@@ -140,6 +140,7 @@ export function ResourceCard(props: {
   subtitle: string;
   current?: boolean;
   tone?: "default" | "danger";
+  media?: JSX.Element;
   meta?: JSX.Element;
   details?: JSX.Element;
   actions?: JSX.Element;
@@ -151,6 +152,9 @@ export function ResourceCard(props: {
       data-state={props.current ? "selected" : "idle"}
       role="listitem"
     >
+      <Show when={props.media}>
+        <div data-component="resource-card-media">{props.media}</div>
+      </Show>
       <div data-component="resource-card-copy">
         <strong>{props.title}</strong>
         <span>{props.subtitle}</span>

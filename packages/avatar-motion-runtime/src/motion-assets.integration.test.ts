@@ -27,7 +27,7 @@ describe("bundled VRMA runtime integration", () => {
     const avatarLoader = new GLTFLoader();
     avatarLoader.register((parser) => new VRMLoaderPlugin(parser));
     const avatarBytes = await readFile(
-      `${repositoryRoot}/assets/avatar-default/3800386813668044008/3800386813668044008.vrm`,
+      `${repositoryRoot}/assets/avatar-default/2639776812528692620/2639776812528692620.vrm`,
     );
     const avatarGltf = await avatarLoader.parseAsync(exactArrayBuffer(avatarBytes), "");
     const vrm = avatarGltf.userData["vrm"] as VRM | undefined;

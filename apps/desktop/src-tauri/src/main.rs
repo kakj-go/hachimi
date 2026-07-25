@@ -68,7 +68,7 @@ const SPEECH_RECOGNITION_STATE_EVENT: &str = "speech-recognition-state-changed";
 const AVATAR_CATALOG_EVENT: &str = "avatar:catalog-changed";
 const MOTION_CATALOG_EVENT: &str = "motion:catalog-changed";
 const DEFAULT_AVATAR_RESOURCE: &str =
-    "resources/avatar-default/3800386813668044008/3800386813668044008.vrm";
+    "resources/avatar-default/2639776812528692620/2639776812528692620.vrm";
 const MOTION_CATALOG_RESOURCE: &str = "resources/avatar-motions-v4/catalog.json";
 const PET_VISIBILITY_EVENT: &str = "pet:visibility";
 const MAX_THEME_FILE_BYTES: u64 = 64 * 1024;
@@ -3182,7 +3182,7 @@ fn main() {
             });
             let bundled_default_avatar = resolve_resource(app.handle(), DEFAULT_AVATAR_RESOURCE);
             let development_default_avatar = Path::new(env!("CARGO_MANIFEST_DIR")).join(
-                "../../../assets/avatar-default/3800386813668044008/3800386813668044008.vrm",
+                "../../../assets/avatar-default/2639776812528692620/2639776812528692620.vrm",
             );
             let default_avatar = if bundled_default_avatar.is_file() {
                 bundled_default_avatar

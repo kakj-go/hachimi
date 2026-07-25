@@ -39,7 +39,7 @@ import {
   classifyRelativeHit,
   canStartQueuedInteraction,
   selectAmbientIdle,
-  selectShyIdle,
+  selectCoolIdle,
   isPlaybackOlder,
   speechReleaseEnvelope,
 } from "./avatar-runtime-logic";
@@ -296,6 +296,7 @@ export class AvatarRuntime {
       soleOffsets: profileSoleOffsets(asset.profile),
     };
     const previous = this.instance;
+    presentationRoot.visible = false;
     this.scene.add(presentationRoot);
     this.idleMotion = undefined;
     this.entranceMotion = undefined;
@@ -321,9 +322,23 @@ export class AvatarRuntime {
     this.foregroundWasActive = false;
     this.idleReturnReadyAt = now;
     this.nextAmbientMotionAt = now + AMBIENT_MOTION_INTERVAL_MS;
+    const baseIdle = this.ensureCoolIdle(now, false);
+    const baseIdleReady = baseIdle ? await this.prepareClip(baseIdle) : false;
+    if (revision !== this.revision || this.disposed) return;
+    if (!baseIdle || !baseIdleReady) {
+      this.scene.remove(presentationRoot);
+      this.motionLibrary.clear(vrm);
+      disposeAvatarInstance(next);
+      this.instance = previous;
+      throw new Error("酷系待机加载失败；已阻止模型以 T Pose 显示");
+    }
+    const baseIdleEntry = this.motionEntries.get(baseIdle.id);
+    baseIdle.startedAt =
+      performance.now() - Math.max(baseIdleEntry?.transitionInMs ?? IDLE_RETURN_SETTLE_MS, 1);
     this.ensureStartupSequence(now);
     this.preloadCatalogDefaults(vrm);
     this.stopSpeech(true);
+    presentationRoot.visible = true;
     if (previous) {
       this.scene.remove(previous.presentationRoot);
       this.motionLibrary.clear(previous.vrm);
@@ -332,6 +347,11 @@ export class AvatarRuntime {
     }
     this.frame(presentationRoot);
     this.restoreBasePose(next);
+    // The first visible frame must be the fully weighted cool idle. Matching
+    // the initial signature bypasses inertialization from the normalized rest pose.
+    this.transitionInertializer.reset();
+    this.motionTransitionSignature = `${this.motionSetRevision}:${baseIdle.id}`;
+    this.update(1 / 60, performance.now());
     this.render();
   }
 
@@ -464,7 +484,7 @@ export class AvatarRuntime {
         Object.keys(channelWeights).length > 0 ? channelWeights : channelsForFullBody(),
     };
     this.requestedMotions.set(request.requestId, clip);
-    this.prepareClip(clip);
+    void this.prepareClip(clip);
     this.motionSetRevision += 1;
     return true;
   }
@@ -502,10 +522,8 @@ export class AvatarRuntime {
     this.requestedMotions.clear();
     this.stageLocomotion.stop();
     this.headPatActive = false;
+    this.ensureCoolIdle(performance.now());
     this.motionSetRevision += 1;
-    if (this.instance) {
-      this.restoreBasePose(this.instance);
-    }
   }
 
   trackCursorAt(clientX: number, clientY: number): void {
@@ -934,7 +952,9 @@ export class AvatarRuntime {
         channelWeights: clip.channelWeights ?? channelWeights,
       });
     };
-    if (this.startupSequenceComplete) add(this.idleMotion, 0, channelsForFullBody());
+    // The base idle is always sampled underneath entrance and foreground clips.
+    // Keeping it warm prevents empty composition frames from exposing the VRM rest/T pose.
+    add(this.idleMotion, 0, channelsForFullBody());
     if (!this.dragging) {
       add(this.ambientMotion, 10, channelsForFullBody());
       add(this.entranceMotion, 20, channelsForFullBody());
@@ -962,7 +982,7 @@ export class AvatarRuntime {
     if (expired(this.entranceMotion, true)) {
       this.entranceMotion = undefined;
       this.startupSequenceComplete = true;
-      this.ensureShyIdle(now);
+      this.ensureCoolIdle(now);
       this.nextAmbientMotionAt = now + AMBIENT_MOTION_INTERVAL_MS;
       this.motionSetRevision += 1;
     }
@@ -1128,7 +1148,7 @@ export class AvatarRuntime {
         this.isMotionEnabled(entry.id) &&
         /openmaiwaifu/i.test(entry.sourceProject) &&
         entry.rootMode !== "stage" &&
-        !/shy.?waiting|appearing|talking|phone|sing|liked/i.test(entry.name),
+        !/(?:shy|cool).?waiting|appearing|talking|phone|sing|liked/i.test(entry.name),
     );
     const energy = this.speech?.playing ? 0.9 : this.listening ? 0.7 : 0.42;
     const entry = selectAmbientIdle(allCandidates, this.lastAmbientMotionId, energy, Math.random());
@@ -1141,7 +1161,7 @@ export class AvatarRuntime {
       mirror: false,
       ready: false,
     };
-    this.prepareClip(this.ambientMotion);
+    void this.prepareClip(this.ambientMotion);
     this.motionSetRevision += 1;
   }
 
@@ -1182,7 +1202,7 @@ export class AvatarRuntime {
       mirror: binding.mirrorBySide && entry.mirrorable && isLeftRegion(region, direction),
       ready: false,
     };
-    this.prepareClip(this.interactionMotion);
+    void this.prepareClip(this.interactionMotion);
     this.motionSetRevision += 1;
     return true;
   }
@@ -1218,7 +1238,7 @@ export class AvatarRuntime {
     const entry = candidates[this.speechGestureCursor % candidates.length]!;
     this.speechGestureCursor += 1;
     this.speechMotion = { id: entry.id, startedAt: now, mirror: false, ready: false };
-    this.prepareClip(this.speechMotion, playbackId);
+    void this.prepareClip(this.speechMotion, playbackId);
     this.motionSetRevision += 1;
   }
 
@@ -1256,11 +1276,11 @@ export class AvatarRuntime {
       priority: 30,
       channelWeights: channelsForFullBody(false),
     };
-    this.prepareClip(this.locomotionMotion);
+    void this.prepareClip(this.locomotionMotion);
     this.motionSetRevision += 1;
   }
 
-  private ensureShyIdle(now: number): void {
+  private ensureCoolIdle(now: number, prepare = true): ActiveMotionClip | undefined {
     const candidates = this.motionCatalog.entries.filter(
       (entry) =>
         entry.category === "idle" &&
@@ -1269,12 +1289,15 @@ export class AvatarRuntime {
         /openmaiwaifu/i.test(entry.sourceProject),
     );
     const currentAvailable = candidates.find((entry) => entry.id === this.idleMotion?.id);
-    if (currentAvailable && /shy.?waiting/i.test(currentAvailable.name)) {
-      if (this.idleMotion && !this.idleMotion.ready) this.prepareClip(this.idleMotion);
-      return;
+    if (currentAvailable && /cool.?waiting/i.test(currentAvailable.name)) {
+      if (prepare && this.idleMotion && !this.idleMotion.ready) {
+        void this.prepareClip(this.idleMotion);
+      }
+      return this.idleMotion;
     }
-    const entry = selectShyIdle(candidates);
-    if (!entry || this.idleMotion?.id === entry.id) return;
+    const entry = selectCoolIdle(candidates);
+    if (!entry) return undefined;
+    if (this.idleMotion?.id === entry.id) return this.idleMotion;
     const replacement: ActiveMotionClip = {
       id: entry.id,
       startedAt: now,
@@ -1282,17 +1305,18 @@ export class AvatarRuntime {
       ready: false,
     };
     this.idleMotion = replacement;
-    this.prepareClip(this.idleMotion);
+    if (prepare) void this.prepareClip(this.idleMotion);
     this.motionSetRevision += 1;
+    return this.idleMotion;
   }
 
   private ensureStartupSequence(now: number): void {
     if (this.startupSequenceComplete) {
-      this.ensureShyIdle(now);
+      this.ensureCoolIdle(now);
       return;
     }
     if (this.entranceMotion) {
-      if (!this.entranceMotion.ready) this.prepareClip(this.entranceMotion);
+      if (!this.entranceMotion.ready) void this.prepareClip(this.entranceMotion);
       return;
     }
     const entry = this.motionCatalog.entries.find(
@@ -1302,7 +1326,7 @@ export class AvatarRuntime {
     if (!entry) {
       if (this.motionCatalog.entries.length === 0) return;
       this.startupSequenceComplete = true;
-      this.ensureShyIdle(now);
+      this.ensureCoolIdle(now);
       return;
     }
     this.entranceMotion = {
@@ -1311,20 +1335,20 @@ export class AvatarRuntime {
       mirror: false,
       ready: false,
     };
-    this.prepareClip(this.entranceMotion);
-    // Prepare the base idle after the entrance request has started so the
-    // transition has no normalized-rest-pose gap when the entrance finishes.
-    this.ensureShyIdle(now);
+    void this.prepareClip(this.entranceMotion);
+    // Keep the prepared base idle under the entrance so loading and fade-out
+    // frames never fall through to the normalized VRM rest pose.
+    this.ensureCoolIdle(now);
     this.motionSetRevision += 1;
   }
 
-  private prepareClip(clip: ActiveMotionClip, playbackId?: string): void {
+  private prepareClip(clip: ActiveMotionClip, playbackId?: string): Promise<boolean> {
     const instance = this.instance;
-    if (!instance) return;
-    void this.motionLibrary
+    if (!instance) return Promise.resolve(false);
+    return this.motionLibrary
       .prepare(instance.vrm, clip.id)
       .then(() => {
-        if (this.disposed || this.instance !== instance) return;
+        if (this.disposed || this.instance !== instance) return false;
         const stillCurrent =
           this.idleMotion === clip ||
           this.entranceMotion === clip ||
@@ -1333,22 +1357,24 @@ export class AvatarRuntime {
           this.locomotionMotion === clip ||
           (clip.requestId !== undefined && this.requestedMotions.get(clip.requestId) === clip) ||
           (this.speechMotion === clip && (!playbackId || this.speech?.playbackId === playbackId));
-        if (!stillCurrent || !this.isMotionEnabled(clip.id)) return;
+        if (!stillCurrent || !this.isMotionEnabled(clip.id)) return false;
         clip.ready = true;
         clip.startedAt = performance.now();
         this.motionSetRevision += 1;
+        return true;
       })
       .catch((error: unknown) => {
         console.error(`Unable to prepare motion ${clip.id}`, error);
-        if (this.disposed || this.instance !== instance) return;
+        if (this.disposed || this.instance !== instance) return false;
         if (this.entranceMotion === clip) {
           this.entranceMotion = undefined;
           this.startupSequenceComplete = true;
           const now = performance.now();
-          this.ensureShyIdle(now);
+          this.ensureCoolIdle(now);
           this.nextAmbientMotionAt = now + AMBIENT_MOTION_INTERVAL_MS;
           this.motionSetRevision += 1;
         }
+        return false;
       });
   }
 

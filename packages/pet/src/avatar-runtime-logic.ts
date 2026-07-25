@@ -53,10 +53,10 @@ export function selectWeightedIdle(
   return entries.at(-1);
 }
 
-export function selectShyIdle(
+export function selectCoolIdle(
   entries: readonly MotionCatalogEntry[],
 ): MotionCatalogEntry | undefined {
-  return entries.find((entry) => /shy.?waiting/i.test(entry.name)) ?? entries[0];
+  return entries.find((entry) => /cool.?waiting/i.test(entry.name)) ?? entries[0];
 }
 
 export function selectAmbientIdle(
@@ -66,12 +66,12 @@ export function selectAmbientIdle(
   random: number,
 ): MotionCatalogEntry | undefined {
   const alternatives = entries.filter(
-    (entry) => !/shy.?waiting/i.test(entry.name) && entry.id !== lastMotionId,
+    (entry) => !/(?:shy|cool).?waiting/i.test(entry.name) && entry.id !== lastMotionId,
   );
   const pool =
     alternatives.length > 0
       ? alternatives
-      : entries.filter((entry) => !/shy.?waiting/i.test(entry.name));
+      : entries.filter((entry) => !/(?:shy|cool).?waiting/i.test(entry.name));
   return selectWeightedIdle(pool, energy, random);
 }
 

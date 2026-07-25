@@ -439,7 +439,13 @@
     margin-top: var(--space-2);
   }
 
+  [data-component="resource-card-media"] {
+    flex: 0 0 auto;
+    align-self: stretch;
+  }
+
   [data-component="resource-card-copy"] {
+    flex: 1 1 auto;
     min-width: 0;
     display: grid;
     gap: 3px;

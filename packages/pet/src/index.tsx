@@ -500,11 +500,14 @@ function DesktopPet() {
       .getVoiceRuntimeState()
       .then((state) => setMutedValue(state.muted))
       .catch((error) => setReply(commandFailure(error).message));
+    // Load the motion catalog before the avatar so its cool base idle can be
+    // prepared while the SVG fallback remains visible. This prevents a rest/T-pose flash.
     void commands
       .listMotionCatalog()
       .then((catalog) => avatarRenderer?.setMotionCatalog(catalog))
-      .catch(() => undefined);
-    void refreshAvatar();
+      .catch(() => undefined)
+      // eslint-disable-next-line solid/reactivity -- initial async bootstrap intentionally refreshes the current avatar after its motion catalog is ready.
+      .then(() => refreshAvatar());
     void reportRegions().then(() => commands.frontendReady());
   });
 

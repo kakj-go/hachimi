@@ -6,6 +6,7 @@ pnpm-lock.yaml
 Cargo.lock
 packages/contracts/src/generated.ts
 apps/desktop/src-tauri/gen/
+apps/desktop/src-tauri/resources/ai-models/
 assets/avatar-motions-v4/catalog.json
 demo.html
 demo2.html

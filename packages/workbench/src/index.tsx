@@ -104,6 +104,7 @@ import {
 } from "solid-js";
 import "./workbench.css";
 import { createSerializedAutosave, type AutosaveStatus } from "./appearance-save";
+import { AvatarCardPreview } from "./avatar-card-preview";
 import { MotionLabPage } from "./motion-lab";
 import { MotionSettingsPage } from "./motion-settings";
 import { normalizeWorkbenchRoute, SETTINGS_ROUTES } from "./routing";
@@ -1639,6 +1640,7 @@ function ResourceSettingsPage() {
                   <ResourceCard
                     title={entry.name}
                     subtitle={`${entry.originalFileName} · ${formatBytes(entry.sizeBytes)}`}
+                    media={<AvatarCardPreview entryId={entry.id} name={entry.name} />}
                     current={entry.isCurrent}
                     tone={
                       resolvedAvatarAssessment(entry).compatibility !== "runtime_ready"

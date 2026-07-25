@@ -1,0 +1,13 @@
+{
+  "schemaVersion": 1,
+  "id": "hachimi-default-2639776812528692620",
+  "name": "VRoid 2639776812528692620",
+  "file": "2639776812528692620.vrm",
+  "sizeBytes": 16805872,
+  "sha256": "a9cced952d6671b51faffe578d32613a8ee927deee1851cff91fdbc4e6ae7d26",
+  "source": "https://hub.vroid.com/",
+  "author": "candyfloof",
+  "license": "VRoid Hub custom license: redistribution and modification allowed; commercial use disallowed",
+  "licenseEvidence": "Embedded VRM0 metadata permits use by everyone, modification and redistribution without required credit, but disallows personal and corporate commercial use.",
+  "licenseUrl": "https://hub.vroid.com/license?allowed_to_use_user=everyone&characterization_allowed_user=everyone&corporate_commercial_use=disallow&credit=unnecessary&modification=allow&personal_commercial_use=disallow&redistribution=allow&sexual_expression=disallow&version=1&violent_expression=allow"
+}

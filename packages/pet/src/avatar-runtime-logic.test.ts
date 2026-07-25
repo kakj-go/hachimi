@@ -6,7 +6,7 @@ import {
   idleMotionWeight,
   canStartQueuedInteraction,
   selectAmbientIdle,
-  selectShyIdle,
+  selectCoolIdle,
   selectWeightedIdle,
 } from "./avatar-runtime-logic";
 
@@ -48,20 +48,22 @@ describe("avatar runtime decisions", () => {
     expect(selectWeightedIdle([calm, active], 0.95, 0.99)).toBe(active);
   });
 
-  it("keeps shy waiting as the permanent base idle", () => {
+  it("keeps cool waiting as the permanent base idle", () => {
     const standard = { id: "standard", name: "standard waiting" } as never;
     const shy = { id: "shy", name: "shy waiting" } as never;
-    expect(selectShyIdle([standard, shy])).toBe(shy);
+    const cool = { id: "cool", name: "cool waiting" } as never;
+    expect(selectCoolIdle([standard, shy, cool])).toBe(cool);
   });
 
-  it("selects a non-shy ambient motion without immediately repeating", () => {
+  it("keeps shy and cool base idles out of ambient motion selection", () => {
     const shy = { id: "shy", name: "shy waiting" } as never;
+    const cool = { id: "cool", name: "cool waiting" } as never;
     const calm = { id: "calm", name: "ladylike waiting" } as never;
     const active = { id: "active", name: "energetic waiting" } as never;
-    expect(selectAmbientIdle([shy, calm, active], "calm", 0.8, 0)).toBe(active);
+    expect(selectAmbientIdle([shy, cool, calm, active], "calm", 0.8, 0)).toBe(active);
   });
 
-  it("holds queued interaction until the foreground finishes and shy idle settles", () => {
+  it("holds queued interaction until the foreground finishes and cool idle settles", () => {
     expect(canStartQueuedInteraction(1_000, 900, 950, true)).toBe(false);
     expect(canStartQueuedInteraction(1_000, 900, 1_100, false)).toBe(false);
     expect(canStartQueuedInteraction(1_100, 900, 1_100, false)).toBe(true);

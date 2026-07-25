@@ -30,9 +30,12 @@ const CATALOG_SCHEMA_VERSION: u32 = 4;
 const DETECTOR_VERSION: u32 = 4;
 const CATALOG_FILE_NAME: &str = "catalog-v4.json";
 const SOURCE_FILE_NAME: &str = "source.glb";
-const DEFAULT_AVATAR_ID: &str = "hachimi-default-3800386813668044008";
-const REMOVED_DEFAULT_AVATAR_ID: &str = "hachimi-default-sendagaya-shino";
-const DEFAULT_AVATAR_NAME: &str = "VRoid 3800386813668044008";
+const DEFAULT_AVATAR_ID: &str = "hachimi-default-2639776812528692620";
+const REMOVED_DEFAULT_AVATAR_IDS: [&str; 2] = [
+    "hachimi-default-sendagaya-shino",
+    "hachimi-default-3800386813668044008",
+];
+const DEFAULT_AVATAR_NAME: &str = "VRoid 2639776812528692620";
 
 #[must_use]
 pub const fn availability() -> FeatureAvailability {
@@ -158,13 +161,18 @@ impl AvatarCatalog {
             return Err(AvatarError::Incompatible);
         }
         catalog.default_asset_path = Some(default_asset_path);
-        let removed_default_was_current =
-            catalog.document.current_id.as_deref() == Some(REMOVED_DEFAULT_AVATAR_ID);
+        let removed_default_was_current = catalog
+            .document
+            .current_id
+            .as_deref()
+            .is_some_and(|id| REMOVED_DEFAULT_AVATAR_IDS.contains(&id));
         catalog
             .document
             .entries
-            .retain(|entry| entry.id != REMOVED_DEFAULT_AVATAR_ID);
-        catalog.document.profiles.remove(REMOVED_DEFAULT_AVATAR_ID);
+            .retain(|entry| !REMOVED_DEFAULT_AVATAR_IDS.contains(&entry.id.as_str()));
+        for removed_id in REMOVED_DEFAULT_AVATAR_IDS {
+            catalog.document.profiles.remove(removed_id);
+        }
         if let Some(entry) = catalog
             .document
             .entries
@@ -2151,7 +2159,7 @@ mod runtime_ready_tests {
     use super::*;
 
     const DEFAULT_AVATAR: &str =
-        "../../assets/avatar-default/3800386813668044008/3800386813668044008.vrm";
+        "../../assets/avatar-default/2639776812528692620/2639776812528692620.vrm";
 
     fn make_legacy_glb() -> Vec<u8> {
         let mut json = serde_json::to_vec(&serde_json::json!({
@@ -2443,8 +2451,9 @@ mod runtime_ready_tests {
         let mut document: Value =
             serde_json::from_slice(&fs::read(&catalog_path).expect("read current catalog"))
                 .expect("catalog JSON");
-        document["entries"][0]["id"] = Value::String(REMOVED_DEFAULT_AVATAR_ID.into());
-        document["currentId"] = Value::String(REMOVED_DEFAULT_AVATAR_ID.into());
+        let removed_default_id = REMOVED_DEFAULT_AVATAR_IDS[1];
+        document["entries"][0]["id"] = Value::String(removed_default_id.into());
+        document["currentId"] = Value::String(removed_default_id.into());
         let profile = document["profiles"]
             .as_object_mut()
             .expect("profile map")
@@ -2453,7 +2462,7 @@ mod runtime_ready_tests {
         document["profiles"]
             .as_object_mut()
             .expect("profile map")
-            .insert(REMOVED_DEFAULT_AVATAR_ID.into(), profile);
+            .insert(removed_default_id.into(), profile);
         fs::write(
             &catalog_path,
             serde_json::to_vec(&document).expect("serialize old default catalog"),
@@ -2468,7 +2477,7 @@ mod runtime_ready_tests {
             snapshot
                 .entries
                 .iter()
-                .all(|entry| entry.id != REMOVED_DEFAULT_AVATAR_ID)
+                .all(|entry| entry.id != removed_default_id)
         );
     }
 

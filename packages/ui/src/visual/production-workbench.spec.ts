@@ -660,7 +660,7 @@ async function installMotionLabAssets(page: Page) {
     route.fulfill({
       path: resolve(
         import.meta.dirname,
-        "../../../../assets/avatar-default/3800386813668044008/3800386813668044008.vrm",
+        "../../../../assets/avatar-default/2639776812528692620/2639776812528692620.vrm",
       ),
       contentType: "model/gltf-binary",
     }),
@@ -993,6 +993,7 @@ test("model, voice, and pet settings use their live command-backed controls", as
   await expect(inspection.getByText(/标准动作、神态、视线、口型/)).toBeVisible();
   await inspection.getByRole("button", { name: "确认导入" }).click({ force: true });
   await expect(page.getByText("Luna", { exact: true })).toBeVisible();
+  await expect(page.locator(".avatar-card-preview canvas")).toHaveCount(2);
 
   await page.goto("http://127.0.0.1:1420/workbench.html?route=settings/motion");
   await expect(page.getByRole("heading", { name: "交互", exact: true })).toBeVisible();

@@ -46,6 +46,6 @@ Desktop.ini
 # stored with Git LFS according to .gitattributes so a clone can build offline.
 tests/avatar-qa-models.json
 
-# This exact VRoid Hub model is local-only: its embedded license forbids
-# redistribution. Keep the manifest and NOTICE in Git, but never the VRM.
+# Legacy local-only VRoid test asset. It is no longer referenced or packaged,
+# but remains ignored because its embedded license forbids redistribution.
 assets/avatar-default/3800386813668044008/*.vrm

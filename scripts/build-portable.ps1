@@ -6,6 +6,22 @@ $releaseRoot = Join-Path $targetRoot "release"
 $portableRoot = Join-Path $targetRoot "portable"
 $stageRoot = Join-Path $portableRoot "Hachimi"
 $archivePath = Join-Path $portableRoot "Hachimi-portable.zip"
+$legacyAvatarRelative = "resources\avatar-default\3800386813668044008"
+
+# Tauri does not remove resources that disappeared from a later bundle config.
+# Delete this exact legacy output from both configurations so a portable rebuild
+# cannot accidentally copy the old non-redistributable avatar from target cache.
+foreach ($configuration in @("debug", "release")) {
+    $legacyAvatarRoot = [System.IO.Path]::GetFullPath(
+        (Join-Path (Join-Path $targetRoot $configuration) $legacyAvatarRelative)
+    )
+    if (-not $legacyAvatarRoot.StartsWith($targetRoot, [StringComparison]::OrdinalIgnoreCase)) {
+        throw "Resolved legacy avatar path is outside target"
+    }
+    if ([System.IO.Directory]::Exists($legacyAvatarRoot)) {
+        [System.IO.Directory]::Delete($legacyAvatarRoot, $true)
+    }
+}
 
 Push-Location $repoRoot
 try {
@@ -38,4 +54,3 @@ try {
 } finally {
     Pop-Location
 }
-

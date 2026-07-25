@@ -6,6 +6,6 @@ apps/desktop/src-tauri/resources/ai-models/** -text
 apps/desktop/src-tauri/resources/ai-models/**/*.onnx filter=lfs diff=lfs merge=lfs -text
 apps/desktop/src-tauri/resources/ai-models/**/voices.bin filter=lfs diff=lfs merge=lfs -text
 
-# A future redistributable default VRM should also use LFS. The current local
-# VRoid test model remains explicitly ignored because its license forbids it.
+# The redistributable, non-commercial default VRM is versioned through LFS so
+# a normal clone followed by `git lfs pull` contains every packaging resource.
 assets/avatar-default/**/*.vrm filter=lfs diff=lfs merge=lfs -text

@@ -1094,6 +1094,53 @@ html[data-color-scheme="light"] .settings-nav-group button.selected {
   gap: 6px;
 }
 
+.avatar-card-preview {
+  position: relative;
+  width: 150px;
+  height: 190px;
+  overflow: hidden;
+  border: 1px solid var(--color-border-muted);
+  border-radius: 14px;
+  background:
+    radial-gradient(
+      circle at 50% 42%,
+      color-mix(in srgb, var(--color-bg-accent) 12%, transparent),
+      transparent 58%
+    ),
+    var(--color-bg-control);
+}
+
+.avatar-card-preview canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+}
+
+.avatar-card-preview-status {
+  position: absolute;
+  inset: auto 8px 8px;
+  z-index: 1;
+  overflow: hidden;
+  color: var(--color-text-faint);
+  font-size: var(--font-size-xs);
+  text-align: center;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+@media (max-width: 760px) {
+  [data-component="resource-card"]:has(.avatar-card-preview) {
+    align-items: flex-start;
+    flex-wrap: wrap;
+  }
+
+  .avatar-card-preview {
+    width: 112px;
+    height: 144px;
+  }
+}
+
 /* Appearance */
 
 .appearance-page {

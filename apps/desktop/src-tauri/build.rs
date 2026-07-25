@@ -92,6 +92,54 @@ fn verify_speech_model_manifest(manifest_path: &Path) {
     }
 }
 
+fn verify_default_avatar_manifest(manifest_path: &Path) {
+    println!("cargo:rerun-if-changed={}", manifest_path.display());
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(manifest_path).unwrap_or_else(|error| {
+            panic!(
+                "bundled default avatar manifest is missing: {}: {error}",
+                manifest_path.display()
+            )
+        }))
+        .unwrap_or_else(|error| panic!("bundled default avatar manifest is invalid: {error}"));
+    let root = manifest_path
+        .parent()
+        .expect("default avatar manifest must have a parent directory");
+    let file_name = manifest["file"]
+        .as_str()
+        .expect("default avatar manifest must contain a file name");
+    assert_eq!(
+        Path::new(file_name).components().count(),
+        1,
+        "default avatar file name must not contain a path"
+    );
+    let path = root.join(file_name);
+    println!("cargo:rerun-if-changed={}", path.display());
+    let expected_size = manifest["sizeBytes"]
+        .as_u64()
+        .expect("default avatar manifest must contain sizeBytes");
+    let expected_sha = manifest["sha256"]
+        .as_str()
+        .expect("default avatar manifest must contain sha256");
+    let actual_size = std::fs::metadata(&path)
+        .unwrap_or_else(|error| {
+            panic!(
+                "bundled default avatar is missing: {}: {error}",
+                path.display()
+            )
+        })
+        .len();
+    assert_eq!(
+        actual_size, expected_size,
+        "bundled default avatar size mismatch"
+    );
+    assert_eq!(
+        sha256_file(&path),
+        expected_sha,
+        "bundled default avatar SHA-256 mismatch"
+    );
+}
+
 fn verify_native_runtime(runtime: &Path) {
     let manifest_path = runtime.join("manifest.json");
     println!("cargo:rerun-if-changed={}", manifest_path.display());
@@ -227,6 +275,9 @@ fn main() {
         "cargo:rerun-if-changed=resources/native/sherpa-onnx-1.13.4-directml/windows-x64/manifest.json"
     );
     verify_motion_catalog(Path::new("../../../assets/avatar-motions-v4"));
+    verify_default_avatar_manifest(Path::new(
+        "../../../assets/avatar-default/2639776812528692620/manifest.json",
+    ));
     verify_speech_model_manifest(Path::new(
         "resources/ai-models/speech-to-text/sensevoice-small/manifest.json",
     ));

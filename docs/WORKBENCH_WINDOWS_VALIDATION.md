@@ -19,8 +19,8 @@
 
 - `target/debug/hachimi-desktop.exe`
 - `target/release/hachimi-desktop.exe`
-- `target/release/bundle/msi/Hachimi_0.1.0_x64_en-US.msi`
-- `target/release/bundle/nsis/Hachimi_0.1.0_x64-setup.exe`
+- `target/release/bundle/msi/Hachimi_0.2.0_x64_en-US.msi`
+- `target/release/bundle/nsis/Hachimi_0.2.0_x64-setup.exe`
 
 ## 环境
 
