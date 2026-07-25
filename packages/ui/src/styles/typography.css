@@ -1,0 +1,24 @@
+@layer theme {
+  :root {
+    --font-ui: Inter, "Noto Sans SC", "Segoe UI", system-ui, sans-serif;
+    --font-code: "JetBrains Mono", "Cascadia Code", monospace;
+    --font-size-xs: 12px;
+    --font-size-sm: 13px;
+    --font-size-md: 14px;
+    --font-size-lg: 16px;
+    --font-size-xl: 20px;
+    --font-size-2xl: 28px;
+    --line-height-tight: 1.25;
+    --line-height-normal: 1.5;
+  }
+}
+
+@layer base {
+  body {
+    color: var(--color-text-base);
+    font-family: var(--font-ui);
+    font-size: var(--font-size-md);
+    line-height: var(--line-height-normal);
+    text-rendering: optimizeLegibility;
+  }
+}

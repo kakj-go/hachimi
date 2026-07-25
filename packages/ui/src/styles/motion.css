@@ -1,0 +1,46 @@
+@layer theme {
+  :root {
+    --duration-fast: 100ms;
+    --duration-normal: 160ms;
+    --duration-slow: 240ms;
+    --ease-standard: cubic-bezier(0.2, 0, 0, 1);
+    --space-1: 4px;
+    --space-2: 8px;
+    --space-3: 12px;
+    --space-4: 16px;
+    --space-5: 20px;
+    --space-6: 24px;
+    --radius-sm: 8px;
+    --radius-md: 12px;
+    --radius-lg: 14px;
+    --radius-xl: 18px;
+    --radius-2xl: 22px;
+    --control-height-sm: 28px;
+    --control-height-md: 34px;
+    --control-height-lg: 38px;
+    --control-height-xl: 44px;
+    --z-floating: 20;
+    --z-overlay: 40;
+    --z-toast: 60;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    :root {
+      --duration-fast: 0ms;
+      --duration-normal: 0ms;
+      --duration-slow: 0ms;
+    }
+  }
+
+  html[data-reduced-motion="on"] {
+    --duration-fast: 0ms;
+    --duration-normal: 0ms;
+    --duration-slow: 0ms;
+  }
+
+  html[data-reduced-motion="off"] {
+    --duration-fast: 100ms;
+    --duration-normal: 160ms;
+    --duration-slow: 240ms;
+  }
+}

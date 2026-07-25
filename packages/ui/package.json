@@ -1,0 +1,40 @@
+{
+  "name": "@hachimi/ui",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./styles": "./src/styles.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "vitest run",
+    "storybook": "storybook dev -p 6006",
+    "storybook:build": "storybook build --output-dir storybook-static",
+    "test:visual": "playwright test -c playwright.config.ts"
+  },
+  "dependencies": {
+    "@kobalte/core": "0.13.12",
+    "lucide-solid": "1.25.0",
+    "solid-js": "1.9.14"
+  },
+  "devDependencies": {
+    "@axe-core/playwright": "4.12.1",
+    "@playwright/test": "1.61.1",
+    "@storybook/addon-a11y": "10.5.3",
+    "@storybook/addon-themes": "10.5.3",
+    "@storybook/test-runner": "0.24.4",
+    "@testing-library/jest-dom": "6.9.1",
+    "@testing-library/user-event": "14.6.1",
+    "@types/node": "24.10.1",
+    "http-server": "14.1.1",
+    "jsdom": "29.1.1",
+    "storybook": "10.5.3",
+    "storybook-solidjs-vite": "10.5.2",
+    "typescript": "6.0.3",
+    "vite": "8.1.5",
+    "vite-plugin-solid": "2.11.13",
+    "vitest": "4.1.10"
+  }
+}

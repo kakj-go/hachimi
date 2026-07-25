@@ -1,0 +1,25 @@
+{
+  "name": "@hachimi/avatar-motion-runtime",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@hachimi/contracts": "workspace:*",
+    "@pixiv/three-vrm": "3.5.5",
+    "@pixiv/three-vrm-animation": "3.5.5",
+    "three": "0.185.1"
+  },
+  "devDependencies": {
+    "@types/node": "24.10.1",
+    "@types/three": "0.185.1",
+    "typescript": "6.0.3",
+    "vitest": "4.1.10"
+  }
+}

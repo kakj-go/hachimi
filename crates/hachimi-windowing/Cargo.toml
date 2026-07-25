@@ -1,0 +1,11 @@
+[package]
+name = "hachimi-windowing"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+hachimi-protocol.workspace = true
+thiserror.workspace = true
+

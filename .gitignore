@@ -1,0 +1,51 @@
+# Rust / Tauri build output
+target/
+**/*.rs.bk
+apps/desktop/src-tauri/gen/schemas/
+
+# Node / frontend build output
+node_modules/
+.pnpm-store/
+**/dist/
+**/storybook-static/
+**/test-results/
+**/playwright-report/
+**/coverage/
+*.tsbuildinfo
+
+# Editor and operating-system metadata
+.idea/
+.vscode/
+.vs/
+*.user
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Logs, crash dumps and local runtime data
+*.log
+*.dmp
+/data/
+/hachimi.portable
+
+# Local configuration and signing material
+.env
+.env.*
+!.env.example
+*.pfx
+*.p12
+
+# Locally published packages (the regular bundles already live under target/)
+/artifacts/
+/release/
+*.msi
+*.msix
+*-setup.exe
+
+# Built-in speech models are intentionally versioned. Large model files are
+# stored with Git LFS according to .gitattributes so a clone can build offline.
+tests/avatar-qa-models.json
+
+# This exact VRoid Hub model is local-only: its embedded license forbids
+# redistribution. Keep the manifest and NOTICE in Git, but never the VRM.
+assets/avatar-default/3800386813668044008/*.vrm

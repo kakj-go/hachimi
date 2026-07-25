@@ -1,0 +1,8 @@
+packages:
+  - apps/desktop/web
+  - packages/*
+
+allowBuilds:
+  "@swc/core": true
+  esbuild: true
+  unrs-resolver: true

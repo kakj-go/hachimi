@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 1,
+  "sherpaOnnxVersion": "1.13.4",
+  "sherpaOnnxCommit": "142807252687d81b40d6315f23470a1512a00de3",
+  "hachimiPatch": "patches/sherpa-onnx-1.13.4-directml-device-id.patch",
+  "providerSyntax": "directml#<dxgi-adapter-index>",
+  "onnxRuntimePackage": "Microsoft.ML.OnnxRuntime.DirectML 1.14.1",
+  "directMlPackage": "Microsoft.AI.DirectML 1.15.0",
+  "target": "x86_64-pc-windows-msvc",
+  "configuration": "Release",
+  "files": {
+    "DirectML.dll": "913b6e436b7292f0b3af6d0c37d2201ab3435cb5f0a7c08c0beaa644602f5312",
+    "DirectML.lib": "dee39565f2cfdb4252c91abf421c49f79b5076f99df9edfe094f68166911779f",
+    "onnxruntime.dll": "6ed5853e37d8c7b1f27cfb99cafd0006eccee7c97cefdc701ddcde962460ae87",
+    "onnxruntime.lib": "f7a39b1d1506a2a5aa195834b2dbc27065118d4f31d149c8463ce1a96817e5d9",
+    "sherpa-onnx-c-api.dll": "cef81bce1e563247e69c44edabdf91b7aa38cce7cc77c32bace23f3c50781015",
+    "sherpa-onnx-c-api.lib": "21513d9d053ea39956081f5d421d610cd512b076032bf550b9907d2c7b6a52fb"
+  }
+}

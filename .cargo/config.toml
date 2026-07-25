@@ -1,0 +1,5 @@
+[env]
+# sherpa-onnx-sys consumes this directory at link time. Keeping the import
+# libraries beside the bundled DLLs prevents Cargo from silently downloading
+# the CPU-only upstream Windows prebuilt.
+SHERPA_ONNX_LIB_DIR = { value = "apps/desktop/src-tauri/resources/native/sherpa-onnx-1.13.4-directml/windows-x64", relative = true }

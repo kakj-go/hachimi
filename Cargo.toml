@@ -1,0 +1,82 @@
+[workspace]
+resolver = "2"
+members = [
+  "apps/desktop/src-tauri",
+  "crates/hachimi-agent",
+  "crates/hachimi-approvals",
+  "crates/hachimi-audit",
+  "crates/hachimi-avatar",
+  "crates/hachimi-browser",
+  "crates/hachimi-capabilities",
+  "crates/hachimi-computer",
+  "crates/hachimi-control-plane",
+  "crates/hachimi-core",
+  "crates/hachimi-llm",
+  "crates/hachimi-motion",
+  "crates/hachimi-policy",
+  "crates/hachimi-protocol",
+  "crates/hachimi-sandbox",
+  "crates/hachimi-storage",
+  "crates/hachimi-voice",
+  "crates/hachimi-windowing",
+  "crates/hachimi-workbench",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.97.1"
+authors = ["Hachimi contributors"]
+publish = false
+
+[workspace.dependencies]
+atomic-write-file = "=0.3.0"
+arboard = { version = "=3.6.1", default-features = false }
+bzip2 = "=0.4.4"
+keyring = { version = "=4.1.5", default-features = false, features = ["v1"] }
+parking_lot = "=0.12.5"
+cpal = "=0.17.3"
+reqwest = { version = "=0.13.4", default-features = false, features = ["blocking", "json", "rustls", "stream"] }
+rfd = { version = "=0.17.2", default-features = false, features = ["common-controls-v6"] }
+rodio = { version = "=0.22.2", default-features = false, features = ["playback", "wav"] }
+sherpa-onnx = { version = "=1.13.4", default-features = false, features = ["shared"] }
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = "=1.0.149"
+sha2 = "=0.11.0"
+specta = { version = "=2.0.0-rc.25", features = ["derive"] }
+specta-serde = "=0.0.12"
+specta-typescript = "=0.0.12"
+tauri = "=2.11.5"
+tauri-runtime = "=2.11.3"
+tracing-subscriber = { version = "=0.3.23", features = ["env-filter"] }
+tempfile = "=3.24.0"
+tar = "=0.4.46"
+thiserror = "=2.0.19"
+tokio = { version = "=1.53.1", features = ["macros", "rt-multi-thread", "sync", "time"] }
+tokio-util = "=0.7.18"
+tracing = "=0.1.44"
+url = "=2.5.8"
+uuid = { version = "=1.24.0", features = ["v4"] }
+zip = { version = "=8.2.0", default-features = false, features = ["deflate"] }
+futures-util = "=0.3.32"
+gltf = { version = "=1.4.1", default-features = false, features = ["names", "extras", "extensions", "utils"] }
+base64 = "=0.22.1"
+
+hachimi-agent = { path = "crates/hachimi-agent" }
+hachimi-approvals = { path = "crates/hachimi-approvals" }
+hachimi-audit = { path = "crates/hachimi-audit" }
+hachimi-avatar = { path = "crates/hachimi-avatar" }
+hachimi-browser = { path = "crates/hachimi-browser" }
+hachimi-capabilities = { path = "crates/hachimi-capabilities" }
+hachimi-computer = { path = "crates/hachimi-computer" }
+hachimi-control-plane = { path = "crates/hachimi-control-plane" }
+hachimi-core = { path = "crates/hachimi-core" }
+hachimi-llm = { path = "crates/hachimi-llm" }
+hachimi-motion = { path = "crates/hachimi-motion" }
+hachimi-policy = { path = "crates/hachimi-policy" }
+hachimi-protocol = { path = "crates/hachimi-protocol" }
+hachimi-sandbox = { path = "crates/hachimi-sandbox" }
+hachimi-storage = { path = "crates/hachimi-storage" }
+hachimi-voice = { path = "crates/hachimi-voice" }
+hachimi-windowing = { path = "crates/hachimi-windowing" }
+hachimi-workbench = { path = "crates/hachimi-workbench" }

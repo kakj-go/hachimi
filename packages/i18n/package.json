@@ -1,0 +1,22 @@
+{
+  "name": "@hachimi/i18n",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.tsx"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "solid-js": "1.9.14"
+  },
+  "devDependencies": {
+    "typescript": "6.0.3",
+    "vite": "8.1.5",
+    "vite-plugin-solid": "2.11.13",
+    "vitest": "4.1.10"
+  }
+}

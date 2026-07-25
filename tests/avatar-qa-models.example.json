@@ -1,0 +1,134 @@
+{
+  "schemaVersion": 1,
+  "notice": "Do not commit VRoid Hub model files or source URLs unless redistribution is explicitly permitted. Copy this file to an ignored local avatar-qa-models.json and fill sha256 after lawful download.",
+  "models": [
+    {
+      "id": "vrm0-vroid-balanced-01",
+      "vrmVersion": "vrm0",
+      "exporter": "vroid_studio",
+      "bodyShape": "balanced",
+      "optionalCapabilityFocus": "full",
+      "sha256": null
+    },
+    {
+      "id": "vrm0-vroid-chibi-02",
+      "vrmVersion": "vrm0",
+      "exporter": "vroid_studio",
+      "bodyShape": "chibi",
+      "optionalCapabilityFocus": "short_limbs",
+      "sha256": null
+    },
+    {
+      "id": "vrm0-vroid-tall-03",
+      "vrmVersion": "vrm0",
+      "exporter": "vroid_studio",
+      "bodyShape": "tall",
+      "optionalCapabilityFocus": "long_limbs",
+      "sha256": null
+    },
+    {
+      "id": "vrm0-vroid-wide-04",
+      "vrmVersion": "vrm0",
+      "exporter": "vroid_studio",
+      "bodyShape": "wide_shoulders",
+      "optionalCapabilityFocus": "torso_collision",
+      "sha256": null
+    },
+    {
+      "id": "vrm0-other-no-chest-05",
+      "vrmVersion": "vrm0",
+      "exporter": "other",
+      "bodyShape": "balanced",
+      "optionalCapabilityFocus": "missing_chest",
+      "sha256": null
+    },
+    {
+      "id": "vrm0-other-no-toes-06",
+      "vrmVersion": "vrm0",
+      "exporter": "other",
+      "bodyShape": "balanced",
+      "optionalCapabilityFocus": "missing_toes",
+      "sha256": null
+    },
+    {
+      "id": "vrm0-other-jaw-07",
+      "vrmVersion": "vrm0",
+      "exporter": "other",
+      "bodyShape": "petite",
+      "optionalCapabilityFocus": "jaw_lip_sync",
+      "sha256": null
+    },
+    {
+      "id": "vrm0-other-no-lookat-08",
+      "vrmVersion": "vrm0",
+      "exporter": "other",
+      "bodyShape": "tall",
+      "optionalCapabilityFocus": "missing_look_at",
+      "sha256": null
+    },
+    {
+      "id": "vrm1-vroid-balanced-09",
+      "vrmVersion": "vrm1",
+      "exporter": "vroid_studio",
+      "bodyShape": "balanced",
+      "optionalCapabilityFocus": "full",
+      "sha256": null
+    },
+    {
+      "id": "vrm1-vroid-chibi-10",
+      "vrmVersion": "vrm1",
+      "exporter": "vroid_studio",
+      "bodyShape": "chibi",
+      "optionalCapabilityFocus": "short_limbs",
+      "sha256": null
+    },
+    {
+      "id": "vrm1-vroid-tall-11",
+      "vrmVersion": "vrm1",
+      "exporter": "vroid_studio",
+      "bodyShape": "tall",
+      "optionalCapabilityFocus": "long_limbs",
+      "sha256": null
+    },
+    {
+      "id": "vrm1-vroid-wide-12",
+      "vrmVersion": "vrm1",
+      "exporter": "vroid_studio",
+      "bodyShape": "wide_hips",
+      "optionalCapabilityFocus": "balance",
+      "sha256": null
+    },
+    {
+      "id": "vrm1-other-no-fingers-13",
+      "vrmVersion": "vrm1",
+      "exporter": "other",
+      "bodyShape": "balanced",
+      "optionalCapabilityFocus": "missing_fingers",
+      "sha256": null
+    },
+    {
+      "id": "vrm1-other-no-spring-14",
+      "vrmVersion": "vrm1",
+      "exporter": "other",
+      "bodyShape": "petite",
+      "optionalCapabilityFocus": "missing_spring_bone",
+      "sha256": null
+    },
+    {
+      "id": "vrm1-other-no-mouth-15",
+      "vrmVersion": "vrm1",
+      "exporter": "other",
+      "bodyShape": "balanced",
+      "optionalCapabilityFocus": "no_lip_sync",
+      "sha256": null
+    },
+    {
+      "id": "vrm1-other-five-viseme-16",
+      "vrmVersion": "vrm1",
+      "exporter": "other",
+      "bodyShape": "tall",
+      "optionalCapabilityFocus": "five_viseme",
+      "sha256": null
+    }
+  ]
+}

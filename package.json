@@ -1,0 +1,43 @@
+{
+  "name": "hachimi",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@11.15.1",
+  "engines": {
+    "node": ">=24.10.0 <25",
+    "pnpm": ">=11.15.0 <12"
+  },
+  "scripts": {
+    "dev": "node scripts/run-with-rust.mjs tauri dev --config apps/desktop/src-tauri/tauri.conf.json",
+    "build": "node scripts/run-with-rust.mjs tauri build --debug --no-bundle --config apps/desktop/src-tauri/tauri.conf.json",
+    "build:debug": "node scripts/run-with-rust.mjs tauri build --debug --no-bundle --config apps/desktop/src-tauri/tauri.conf.json",
+    "build:installer": "node scripts/run-with-rust.mjs tauri build --bundles msi --config apps/desktop/src-tauri/tauri.conf.json && node scripts/run-with-rust.mjs tauri build --bundles nsis --config apps/desktop/src-tauri/tauri.conf.json",
+    "build:portable": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/build-portable.ps1",
+    "format": "prettier --write . && node scripts/run-with-rust.mjs cargo fmt --all",
+    "format:check": "prettier --check . && node scripts/run-with-rust.mjs cargo fmt --all --check",
+    "lint": "eslint . --max-warnings 0 && node scripts/run-with-rust.mjs cargo clippy --workspace --all-targets --all-features -- -D warnings",
+    "typecheck": "corepack pnpm -r --if-present typecheck",
+    "test": "corepack pnpm -r --if-present test && node scripts/run-with-rust.mjs cargo test --workspace",
+    "storybook": "corepack pnpm --filter @hachimi/ui storybook",
+    "storybook:build": "corepack pnpm --filter @hachimi/ui storybook:build",
+    "test:visual": "corepack pnpm --filter @hachimi/ui test:visual",
+    "contracts:generate": "node scripts/run-with-rust.mjs cargo run -p hachimi-protocol --bin export-types -- packages/contracts/src/generated.ts",
+    "contracts:check": "node scripts/run-with-rust.mjs cargo run -p hachimi-protocol --bin export-types -- packages/contracts/src/generated.ts --check",
+    "models:prepare": "node scripts/ensure-speech-models.mjs",
+    "motions:sync": "node scripts/sync-avatar-motions-v4.mjs",
+    "motions:check": "node scripts/sync-avatar-motions-v4.mjs --check",
+    "check": "corepack pnpm format:check && corepack pnpm lint && corepack pnpm typecheck && corepack pnpm test && corepack pnpm contracts:check && corepack pnpm storybook:build && corepack pnpm build",
+    "tauri": "node scripts/run-with-rust.mjs tauri"
+  },
+  "devDependencies": {
+    "@eslint/js": "9.39.2",
+    "@tauri-apps/cli": "2.11.4",
+    "eslint": "9.39.2",
+    "eslint-plugin-solid": "0.14.5",
+    "globals": "16.5.0",
+    "prettier": "3.7.4",
+    "typescript": "6.0.3",
+    "typescript-eslint": "8.52.0"
+  }
+}

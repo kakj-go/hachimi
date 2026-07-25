@@ -1,0 +1,306 @@
+html[data-window="pet"],
+html[data-window="pet"] body,
+html[data-window="pet"] #root {
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
+  background: transparent !important;
+  user-select: none;
+}
+
+.pet-stage {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  background: transparent;
+}
+
+.pet-speech {
+  position: absolute;
+  top: 14px;
+  left: 50%;
+  z-index: 8;
+  width: min(304px, calc(100% - 28px));
+  max-height: 116px;
+  transform: translateX(-50%);
+  padding: 11px 14px;
+  overflow: hidden auto;
+  border: 1px solid color-mix(in srgb, var(--color-border-base) 86%, transparent);
+  border-radius: 16px;
+  background: color-mix(in srgb, var(--color-bg-floating) 94%, transparent);
+  box-shadow: 0 12px 36px rgb(12 10 24 / 22%);
+  color: var(--color-text-base);
+  font-size: var(--font-size-sm);
+  line-height: 1.55;
+  text-align: left;
+  white-space: pre-wrap;
+  backdrop-filter: blur(20px) saturate(1.15);
+  pointer-events: none;
+  animation: pet-bubble-in var(--duration-normal) var(--ease-standard);
+}
+
+.pet-stream-caret {
+  width: 5px;
+  height: 14px;
+  display: inline-block;
+  margin-left: 3px;
+  border-radius: 3px;
+  background: var(--color-bg-accent);
+  vertical-align: -2px;
+  animation: pet-caret 850ms ease-in-out infinite;
+}
+
+.pet-voice-notice {
+  display: block;
+  margin-top: 6px;
+  color: var(--color-state-warning);
+  font-size: var(--font-size-xs);
+  line-height: 1.4;
+}
+
+.pet-avatar-hit-area {
+  position: absolute;
+  right: 38px;
+  bottom: 62px;
+  left: 38px;
+  height: 348px;
+  z-index: 3;
+  outline: none;
+  cursor: move;
+  filter: drop-shadow(0 14px 17px rgb(24 18 51 / 18%));
+  transition:
+    bottom var(--duration-normal) var(--ease-standard),
+    height var(--duration-normal) var(--ease-standard),
+    transform var(--duration-fast) var(--ease-standard);
+  -webkit-user-drag: none;
+}
+
+.pet-stage[data-composer-open="true"] .pet-avatar-hit-area {
+  bottom: 118px;
+  height: 300px;
+}
+
+.pet-avatar-hit-area:active {
+  cursor: move;
+}
+
+.pet-avatar-hit-area:focus-visible {
+  outline: none;
+}
+
+[data-component="context-menu-trigger"] {
+  display: contents;
+  outline: none;
+}
+
+.pet-avatar-canvas-host,
+.pet-avatar-canvas,
+.pet-fallback {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  display: block;
+  pointer-events: none;
+}
+
+.pet-fallback {
+  object-fit: contain;
+}
+
+.pet-model-loader {
+  position: absolute;
+  right: 12px;
+  bottom: 12px;
+  width: 16px;
+  height: 16px;
+  border: 2px solid color-mix(in srgb, var(--color-text-base) 22%, transparent);
+  border-top-color: var(--color-text-base);
+  border-radius: 50%;
+  animation: pet-spin 750ms linear infinite;
+}
+
+.pet-actions {
+  position: absolute;
+  right: 0;
+  bottom: 8px;
+  left: 0;
+  z-index: 7;
+  height: 76px;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  gap: 9px;
+  padding: 24px 12px 10px;
+  opacity: 0;
+  transform: translateY(10px) scale(0.96);
+  visibility: hidden;
+  pointer-events: none;
+  transition:
+    opacity var(--duration-normal) var(--ease-standard),
+    transform var(--duration-normal) var(--ease-standard),
+    visibility 0s linear var(--duration-normal);
+}
+
+.pet-actions[data-state="visible"] {
+  opacity: 1;
+  transform: translateY(0) scale(1);
+  visibility: visible;
+  pointer-events: auto;
+  transition-delay: 0s;
+}
+
+.pet-action {
+  width: 38px !important;
+  min-width: 38px;
+  height: 38px;
+  padding: 0 !important;
+  border-color: transparent !important;
+  background: transparent !important;
+  box-shadow: none !important;
+  color: color-mix(in srgb, var(--color-text-base) 88%, transparent) !important;
+  backdrop-filter: none !important;
+}
+
+.pet-action:hover {
+  background: color-mix(in srgb, var(--color-bg-floating) 38%, transparent) !important;
+}
+
+.pet-action svg {
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 1.8;
+}
+
+.pet-composer {
+  position: absolute;
+  right: 18px;
+  bottom: 60px;
+  left: 18px;
+  z-index: 9;
+  min-height: 54px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 34px 36px;
+  align-items: end;
+  gap: 8px;
+  padding: 9px 9px 9px 13px;
+  border: 1px solid color-mix(in srgb, var(--color-border-strong) 80%, transparent);
+  border-radius: 17px;
+  background: color-mix(in srgb, var(--color-bg-floating) 96%, transparent);
+  box-shadow: 0 14px 42px rgb(12 10 24 / 28%);
+  backdrop-filter: blur(22px) saturate(1.2);
+  animation: pet-composer-in var(--duration-normal) var(--ease-standard);
+}
+
+.pet-composer textarea {
+  width: 100%;
+  min-height: 34px;
+  max-height: 74px;
+  resize: none;
+  padding: 7px 2px 3px;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: var(--color-text-base);
+  font: inherit;
+  font-size: var(--font-size-sm);
+  line-height: 1.45;
+  user-select: text;
+}
+
+.pet-composer textarea::placeholder {
+  color: var(--color-text-faint);
+}
+
+.pet-composer-submit {
+  width: 34px;
+  height: 34px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: 11px;
+  background: var(--color-bg-accent);
+  color: var(--color-text-inverse);
+}
+
+.pet-composer-microphone {
+  width: 34px;
+  height: 34px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: 11px;
+  background: transparent;
+  color: var(--color-text-muted);
+}
+
+.pet-composer-microphone:hover:not(:disabled) {
+  background: var(--color-overlay-hover);
+  color: var(--color-text-base);
+}
+
+.pet-composer-microphone[data-state="listening"] {
+  background: color-mix(in srgb, var(--color-state-danger) 16%, transparent);
+  color: var(--color-state-danger);
+  animation: pet-listening 1s ease-in-out infinite;
+}
+
+.pet-composer-microphone:disabled:not([data-state="listening"]) {
+  opacity: 0.42;
+}
+
+.pet-composer-submit:disabled {
+  background: var(--color-overlay-pressed);
+  color: var(--color-text-faint);
+}
+
+@keyframes pet-bubble-in {
+  from {
+    opacity: 0;
+    transform: translate(-50%, 5px) scale(0.98);
+  }
+}
+
+@keyframes pet-composer-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px) scale(0.98);
+  }
+}
+
+@keyframes pet-caret {
+  50% {
+    opacity: 0.25;
+  }
+}
+
+@keyframes pet-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes pet-listening {
+  50% {
+    transform: scale(0.9);
+    opacity: 0.68;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pet-speech,
+  .pet-composer,
+  .pet-stream-caret,
+  .pet-model-loader {
+    animation: none;
+  }
+
+  .pet-composer-microphone[data-state="listening"] {
+    animation: none;
+  }
+}

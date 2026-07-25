@@ -1,0 +1,11 @@
+# Every packaged model file is checksum-verified. Disable text normalization so
+# Windows and Unix checkouts preserve identical bytes.
+apps/desktop/src-tauri/resources/ai-models/** -text
+
+# Large, redistributable runtime assets. Git LFS must be installed before clone.
+apps/desktop/src-tauri/resources/ai-models/**/*.onnx filter=lfs diff=lfs merge=lfs -text
+apps/desktop/src-tauri/resources/ai-models/**/voices.bin filter=lfs diff=lfs merge=lfs -text
+
+# A future redistributable default VRM should also use LFS. The current local
+# VRoid test model remains explicitly ignored because its license forbids it.
+assets/avatar-default/**/*.vrm filter=lfs diff=lfs merge=lfs -text

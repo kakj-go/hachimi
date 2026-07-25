@@ -1,0 +1,83 @@
+html[data-window="settings"],
+html[data-window="settings"] body,
+html[data-window="settings"] #root {
+  width: 100%;
+  min-width: 0;
+  min-height: 100%;
+  background: var(--color-bg-base);
+}
+
+.settings-window {
+  width: min(100%, 920px);
+  min-height: 100vh;
+  margin: 0 auto;
+  padding: clamp(24px, 5vw, 48px);
+}
+
+.settings-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-4);
+  margin-bottom: var(--space-5);
+}
+
+.settings-header h1 {
+  margin: 0;
+  font-size: var(--font-size-2xl);
+}
+
+.settings-eyebrow {
+  margin: 0 0 var(--space-1);
+  color: var(--color-text-faint);
+  font-size: var(--font-size-xs);
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.settings-sections {
+  display: grid;
+  gap: var(--space-5);
+}
+
+.settings-placeholder {
+  min-height: 260px;
+  display: grid;
+  place-content: center;
+  justify-items: center;
+  padding: var(--space-6);
+  border: 1px dashed var(--color-border-strong);
+  border-radius: var(--radius-xl);
+  color: var(--color-text-muted);
+  text-align: center;
+}
+
+.settings-placeholder h2 {
+  margin: var(--space-3) 0 var(--space-1);
+  color: var(--color-text-base);
+}
+
+.settings-placeholder p {
+  max-width: 480px;
+  margin: 0;
+}
+
+.settings-loading {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  background: var(--color-bg-base);
+  color: var(--color-text-muted);
+}
+
+@media (max-width: 720px) {
+  .settings-window {
+    padding: var(--space-4);
+  }
+
+  [data-component="settings-row"] {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+}

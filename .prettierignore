@@ -1,0 +1,11 @@
+target
+node_modules
+dist
+storybook-static
+pnpm-lock.yaml
+Cargo.lock
+packages/contracts/src/generated.ts
+apps/desktop/src-tauri/gen/
+assets/avatar-motions-v4/catalog.json
+demo.html
+demo2.html

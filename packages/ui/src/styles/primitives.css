@@ -1,0 +1,21 @@
+@layer theme {
+  :root {
+    --neutral-0: #ffffff;
+    --neutral-50: #f7f8fa;
+    --neutral-100: #eef0f3;
+    --neutral-200: #e1e4e8;
+    --neutral-300: #cdd1d7;
+    --neutral-400: #aab0b8;
+    --neutral-500: #858c96;
+    --neutral-600: #68707b;
+    --neutral-700: #4d545d;
+    --neutral-800: #34393f;
+    --neutral-900: #24282d;
+    --neutral-950: #15171a;
+    --blue-500: #6d8dff;
+    --blue-600: #405fc9;
+    --green-700: #248a52;
+    --yellow-700: #a56c13;
+    --red-600: #d54b52;
+  }
+}
