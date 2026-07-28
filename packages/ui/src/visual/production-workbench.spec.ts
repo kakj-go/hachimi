@@ -51,10 +51,27 @@ const initialSettings = {
   appearance,
 };
 
-async function installTauriMocks(page: Page) {
+async function installTauriMocks(
+  page: Page,
+  withComposerData = false,
+  schedulerEnabled = false,
+  withSessionData = false,
+  themeMode: "light" | "dark" | "system" = "dark",
+) {
   await page.addInitScript(
-    ({ appearance, initialSettings, motionEntry }) => {
-      let settings = initialSettings;
+    ({
+      appearance,
+      initialSettings,
+      motionEntry,
+      withComposerData,
+      schedulerEnabled,
+      withSessionData,
+      themeMode,
+    }) => {
+      type MockSettings = Omit<typeof initialSettings, "theme"> & {
+        theme: "light" | "dark" | "system";
+      };
+      let settings: MockSettings = { ...initialSettings, theme: themeMode };
       const runtimeRequirements = [
         "vrm_format",
         "skinned_mesh",
@@ -198,6 +215,109 @@ async function installTauriMocks(page: Page) {
       };
       const calls: Array<{ command: string; args: Record<string, unknown> }> = [];
       const testState = { failNextUpdate: false };
+      const session = {
+        id: "session-ui-unification",
+        context: {
+          kind: "project",
+          project_id: "project-hachimi",
+          checkout_id: "checkout-ui-unification",
+        },
+        entryProfile: "workbench",
+        title: "统一前端视觉规范与组件样式",
+        archived: false,
+        pinned: false,
+        parentSessionId: null,
+        sourceRunId: null,
+        createdAtMs: 1_774_184_400_000,
+        updatedAtMs: 1_774_184_520_000,
+      };
+      const run = {
+        id: "run-ui-unification",
+        sessionId: session.id,
+        status: "waiting_approval",
+        purpose: "task",
+        generation: 2,
+        configuration: {},
+        requestedCapabilities: {},
+        negotiatedCapabilities: {},
+        capabilityDegradations: [],
+        failureCode: null,
+        createdAtMs: 1_774_184_400_000,
+        updatedAtMs: 1_774_184_520_000,
+      };
+      const transcript = [
+        {
+          id: "item-user",
+          sessionId: session.id,
+          runId: run.id,
+          sequence: 1,
+          kind: "user",
+          status: "completed",
+          payloadVersion: 1,
+          typedPayload: null,
+          relations: {},
+          content: { text: "分析并统一前端各组件的颜色、排版、字号和交互状态。" },
+          createdAtMs: 1_774_184_400_000,
+        },
+        {
+          id: "item-assistant",
+          sessionId: session.id,
+          runId: run.id,
+          sequence: 2,
+          kind: "assistant",
+          status: "completed",
+          payloadVersion: 1,
+          typedPayload: null,
+          relations: {},
+          content: {
+            text: "已将 Quiet Graphite 令牌、设置行和 Composer 提取为共享实现，正在核对正式页面。",
+          },
+          createdAtMs: 1_774_184_460_000,
+        },
+        {
+          id: "item-tool",
+          sessionId: session.id,
+          runId: run.id,
+          sequence: 3,
+          kind: "tool_result",
+          status: "completed",
+          payloadVersion: 1,
+          typedPayload: null,
+          relations: {},
+          content: { text: "检查组件契约：42 个共享模式通过。" },
+          createdAtMs: 1_774_184_490_000,
+        },
+      ];
+      const approval = {
+        id: "approval-ui-unification",
+        sessionId: session.id,
+        runId: run.id,
+        toolCallId: "tool-call-ui-unification",
+        runGeneration: run.generation,
+        status: "pending",
+        action: "write_file",
+        resource: "packages/ui/src/styles",
+        parameterHash: "ui-contract",
+        riskSummary: "将更新共享组件样式并同步到正式页面。",
+        targetHost: "local",
+        requiredScopes: ["workspace.write"],
+        grantScope: "once",
+        usesRemaining: 1,
+        requesterPrincipal: "hachimi-agent",
+        resolvedBy: null,
+        expiresAtMs: null,
+        createdAtMs: 1_774_184_520_000,
+        resolvedAtMs: null,
+      };
+      const sessionSnapshot = {
+        session,
+        runs: [run],
+        events: [],
+        transcript,
+        pendingApprovals: [approval],
+        proposedPlans: [],
+        artifacts: [],
+      };
       let nextCallbackId = 1;
       const callbacks = new Map<number, (data: unknown) => unknown>();
       const internals = {
@@ -218,12 +338,159 @@ async function installTauriMocks(page: Page) {
         callbacks,
         async invoke(command: string, args: Record<string, unknown> = {}) {
           calls.push({ command, args });
+          if (command === "initialize_agent_control") {
+            return {
+              protocolVersion: 18,
+              acceptedFeatures: ["workbench", "workspace_tools"],
+              sandbox: { osEnforced: true },
+            };
+          }
+          if (command === "list_workbench_projects") {
+            return withComposerData
+              ? [
+                  {
+                    id: "project-hachimi",
+                    displayName: "hachimi-code",
+                    rootPath: "D:\\workspace\\rust\\hachimi-code",
+                    gitRoot: "D:\\workspace\\rust\\hachimi-code",
+                    trusted: true,
+                    createdAtMs: 1,
+                    updatedAtMs: 1,
+                  },
+                  {
+                    id: "project-notes",
+                    displayName: "notes",
+                    rootPath: "D:\\workspace\\notes",
+                    gitRoot: null,
+                    trusted: true,
+                    createdAtMs: 2,
+                    updatedAtMs: 2,
+                  },
+                ]
+              : [];
+          }
+          if (command === "list_workbench_sessions") return withSessionData ? [session] : [];
+          if (command === "get_workbench_session") return sessionSnapshot;
+          if (command === "resume_agent_session") {
+            return {
+              session,
+              activeRun: run,
+              transcript,
+              pendingApprovals: [approval],
+              pendingUserInputs: [],
+              usageSnapshot: null,
+              snapshotSequence: 3,
+              previousTranscriptCursor: null,
+            };
+          }
+          if (command === "subscribe_agent_events") {
+            return {
+              subscription: {
+                id: "subscription-ui-unification",
+                sessionId: session.id,
+                clientId: "visual-test",
+                afterSequence: 3,
+              },
+              catchUp: [],
+            };
+          }
+          if (command === "unsubscribe_agent_events" || command === "unwatch_workspace_files") {
+            return true;
+          }
+          if (command === "list_workspace_files") {
+            return {
+              path: "",
+              entries: [
+                {
+                  path: "packages",
+                  name: "packages",
+                  kind: "directory",
+                  byteSize: null,
+                  modifiedAtMs: 1_774_184_500_000,
+                  hidden: false,
+                  hasChildren: true,
+                  gitStatus: null,
+                },
+                {
+                  path: "README.md",
+                  name: "README.md",
+                  kind: "file",
+                  byteSize: 6_144,
+                  modifiedAtMs: 1_774_184_500_000,
+                  hidden: false,
+                  hasChildren: false,
+                  gitStatus: "modified",
+                },
+              ],
+              nextCursor: null,
+              etag: "workspace-ui-unification",
+            };
+          }
+          if (command === "watch_workspace_files") {
+            return {
+              id: "watch-ui-unification",
+              sessionId: session.id,
+              checkoutId: "checkout-ui-unification",
+              path: "",
+              generation: 1,
+            };
+          }
+          if (command === "list_schedules" || command === "list_task_runs") return [];
+          if (command === "list_mcp_servers") return [];
+          if (command === "list_project_git_refs") {
+            return [
+              { name: "main", revision: "1234567890abcdef", remote: false, current: true },
+              {
+                name: "feature/composer",
+                revision: "abcdef1234567890",
+                remote: false,
+                current: false,
+              },
+              { name: "origin/main", revision: "fedcba0987654321", remote: true, current: false },
+            ];
+          }
+          if (command === "list_skills") {
+            return withComposerData
+              ? [
+                  {
+                    id: "skill-documents",
+                    name: "Documents",
+                    description: "创建和编辑文档工件",
+                    enabled: true,
+                    contentHash: "documents-hash",
+                    treeRevision: "documents-revision",
+                    diagnostics: [],
+                    updatedAtMs: 1,
+                  },
+                  {
+                    id: "skill-pdf",
+                    name: "PDF",
+                    description: "读取、创建和验证 PDF 文件",
+                    enabled: true,
+                    contentHash: "pdf-hash",
+                    treeRevision: "pdf-revision",
+                    diagnostics: [],
+                    updatedAtMs: 2,
+                  },
+                  {
+                    id: "skill-spreadsheets",
+                    name: "Spreadsheets",
+                    description: "创建和编辑电子表格",
+                    enabled: true,
+                    contentHash: "spreadsheets-hash",
+                    treeRevision: "spreadsheets-revision",
+                    diagnostics: [],
+                    updatedAtMs: 3,
+                  },
+                ]
+              : [];
+          }
           if (command === "get_bootstrap_state") {
             return {
               protocolVersion: 17,
               windowKind: "workbench",
               locale: "zh-CN",
-              theme: "dark",
+              theme: themeMode,
               appearance,
               alwaysOnTop: true,
               featureFlags: {
@@ -235,7 +502,8 @@ async function installTauriMocks(page: Page) {
                 computerControl: false,
                 remoteTts: false,
                 remoteGateway: false,
-                connectorPlugins: false,
+                mcpRuntime: false,
+                scheduler: schedulerEnabled,
               },
             };
           }
@@ -246,7 +514,7 @@ async function installTauriMocks(page: Page) {
               testState.failNextUpdate = false;
               throw new Error("mock settings write failed");
             }
-            settings = args.settings as typeof initialSettings;
+            settings = args.settings as MockSettings;
             return settings;
           }
           if (command === "import_theme_profile") {
@@ -651,7 +919,15 @@ async function installTauriMocks(page: Page) {
         __HACHIMI_TEST_STATE__: testState,
       });
     },
-    { appearance, initialSettings, motionEntry },
+    {
+      appearance,
+      initialSettings,
+      motionEntry,
+      withComposerData,
+      schedulerEnabled,
+      withSessionData,
+      themeMode,
+    },
   );
 }
 
@@ -676,16 +952,174 @@ async function installMotionLabAssets(page: Page) {
   );
 }
 
+test("production composer popovers dismiss outside and create visual Skill references", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await installTauriMocks(page, true);
+  await page.goto("http://127.0.0.1:1420/workbench.html?route=home");
+  await expect(page.getByRole("heading", { name: /hachimi-code/ })).toBeVisible();
+
+  await page.getByTestId("workbench-project-trigger").click();
+  const projectPopover = page.getByTestId("workbench-project-popover");
+  await expect(projectPopover).toBeVisible();
+  await expect(projectPopover).toHaveCSS("width", "320px");
+  await expect(projectPopover.locator(".composer-popover-row-copy strong").first()).toHaveCSS(
+    "font-size",
+    "13px",
+  );
+  await expect(projectPopover.locator(".composer-popover-row-copy small").first()).toHaveCSS(
+    "font-size",
+    "12px",
+  );
+  if (process.env.HACHIMI_CAPTURE_COMPOSER_QA) {
+    await page.screenshot({
+      path: resolve(import.meta.dirname, "../../../../target/composer-project-popover-qa.png"),
+      animations: "disabled",
+    });
+  }
+  await page.locator(".welcome-block h1").click();
+  await expect(page.getByTestId("workbench-project-popover")).toHaveCount(0);
+
+  await page.getByTestId("workbench-execution-target").click();
+  const executionPopover = page.getByTestId("workbench-execution-popover");
+  await expect(executionPopover).toBeVisible();
+  await expect(executionPopover).toHaveCSS("width", "292px");
+  if (process.env.HACHIMI_CAPTURE_COMPOSER_QA) {
+    await page.screenshot({
+      path: resolve(import.meta.dirname, "../../../../target/composer-execution-popover-qa.png"),
+      animations: "disabled",
+    });
+  }
+  await page.getByTestId("workbench-execution-worktree").click();
+  await page.getByTestId("workbench-base-branch").click();
+  const branchPopover = page.getByTestId("workbench-branch-popover");
+  await expect(branchPopover).toBeVisible();
+  await expect(branchPopover).toHaveCSS("width", "350px");
+  if (process.env.HACHIMI_CAPTURE_COMPOSER_QA) {
+    await page.screenshot({
+      path: resolve(import.meta.dirname, "../../../../target/composer-branch-popover-qa.png"),
+      animations: "disabled",
+    });
+  }
+  await page.locator(".welcome-block h1").click();
+
+  await page.getByTestId("workbench-task-options").click();
+  const optionsPopover = page.getByTestId("workbench-options-popover");
+  await expect(optionsPopover).toBeVisible();
+  await expect(optionsPopover).toHaveCSS("width", "390px");
+  await expect(optionsPopover).toContainText("文件和文件夹");
+  await expect(page.getByTestId("workbench-add-folder")).toBeVisible();
+
+  const fileChooserPromise = page.waitForEvent("filechooser");
+  await page.getByTestId("workbench-add-attachment").click();
+  const fileChooser = await fileChooserPromise;
+  expect(fileChooser.isMultiple()).toBe(true);
+  await fileChooser.setFiles([
+    {
+      name: "shore.svg",
+      mimeType: "image/svg+xml",
+      buffer: Buffer.from(
+        '<svg xmlns="http://www.w3.org/2000/svg" width="120" height="120"><defs><linearGradient id="g" x2="0" y2="1"><stop stop-color="#62c7f2"/><stop offset=".58" stop-color="#d9f4fb"/><stop offset=".6" stop-color="#f7d48b"/><stop offset="1" stop-color="#d99a55"/></linearGradient></defs><rect width="120" height="120" fill="url(#g)"/><path d="M0 68 Q28 57 55 70 T120 67" fill="none" stroke="#fff" stroke-width="6" opacity=".8"/></svg>',
+      ),
+    },
+    { name: "notes.txt", mimeType: "text/plain", buffer: Buffer.from("reference notes") },
+  ]);
+  await expect(page.locator(".composer-attachment-card")).toHaveCount(2);
+  await expect(page.locator(".composer-attachment-card.image img")).toBeVisible();
+
+  await page.getByTestId("workbench-task-options").click();
+  const folderChooserPromise = page.waitForEvent("filechooser");
+  await page.getByTestId("workbench-add-folder").click();
+  const folderChooser = await folderChooserPromise;
+  expect(folderChooser.isMultiple()).toBe(true);
+  await expect(page.getByTestId("workbench-attachment-folder-input")).toHaveAttribute(
+    "webkitdirectory",
+    "",
+  );
+  await folderChooser.setFiles(resolve(import.meta.dirname, "fixtures/attachment-folder"));
+  await expect(page.locator(".composer-attachment-card")).toHaveCount(3);
+  await expect(page.locator(".composer-attachment-card.folder")).toContainText("1 个文件");
+
+  await page.getByTestId("workbench-task-options").click();
+  await page.getByTestId("workbench-skill-Documents").click();
+  await expect(page.locator(".composer-skill-reference")).toContainText("Documents");
+  if (process.env.HACHIMI_CAPTURE_COMPOSER_QA) {
+    await page.screenshot({
+      path: resolve(import.meta.dirname, "../../../../target/composer-options-popover-qa.png"),
+      animations: "disabled",
+    });
+  }
+  await page.locator(".welcome-block h1").click();
+  await expect(page.getByTestId("workbench-options-popover")).toHaveCount(0);
+  if (process.env.HACHIMI_CAPTURE_COMPOSER_QA) {
+    await page.screenshot({
+      path: resolve(import.meta.dirname, "../../../../target/composer-skill-reference-qa.png"),
+      animations: "disabled",
+    });
+  }
+
+  await page.getByTestId("workbench-approval-policy").click();
+  const approvalPopover = page.getByTestId("workbench-approval-popover");
+  await expect(approvalPopover).toBeVisible();
+  await expect(approvalPopover).toHaveCSS("width", "380px");
+
+  if (process.env.HACHIMI_CAPTURE_COMPOSER_QA) {
+    await page.screenshot({
+      path: resolve(import.meta.dirname, "../../../../target/composer-approval-popover-qa.png"),
+      animations: "disabled",
+    });
+  }
+
+  await page.locator("html").evaluate((root) => {
+    root.style.setProperty("--font-size-xs", "16px");
+    root.style.setProperty("--font-size-sm", "17px");
+    root.style.setProperty("--font-size-md", "18px");
+  });
+  await expect(approvalPopover).toHaveCSS("width", "380px");
+  await expect(approvalPopover.locator(".composer-popover-row-copy strong").first()).toHaveCSS(
+    "font-size",
+    "17px",
+  );
+  const enlargedApprovalBox = await approvalPopover.boundingBox();
+  expect(enlargedApprovalBox).not.toBeNull();
+  expect(enlargedApprovalBox!.height).toBeLessThan(230);
+  if (process.env.HACHIMI_CAPTURE_COMPOSER_QA) {
+    await page.screenshot({
+      path: resolve(
+        import.meta.dirname,
+        "../../../../target/composer-approval-popover-large-type-qa.png",
+      ),
+      animations: "disabled",
+    });
+  }
+});
+
 for (const viewport of [
   { name: "1855x1343", width: 1855, height: 1343 },
   { name: "1280x800", width: 1280, height: 800 },
+  { name: "1024x768", width: 1024, height: 768 },
   { name: "960x640", width: 960, height: 640 },
+  { name: "720x640", width: 720, height: 640 },
 ] as const) {
   test(`production workbench ${viewport.name}`, async ({ page }) => {
     await page.setViewportSize(viewport);
     await installTauriMocks(page);
     await page.goto("http://127.0.0.1:1420/workbench.html?route=home");
     await expect(page.getByRole("heading", { name: /hachimi-code/ })).toBeVisible();
+    await expect(page.locator('[data-component="composer"]')).toHaveCSS(
+      "background-color",
+      "rgb(32, 36, 42)",
+    );
+    await expect(page.locator('[data-component="title-bar"]')).toHaveCSS("height", "46px");
+    if (viewport.width > 760) {
+      await expect(page.locator(".project-sidebar")).toHaveCSS(
+        "width",
+        viewport.width <= 1100 ? "250px" : "276px",
+      );
+    } else {
+      await expect(page.locator(".project-sidebar")).toBeHidden();
+    }
     await expect(page.locator("html")).toHaveJSProperty("scrollWidth", viewport.width);
     await expect(page).toHaveScreenshot(`production-home-${viewport.name}.png`, {
       animations: "disabled",
@@ -693,15 +1127,198 @@ for (const viewport of [
   });
 }
 
+for (const systemScheme of ["light", "dark"] as const) {
+  test(`production system appearance ${systemScheme}`, async ({ page }) => {
+    await page.setViewportSize({ width: 1024, height: 768 });
+    await page.emulateMedia({ colorScheme: systemScheme });
+    await installTauriMocks(page, false, false, false, "system");
+    await page.goto("http://127.0.0.1:1420/workbench.html?route=home");
+    await expect(page.locator("html")).toHaveAttribute("data-color-scheme", systemScheme);
+    await expect(page.locator('[data-component="title-bar"]')).toBeVisible();
+    await expect(page).toHaveScreenshot(`production-home-system-${systemScheme}-1024x768.png`, {
+      animations: "disabled",
+    });
+  });
+}
+
+test("production title bar and project rows preserve their desktop alignment and actions", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await installTauriMocks(page, true, false, true);
+  await page.goto("http://127.0.0.1:1420/workbench.html?route=home");
+
+  const titleMenus = page.locator(".title-menus");
+  await expect(titleMenus.getByRole("button")).toHaveCount(4);
+  await expect(titleMenus.getByRole("button").first()).toHaveCSS("white-space", "nowrap");
+  await expect(page.locator(".window-controls").getByRole("button")).toHaveCount(3);
+  await expect(page.locator(".window-controls").getByRole("button").last()).toBeVisible();
+  const titleBounds = await page.locator('[data-component="title-bar"]').evaluate((element) => {
+    const bounds = (selector: string) => {
+      const rect = element.querySelector(selector)!.getBoundingClientRect();
+      return { left: rect.left, right: rect.right, width: rect.width };
+    };
+    const rect = element.getBoundingClientRect();
+    return {
+      display: getComputedStyle(element).display,
+      right: rect.right,
+      history: bounds(".title-history"),
+      menus: bounds(".title-menus"),
+      controls: bounds(".window-controls"),
+    };
+  });
+  expect(titleBounds.display).toBe("flex");
+  expect(titleBounds.menus.left).toBeGreaterThanOrEqual(titleBounds.history.right);
+  expect(titleBounds.controls.left).toBeGreaterThanOrEqual(titleBounds.menus.right);
+  expect(titleBounds.controls.right).toBeLessThanOrEqual(titleBounds.right);
+
+  const projectNames = page.locator(".project-row-name");
+  await expect(projectNames).toHaveCount(2);
+  const nameBoxes = await projectNames.evaluateAll((elements) =>
+    elements.map((element) => ({
+      x: element.getBoundingClientRect().x,
+      text: element.textContent,
+    })),
+  );
+  expect(nameBoxes.map(({ text }) => text)).toEqual(["notes", "hachimi-code"]);
+  expect(Math.abs(nameBoxes[0]!.x - nameBoxes[1]!.x)).toBeLessThan(1);
+
+  const hachimiRow = page.locator(".project-row-shell", { hasText: "hachimi-code" });
+  await hachimiRow.hover();
+  await expect(page.getByTestId("project-new-task-project-hachimi")).toBeVisible();
+  await page.getByTestId("project-new-task-project-hachimi").click();
+  await expect(page.getByRole("heading", { name: /hachimi-code/ })).toBeVisible();
+  await expect(page.getByTestId("workbench-project-trigger")).toContainText("hachimi-code");
+  const composerBox = await page.locator('[data-component="composer"]').boundingBox();
+  const contextBox = await page.locator(".composer-context").boundingBox();
+  const projectTriggerBox = await page.getByTestId("workbench-project-trigger").boundingBox();
+  const composerInputBox = await page.locator('[data-component="composer-input"]').boundingBox();
+  expect(composerBox).not.toBeNull();
+  expect(contextBox).not.toBeNull();
+  expect(projectTriggerBox).not.toBeNull();
+  expect(composerInputBox).not.toBeNull();
+  expect(Math.abs(contextBox!.x - composerBox!.x)).toBeLessThanOrEqual(1);
+  expect(Math.abs(projectTriggerBox!.x - composerInputBox!.x)).toBeLessThanOrEqual(1);
+
+  await hachimiRow.hover();
+  await page.getByTestId("project-more-project-hachimi").click();
+  await expect(page.locator('[data-component="dropdown-item"]')).toHaveText([
+    "置顶项目",
+    "在资源管理器中打开",
+    "创建永久工作树",
+    "重命名项目",
+    "全部标为已读",
+    "归档任务",
+    "移除",
+  ]);
+});
+
+test("production density changes the shared root contract", async ({ page }) => {
+  await installTauriMocks(page);
+  await page.goto("http://127.0.0.1:1420/workbench.html?route=settings/appearance");
+  const densityRow = page.locator('[data-component="settings-row"]', { hasText: "界面密度" });
+  const density = densityRow.locator('[data-component="segmented-control"]');
+  for (const option of [
+    ["紧凑", "compact"],
+    ["默认", "default"],
+    ["宽松", "comfortable"],
+  ] as const) {
+    await density.getByRole("button", { name: option[0], exact: true }).click();
+    await expect(page.locator("html")).toHaveAttribute("data-appearance-density", option[1]);
+  }
+});
+
+test("production active Agent session uses the shared workflow and workspace contract", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.clock.setFixedTime(new Date("2026-07-26T15:00:00.000Z"));
+  await installTauriMocks(page, true, false, true);
+  await page.goto("http://127.0.0.1:1420/workbench.html?route=home");
+  await page.getByRole("button", { name: "统一前端视觉规范与组件样式" }).click();
+
+  await expect(page.getByRole("heading", { name: "统一前端视觉规范与组件样式" })).toBeVisible();
+  await expect(page.locator('[data-component="agent-message"]')).toHaveCount(2);
+  await expect(page.locator('[data-component="tool-call"]')).toHaveCount(1);
+  await expect(page.locator('[data-component="approval"]')).toBeVisible();
+  await expect(page.locator('[data-component="workspace"]')).toBeVisible();
+  await expect(page.locator('[data-component="file-tree"]')).toBeVisible();
+  await expect(page.getByTestId("review-panel")).toContainText("代码 Review");
+  await expect(page.locator("html")).toHaveJSProperty("scrollWidth", 1440);
+
+  const result = await new AxeBuilder({ page })
+    .include(".home-main")
+    .withTags(["wcag2a", "wcag2aa"])
+    .disableRules(["nested-interactive"])
+    .analyze();
+  expect(result.violations).toEqual([]);
+  await expect(page).toHaveScreenshot("production-agent-session-1440x900.png", {
+    animations: "disabled",
+  });
+});
+
+test("production task center uses the shared form and page contract", async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await page.clock.setFixedTime(new Date("2026-07-26T15:00:00.000Z"));
+  await installTauriMocks(page, true, true);
+  await page.goto("http://127.0.0.1:1420/workbench.html?route=home");
+  await page.getByTestId("workbench-task-tab").click();
+  await expect(page.getByTestId("workbench-task-center")).toBeVisible();
+  await page.getByTestId("task-create-toggle").click();
+  await expect(page.getByTestId("task-name")).toBeVisible();
+  await expect(page.getByTestId("task-prompt")).toBeVisible();
+  await expect(page.locator("html")).toHaveJSProperty("scrollWidth", 1280);
+  const result = await new AxeBuilder({ page })
+    .include(".task-center")
+    .withTags(["wcag2a", "wcag2aa"])
+    .analyze();
+  expect(result.violations).toEqual([]);
+  await expect(page).toHaveScreenshot("production-task-center-1280x800.png", {
+    animations: "disabled",
+  });
+});
+
+for (const route of ["general", "llm", "voice", "avatar", "skills", "mcp"] as const) {
+  test(`production settings ${route} uses the shared page contract`, async ({ page }) => {
+    await page.setViewportSize({ width: 1280, height: 800 });
+    await installTauriMocks(page);
+    await page.goto(`http://127.0.0.1:1420/workbench.html?route=settings/${route}`);
+    await expect(page.getByRole("heading", { level: 1 }).first()).toBeVisible();
+    await expect(page.locator("html")).toHaveJSProperty("scrollWidth", 1280);
+    const result = await new AxeBuilder({ page })
+      .include(".settings-main")
+      .withTags(["wcag2a", "wcag2aa"])
+      .disableRules(["nested-interactive"])
+      .analyze();
+    expect(result.violations).toEqual([]);
+    await expect(page).toHaveScreenshot(`production-settings-${route}-1280x800.png`, {
+      animations: "disabled",
+    });
+  });
+}
+
 for (const viewport of [
   { name: "1855x1343", width: 1855, height: 1343 },
+  { name: "1024x768", width: 1024, height: 768 },
   { name: "960x640", width: 960, height: 640 },
+  { name: "720x640", width: 720, height: 640 },
 ] as const) {
   test(`production appearance ${viewport.name}`, async ({ page }) => {
     await page.setViewportSize(viewport);
     await installTauriMocks(page);
     await page.goto("http://127.0.0.1:1420/workbench.html?route=settings/appearance");
     await expect(page.getByRole("heading", { name: "外观", exact: true })).toBeVisible();
+    if (viewport.width > 760) {
+      await expect(page.locator(".settings-sidebar")).toHaveCSS(
+        "width",
+        viewport.width <= 1040 ? "226px" : "256px",
+      );
+    } else {
+      await expect(page.locator(".settings-sidebar")).toBeHidden();
+    }
+    const accentChip = page.locator(".accent-chip").first();
+    await expect(accentChip).toHaveCSS("height", "24px");
+    await expect(accentChip).toHaveCSS("background-color", "rgb(112, 98, 213)");
     expect(
       await page
         .locator(".settings-main")
@@ -752,8 +1369,8 @@ test("production menus contain only implemented entries and legacy routes normal
 
   await page.goto("http://127.0.0.1:1420/workbench.html?route=settings/plugins");
   await expect(page.getByRole("heading", { name: "通用", exact: true, level: 1 })).toBeVisible();
-  await expect(page.locator(".settings-nav button")).toHaveCount(6);
-  for (const entry of ["通用", "外观", "语音", "配置", "宠物", "交互"]) {
+  await expect(page.locator(".settings-nav button")).toHaveCount(8);
+  for (const entry of ["通用", "外观", "语音", "配置", "宠物", "交互", "Skills", "MCP"]) {
     await expect(page.locator(".settings-nav").getByRole("button", { name: entry })).toBeVisible();
   }
 });
@@ -796,12 +1413,12 @@ test("appearance controls update runtime tokens and support wheel and keyboard",
     .locator('[data-component="switch-root"]');
   const sidebar = page.locator(".settings-sidebar");
   const translucentBackground = await sidebar.evaluate(
-    (element) => getComputedStyle(element).backgroundImage,
+    (element) => getComputedStyle(element).backgroundColor,
   );
   await sidebarSwitches.nth(1).click();
   await expect(root).toHaveAttribute("data-translucent-sidebar", "off");
   await expect
-    .poll(() => sidebar.evaluate((element) => getComputedStyle(element).backgroundImage))
+    .poll(() => sidebar.evaluate((element) => getComputedStyle(element).backgroundColor))
     .not.toBe(translucentBackground);
 
   const darkEditor = page.locator(".theme-profile-card").nth(1);
@@ -836,6 +1453,12 @@ test("built-in themes and font presets switch the complete interface", async ({ 
 
   await lightEditor.locator('[data-component="select-trigger"]').nth(0).click();
   await expect(page.getByRole("option")).toHaveCount(9);
+  await page.keyboard.press("Escape");
+  const darkEditor = page.locator(".theme-profile-card").nth(1);
+  await darkEditor.locator('[data-component="select-trigger"]').nth(0).click();
+  await expect(page.getByRole("option")).toHaveCount(9);
+  await page.keyboard.press("Escape");
+  await lightEditor.locator('[data-component="select-trigger"]').nth(0).click();
   await page.getByRole("option", { name: "Catppuccin" }).click();
   await expect(root).toHaveAttribute("data-color-scheme", "light");
   await expect(root).toHaveCSS("--appearance-background", "#EFF1F5");
@@ -879,7 +1502,7 @@ test("theme import, copy, delete, and built-in reset complete through native com
   await expect(page.getByRole("dialog", { name: "删除自定义主题" })).toBeVisible();
   await page.getByRole("dialog").getByRole("button", { name: "确认" }).click();
   await expect(lightEditor.locator('[data-component="select-trigger"]').nth(0)).toContainText(
-    "Codex",
+    "Quiet Graphite",
   );
 
   const darkEditor = editors.nth(1);
@@ -907,7 +1530,7 @@ test("theme import, copy, delete, and built-in reset complete through native com
   await page.getByRole("menuitem", { name: "恢复默认" }).click();
   await expect(page.getByRole("dialog", { name: "恢复内置主题" })).toBeVisible();
   await page.getByRole("dialog").getByRole("button", { name: "确认" }).click();
-  await expect(darkAccent).toHaveValue("#2EA8FF");
+  await expect(darkAccent).toHaveValue("#7062D5");
 
   const commands = await page.evaluate(() =>
     (
@@ -1018,7 +1641,12 @@ test("model, voice, and pet settings use their live command-backed controls", as
 
   await page.getByRole("tab", { name: "互动" }).click();
   await expect(page.getByRole("button", { name: /头顶/ })).toBeVisible();
-  await expect(page.getByText("点头同意", { exact: true }).first()).toBeVisible();
+  await page
+    .locator('[data-component="form-label"]', { hasText: "绑定动作" })
+    .locator("..")
+    .locator('[data-component="select-trigger"]')
+    .click();
+  await expect(page.getByRole("option", { name: /点头同意/ })).toBeVisible();
 });
 
 test("motion settings keep one motion per region and import an optional binding", async ({
@@ -1096,6 +1724,17 @@ test("motion settings share one responsive preview across both tabs", async ({ p
   await installMotionLabAssets(page);
   await page.goto("http://127.0.0.1:1420/workbench.html?route=settings/motion");
 
+  const motionSearchBox = await page
+    .locator(".motion-filter-control.search [data-component=search-field]")
+    .boundingBox();
+  const motionCategoryBox = await page
+    .locator(".motion-filter-control.category [data-component=select-trigger]")
+    .boundingBox();
+  expect(motionSearchBox).not.toBeNull();
+  expect(motionCategoryBox).not.toBeNull();
+  expect(Math.abs(motionSearchBox!.y - motionCategoryBox!.y)).toBeLessThanOrEqual(1);
+  expect(Math.abs(motionSearchBox!.height - motionCategoryBox!.height)).toBeLessThanOrEqual(1);
+
   const previewCanvas = page.locator(".motion-preview-stage canvas");
   await expect(previewCanvas).toHaveCount(1);
   await expect(page.getByText("标准待机", { exact: true }).first()).toBeVisible();
@@ -1120,7 +1759,7 @@ test("motion settings share one responsive preview across both tabs", async ({ p
   const browserBox = await page.locator(".motion-settings-browser").boundingBox();
   expect(previewBox).not.toBeNull();
   expect(browserBox).not.toBeNull();
-  expect(previewBox!.y).toBeLessThan(browserBox!.y);
+  expect(browserBox!.y).toBeLessThan(previewBox!.y);
   await expect(previewCanvas).toHaveCount(1);
   await expect(page).toHaveScreenshot("production-motion-settings-motions-960x640.png", {
     animations: "disabled",
@@ -1135,25 +1774,34 @@ test("Motion Library Lab previews a catalog VRMA with finger diagnostics", async
   await installMotionLabAssets(page);
   await page.goto("http://127.0.0.1:1420/workbench.html?route=developer/motion-lab");
   await expect(page.getByRole("heading", { name: "动作库实验室" })).toBeVisible();
-  await expect(page.getByLabel("VRMA 动作")).toHaveValue(motionEntry.id);
+  await expect(page.getByRole("button", { name: /VRMA 动作/ })).toHaveAttribute(
+    "data-value",
+    motionEntry.id,
+  );
   await page.getByRole("button", { name: "暂停" }).click();
-  await page.getByLabel("动作时间").fill("1100");
-  await expect(page.getByLabel("动作时间")).toHaveValue("1100");
+  const motionTimeSlider = page
+    .locator('[data-component="range-field"]', { hasText: "动作时间" })
+    .locator('input[type="range"]');
+  await motionTimeSlider.fill("1100");
+  await expect(motionTimeSlider).toHaveValue("1100");
   await expect(
-    page.locator(".motion-lab-metrics > div", { hasText: "活动骨骼" }).locator("strong"),
+    page.locator('[data-component="metric-card"]', { hasText: "活动骨骼" }).locator("strong"),
   ).not.toHaveText("0");
   await expect(page.getByText("30", { exact: true }).first()).toBeVisible();
   await expect(page.getByText("Root 轨迹", { exact: true })).toBeVisible();
   await expect(page.getByText("足部接触", { exact: true })).toBeVisible();
   await expect(page.getByText("接触时间线", { exact: true })).toBeVisible();
   await expect(page.getByText(/° · .* m/)).toBeVisible();
-  await page.getByLabel("播放速度").fill("1.5");
-  await expect(page.getByLabel("播放速度")).toHaveValue("1.5");
+  const playbackSpeedSlider = page
+    .locator('[data-component="range-field"]', { hasText: "播放速度" })
+    .locator('input[type="range"]');
+  await playbackSpeedSlider.fill("1.5");
+  await expect(playbackSpeedSlider).toHaveValue("1.5");
   await expect(page).toHaveScreenshot("production-motion-lab-1280x800.png", {
     animations: "disabled",
     mask: [
       page.locator(".motion-lab-stage canvas"),
-      page.locator(".motion-lab-metrics > div", { hasText: "Solve" }).locator("strong"),
+      page.locator('[data-component="metric-card"]', { hasText: "Solve" }).locator("strong"),
     ],
     maskColor: "#313236",
   });

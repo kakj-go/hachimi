@@ -1,7 +1,39 @@
-// Hachimi is a GUI application in both Debug and Release builds. Keeping the
-// Windows GUI subsystem enabled prevents an extra console window on startup.
+// Keep Windows GUI builds free of an extra console window.
 #![cfg_attr(windows, windows_subsystem = "windows")]
+#![cfg_attr(all(feature = "desktop-e2e", not(debug_assertions)), allow(dead_code))]
+#[cfg(all(feature = "desktop-e2e", not(debug_assertions)))]
+compile_error!("the desktop-e2e feature is forbidden in release builds");
+mod agent_commands;
+mod agent_runtime_host;
+mod app_domain_handler;
+mod app_shell;
+mod desktop_e2e;
+mod domain_run_launcher;
+mod extension_commands;
+mod mcp_commands;
+mod media_commands;
+mod process_commands;
+mod project_git_commands;
+mod review_commands;
+mod sandbox_commands;
+mod scheduler_commands;
+mod skill_drop;
+mod workbench_commands;
+mod workspace_commands;
+mod workspace_mutation_commands;
 
+use agent_commands::*;
+use app_shell::*;
+use desktop_e2e::*;
+use extension_commands::*;
+use mcp_commands::*;
+use media_commands::*;
+use process_commands::*;
+use project_git_commands::*;
+use review_commands::*;
+use sandbox_commands::*;
+use scheduler_commands::*;
+use skill_drop::{PendingSkillDrop, handle_skill_drag_event};
 use std::{
     collections::BTreeMap,
     fs::{self, File, OpenOptions},
@@ -13,30 +45,49 @@ use std::{
     },
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
+use workbench_commands::*;
+use workspace_commands::*;
+use workspace_mutation_commands::*;
 
+use hachimi_agent::{AgentExecutorRegistry, AgentRunExecutor};
+use hachimi_approvals::{ApprovalBroker, PersistentApprovalBroker};
 use hachimi_avatar::{AvatarCatalog, InspectedAvatar, inspect_avatar};
-use hachimi_control_plane::ControlPlane;
+use hachimi_capabilities::McpEchoServer;
+use hachimi_control_plane::{
+    AgentLifecycleService, AppServer, ControlPlane, McpControlService, PersistentControlAuditSink,
+};
 use hachimi_core::{FeatureFlags, WindowKind};
 use hachimi_llm::{
     ApiKeyStore, LlmError, SystemApiKeyStore, apply_secret_change, stream_pet_turn,
     test_connection, validate_input,
 };
 use hachimi_motion::{InspectedMotion, MotionCatalog, inspect_motion};
+use hachimi_policy::expand_permission_profile;
+use hachimi_process::ProcessRegistry;
 use hachimi_protocol::{
-    AppSettings, AvatarAdaptationProfile, AvatarCatalogSnapshot, AvatarImportCommitRequest,
+    AppSettings, ApprovalDecisionRequest, ApprovalResolution, ApprovalStatus, AttachmentRecord,
+    AvatarAdaptationProfile, AvatarCatalogSnapshot, AvatarImportCommitRequest,
     AvatarImportInspection, AvatarRuntimeAsset, BootstrapState, CONTROL_PROTOCOL_VERSION,
-    ClientContext, ClientId, ControlMethod, FrontendLogEntry, FrontendLogLevel,
+    ClientContext, ClientId, ControlMethod, FrontendLogEntry, FrontendLogLevel, GitRefRecord,
     InteractionMotionBindingUpdateRequest, InteractiveRegionsUpdate, LipSyncCapability,
     LlmSettingsInput, LlmSettingsView, LlmTestResult, Locale, MAX_THEME_PROFILES,
+    McpServerHealthRecord, McpServerRecord, McpServerUpsertRequest, McpServerView,
     MotionAssetBindingsClearRequest, MotionBindingResetRequest, MotionCatalogSnapshot,
     MotionEnabledUpdateRequest, MotionImportCommitRequest, MotionImportInspection,
     MotionMetadataUpdateRequest, MotionRuntimeAsset, PetContextMenuRequest, PetTurnEvent,
-    PetTurnRequest, ResourceEntryRequest, SETTINGS_SCHEMA_VERSION, SpeechRecognitionRuntimeState,
-    SpeechRecognitionSettingsInput, ThemeProfile, ThemeProfileDocument, ThemeScheme,
-    VoiceCatalogSnapshot, VoiceImportCommitRequest, VoiceModelInspection, VoiceRuntimeState,
-    VoiceSettingsInput, WindowPlacementV1, WorkbenchRoute,
+    PetTurnRequest, PlanAcceptanceRequest, ProjectId, ProjectRecord, ResourceEntryRequest, RunId,
+    RunRecord, SETTINGS_SCHEMA_VERSION, SessionId, SessionRecord, SkillSubscriptionId,
+    SpeechRecognitionRuntimeState, SpeechRecognitionSettingsInput, ThemeProfile,
+    ThemeProfileDocument, ThemeScheme, VoiceCatalogSnapshot, VoiceImportCommitRequest,
+    VoiceModelInspection, VoiceRuntimeState, VoiceSettingsInput, WindowPlacementV1,
+    WorkbenchPlanAcceptanceSnapshot, WorkbenchRoute, WorkbenchSessionSnapshot,
+    WorkbenchTaskSnapshot, WorkbenchTaskStartRequest,
 };
-use hachimi_storage::SettingsStore;
+use hachimi_sandbox::{
+    SandboxBackend, SandboxRuntimeManager, SandboxStatus, WindowsSandboxReadinessProbe,
+};
+use hachimi_storage::{AgentStore, SettingsStore};
+use hachimi_user_input::{PersistentUserInputBroker, UserInputBroker};
 use hachimi_voice::{
     InspectedVoiceModel, SpeechRecognizerRuntime, VoiceCatalog, VoiceEventSink, VoiceRuntime,
     VoiceRuntimeEventSinks, VoiceRuntimeStateSink, VoiceTurnEventSink, inspect_voice_archive,
@@ -45,6 +96,7 @@ use hachimi_windowing::{
     InteractiveRegionState, MonitorGeometry, PhysicalPoint, PhysicalRect,
     restore_or_default_placement,
 };
+use hachimi_workbench::WorkbenchService;
 use parking_lot::{Mutex, RwLock};
 use serde::{Deserialize, Serialize};
 use specta::Type;
@@ -67,6 +119,7 @@ const VOICE_CATALOG_EVENT: &str = "voice:catalog-changed";
 const SPEECH_RECOGNITION_STATE_EVENT: &str = "speech-recognition-state-changed";
 const AVATAR_CATALOG_EVENT: &str = "avatar:catalog-changed";
 const MOTION_CATALOG_EVENT: &str = "motion:catalog-changed";
+const WORKBENCH_RUN_EVENT: &str = "workbench:run-updated";
 const DEFAULT_AVATAR_RESOURCE: &str =
     "resources/avatar-default/2639776812528692620/2639776812528692620.vrm";
 const MOTION_CATALOG_RESOURCE: &str = "resources/avatar-motions-v4/catalog.json";
@@ -79,7 +132,6 @@ const APP_IDENTIFIER: &str = "com.hachimi.desktop";
 const PORTABLE_MARKER_FILE: &str = "hachimi.portable";
 const RESET_MARKER_FILE: &str = "hachimi-reset-all-v1.marker";
 const DATA_ROOT_SENTINEL_FILE: &str = ".hachimi-data-root";
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum StorageMode {
     Debug,
@@ -87,7 +139,6 @@ enum StorageMode {
     Installed,
     Override,
 }
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct StorageLayout {
     root: PathBuf,
@@ -95,7 +146,6 @@ struct StorageLayout {
     mode: StorageMode,
     redirect_webview: bool,
 }
-
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 struct ResetMarker {
@@ -103,23 +153,21 @@ struct ResetMarker {
     root: PathBuf,
     webview: PathBuf,
 }
-
 impl StorageLayout {
     fn logs(&self) -> PathBuf {
         self.root.join("logs")
     }
-}
-
-fn absolute_path(path: PathBuf) -> PathBuf {
-    if path.is_absolute() {
-        path
-    } else {
-        std::env::current_dir()
-            .unwrap_or_else(|_| PathBuf::from("."))
-            .join(path)
+    fn sandbox_setup_marker(&self) -> PathBuf {
+        if self.mode == StorageMode::Installed {
+            std::env::var_os("PROGRAMDATA")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| self.root.clone())
+                .join("Hachimi/sandbox/windows/setup.json")
+        } else {
+            self.root.join("sandbox/windows/setup.json")
+        }
     }
 }
-
 fn debug_data_root(executable: &Path) -> Option<PathBuf> {
     let executable_dir = executable.parent()?;
     if executable_dir
@@ -141,7 +189,6 @@ fn debug_data_root(executable: &Path) -> Option<PathBuf> {
     }
     None
 }
-
 fn resolve_storage_layout() -> StorageLayout {
     let executable = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("hachimi-desktop"));
     let executable_dir = executable
@@ -198,11 +245,20 @@ fn resolve_storage_layout() -> StorageLayout {
         redirect_webview: false,
     }
 }
-
+#[cfg(all(debug_assertions, feature = "desktop-e2e"))]
+fn desktop_e2e_path(variable: &str) -> Option<PathBuf> {
+    std::env::var_os(variable)
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .map(absolute_path)
+}
+#[cfg(not(all(debug_assertions, feature = "desktop-e2e")))]
+fn desktop_e2e_path(_variable: &str) -> Option<PathBuf> {
+    None
+}
 fn reset_marker_path() -> PathBuf {
     std::env::temp_dir().join(RESET_MARKER_FILE)
 }
-
 fn write_reset_marker(layout: &StorageLayout) -> Result<(), String> {
     let marker = ResetMarker {
         version: 1,
@@ -222,7 +278,6 @@ fn remove_reset_directory(path: &Path) -> std::io::Result<()> {
         Err(error) => Err(error),
     }
 }
-
 fn perform_pending_reset(layout: &StorageLayout) -> Result<(), String> {
     let marker = reset_marker_path();
     if !marker.is_file() {
@@ -234,8 +289,7 @@ fn perform_pending_reset(layout: &StorageLayout) -> Result<(), String> {
     )
     .map_err(|error| format!("invalid reset marker: {error}"))?;
     if pending.version != 1 || pending.root != layout.root || pending.webview != layout.webview {
-        // A different installed/portable/debug instance owns this marker. It
-        // must remain pending until that same storage layout is launched.
+        // Keep markers from another installed, portable, or debug storage layout pending.
         return Ok(());
     }
 
@@ -261,14 +315,27 @@ fn perform_pending_reset(layout: &StorageLayout) -> Result<(), String> {
 }
 
 fn configure_webview_storage(layout: &StorageLayout) {
-    if !layout.redirect_webview {
-        return;
+    #[cfg(all(debug_assertions, feature = "desktop-e2e"))]
+    {
+        // msedgedriver assigns a profile to every native session. Overriding
+        // it here makes a restarted application write DevToolsActivePort to
+        // the first session's directory while the driver waits in the new
+        // one. The E2E build therefore accepts the driver-owned process-local
+        // WEBVIEW2_USER_DATA_FOLDER. Production and portable builds continue
+        // to use StorageLayout below.
+        let _ = layout;
     }
-    // This runs at the very beginning of main, before Tauri/WebView2 creates
-    // threads or reads its environment. That makes changing the process-local
-    // WebView2 data root safe for Debug and explicit portable runs.
-    unsafe {
-        std::env::set_var("WEBVIEW2_USER_DATA_FOLDER", &layout.webview);
+    #[cfg(not(all(debug_assertions, feature = "desktop-e2e")))]
+    {
+        if !layout.redirect_webview {
+            return;
+        }
+        // This runs at the very beginning of main, before Tauri/WebView2 creates
+        // threads or reads its environment. That makes changing the process-local
+        // WebView2 data root safe for Debug and explicit portable runs.
+        unsafe {
+            std::env::set_var("WEBVIEW2_USER_DATA_FOLDER", &layout.webview);
+        }
     }
 }
 
@@ -333,13 +400,6 @@ fn cancel_pending_avatar_import(
     }
 }
 
-fn avatar_source_is_unchanged(previous: &InspectedAvatar, current: &InspectedAvatar) -> bool {
-    current.sha256 == previous.sha256
-        && current.size_bytes == previous.size_bytes
-        && current.modified_millis == previous.modified_millis
-        && current.is_compatible()
-}
-
 fn consume_pending_motion_import(
     imports: &mut BTreeMap<String, PendingMotionImport>,
     token: &str,
@@ -402,16 +462,6 @@ fn cancel_pending_voice_import(
     }
 }
 
-fn voice_source_is_unchanged(
-    previous: &InspectedVoiceModel,
-    current: &InspectedVoiceModel,
-) -> bool {
-    current.sha256 == previous.sha256
-        && current.size_bytes == previous.size_bytes
-        && current.modified_millis == previous.modified_millis
-        && current.compatible
-}
-
 #[derive(Debug, Clone, Serialize, Type)]
 #[serde(rename_all = "camelCase")]
 struct CommandError {
@@ -449,8 +499,10 @@ impl From<tauri::Error> for CommandError {
 
 struct DesktopState {
     storage_layout: StorageLayout,
+    agent_store: AgentStore,
     settings: RwLock<AppSettings>,
     settings_store: SettingsStore,
+    workbench: WorkbenchService,
     api_key_store: SystemApiKeyStore,
     avatar_catalog: RwLock<AvatarCatalog>,
     pending_avatar_imports: Mutex<BTreeMap<String, PendingAvatarImport>>,
@@ -462,7 +514,25 @@ struct DesktopState {
     speech_recognizer: SpeechRecognizerRuntime,
     frontend_log: FrontendLog,
     pet_run: Mutex<Option<ActivePetRun>>,
-    control_plane: ControlPlane,
+    agent_executor: AgentRunExecutor,
+    process_registry: Arc<ProcessRegistry>,
+    process_event_bridges: ProcessEventBridgeRegistry,
+    scheduler_handle: Mutex<Option<hachimi_scheduler::SchedulerHandle>>,
+    workspace_watches: Arc<Mutex<BTreeMap<hachimi_protocol::FsWatchId, ActiveWorkspaceWatch>>>,
+    workspace_searches: Arc<Mutex<BTreeMap<hachimi_protocol::FsSearchId, ActiveWorkspaceSearch>>>,
+    agent_event_streams: Mutex<BTreeMap<hachimi_protocol::EventSubscriptionId, CancellationToken>>,
+    approval_broker: PersistentApprovalBroker,
+    user_input_broker: PersistentUserInputBroker,
+    app_server: AppServer,
+    sandbox_runtime: Arc<SandboxRuntimeManager>,
+    sandbox_activity: SandboxActivityTracker,
+    control_plane: Arc<ControlPlane>,
+    mcp_control: McpControlService,
+    mcp_secrets: McpKeyring,
+    mcp_echo_server: McpEchoServer,
+    skill_host: hachimi_skills::SkillHost,
+    skill_subscriptions: Mutex<BTreeMap<SkillSubscriptionId, String>>,
+    pending_skill_drops: Mutex<BTreeMap<String, PendingSkillDrop>>,
     interactive_regions: RwLock<InteractiveRegionState>,
     click_through: AtomicBool,
     pet_hidden_by_user: AtomicBool,
@@ -524,6 +594,20 @@ impl FrontendLog {
 }
 
 impl DesktopState {
+    fn sandbox_snapshot(&self) -> hachimi_protocol::SandboxRuntimeSnapshot {
+        self.sandbox_runtime.snapshot()
+    }
+
+    fn sandbox_status(&self) -> SandboxStatus {
+        SandboxStatus::from_report(&self.sandbox_snapshot().report)
+    }
+
+    fn sandbox_backend(&self) -> Option<Arc<dyn SandboxBackend>> {
+        let snapshot = self.sandbox_snapshot();
+        (snapshot.report.backend != "desktop-e2e-deterministic")
+            .then(|| Arc::clone(&self.sandbox_runtime) as Arc<dyn SandboxBackend>)
+    }
+
     fn authorize(
         &self,
         window: &WebviewWindow,
@@ -883,6 +967,12 @@ fn set_always_on_top(
     let method = match kind {
         WindowKind::Pet => ControlMethod::WindowInteract,
         WindowKind::Settings | WindowKind::Workbench => ControlMethod::SettingsWrite,
+        WindowKind::Service => {
+            return Err(CommandError::new(
+                "invalid_window",
+                "internal service principals do not map to a Webview window",
+            ));
+        }
     };
     state.authorize(&window, method)?;
     update_always_on_top(&app, &state, enabled)
@@ -956,6 +1046,7 @@ fn hide_workbench(
 ) -> Result<(), CommandError> {
     state.authorize(&window, ControlMethod::WorkbenchWindow)?;
     require_window(&window, "workbench")?;
+    cancel_all_workspace_transients(&state);
     window.hide()?;
     restore_pet(&app);
     Ok(())
@@ -1028,1975 +1119,28 @@ fn start_workbench_resize(
     Ok(())
 }
 
-#[tauri::command]
-fn get_llm_settings(
-    window: WebviewWindow,
-    state: State<'_, DesktopState>,
-) -> Result<LlmSettingsView, CommandError> {
-    state.authorize(&window, ControlMethod::LlmRead)?;
-    state.llm_view()
+const fn release_feature_enabled(explicitly_disabled: bool) -> bool {
+    !explicitly_disabled
 }
 
-fn save_llm(
-    app: &AppHandle,
-    state: &DesktopState,
-    input: &LlmSettingsInput,
-) -> Result<LlmSettingsView, CommandError> {
-    let settings = validate_input(input)
-        .map_err(|error| CommandError::operation("invalid_llm_settings", error))?;
-    {
-        let mut app_settings = state.settings.write();
-        let previous = app_settings.llm.clone();
-        app_settings.llm = settings;
-        if let Err(error) = state.settings_store.save(&app_settings) {
-            app_settings.llm = previous;
-            return Err(CommandError::operation("settings_save_failed", error));
-        }
+fn release_agent_feature_flags(
+    workspace_disabled: bool,
+    mcp_disabled: bool,
+    scheduler_disabled: bool,
+) -> FeatureFlags {
+    FeatureFlags {
+        workbench: true,
+        workspace_tools: release_feature_enabled(workspace_disabled),
+        mcp_runtime: release_feature_enabled(mcp_disabled),
+        scheduler: release_feature_enabled(scheduler_disabled),
+        ..FeatureFlags::all_disabled()
     }
-    apply_secret_change(&state.api_key_store, input)
-        .map_err(|error| CommandError::operation("secret_store_failed", error))?;
-    let app_settings = state.settings.read().clone();
-    let _ = app.emit("settings-changed", &app_settings);
-    state.llm_view()
-}
-
-#[tauri::command]
-fn save_llm_settings(
-    window: WebviewWindow,
-    app: AppHandle,
-    state: State<'_, DesktopState>,
-    input: LlmSettingsInput,
-) -> Result<LlmSettingsView, CommandError> {
-    state.authorize(&window, ControlMethod::LlmWrite)?;
-    save_llm(&app, &state, &input)
-}
-
-#[tauri::command]
-async fn save_and_test_llm_settings(
-    window: WebviewWindow,
-    app: AppHandle,
-    state: State<'_, DesktopState>,
-    input: LlmSettingsInput,
-) -> Result<LlmTestResult, CommandError> {
-    state.authorize(&window, ControlMethod::LlmWrite)?;
-    state.authorize(&window, ControlMethod::LlmTest)?;
-    save_llm(&app, &state, &input)?;
-    let settings = state.settings.read().llm.clone();
-    let secret = state
-        .api_key_store
-        .get()
-        .map_err(|error| CommandError::operation("secret_store_failed", error))?;
-    test_connection(&settings, secret.as_deref())
-        .await
-        .map_err(|error| CommandError::operation("llm_test_failed", error))
-}
-
-#[tauri::command]
-fn list_avatar_models(
-    window: WebviewWindow,
-    state: State<'_, DesktopState>,
-) -> Result<AvatarCatalogSnapshot, CommandError> {
-    state.authorize(&window, ControlMethod::AvatarRead)?;
-    Ok(state.avatar_catalog.read().snapshot())
-}
-
-#[tauri::command]
-fn inspect_avatar_model(
-    window: WebviewWindow,
-    state: State<'_, DesktopState>,
-) -> Result<Option<AvatarImportInspection>, CommandError> {
-    let client = state.authorize(&window, ControlMethod::AvatarManage)?;
-    let Some(source) = rfd::FileDialog::new()
-        .set_title("检测 Runtime Ready VRM 角色模型")
-        .add_filter("VRM 角色模型", &["vrm"])
-        .pick_file()
-    else {
-        return Ok(None);
-    };
-    let inspection = inspect_avatar(&source)
-        .map_err(|error| CommandError::operation("avatar_inspection_failed", error))?;
-    let token = inspection
-        .is_compatible()
-        .then(|| Uuid::new_v4().to_string());
-    if let Some(token) = &token {
-        let mut pending = state.pending_avatar_imports.lock();
-        let now = Instant::now();
-        pending.retain(|_, value| value.expires_at > now);
-        pending.insert(
-            token.clone(),
-            PendingAvatarImport {
-                owner: client.client_id,
-                source,
-                inspection: inspection.clone(),
-                expires_at: now + AVATAR_IMPORT_TOKEN_TTL,
-            },
-        );
-    }
-    Ok(Some(inspection.view(token)))
-}
-
-#[tauri::command]
-fn commit_avatar_model_import(
-    app: AppHandle,
-    window: WebviewWindow,
-    state: State<'_, DesktopState>,
-    request: AvatarImportCommitRequest,
-) -> Result<AvatarCatalogSnapshot, CommandError> {
-    let client = state.authorize(&window, ControlMethod::AvatarManage)?;
-    let pending = {
-        let mut imports = state.pending_avatar_imports.lock();
-        let Some(pending) = consume_pending_avatar_import(
-            &mut imports,
-            &request.token,
-            &client.client_id,
-            Instant::now(),
-        ) else {
-            return Err(CommandError::new(
-                "avatar_import_token_invalid",
-                "模型导入已过期，请重新选择文件",
-            ));
-        };
-        pending
-    };
-    let refreshed = inspect_avatar(&pending.source)
-        .map_err(|error| CommandError::operation("avatar_import_source_changed", error))?;
-    if !avatar_source_is_unchanged(&pending.inspection, &refreshed) {
-        return Err(CommandError::new(
-            "avatar_import_source_changed",
-            "源模型在检测后发生变化，请重新选择文件",
-        ));
-    }
-    let snapshot = state
-        .avatar_catalog
-        .write()
-        .import_inspected(&request.name, &pending.source, &refreshed)
-        .map_err(|error| CommandError::operation("avatar_import_failed", error))?;
-    let _ = app.emit(AVATAR_CATALOG_EVENT, &snapshot);
-    Ok(snapshot)
-}
-
-#[tauri::command]
-fn cancel_avatar_model_import(
-    window: WebviewWindow,
-    state: State<'_, DesktopState>,
-    token: String,
-) -> Result<(), CommandError> {
-    let client = state.authorize(&window, ControlMethod::AvatarManage)?;
-    let mut imports = state.pending_avatar_imports.lock();
-    if !cancel_pending_avatar_import(&mut imports, &token, &client.client_id, Instant::now()) {
-        return Err(CommandError::new(
-            "avatar_import_token_invalid",
-            "模型导入已过期或不属于当前窗口",
-        ));
-    }
-    Ok(())
-}
-
-#[tauri::command]
-fn select_avatar_model(
-    app: AppHandle,
-    window: WebviewWindow,
-    state: State<'_, DesktopState>,
-    request: ResourceEntryRequest,
-) -> Result<AvatarCatalogSnapshot, CommandError> {
-    state.authorize(&window, ControlMethod::AvatarManage)?;
-    let changes_current =
-        state.avatar_catalog.read().snapshot().current_id.as_deref() != Some(request.id.as_str());
-    let snapshot = state
-        .avatar_catalog
-        .write()
-        .select(&request.id)
-        .map_err(|error| CommandError::operation("avatar_select_failed", error))?;
-    if changes_current {
-        state.voice_runtime.stop();
-    }
-    let _ = app.emit(AVATAR_CATALOG_EVENT, &snapshot);
-    Ok(snapshot)
-}
-
-#[tauri::command]
-fn delete_avatar_model(
-    app: AppHandle,
-    window: WebviewWindow,
-    state: State<'_, DesktopState>,
-    request: ResourceEntryRequest,
-) -> Result<AvatarCatalogSnapshot, CommandError> {
-    state.authorize(&window, ControlMethod::AvatarManage)?;
-    let deletes_current =
-        state.avatar_catalog.read().snapshot().current_id.as_deref() == Some(request.id.as_str());
-    let snapshot = state
-        .avatar_catalog
-        .write()
-        .delete(&request.id)
-        .map_err(|error| CommandError::operation("avatar_delete_failed", error))?;
-    if deletes_current {
-        state.voice_runtime.stop();
-    }
-    let _ = app.emit(AVATAR_CATALOG_EVENT, &snapshot);
-    Ok(snapshot)
-}
-
-#[tauri::command]
-fn get_current_avatar_asset(
-    window: WebviewWindow,
-    state: State<'_, DesktopState>,
-) -> Result<Option<AvatarRuntimeAsset>, CommandError> {
-    match window.label() {
-        "pet" => {
-            state.authorize(&window, ControlMethod::AvatarRuntime)?;
-        }
-        "workbench" => {
-            state.authorize(&window, ControlMethod::AvatarRead)?;
-        }
-        _ => return Err(CommandError::new("unknown_window", "不允许的窗口")),
-    }
-    Ok(state.avatar_catalog.read().current_asset().map(|asset| {
-        let entry_id = asset.entry.id;
-        let asset_url = avatar_asset_url(&entry_id);
-        AvatarRuntimeAsset {
-            entry_id,
-            name: asset.entry.name,
-            sha256: asset.entry.sha256,
-            asset_url,
-            format: asset.entry.format,
-            profile: asset.profile,
-        }
-    }))
-}
-
-#[tauri::command]
-fn get_avatar_runtime_asset(
-    window: WebviewWindow,
-    state: State<'_, DesktopState>,
-    request: ResourceEntryRequest,
-) -> Result<Option<AvatarRuntimeAsset>, CommandError> {
-    state.authorize(&window, ControlMethod::AvatarRead)?;
-    let asset = state.avatar_catalog.read().asset_for(&request.id);
-    Ok(asset.map(|asset| {
-        let entry_id = asset.entry.id;
-        let asset_url = avatar_asset_url(&entry_id);
-        AvatarRuntimeAsset {
-            entry_id,
-            name: asset.entry.name,
-            sha256: asset.entry.sha256,
-            asset_url,
-            format: asset.entry.format,
-            profile: asset.profile,
-        }
-    }))
-}
-
-#[tauri::command]
-fn list_motion_catalog(
-    window: WebviewWindow,
-    state: State<'_, DesktopState>,
-) -> Result<MotionCatalogSnapshot, CommandError> {
-    match window.label() {
-        "pet" => {
-            state.authorize(&window, ControlMethod::MotionRuntime)?;
-        }
-        "workbench" => {
-            state.authorize(&window, ControlMethod::MotionRead)?;
-        }
-        _ => return Err(CommandError::new("unknown_window", "不允许的窗口")),
-    }
-    Ok(state.motion_catalog.read().snapshot())
-}
-
-#[tauri::command]
-fn inspect_motion_file(
-    window: WebviewWindow,
-    state: State<'_, DesktopState>,
-) -> Result<Option<MotionImportInspection>, CommandError> {
-    let client = state.authorize(&window, ControlMethod::MotionManage)?;
-    let Some(source) = rfd::FileDialog::new()
-        .set_title("检测 VRMA 1.0 动作")
-        .add_filter("VRM Animation", &["vrma"])
-        .pick_file()
-    else {
-        return Ok(None);
-    };
-    let inspection = inspect_motion(&source)
-        .map_err(|error| CommandError::operation("motion_inspection_failed", error))?;
-    let token = Uuid::new_v4().to_string();
-    let view = inspection.view(Some(token.clone()));
-    let mut pending = state.pending_motion_imports.lock();
-    let now = Instant::now();
-    pending.retain(|_, value| value.expires_at > now);
-    pending.insert(
-        token,
-        PendingMotionImport {
-            owner: client.client_id,
-            source,
-            inspection,
-            expires_at: now + MOTION_IMPORT_TOKEN_TTL,
-        },
-    );
-    Ok(Some(view))
-}
-
-#[tauri::command]
-fn commit_motion_import(
-    app: AppHandle,
-    window: WebviewWindow,
-    state: State<'_, DesktopState>,
-    request: MotionImportCommitRequest,
-) -> Result<MotionCatalogSnapshot, CommandError> {
-    let client = state.authorize(&window, ControlMethod::MotionManage)?;
-    let pending = consume_pending_motion_import(
-        &mut state.pending_motion_imports.lock(),
-        &request.token,
-        &client.client_id,
-        Instant::now(),
-    )
-    .ok_or_else(|| {
-        CommandError::new(
-            "motion_import_token_invalid",
-            "动作导入已过期，请重新选择文件",
-        )
-    })?;
-    let snapshot = state
-        .motion_catalog
-        .write()
-        .import_inspected(&pending.source, &pending.inspection, &request)
-        .map_err(|error| CommandError::operation("motion_import_failed", error))?;
-    let _ = app.emit(MOTION_CATALOG_EVENT, &snapshot);
-    Ok(snapshot)
-}
-
-#[tauri::command]
-fn cancel_motion_import(
-    window: WebviewWindow,
-    state: State<'_, DesktopState>,
-    token: String,
-) -> Result<(), CommandError> {
-    let client = state.authorize(&window, ControlMethod::MotionManage)?;
-    if !cancel_pending_motion_import(
-        &mut state.pending_motion_imports.lock(),
-        &token,
-        &client.client_id,
-        Instant::now(),
-    ) {
-        return Err(CommandError::new(
-            "motion_import_token_invalid",
-            "动作导入已过期或不属于当前窗口",
-        ));
-    }
-    Ok(())
-}
-
-#[tauri::command]
-fn update_motion_metadata(
-    app: AppHandle,
-    window: WebviewWindow,
-    state: State<'_, DesktopState>,
-    request: MotionMetadataUpdateRequest,
-) -> Result<MotionCatalogSnapshot, CommandError> {
-    state.authorize(&window, ControlMethod::MotionManage)?;
-    let snapshot = state
-        .motion_catalog
-        .write()
-        .update_metadata(&request)
-        .map_err(|error| CommandError::operation("motion_update_failed", error))?;
-    let _ = app.emit(MOTION_CATALOG_EVENT, &snapshot);
-    Ok(snapshot)
-}
-
-#[tauri::command]
-fn delete_user_motion(
-    app: AppHandle,
-    window: WebviewWindow,
-    state: State<'_, DesktopState>,
-    request: ResourceEntryRequest,
-) -> Result<MotionCatalogSnapshot, CommandError> {
-    state.authorize(&window, ControlMethod::MotionManage)?;
-    let snapshot = state
-        .motion_catalog
-        .write()
-        .delete_user(&request.id)
-        .map_err(|error| CommandError::operation("motion_delete_failed", error))?;
-    let _ = app.emit(MOTION_CATALOG_EVENT, &snapshot);
-    Ok(snapshot)
-}
-
-#[tauri::command]
-fn set_interaction_motion_binding(
-    app: AppHandle,
-    window: WebviewWindow,
-    state: State<'_, DesktopState>,
-    request: InteractionMotionBindingUpdateRequest,
-) -> Result<MotionCatalogSnapshot, CommandError> {
-    state.authorize(&window, ControlMethod::MotionManage)?;
-    let snapshot = state
-        .motion_catalog
-        .write()
-        .update_binding(&request)
-        .map_err(|error| CommandError::operation("motion_bindings_invalid", error))?;
-    let _ = app.emit(MOTION_CATALOG_EVENT, &snapshot);
-    Ok(snapshot)
-}
-
-#[tauri::command]
-fn clear_motion_interaction_bindings(
-    app: AppHandle,
-    window: WebviewWindow,
-    state: State<'_, DesktopState>,
-    request: MotionAssetBindingsClearRequest,
-) -> Result<MotionCatalogSnapshot, CommandError> {
-    state.authorize(&window, ControlMethod::MotionManage)?;
-    let snapshot = state
-        .motion_catalog
-        .write()
-        .clear_motion_bindings(&request)
-        .map_err(|error| CommandError::operation("motion_bindings_clear_failed", error))?;
-    let _ = app.emit(MOTION_CATALOG_EVENT, &snapshot);
-    Ok(snapshot)
-}
-
-#[tauri::command]
-fn set_motion_enabled(
-    app: AppHandle,
-    window: WebviewWindow,
-    state: State<'_, DesktopState>,
-    request: MotionEnabledUpdateRequest,
-) -> Result<MotionCatalogSnapshot, CommandError> {
-    state.authorize(&window, ControlMethod::MotionManage)?;
-    let snapshot = state
-        .motion_catalog
-        .write()
-        .set_motion_enabled(&request)
-        .map_err(|error| CommandError::operation("motion_enabled_update_failed", error))?;
-    let _ = app.emit(MOTION_CATALOG_EVENT, &snapshot);
-    Ok(snapshot)
-}
-
-#[tauri::command]
-fn reset_motion_bindings(
-    app: AppHandle,
-    window: WebviewWindow,
-    state: State<'_, DesktopState>,
-) -> Result<MotionCatalogSnapshot, CommandError> {
-    state.authorize(&window, ControlMethod::MotionManage)?;
-    let snapshot = state
-        .motion_catalog
-        .write()
-        .reset_bindings()
-        .map_err(|error| CommandError::operation("motion_bindings_reset_failed", error))?;
-    let _ = app.emit(MOTION_CATALOG_EVENT, &snapshot);
-    Ok(snapshot)
-}
-
-#[tauri::command]
-fn reset_motion_binding(
-    app: AppHandle,
-    window: WebviewWindow,
-    state: State<'_, DesktopState>,
-    request: MotionBindingResetRequest,
-) -> Result<MotionCatalogSnapshot, CommandError> {
-    state.authorize(&window, ControlMethod::MotionManage)?;
-    let snapshot = state
-        .motion_catalog
-        .write()
-        .reset_binding(request.region)
-        .map_err(|error| CommandError::operation("motion_binding_reset_failed", error))?;
-    let _ = app.emit(MOTION_CATALOG_EVENT, &snapshot);
-    Ok(snapshot)
-}
-
-#[tauri::command]
-fn get_motion_runtime_asset(
-    window: WebviewWindow,
-    state: State<'_, DesktopState>,
-    request: ResourceEntryRequest,
-) -> Result<Option<MotionRuntimeAsset>, CommandError> {
-    match window.label() {
-        "pet" => {
-            state.authorize(&window, ControlMethod::MotionRuntime)?;
-        }
-        "workbench" => {
-            state.authorize(&window, ControlMethod::MotionRead)?;
-        }
-        _ => return Err(CommandError::new("unknown_window", "不允许的窗口")),
-    }
-    Ok(state
-        .motion_catalog
-        .read()
-        .asset_for(&request.id)
-        .map(|asset| {
-            let asset_url = motion_asset_url(&asset.entry.id);
-            MotionRuntimeAsset {
-                entry: asset.entry,
-                asset_url,
-            }
-        }))
-}
-
-fn profile_supports_pet_voice(profile: &AvatarAdaptationProfile) -> bool {
-    !matches!(profile.lip_sync, LipSyncCapability::None)
-}
-
-#[tauri::command]
-fn start_pet_turn(
-    window: WebviewWindow,
-    app: AppHandle,
-    state: State<'_, DesktopState>,
-    request: PetTurnRequest,
-) -> Result<(), CommandError> {
-    state.authorize(&window, ControlMethod::LlmChat)?;
-    require_window(&window, "pet")?;
-    let text = request.text.trim().to_owned();
-    if text.is_empty() || text.chars().count() > 8_000 {
-        return Err(CommandError::new(
-            "invalid_pet_message",
-            "消息长度必须为 1–8,000 个字符",
-        ));
-    }
-    let settings = state.settings.read().llm.clone();
-    let secret = state
-        .api_key_store
-        .get()
-        .map_err(|error| CommandError::operation("secret_store_failed", error))?;
-    cancel_pet_activity(&app, &state, false);
-    let cancellation = CancellationToken::new();
-    *state.pet_run.lock() = Some(ActivePetRun {
-        run_id: request.run_id.clone(),
-        cancellation: cancellation.clone(),
-    });
-    app.emit_to(
-        "pet",
-        PET_TURN_EVENT,
-        PetTurnEvent::Started {
-            run_id: request.run_id.clone(),
-        },
-    )?;
-    let avatar_supports_lip_sync = state
-        .avatar_catalog
-        .read()
-        .current_asset()
-        .is_some_and(|asset| profile_supports_pet_voice(&asset.profile));
-    let voice_streaming =
-        avatar_supports_lip_sync && state.voice_runtime.begin_pet_turn(request.run_id.clone());
-
-    let task_app = app.clone();
-    let run_id = request.run_id;
-    tauri::async_runtime::spawn(async move {
-        let delta_app = task_app.clone();
-        let delta_run_id = run_id.clone();
-        let result = stream_pet_turn(
-            &settings,
-            secret.as_deref(),
-            &text,
-            &cancellation,
-            move |delta| {
-                if voice_streaming {
-                    delta_app
-                        .state::<DesktopState>()
-                        .voice_runtime
-                        .push_pet_delta(&delta_run_id, delta);
-                } else {
-                    let _ = delta_app.emit_to(
-                        "pet",
-                        PET_TURN_EVENT,
-                        PetTurnEvent::TextDelta {
-                            run_id: delta_run_id.clone(),
-                            delta: delta.to_owned(),
-                        },
-                    );
-                }
-            },
-        )
-        .await;
-        let state = task_app.state::<DesktopState>();
-        let is_current = state
-            .pet_run
-            .lock()
-            .as_ref()
-            .is_some_and(|active| active.run_id == run_id);
-        if !is_current {
-            return;
-        }
-        state.pet_run.lock().take();
-        match result {
-            Ok(text) => {
-                let speech_queued = voice_streaming && state.voice_runtime.finish_pet_turn(&run_id);
-                let _ = task_app.emit_to(
-                    "pet",
-                    PET_TURN_EVENT,
-                    PetTurnEvent::Completed {
-                        run_id: run_id.clone(),
-                        text,
-                        speech_queued,
-                    },
-                );
-            }
-            Err(LlmError::Cancelled) => {
-                state.voice_runtime.stop();
-                let _ = task_app.emit_to("pet", PET_TURN_EVENT, PetTurnEvent::Cancelled { run_id });
-            }
-            Err(error) => {
-                state.voice_runtime.stop();
-                let _ = task_app.emit_to(
-                    "pet",
-                    PET_TURN_EVENT,
-                    PetTurnEvent::Failed {
-                        run_id,
-                        code: "llm_request_failed".into(),
-                        message: error.to_string(),
-                    },
-                );
-            }
-        }
-    });
-    Ok(())
-}
-
-#[tauri::command]
-fn cancel_pet_turn(
-    window: WebviewWindow,
-    app: AppHandle,
-    state: State<'_, DesktopState>,
-) -> Result<(), CommandError> {
-    state.authorize(&window, ControlMethod::LlmChat)?;
-    require_window(&window, "pet")?;
-    cancel_pet_activity(&app, &state, true);
-    Ok(())
-}
-
-#[tauri::command]
-fn list_voice_models(
-    window: WebviewWindow,
-    state: State<'_, DesktopState>,
-) -> Result<VoiceCatalogSnapshot, CommandError> {
-    state.authorize(&window, ControlMethod::VoiceRead)?;
-    Ok(state.voice_catalog.read().snapshot())
-}
-
-#[tauri::command]
-fn inspect_voice_model(
-    window: WebviewWindow,
-    state: State<'_, DesktopState>,
-) -> Result<Option<VoiceModelInspection>, CommandError> {
-    let client = state.authorize(&window, ControlMethod::VoiceManage)?;
-    let Some(source) = rfd::FileDialog::new()
-        .set_title("检测 sherpa-onnx VITS 模型")
-        .add_filter("VITS 模型归档", &["bz2"])
-        .pick_file()
-    else {
-        return Ok(None);
-    };
-    let inspection = inspect_voice_archive(&source)
-        .map_err(|error| CommandError::operation("voice_inspection_failed", error))?;
-    let token = inspection.compatible.then(|| Uuid::new_v4().to_string());
-    if let Some(token) = &token {
-        let mut pending = state.pending_voice_imports.lock();
-        let now = Instant::now();
-        pending.retain(|_, value| value.expires_at > now);
-        pending.insert(
-            token.clone(),
-            PendingVoiceImport {
-                owner: client.client_id,
-                source,
-                inspection: inspection.clone(),
-                expires_at: now + VOICE_IMPORT_TOKEN_TTL,
-            },
-        );
-    }
-    Ok(Some(inspection.view(token)))
-}
-
-#[tauri::command]
-fn commit_voice_model_import(
-    app: AppHandle,
-    window: WebviewWindow,
-    state: State<'_, DesktopState>,
-    request: VoiceImportCommitRequest,
-) -> Result<VoiceCatalogSnapshot, CommandError> {
-    let client = state.authorize(&window, ControlMethod::VoiceManage)?;
-    let pending = {
-        let mut imports = state.pending_voice_imports.lock();
-        consume_pending_voice_import(
-            &mut imports,
-            &request.token,
-            &client.client_id,
-            Instant::now(),
-        )
-        .ok_or_else(|| {
-            CommandError::new(
-                "voice_import_token_invalid",
-                "语音模型导入已过期，请重新选择文件",
-            )
-        })?
-    };
-    let refreshed = inspect_voice_archive(&pending.source)
-        .map_err(|error| CommandError::operation("voice_import_source_changed", error))?;
-    if !voice_source_is_unchanged(&pending.inspection, &refreshed) {
-        return Err(CommandError::new(
-            "voice_import_source_changed",
-            "源语音模型在检测后发生变化，请重新选择文件",
-        ));
-    }
-    let snapshot = state
-        .voice_catalog
-        .write()
-        .import_inspected(
-            &request.name,
-            &pending.source,
-            &refreshed,
-            request.license_acknowledged,
-            request.speaker_id,
-        )
-        .map_err(|error| CommandError::operation("voice_import_failed", error))?;
-    let _ = app.emit(VOICE_CATALOG_EVENT, &snapshot);
-    Ok(snapshot)
-}
-
-#[tauri::command]
-fn cancel_voice_model_import(
-    window: WebviewWindow,
-    state: State<'_, DesktopState>,
-    token: String,
-) -> Result<(), CommandError> {
-    let client = state.authorize(&window, ControlMethod::VoiceManage)?;
-    let mut imports = state.pending_voice_imports.lock();
-    if !cancel_pending_voice_import(&mut imports, &token, &client.client_id, Instant::now()) {
-        return Err(CommandError::new(
-            "voice_import_token_invalid",
-            "语音模型导入已过期或不属于当前窗口",
-        ));
-    }
-    Ok(())
-}
-
-#[tauri::command]
-fn select_voice_model(
-    app: AppHandle,
-    window: WebviewWindow,
-    state: State<'_, DesktopState>,
-    request: ResourceEntryRequest,
-) -> Result<VoiceCatalogSnapshot, CommandError> {
-    state.authorize(&window, ControlMethod::VoiceManage)?;
-    let (asset, previous_asset) = {
-        let catalog = state.voice_catalog.read();
-        let asset = catalog.asset(&request.id).ok_or_else(|| {
-            CommandError::new("voice_model_not_found", "找不到可用的语音模型文件")
-        })?;
-        (asset, catalog.current_asset())
-    };
-    let mode = state.settings.read().voice.compute_mode;
-    state
-        .voice_runtime
-        .load_model_with_rollback(Some(asset), previous_asset.clone(), mode)
-        .map_err(|error| CommandError::operation("voice_model_warmup_failed", error))?;
-    let snapshot = match state.voice_catalog.write().select(&request.id) {
-        Ok(snapshot) => snapshot,
-        Err(error) => {
-            let _ = state.voice_runtime.load_model(previous_asset, mode);
-            return Err(CommandError::operation("voice_model_select_failed", error));
-        }
-    };
-    let runtime = state.voice_runtime.state();
-    let _ = app.emit(VOICE_CATALOG_EVENT, &snapshot);
-    let _ = app.emit("voice-runtime-changed", &runtime);
-    Ok(snapshot)
-}
-
-#[tauri::command]
-fn delete_voice_model(
-    app: AppHandle,
-    window: WebviewWindow,
-    state: State<'_, DesktopState>,
-    request: ResourceEntryRequest,
-) -> Result<VoiceCatalogSnapshot, CommandError> {
-    state.authorize(&window, ControlMethod::VoiceManage)?;
-    let was_current = state.voice_catalog.read().snapshot().current_id == request.id;
-    let snapshot = state
-        .voice_catalog
-        .write()
-        .delete(&request.id)
-        .map_err(|error| CommandError::operation("voice_model_delete_failed", error))?;
-    if was_current {
-        let asset = state.voice_catalog.read().current_asset();
-        let mode = state.settings.read().voice.compute_mode;
-        let _ = state.voice_runtime.load_model(asset, mode);
-    }
-    let runtime = state.voice_runtime.state();
-    let _ = app.emit(VOICE_CATALOG_EVENT, &snapshot);
-    let _ = app.emit("voice-runtime-changed", &runtime);
-    Ok(snapshot)
-}
-
-#[tauri::command]
-fn get_voice_runtime_state(
-    window: WebviewWindow,
-    state: State<'_, DesktopState>,
-) -> Result<VoiceRuntimeState, CommandError> {
-    state.authorize(&window, ControlMethod::VoicePlayback)?;
-    Ok(state.voice_runtime.state())
-}
-
-#[tauri::command]
-fn get_speech_recognition_state(
-    window: WebviewWindow,
-    state: State<'_, DesktopState>,
-) -> Result<SpeechRecognitionRuntimeState, CommandError> {
-    state.authorize(&window, ControlMethod::VoiceRead)?;
-    Ok(state.speech_recognizer.state())
-}
-
-#[tauri::command]
-async fn update_speech_recognition_settings(
-    app: AppHandle,
-    window: WebviewWindow,
-    state: State<'_, DesktopState>,
-    input: SpeechRecognitionSettingsInput,
-) -> Result<SpeechRecognitionRuntimeState, CommandError> {
-    state.authorize(&window, ControlMethod::VoiceManage)?;
-    require_window(&window, "workbench")?;
-    let recognizer = state.speech_recognizer.clone();
-    let compute_mode = input.compute_mode;
-    let result = tokio::task::spawn_blocking(move || recognizer.update_compute_mode(compute_mode))
-        .await
-        .map_err(|error| CommandError::operation("speech_backend_update_failed", error))?
-        .map_err(|error| CommandError::operation("speech_backend_update_failed", error))?;
-    state.settings.write().voice.recognition_compute_mode = compute_mode;
-    state.save_settings()?;
-    let settings = state.settings.read().clone();
-    let _ = app.emit("settings-changed", &settings);
-    let _ = app.emit(SPEECH_RECOGNITION_STATE_EVENT, &result);
-    Ok(result)
-}
-
-#[tauri::command]
-fn update_voice_settings(
-    window: WebviewWindow,
-    app: AppHandle,
-    state: State<'_, DesktopState>,
-    input: VoiceSettingsInput,
-) -> Result<VoiceRuntimeState, CommandError> {
-    state.authorize(&window, ControlMethod::VoiceManage)?;
-    tracing::info!(
-        speed_percent = input.speed_percent,
-        window = window.label(),
-        compute_mode = ?input.compute_mode,
-        "native VITS settings update requested"
-    );
-    let current_asset = state.voice_catalog.read().current_asset();
-    state
-        .voice_runtime
-        .update_settings(input.speed_percent, input.compute_mode, current_asset)
-        .map_err(|error| CommandError::operation("invalid_voice_settings", error))?;
-    {
-        let mut settings = state.settings.write();
-        settings.voice.speed_percent = input.speed_percent;
-        settings.voice.compute_mode = input.compute_mode;
-    }
-    state.save_settings()?;
-    let settings = state.settings.read().clone();
-    let runtime = state.voice_runtime.state();
-    let _ = app.emit("settings-changed", &settings);
-    let _ = app.emit("voice-runtime-changed", &runtime);
-    Ok(runtime)
-}
-
-#[tauri::command]
-fn set_muted(
-    window: WebviewWindow,
-    app: AppHandle,
-    state: State<'_, DesktopState>,
-    muted: bool,
-) -> Result<VoiceRuntimeState, CommandError> {
-    state.authorize(&window, ControlMethod::VoicePlayback)?;
-    state.settings.write().voice.muted = muted;
-    state.save_settings()?;
-    state.voice_runtime.set_muted(muted);
-    let settings = state.settings.read().clone();
-    let runtime = state.voice_runtime.state();
-    let _ = app.emit("settings-changed", &settings);
-    let _ = app.emit("voice-runtime-changed", &runtime);
-    Ok(runtime)
-}
-
-#[tauri::command]
-fn preview_default_voice(
-    window: WebviewWindow,
-    state: State<'_, DesktopState>,
-) -> Result<VoiceRuntimeState, CommandError> {
-    state.authorize(&window, ControlMethod::VoicePlayback)?;
-    let state_view = state.voice_runtime.state();
-    tracing::info!(
-        speed_percent = state_view.speed_percent,
-        muted = state_view.muted,
-        window = window.label(),
-        "voice preview requested"
-    );
-    let sample = "你好，我是 Hachimi。很高兴在桌面上陪着你。";
-    state.voice_runtime.speak(sample);
-    tracing::info!("native VITS voice preview queued");
-    Ok(state.voice_runtime.state())
-}
-
-#[tauri::command]
-fn stop_speech(
-    window: WebviewWindow,
-    state: State<'_, DesktopState>,
-) -> Result<VoiceRuntimeState, CommandError> {
-    state.authorize(&window, ControlMethod::VoicePlayback)?;
-    state.voice_runtime.stop();
-    Ok(state.voice_runtime.state())
-}
-
-#[tauri::command]
-async fn recognize_pet_speech(
-    window: WebviewWindow,
-    state: State<'_, DesktopState>,
-) -> Result<String, CommandError> {
-    state.authorize(&window, ControlMethod::VoiceCapture)?;
-    require_window(&window, "pet")?;
-    let recognizer = state.speech_recognizer.clone();
-    tokio::task::spawn_blocking(move || recognizer.recognize_once())
-        .await
-        .map_err(|error| CommandError::operation("speech_recognition_failed", error))?
-        .map_err(|error| CommandError::operation("speech_recognition_failed", error))
-}
-
-#[cfg(any())]
-mod legacy_windows_speech {
-    use super::*;
-
-    #[cfg(windows)]
-    macro_rules! wait_for_windows_operation {
-        ($operation:expr, $timeout:expr) => {{
-            let started = std::time::Instant::now();
-            loop {
-                let status = $operation.Status().map_err(|error| {
-                    CommandError::operation(
-                        "speech_recognition_failed",
-                        sanitize_windows_error(error),
-                    )
-                })?;
-                match status.0 {
-                    0 => {
-                        if started.elapsed() >= $timeout {
-                            let _ = $operation.Cancel();
-                            break Err(CommandError::new(
-                                "speech_recognition_timeout",
-                                "语音识别超时，请检查麦克风后重试",
-                            ));
-                        }
-                        std::thread::sleep(Duration::from_millis(25));
-                    }
-                    1 => break Ok(()),
-                    2 => {
-                        break Err(CommandError::new(
-                            "speech_recognition_cancelled",
-                            "语音识别已取消",
-                        ));
-                    }
-                    _ => {
-                        break Err(CommandError::new(
-                            "speech_recognition_failed",
-                            "Windows 语音识别执行失败",
-                        ));
-                    }
-                }
-            }
-        }};
-    }
-
-    #[cfg(windows)]
-    fn recognize_windows_speech() -> Result<String, CommandError> {
-        use windows::{
-            Media::SpeechRecognition::{
-                ISpeechRecognitionConstraint, SpeechRecognitionResultStatus,
-                SpeechRecognitionScenario, SpeechRecognitionTopicConstraint, SpeechRecognizer,
-            },
-            Win32::System::Com::{COINIT_MULTITHREADED, CoInitializeEx, CoUninitialize},
-            core::{HSTRING, Interface},
-        };
-
-        struct ComApartment;
-        impl Drop for ComApartment {
-            fn drop(&mut self) {
-                // SAFETY: paired with the successful CoInitializeEx call on this worker thread.
-                unsafe { CoUninitialize() };
-            }
-        }
-        // SAFETY: this is a dedicated blocking worker thread and the null reserved pointer is required.
-        unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) }
-            .ok()
-            .map_err(|error| {
-                CommandError::operation(
-                    "speech_recognition_unavailable",
-                    sanitize_windows_error(error),
-                )
-            })?;
-        let _apartment = ComApartment;
-        let recognizer = SpeechRecognizer::new().map_err(|error| {
-            CommandError::operation(
-                "speech_recognition_unavailable",
-                sanitize_windows_error(error),
-            )
-        })?;
-        let topic = SpeechRecognitionTopicConstraint::Create(
-            SpeechRecognitionScenario::Dictation,
-            &HSTRING::from("hachimi-dictation"),
-        )
-        .map_err(|error| {
-            CommandError::operation(
-                "speech_recognition_unavailable",
-                sanitize_windows_error(error),
-            )
-        })?;
-        let constraint = topic
-            .cast::<ISpeechRecognitionConstraint>()
-            .map_err(|error| {
-                CommandError::operation(
-                    "speech_recognition_unavailable",
-                    sanitize_windows_error(error),
-                )
-            })?;
-        recognizer
-            .Constraints()
-            .and_then(|constraints| constraints.Append(&constraint))
-            .map_err(|error| {
-                CommandError::operation(
-                    "speech_recognition_unavailable",
-                    sanitize_windows_error(error),
-                )
-            })?;
-
-        let compilation = recognizer.CompileConstraintsAsync().map_err(|error| {
-            CommandError::operation(
-                "speech_recognition_unavailable",
-                sanitize_windows_error(error),
-            )
-        })?;
-        wait_for_windows_operation!(compilation, Duration::from_secs(15))?;
-        let compilation = compilation.GetResults().map_err(|error| {
-            CommandError::operation(
-                "speech_recognition_unavailable",
-                sanitize_windows_error(error),
-            )
-        })?;
-        let compilation_status = compilation.Status().map_err(|error| {
-            CommandError::operation(
-                "speech_recognition_unavailable",
-                sanitize_windows_error(error),
-            )
-        })?;
-        if compilation_status != SpeechRecognitionResultStatus::Success {
-            return Err(speech_status_error(compilation_status));
-        }
-
-        let operation = recognizer.RecognizeAsync().map_err(|error| {
-            CommandError::operation("speech_recognition_failed", sanitize_windows_error(error))
-        })?;
-        wait_for_windows_operation!(operation, Duration::from_secs(30))?;
-        let result = operation.GetResults().map_err(|error| {
-            CommandError::operation("speech_recognition_failed", sanitize_windows_error(error))
-        })?;
-        let status = result.Status().map_err(|error| {
-            CommandError::operation("speech_recognition_failed", sanitize_windows_error(error))
-        })?;
-        if status != SpeechRecognitionResultStatus::Success {
-            return Err(speech_status_error(status));
-        }
-        let text = result
-            .Text()
-            .map_err(|error| {
-                CommandError::operation("speech_recognition_failed", sanitize_windows_error(error))
-            })?
-            .to_string();
-        let _ = recognizer.Close();
-        let text = text.trim().to_owned();
-        if text.is_empty() {
-            return Err(CommandError::new(
-                "speech_not_recognized",
-                "没有识别到语音，请靠近麦克风后重试",
-            ));
-        }
-        Ok(text)
-    }
-
-    #[cfg(windows)]
-    fn speech_status_error(
-        status: windows::Media::SpeechRecognition::SpeechRecognitionResultStatus,
-    ) -> CommandError {
-        use windows::Media::SpeechRecognition::SpeechRecognitionResultStatus;
-        let (code, message) = if status == SpeechRecognitionResultStatus::MicrophoneUnavailable {
-            ("microphone_unavailable", "麦克风不可用或未授予访问权限")
-        } else if status == SpeechRecognitionResultStatus::TopicLanguageNotSupported
-            || status == SpeechRecognitionResultStatus::GrammarLanguageMismatch
-        {
-            (
-                "speech_language_unavailable",
-                "Windows 未安装当前系统语言的语音识别包，请在系统语言设置中安装语音组件",
-            )
-        } else if status == SpeechRecognitionResultStatus::TimeoutExceeded
-            || status == SpeechRecognitionResultStatus::PauseLimitExceeded
-        {
-            ("speech_not_recognized", "没有听到清晰语音，请重试")
-        } else if status == SpeechRecognitionResultStatus::NetworkFailure {
-            (
-                "speech_service_unavailable",
-                "Windows 语音识别服务不可用，请检查系统的在线语音识别设置",
-            )
-        } else if status == SpeechRecognitionResultStatus::UserCanceled {
-            ("speech_recognition_cancelled", "语音识别已取消")
-        } else {
-            ("speech_recognition_failed", "Windows 无法完成本次语音识别")
-        };
-        CommandError::new(code, message)
-    }
-
-    #[cfg(windows)]
-    fn sanitize_windows_error(error: windows::core::Error) -> String {
-        let code = error.code();
-        format!("Windows 语音服务错误（0x{:08X}）", code.0 as u32)
-    }
-}
-
-#[tauri::command]
-fn exit_app(
-    window: WebviewWindow,
-    app: AppHandle,
-    state: State<'_, DesktopState>,
-) -> Result<(), CommandError> {
-    state.authorize(&window, ControlMethod::WindowInteract)?;
-    require_window(&window, "pet")?;
-    exit_application(&app, &state)
-}
-
-fn exit_application(app: &AppHandle, state: &DesktopState) -> Result<(), CommandError> {
-    if let Some(pet) = app.get_webview_window("pet") {
-        capture_pet_placement(&pet, state)?;
-    }
-    state.save_settings()?;
-    app.exit(0);
-    Ok(())
-}
-
-#[tauri::command]
-fn hide_pet_window(
-    window: WebviewWindow,
-    app: AppHandle,
-    state: State<'_, DesktopState>,
-) -> Result<(), CommandError> {
-    state.authorize(&window, ControlMethod::WindowInteract)?;
-    require_window(&window, "pet")?;
-    state.pet_hidden_by_user.store(true, Ordering::SeqCst);
-    hide_pet(&app);
-    Ok(())
-}
-
-#[tauri::command]
-fn show_pet_context_menu(
-    window: WebviewWindow,
-    app: AppHandle,
-    state: State<'_, DesktopState>,
-    menu: State<'_, PetContextMenuState>,
-    request: PetContextMenuRequest,
-) -> Result<(), CommandError> {
-    state.authorize(&window, ControlMethod::WindowInteract)?;
-    require_window(&window, "pet")?;
-    if !request.x.is_finite() || !request.y.is_finite() {
-        return Err(CommandError::new(
-            "invalid_menu_position",
-            "右键菜单位置无效",
-        ));
-    }
-    refresh_pet_context_menu(&app);
-    window
-        .popup_menu_at(
-            &menu.menu,
-            LogicalPosition::new(request.x.max(0.0), request.y.max(0.0)),
-        )
-        .map_err(CommandError::from)
-}
-
-fn require_window(window: &WebviewWindow, expected: &str) -> Result<(), CommandError> {
-    if window.label() == expected {
-        Ok(())
-    } else {
-        Err(CommandError::new(
-            "permission_denied",
-            format!("command is only available to the {expected} window"),
-        ))
-    }
-}
-
-fn avatar_asset_url(entry_id: &str) -> String {
-    if cfg!(windows) {
-        format!("http://hachimi-avatar.localhost/{entry_id}")
-    } else {
-        format!("hachimi-avatar://localhost/{entry_id}")
-    }
-}
-
-fn motion_asset_url(entry_id: &str) -> String {
-    if cfg!(windows) {
-        format!("http://hachimi-motion.localhost/{entry_id}")
-    } else {
-        format!("hachimi-motion://localhost/{entry_id}")
-    }
-}
-
-fn cancel_pet_activity(app: &AppHandle, state: &DesktopState, emit_cancelled: bool) {
-    if let Some(active) = state.pet_run.lock().take() {
-        active.cancellation.cancel();
-        if emit_cancelled {
-            let _ = app.emit_to(
-                "pet",
-                PET_TURN_EVENT,
-                PetTurnEvent::Cancelled {
-                    run_id: active.run_id,
-                },
-            );
-        }
-    }
-    state.voice_runtime.stop();
-}
-
-fn enter_workbench_mode(app: &AppHandle, state: &DesktopState) {
-    cancel_pet_activity(app, state, true);
-    let _ = app.emit_to("pet", "pet:close-composer", ());
-    hide_pet(app);
-}
-
-fn restore_pet<R: Runtime>(app: &AppHandle<R>) {
-    let state = app.state::<DesktopState>();
-    if state.pet_hidden_by_user.load(Ordering::SeqCst) {
-        refresh_tray_menu(app);
-        return;
-    }
-    if let Some(pet) = app.get_webview_window("pet") {
-        let _ = app.emit_to("pet", "pet:refresh-avatar", ());
-        let _ = pet.show();
-        let _ = app.emit_to("pet", PET_VISIBILITY_EVENT, true);
-    }
-    refresh_tray_menu(app);
-}
-
-fn hide_pet<R: Runtime>(app: &AppHandle<R>) {
-    let _ = app.emit_to("pet", PET_VISIBILITY_EVENT, false);
-    if let Some(pet) = app.get_webview_window("pet") {
-        let _ = pet.hide();
-    }
-    refresh_tray_menu(app);
-}
-
-fn show_pet_by_user<R: Runtime>(app: &AppHandle<R>) {
-    let state = app.state::<DesktopState>();
-    state.pet_hidden_by_user.store(false, Ordering::SeqCst);
-    restore_pet(app);
-}
-
-fn toggle_pet_visibility<R: Runtime>(app: &AppHandle<R>) {
-    let visible = app
-        .get_webview_window("pet")
-        .and_then(|pet| pet.is_visible().ok())
-        .unwrap_or(false);
-    if visible {
-        let state = app.state::<DesktopState>();
-        state.pet_hidden_by_user.store(true, Ordering::SeqCst);
-        hide_pet(app);
-    } else {
-        show_pet_by_user(app);
-    }
-}
-
-fn refresh_tray_menu<R: Runtime>(app: &AppHandle<R>) {
-    let Some(tray) = app.try_state::<TrayMenuState>() else {
-        return;
-    };
-    let state = app.state::<DesktopState>();
-    let settings = state.settings.read();
-    let zh = settings.locale == Locale::ZhCn;
-    let visible = app
-        .get_webview_window("pet")
-        .and_then(|pet| pet.is_visible().ok())
-        .unwrap_or(false);
-    let _ = tray.visibility.set_text(if visible {
-        if zh { "隐藏桌宠" } else { "Hide Pet" }
-    } else if zh {
-        "显示桌宠"
-    } else {
-        "Show Pet"
-    });
-    let _ = tray
-        .send_message
-        .set_text(if zh { "发送消息" } else { "Send message" });
-    let _ = tray
-        .workbench
-        .set_text(if zh { "工作台" } else { "Workbench" });
-    let _ = tray
-        .llm_settings
-        .set_text(if zh { "LLM 设置" } else { "LLM settings" });
-    let _ = tray.avatar_settings.set_text(if zh {
-        "角色模型"
-    } else {
-        "Avatar settings"
-    });
-    let _ = tray
-        .voice_settings
-        .set_text(if zh { "语音设置" } else { "Voice settings" });
-    let _ = tray.interaction_settings.set_text(if zh {
-        "交互设置"
-    } else {
-        "Interaction settings"
-    });
-    let _ = tray.always_on_top.set_text(if zh {
-        "始终显示在其他窗口上方"
-    } else {
-        "Keep above other windows"
-    });
-    let _ = tray.always_on_top.set_checked(settings.always_on_top);
-    let _ = tray.exit.set_text(if zh { "退出" } else { "Exit" });
-    drop(settings);
-    refresh_pet_context_menu(app);
-}
-
-fn refresh_pet_context_menu<R: Runtime>(app: &AppHandle<R>) {
-    let Some(menu) = app.try_state::<PetContextMenuState>() else {
-        return;
-    };
-    let state = app.state::<DesktopState>();
-    let settings = state.settings.read();
-    let zh = settings.locale == Locale::ZhCn;
-    let _ = menu
-        .send_message
-        .set_text(if zh { "发送消息" } else { "Send message" });
-    let _ = menu.hide.set_text(if zh { "隐藏桌宠" } else { "Hide Pet" });
-    let _ = menu
-        .workbench
-        .set_text(if zh { "工作台" } else { "Workbench" });
-    let _ = menu
-        .llm_settings
-        .set_text(if zh { "LLM 设置" } else { "LLM settings" });
-    let _ = menu.avatar_settings.set_text(if zh {
-        "角色模型"
-    } else {
-        "Avatar settings"
-    });
-    let _ = menu
-        .voice_settings
-        .set_text(if zh { "语音设置" } else { "Voice settings" });
-    let _ = menu.interaction_settings.set_text(if zh {
-        "交互设置"
-    } else {
-        "Interaction settings"
-    });
-    let _ = menu.always_on_top.set_text(if zh {
-        "始终显示在其他窗口上方"
-    } else {
-        "Keep above other windows"
-    });
-    let _ = menu.always_on_top.set_checked(settings.always_on_top);
-    let _ = menu.exit.set_text(if zh { "退出" } else { "Exit" });
-}
-
-fn handle_pet_context_menu_action(app: &AppHandle, id: &str) -> Result<(), CommandError> {
-    let state = app.state::<DesktopState>();
-    match id {
-        "pet-menu.send-message" => {
-            show_pet_by_user(app);
-            let _ = app.emit_to("pet", "pet:open-composer", ());
-            Ok(())
-        }
-        "pet-menu.hide" => {
-            state.pet_hidden_by_user.store(true, Ordering::SeqCst);
-            hide_pet(app);
-            Ok(())
-        }
-        "pet-menu.workbench" => open_workbench_route(app, &state, WorkbenchRoute::Home),
-        "pet-menu.settings-llm" => open_workbench_route(app, &state, WorkbenchRoute::SettingsLlm),
-        "pet-menu.settings-avatar" => {
-            open_workbench_route(app, &state, WorkbenchRoute::SettingsAvatar)
-        }
-        "pet-menu.settings-voice" => {
-            open_workbench_route(app, &state, WorkbenchRoute::SettingsVoice)
-        }
-        "pet-menu.settings-interaction" => {
-            open_workbench_route(app, &state, WorkbenchRoute::SettingsMotion)
-        }
-        "pet-menu.always-on-top" => {
-            let enabled = !state.settings.read().always_on_top;
-            update_always_on_top(app, &state, enabled).map(|_| ())
-        }
-        "pet-menu.exit" => exit_application(app, &state),
-        _ => Ok(()),
-    }
-}
-
-fn create_pet_context_menu(app: &tauri::App) -> Result<(), tauri::Error> {
-    let state = app.state::<DesktopState>();
-    let settings = state.settings.read();
-    let zh = settings.locale == Locale::ZhCn;
-    let send_message = MenuItem::with_id(
-        app,
-        "pet-menu.send-message",
-        if zh { "发送消息" } else { "Send message" },
-        true,
-        None::<&str>,
-    )?;
-    let hide = MenuItem::with_id(
-        app,
-        "pet-menu.hide",
-        if zh { "隐藏桌宠" } else { "Hide Pet" },
-        true,
-        None::<&str>,
-    )?;
-    let workbench = MenuItem::with_id(
-        app,
-        "pet-menu.workbench",
-        if zh { "工作台" } else { "Workbench" },
-        true,
-        None::<&str>,
-    )?;
-    let llm_settings = MenuItem::with_id(
-        app,
-        "pet-menu.settings-llm",
-        if zh { "LLM 设置" } else { "LLM settings" },
-        true,
-        None::<&str>,
-    )?;
-    let avatar_settings = MenuItem::with_id(
-        app,
-        "pet-menu.settings-avatar",
-        if zh {
-            "角色模型"
-        } else {
-            "Avatar settings"
-        },
-        true,
-        None::<&str>,
-    )?;
-    let voice_settings = MenuItem::with_id(
-        app,
-        "pet-menu.settings-voice",
-        if zh { "语音设置" } else { "Voice settings" },
-        true,
-        None::<&str>,
-    )?;
-    let interaction_settings = MenuItem::with_id(
-        app,
-        "pet-menu.settings-interaction",
-        if zh {
-            "交互设置"
-        } else {
-            "Interaction settings"
-        },
-        true,
-        None::<&str>,
-    )?;
-    let always_on_top = CheckMenuItem::with_id(
-        app,
-        "pet-menu.always-on-top",
-        if zh {
-            "始终显示在其他窗口上方"
-        } else {
-            "Keep above other windows"
-        },
-        true,
-        settings.always_on_top,
-        None::<&str>,
-    )?;
-    let exit = MenuItem::with_id(
-        app,
-        "pet-menu.exit",
-        if zh { "退出" } else { "Exit" },
-        true,
-        None::<&str>,
-    )?;
-    drop(settings);
-    let separator_one = PredefinedMenuItem::separator(app)?;
-    let separator_two = PredefinedMenuItem::separator(app)?;
-    let separator_three = PredefinedMenuItem::separator(app)?;
-    let menu = Menu::with_items(
-        app,
-        &[
-            &send_message,
-            &hide,
-            &separator_one,
-            &workbench,
-            &llm_settings,
-            &avatar_settings,
-            &voice_settings,
-            &interaction_settings,
-            &separator_two,
-            &always_on_top,
-            &separator_three,
-            &exit,
-        ],
-    )?;
-    app.manage(PetContextMenuState {
-        menu,
-        send_message,
-        hide,
-        workbench,
-        llm_settings,
-        avatar_settings,
-        voice_settings,
-        interaction_settings,
-        always_on_top,
-        exit,
-    });
-    Ok(())
-}
-
-fn create_tray(app: &tauri::App) -> Result<(), tauri::Error> {
-    let state = app.state::<DesktopState>();
-    let settings = state.settings.read();
-    let zh = settings.locale == Locale::ZhCn;
-    let visibility = MenuItem::with_id(
-        app,
-        "tray.visibility",
-        if zh { "隐藏桌宠" } else { "Hide Pet" },
-        true,
-        None::<&str>,
-    )?;
-    let send_message = MenuItem::with_id(
-        app,
-        "tray.send-message",
-        if zh { "发送消息" } else { "Send message" },
-        true,
-        None::<&str>,
-    )?;
-    let workbench = MenuItem::with_id(
-        app,
-        "tray.workbench",
-        if zh { "工作台" } else { "Workbench" },
-        true,
-        None::<&str>,
-    )?;
-    let llm_settings = MenuItem::with_id(
-        app,
-        "tray.settings-llm",
-        if zh { "LLM 设置" } else { "LLM settings" },
-        true,
-        None::<&str>,
-    )?;
-    let avatar_settings = MenuItem::with_id(
-        app,
-        "tray.settings-avatar",
-        if zh {
-            "角色模型"
-        } else {
-            "Avatar settings"
-        },
-        true,
-        None::<&str>,
-    )?;
-    let voice_settings = MenuItem::with_id(
-        app,
-        "tray.settings-voice",
-        if zh { "语音设置" } else { "Voice settings" },
-        true,
-        None::<&str>,
-    )?;
-    let interaction_settings = MenuItem::with_id(
-        app,
-        "tray.settings-interaction",
-        if zh {
-            "交互设置"
-        } else {
-            "Interaction settings"
-        },
-        true,
-        None::<&str>,
-    )?;
-    let always_on_top = CheckMenuItem::with_id(
-        app,
-        "tray.always-on-top",
-        if zh {
-            "始终显示在其他窗口上方"
-        } else {
-            "Keep above other windows"
-        },
-        true,
-        settings.always_on_top,
-        None::<&str>,
-    )?;
-    let exit = MenuItem::with_id(
-        app,
-        "tray.exit",
-        if zh { "退出" } else { "Exit" },
-        true,
-        None::<&str>,
-    )?;
-    drop(settings);
-    let separator_one = PredefinedMenuItem::separator(app)?;
-    let separator_two = PredefinedMenuItem::separator(app)?;
-    let separator_three = PredefinedMenuItem::separator(app)?;
-    let menu = Menu::with_items(
-        app,
-        &[
-            &visibility,
-            &send_message,
-            &separator_one,
-            &workbench,
-            &llm_settings,
-            &avatar_settings,
-            &voice_settings,
-            &interaction_settings,
-            &separator_two,
-            &always_on_top,
-            &separator_three,
-            &exit,
-        ],
-    )?;
-    app.manage(TrayMenuState {
-        visibility,
-        send_message,
-        workbench,
-        llm_settings,
-        avatar_settings,
-        voice_settings,
-        interaction_settings,
-        always_on_top,
-        exit,
-    });
-    let mut builder = TrayIconBuilder::with_id("hachimi-main")
-        .menu(&menu)
-        .tooltip("Hachimi")
-        .show_menu_on_left_click(false)
-        .on_menu_event(|app, event| {
-            let state = app.state::<DesktopState>();
-            let result = match event.id().as_ref() {
-                "tray.visibility" => {
-                    toggle_pet_visibility(app);
-                    Ok(())
-                }
-                "tray.send-message" => {
-                    show_pet_by_user(app);
-                    let _ = app.emit_to("pet", "pet:open-composer", ());
-                    Ok(())
-                }
-                "tray.workbench" => open_workbench_route(app, &state, WorkbenchRoute::Home),
-                "tray.settings-llm" => {
-                    open_workbench_route(app, &state, WorkbenchRoute::SettingsLlm)
-                }
-                "tray.settings-avatar" => {
-                    open_workbench_route(app, &state, WorkbenchRoute::SettingsAvatar)
-                }
-                "tray.settings-voice" => {
-                    open_workbench_route(app, &state, WorkbenchRoute::SettingsVoice)
-                }
-                "tray.settings-interaction" => {
-                    open_workbench_route(app, &state, WorkbenchRoute::SettingsMotion)
-                }
-                "tray.always-on-top" => {
-                    let enabled = !state.settings.read().always_on_top;
-                    update_always_on_top(app, &state, enabled).map(|_| ())
-                }
-                "tray.exit" => exit_application(app, &state),
-                _ => Ok(()),
-            };
-            if let Err(error) = result {
-                tracing::error!(code = %error.code, message = %error.message, "tray menu action failed");
-            }
-        })
-        .on_tray_icon_event(|tray, event| {
-            if matches!(
-                event,
-                TrayIconEvent::Click {
-                    button: MouseButton::Left,
-                    button_state: MouseButtonState::Up,
-                    ..
-                }
-            ) {
-                toggle_pet_visibility(tray.app_handle());
-            }
-        });
-    if let Some(icon) = app.default_window_icon().cloned() {
-        builder = builder.icon(icon);
-    }
-    builder.build(app)?;
-    refresh_tray_menu(app.handle());
-    Ok(())
-}
-
-fn resolve_resource<R: Runtime>(app: &AppHandle<R>, relative: &str) -> PathBuf {
-    if let Ok(resource_dir) = app.path().resource_dir() {
-        let candidate = resource_dir.join(relative);
-        if candidate.exists() {
-            return candidate;
-        }
-    }
-    Path::new(env!("CARGO_MANIFEST_DIR")).join(relative)
-}
-
-fn avatar_protocol_response(
-    status: tauri::http::StatusCode,
-    content_type: &'static str,
-    body: Vec<u8>,
-) -> tauri::http::Response<Vec<u8>> {
-    tauri::http::Response::builder()
-        .status(status)
-        .header(tauri::http::header::CONTENT_TYPE, content_type)
-        .header(tauri::http::header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
-        .header(tauri::http::header::CACHE_CONTROL, "no-store")
-        .body(body)
-        .expect("static avatar protocol response headers are valid")
-}
-
-fn create_workbench_window<R: Runtime>(
-    app: &AppHandle<R>,
-    route: WorkbenchRoute,
-    webview_data_directory: &Path,
-) -> Result<(), CommandError> {
-    let url = format!("workbench.html?route={}", route.as_str());
-    let workbench = WebviewWindowBuilder::new(app, "workbench", WebviewUrl::App(url.into()))
-        .title("Hachimi Workbench")
-        .inner_size(1280.0, 800.0)
-        .min_inner_size(960.0, 640.0)
-        .resizable(true)
-        .decorations(false)
-        .transparent(false)
-        .shadow(true)
-        .data_directory(webview_data_directory.to_path_buf())
-        // The workbench is an opaque application window, so it does not need
-        // the Pet window's hidden-until-ready flash prevention. Keeping it
-        // hidden here makes any frontend bootstrap error look like the menu
-        // command did nothing.
-        .visible(true)
-        .build()?;
-    let close_target = workbench.clone();
-    let event_app = app.clone();
-    workbench.on_window_event(move |event| match event {
-        WindowEvent::CloseRequested { api, .. } => {
-            api.prevent_close();
-            let _ = close_target.hide();
-            restore_pet(&event_app);
-        }
-        WindowEvent::Focused(true) => {
-            hide_pet(&event_app);
-        }
-        WindowEvent::Resized(_) => {
-            if close_target.is_minimized().unwrap_or(false) {
-                restore_pet(&event_app);
-            }
-        }
-        WindowEvent::Destroyed => restore_pet(&event_app),
-        _ => {}
-    });
-    workbench.show()?;
-    workbench.set_focus()?;
-    Ok(())
-}
-
-fn capture_pet_placement<R: Runtime>(
-    window: &WebviewWindow<R>,
-    state: &DesktopState,
-) -> Result<(), CommandError> {
-    let position = window.outer_position()?;
-    let size = window.outer_size()?;
-    let scale_factor = window.scale_factor()?;
-    let monitor_name = window
-        .current_monitor()?
-        .and_then(|monitor| monitor.name().cloned());
-    state.settings.write().pet_placement = Some(WindowPlacementV1 {
-        x: position.x,
-        y: position.y,
-        width: size.width,
-        height: size.height,
-        monitor_name,
-        scale_factor,
-    });
-    Ok(())
-}
-
-fn monitor_geometries<R: Runtime>(window: &WebviewWindow<R>) -> Vec<MonitorGeometry> {
-    let primary = window.primary_monitor().ok().flatten();
-    window
-        .available_monitors()
-        .unwrap_or_default()
-        .into_iter()
-        .map(|monitor| {
-            let position = monitor.position();
-            let size = monitor.size();
-            let is_primary = primary.as_ref().is_some_and(|candidate| {
-                candidate.position() == position && candidate.size() == size
-            });
-            MonitorGeometry {
-                name: monitor.name().cloned(),
-                bounds: PhysicalRect {
-                    x: position.x,
-                    y: position.y,
-                    width: size.width,
-                    height: size.height,
-                },
-                scale_factor: monitor.scale_factor(),
-                primary: is_primary,
-            }
-        })
-        .collect()
-}
-
-fn restore_pet_placement<R: Runtime>(
-    window: &WebviewWindow<R>,
-    state: &DesktopState,
-) -> Result<(), CommandError> {
-    let monitors = monitor_geometries(window);
-    let placement = restore_or_default_placement(
-        state.settings.read().pet_placement.as_ref(),
-        &monitors,
-        360,
-        480,
-        24,
-    );
-    window.set_position(PhysicalPosition::new(placement.x, placement.y))?;
-    Ok(())
-}
-
-fn start_click_through_loop(app: AppHandle) {
-    tauri::async_runtime::spawn(async move {
-        let mut interval = tokio::time::interval(Duration::from_millis(30));
-        loop {
-            interval.tick().await;
-            let Some(window) = app.get_webview_window("pet") else {
-                break;
-            };
-            let Some(state) = app.try_state::<DesktopState>() else {
-                continue;
-            };
-            if !window.is_visible().unwrap_or(false) {
-                continue;
-            }
-            let (Ok(cursor), Ok(origin), Ok(scale_factor)) = (
-                window.cursor_position(),
-                window.outer_position(),
-                window.scale_factor(),
-            ) else {
-                continue;
-            };
-            let hit = state.interactive_regions.read().hit_test(
-                PhysicalPoint {
-                    x: cursor.x,
-                    y: cursor.y,
-                },
-                PhysicalPoint {
-                    x: f64::from(origin.x),
-                    y: f64::from(origin.y),
-                },
-                scale_factor,
-            );
-            let should_ignore = !hit;
-            if state.click_through.swap(should_ignore, Ordering::SeqCst) != should_ignore {
-                let _ = window.set_ignore_cursor_events(should_ignore);
-            }
-        }
-    });
-}
-
-fn persist_pet_placement_after_move(app: AppHandle, revision: u64) {
-    tauri::async_runtime::spawn(async move {
-        tokio::time::sleep(Duration::from_millis(250)).await;
-        let Some(state) = app.try_state::<DesktopState>() else {
-            return;
-        };
-        if state.placement_revision.load(Ordering::SeqCst) != revision {
-            return;
-        }
-        let Some(pet) = app.get_webview_window("pet") else {
-            return;
-        };
-        if let Err(error) = capture_pet_placement(&pet, &state).and_then(|()| state.save_settings())
-        {
-            tracing::warn!(message = %error.message, "failed to persist pet placement");
-        }
-    });
-}
-
-fn open_append_log(path: PathBuf) -> std::io::Result<File> {
-    OpenOptions::new().create(true).append(true).open(path)
-}
-
-fn epoch_millis() -> u128 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis()
-}
-
-fn redact_prefixed_token(mut value: String, prefix: &str) -> String {
-    let mut search_from = 0;
-    while let Some(relative) = value[search_from..].find(prefix) {
-        let token_start = search_from + relative + prefix.len();
-        let token_end = value[token_start..]
-            .char_indices()
-            .find_map(|(offset, character)| {
-                (!character.is_ascii_alphanumeric() && !matches!(character, '-' | '_' | '.'))
-                    .then_some(token_start + offset)
-            })
-            .unwrap_or(value.len());
-        if token_end == token_start {
-            search_from = token_start;
-            continue;
-        }
-        value.replace_range(token_start..token_end, "[REDACTED]");
-        search_from = token_start + "[REDACTED]".len();
-    }
-    value
-}
-
-fn sanitize_log_message(message: &str) -> String {
-    let mut value = message
-        .chars()
-        .take(4_096)
-        .collect::<String>()
-        .replace(['\r', '\n'], " ");
-    for prefix in [
-        "sk-",
-        "Bearer ",
-        "bearer ",
-        "apiKey=",
-        "api_key=",
-        "apiKey\":\"",
-        "api_key\":\"",
-    ] {
-        value = redact_prefixed_token(value, prefix);
-    }
-    value
-}
-
-fn initialize_logging(preferred: PathBuf) -> PathBuf {
-    let fallback = std::env::temp_dir().join("Hachimi").join("logs");
-    let (log_dir, backend_log, used_fallback) = [(&preferred, false), (&fallback, true)]
-        .into_iter()
-        .find_map(|(directory, fallback)| {
-            std::fs::create_dir_all(directory)
-                .and_then(|()| open_append_log(directory.join("hachimi-backend.log")))
-                .ok()
-                .map(|file| (directory.clone(), file, fallback))
-        })
-        .expect("unable to create the Hachimi logs directory");
-
-    tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::new(
-            "warn,hachimi_desktop=info,hachimi_voice=info,hachimi_llm=info",
-        ))
-        .with_ansi(false)
-        .with_thread_names(true)
-        .with_writer(StdMutex::new(backend_log))
-        .init();
-    let previous_hook = std::panic::take_hook();
-    std::panic::set_hook(Box::new(move |panic_info| {
-        tracing::error!(panic = %panic_info, "unhandled Rust panic");
-        previous_hook(panic_info);
-    }));
-    if used_fallback {
-        tracing::warn!(
-            preferred = %preferred.display(),
-            fallback = %log_dir.display(),
-            "the executable directory was not writable; using a fallback logs directory"
-        );
-    }
-    tracing::info!(directory = %log_dir.display(), "file logging initialized");
-    log_dir
 }
 
 fn main() {
+    if let Err(error) = reject_release_e2e_environment() {
+        panic!("{error}");
+    }
     let storage_layout = resolve_storage_layout();
     if let Err(error) = perform_pending_reset(&storage_layout) {
         eprintln!("Hachimi reset could not be completed: {error}");
@@ -3005,6 +1149,7 @@ fn main() {
     let log_dir = initialize_logging(storage_layout.logs());
 
     tauri::Builder::default()
+        .plugin(tauri_plugin_notification::init())
         .register_uri_scheme_protocol("hachimi-avatar", |context, request| {
             if !matches!(context.webview_label(), "pet" | "workbench")
                 || request.method() != tauri::http::Method::GET
@@ -3103,6 +1248,7 @@ fn main() {
                 ),
             }
         })
+        .on_webview_event(handle_skill_drag_event)
         .invoke_handler(tauri::generate_handler![
             get_bootstrap_state,
             frontend_ready,
@@ -3123,6 +1269,110 @@ fn main() {
             toggle_maximize_workbench,
             start_workbench_dragging,
             start_workbench_resize,
+            list_mcp_servers,
+            get_mcp_server,
+            get_mcp_echo_server_url,
+            test_mcp_server,
+            upsert_mcp_server,
+            set_mcp_server_enabled,
+            refresh_mcp_server,
+            remove_mcp_server,
+            list_mcp_tools,
+            discover_mcp_tools,
+            set_mcp_tool_enabled,
+            get_mcp_inventory,
+            refresh_mcp_inventory,
+            read_mcp_resource,
+            get_mcp_prompt,
+            list_mcp_call_summaries,
+            get_mcp_auth_status,
+            start_mcp_oauth_login,
+            logout_mcp_oauth,
+            list_skills,
+            create_skill,
+            import_skill_archive,
+            import_skill_dropped_files,
+            rename_skill,
+            remove_skill,
+            set_skill_enabled,
+            get_skill_tree,
+            read_skill_file,
+            write_skill_file,
+            create_skill_entry,
+            rename_skill_entry,
+            remove_skill_entry,
+            validate_skill,
+            read_skill_preview_resource,
+            subscribe_skills,
+            unsubscribe_skills,
+            list_workbench_projects,
+            add_workbench_project,
+            manage_workbench_project,
+            import_workbench_attachment,
+            list_workbench_sessions,
+            get_workbench_session,
+            resolve_workbench_approval,
+            accept_workbench_plan,
+            list_project_git_refs,
+            inspect_project_git,
+            refresh_project_git,
+            create_project_empty_initial_commit,
+            get_sandbox_status,
+            refresh_sandbox_status,
+            repair_sandbox,
+            pin_workbench_checkout,
+            cleanup_workbench_checkout,
+            start_workbench_task,
+            cancel_workbench_run,
+            list_workspace_files,
+            read_workspace_file_chunk,
+            write_workspace_file,
+            get_workspace_git,
+            mutate_workspace_git,
+            watch_workspace_files,
+            unwatch_workspace_files,
+            start_workspace_file_search,
+            update_workspace_file_search,
+            cancel_workspace_file_search,
+            get_workspace_diff,
+            read_workspace_diff_file,
+            spawn_process,
+            write_process_stdin,
+            resize_process,
+            terminate_process,
+            read_process,
+            list_processes,
+            start_review,
+            get_review,
+            list_reviews,
+            update_review_finding,
+            create_schedule,
+            get_schedule,
+            list_schedules,
+            preview_schedule,
+            update_schedule,
+            set_schedule_enabled,
+            remove_schedule,
+            reauthorize_schedule,
+            revoke_schedule_grant,
+            run_schedule_now,
+            get_task_run,
+            list_task_runs,
+            cancel_task_run,
+            retry_task_run,
+            continue_task_interactively,
+            initialize_agent_control,
+            search_agent_sessions,
+            resume_agent_session,
+            fork_agent_session,
+            update_agent_session_metadata,
+            steer_agent_run,
+            interrupt_agent_run,
+            subscribe_agent_events,
+            unsubscribe_agent_events,
+            list_pending_user_input,
+            resolve_user_input,
+            cancel_user_input,
             get_llm_settings,
             save_llm_settings,
             save_and_test_llm_settings,
@@ -3180,6 +1430,97 @@ fn main() {
                 tracing::error!(%error, "failed to load settings; using defaults");
                 AppSettings::default()
             });
+            let agent_store = tauri::async_runtime::block_on(AgentStore::connect(
+                data_dir.join("agent.sqlite3"),
+            ))?;
+            let recovery = tauri::async_runtime::block_on(agent_store.recover_interrupted())?;
+            if recovery.interrupted_runs > 0
+                || recovery.lost_tasks > 0
+                || recovery.expired_processes > 0
+                || recovery.expired_approvals > 0
+                || recovery.interrupted_user_inputs > 0
+                || recovery.stopped_mcp_servers > 0
+            {
+                tracing::warn!(
+                interrupted_runs = recovery.interrupted_runs,
+                lost_tasks = recovery.lost_tasks,
+                    expired_processes = recovery.expired_processes,
+                expired_approvals = recovery.expired_approvals,
+                    interrupted_user_inputs = recovery.interrupted_user_inputs,
+                    stopped_mcp_servers = recovery.stopped_mcp_servers,
+                    "recovered interrupted agent state"
+                );
+            }
+            let approval_broker = PersistentApprovalBroker::new(agent_store.clone());
+            let user_input_broker = PersistentUserInputBroker::new(agent_store.clone());
+            let sandbox_probe = Arc::new(
+                WindowsSandboxReadinessProbe::new(storage_layout.sandbox_setup_marker())
+                    .with_runtime(
+                        sandbox_sidecar_path("hachimi-sandbox-launcher"),
+                        sandbox_sidecar_path("hachimi-sandbox-canary"),
+                        data_dir.join("sandbox/windows/attestation"),
+                    ),
+            );
+            let deterministic_report = deterministic_e2e_sandbox_report();
+            let sandbox_runtime = Arc::new(SandboxRuntimeManager::new_with_report(
+                Arc::clone(&sandbox_probe),
+                sandbox_sidecar_path("hachimi-sandbox-setup"),
+                storage_layout.sandbox_setup_marker(),
+                sandbox_sidecar_path("hachimi-sandbox-launcher"),
+                deterministic_report.clone(),
+            ));
+            let sandbox_report = sandbox_runtime.snapshot().report;
+            let sandbox_backend: Option<Arc<dyn SandboxBackend>> = deterministic_report
+                .is_none()
+                .then(|| Arc::clone(&sandbox_runtime) as Arc<dyn SandboxBackend>);
+            tracing::info!(
+                backend = %sandbox_report.backend,
+                readiness = ?sandbox_report.readiness,
+                os_enforced = sandbox_report.os_enforced,
+                error_code = ?sandbox_report.stable_error_code,
+                "workspace sandbox readiness probed"
+            );
+            let workbench = WorkbenchService::new(
+                agent_store.clone(),
+                data_dir.join("worktrees"),
+                data_dir.join("attachments"),
+            );
+            let skill_host = hachimi_skills::SkillHost::new(
+                data_dir.join("skills/user"),
+                agent_store.clone(),
+            )?;
+            let bundled_skill_root = resolve_resource(app.handle(), "resources/skills/builtin");
+            let development_skill_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("resources/skills/builtin");
+            let builtin_skill_root = if bundled_skill_root.is_dir() {
+                bundled_skill_root
+            } else {
+                development_skill_root
+            };
+            let mut skill_catalog_roots = vec![
+                hachimi_skills::SkillCatalogRoot::new(
+                    builtin_skill_root,
+                    hachimi_protocol::SkillScope::BuiltIn,
+                ),
+                hachimi_skills::SkillCatalogRoot::new(
+                    data_dir.join("skills/system"),
+                    hachimi_protocol::SkillScope::System,
+                ),
+            ];
+            if let Some(user_profile) = std::env::var_os("USERPROFILE") {
+                skill_catalog_roots.push(hachimi_skills::SkillCatalogRoot::new(
+                    PathBuf::from(user_profile).join(".agents/skills"),
+                    hachimi_protocol::SkillScope::User,
+                ));
+            }
+            if let Some(program_data) = std::env::var_os("PROGRAMDATA") {
+                skill_catalog_roots.push(hachimi_skills::SkillCatalogRoot::new(
+                    PathBuf::from(program_data).join("Hachimi/skills"),
+                    hachimi_protocol::SkillScope::Admin,
+                ));
+            }
+            skill_host.set_catalog_roots(skill_catalog_roots)?;
+            let skill_change_host = skill_host.clone();
             let bundled_default_avatar = resolve_resource(app.handle(), DEFAULT_AVATAR_RESOURCE);
             let development_default_avatar = Path::new(env!("CARGO_MANIFEST_DIR")).join(
                 "../../../assets/avatar-default/2639776812528692620/2639776812528692620.vrm",
@@ -3250,18 +1591,101 @@ fn main() {
             if !speech_recognizer.available() {
                 tracing::error!(path = %sensevoice_dir.display(), "bundled SenseVoice-Small model is missing");
             }
-            let feature_flags = FeatureFlags {
-                workbench: true,
-                motion_lab: cfg!(debug_assertions)
-                    || settings.developer_mode
-                    || std::env::var("HACHIMI_ENABLE_MOTION_LAB").as_deref() == Ok("1"),
-                ..FeatureFlags::all_disabled()
-            };
+            let mut feature_flags = release_agent_feature_flags(
+                std::env::var("HACHIMI_DISABLE_WORKSPACE_TOOLS").as_deref() == Ok("1"),
+                std::env::var("HACHIMI_DISABLE_MCP_RUNTIME").as_deref() == Ok("1"),
+                std::env::var("HACHIMI_DISABLE_SCHEDULER").as_deref() == Ok("1"),
+            );
+            feature_flags.motion_lab = cfg!(debug_assertions)
+                || settings.developer_mode
+                || std::env::var("HACHIMI_ENABLE_MOTION_LAB").as_deref() == Ok("1");
+            let control_plane = Arc::new(ControlPlane::with_audit(
+                feature_flags,
+                Arc::new(PersistentControlAuditSink::new(agent_store.clone())),
+            ));
+            let agent_lifecycle = AgentLifecycleService::new(
+                agent_store.clone(),
+                feature_flags,
+                sandbox_report.clone(),
+            );
+            let mcp_secrets = McpKeyring;
+            let mcp_echo_server = McpEchoServer::start()?;
+            tracing::info!(url = %mcp_echo_server.url(), "loopback MCP echo server started");
+            tauri::async_runtime::block_on(retry_deferred_mcp_secret_cleanup(
+                &agent_store,
+                mcp_secrets,
+            ));
+            let mcp_control = configured_mcp_control(
+                &agent_store,
+                &control_plane,
+                sandbox_backend.as_ref(),
+                &data_dir,
+                mcp_secrets,
+            );
+            if feature_flags.mcp_runtime
+                && let Err(error) =
+                    tauri::async_runtime::block_on(mcp_control.reconcile_startup())
+            {
+                tracing::warn!(%error, "MCP startup reconciliation failed");
+            }
+            let agent_preparer = Arc::new(agent_runtime_host::DesktopAgentRunPreparer::new(
+                agent_store.clone(),
+                workbench.clone(),
+                approval_broker.clone(),
+                user_input_broker.clone(),
+                skill_host.clone(),
+                mcp_control.clone(),
+                sandbox_backend.clone(),
+            ));
+            let agent_executor = AgentRunExecutor::new(
+                agent_store.clone(),
+                Arc::new(AgentExecutorRegistry::default()),
+                Arc::new(workbench_commands::DesktopModelRuntimeFactory::new()),
+                agent_preparer,
+            );
             let recognition_runtime = speech_recognizer.clone();
+            let scheduler = Arc::new(hachimi_scheduler::SchedulerService::new(
+                agent_store.clone(),
+                Arc::new(hachimi_scheduler::SystemClock),
+                Arc::new(hachimi_scheduler::BundledIanaTimeZoneResolver),
+                Arc::new(DesktopScheduleRunLauncher::new(app.handle().clone())),
+                Arc::new(DesktopTaskNotificationAdapter::new(app.handle().clone())),
+            ));
+            let sandbox_activity = SandboxActivityTracker::default();
+            let process_registry = Arc::new(ProcessRegistry::default());
+            let workspace_watches = Arc::new(Mutex::new(BTreeMap::new()));
+            let workspace_searches = Arc::new(Mutex::new(BTreeMap::new()));
+            let domain_handler = app_domain_handler::DesktopAppDomainHandler::new(
+                app_domain_handler::DesktopAppDomainDependencies {
+                    store: agent_store.clone(),
+                    mcp: mcp_control.clone(),
+                    skills: skill_host.clone(),
+                    scheduler: Arc::clone(&scheduler),
+                    processes: Arc::clone(&process_registry),
+                    sandbox_runtime: Arc::clone(&sandbox_runtime),
+                    run_launcher: Arc::new(
+                        domain_run_launcher::DesktopDomainRunLauncherAdapter::new(
+                            app.handle().clone(),
+                        ),
+                    ),
+                    workspace_watches: Arc::clone(&workspace_watches),
+                    workspace_searches: Arc::clone(&workspace_searches),
+                },
+                feature_flags,
+                sandbox_activity.clone(),
+            );
+            let app_server = AppServer::new(Arc::clone(&control_plane), agent_lifecycle)
+                .with_brokers(
+                    Arc::new(approval_broker.clone()),
+                    Arc::new(user_input_broker.clone()),
+                )
+                .with_domain_handler(Arc::new(domain_handler));
             let state = DesktopState {
                 storage_layout: storage_layout.clone(),
+                agent_store,
                 settings: RwLock::new(settings.clone()),
                 settings_store: store,
+                workbench,
                 api_key_store: SystemApiKeyStore,
                 avatar_catalog: RwLock::new(avatar_catalog),
                 pending_avatar_imports: Mutex::new(BTreeMap::new()),
@@ -3273,13 +1697,33 @@ fn main() {
                 speech_recognizer,
                 frontend_log: FrontendLog::open(&log_dir)?,
                 pet_run: Mutex::new(None),
-                control_plane: ControlPlane::new(feature_flags),
+                agent_executor,
+                process_registry,
+                process_event_bridges: ProcessEventBridgeRegistry::default(),
+                scheduler_handle: Mutex::new(None),
+                workspace_watches,
+                workspace_searches,
+                agent_event_streams: Mutex::new(BTreeMap::new()),
+                approval_broker,
+                user_input_broker,
+                app_server,
+                sandbox_runtime,
+                sandbox_activity,
+                control_plane,
+                mcp_control,
+                mcp_secrets,
+                mcp_echo_server,
+                skill_host,
+                skill_subscriptions: Mutex::new(BTreeMap::new()),
+                pending_skill_drops: Mutex::new(BTreeMap::new()),
                 interactive_regions: RwLock::new(InteractiveRegionState::default()),
                 click_through: AtomicBool::new(false),
                 pet_hidden_by_user: AtomicBool::new(false),
                 placement_revision: AtomicU64::new(0),
             };
             app.manage(state);
+            start_desktop_scheduler(app.handle(), scheduler, feature_flags.scheduler);
+            start_skill_change_bridge(app.handle().clone(), skill_change_host);
             create_pet_context_menu(app)?;
             let recognition_app = app.handle().clone();
             std::thread::spawn(move || {
@@ -3301,9 +1745,10 @@ fn main() {
                 .find(|window| window.label == "pet")
                 .cloned()
                 .ok_or_else(|| std::io::Error::other("pet window config is missing"))?;
-            let pet = WebviewWindowBuilder::from_config(app.handle(), &pet_config)?
-                .data_directory(storage_layout.webview.clone())
-                .build()?;
+            let pet_builder = WebviewWindowBuilder::from_config(app.handle(), &pet_config)?;
+            #[cfg(not(all(debug_assertions, feature = "desktop-e2e")))]
+            let pet_builder = pet_builder.data_directory(storage_layout.webview.clone());
+            let pet = pet_builder.build()?;
             pet.set_always_on_top(settings.always_on_top)?;
             pet.set_skip_taskbar(true)?;
             pet.set_shadow(false)?;
@@ -3355,6 +1800,10 @@ fn main() {
             });
             create_tray(app)?;
             start_click_through_loop(app.handle().clone());
+            if deterministic_e2e_provider_enabled() {
+                open_workbench_route(app.handle(), &managed, WorkbenchRoute::Home)
+                    .map_err(|error| std::io::Error::other(error.message))?;
+            }
             Ok(())
         })
         .run(tauri::generate_context!())
@@ -3362,316 +1811,5 @@ fn main() {
 }
 
 #[cfg(test)]
-mod logging_tests {
-    use super::{
-        PendingAvatarImport, PendingVoiceImport, avatar_source_is_unchanged,
-        cancel_pending_avatar_import, cancel_pending_voice_import, consume_pending_avatar_import,
-        consume_pending_voice_import, debug_data_root, delete_theme_in_settings,
-        profile_supports_pet_voice, reset_theme_in_settings, sanitize_log_message,
-        validate_app_settings, voice_source_is_unchanged,
-    };
-    use std::{
-        collections::BTreeMap,
-        path::{Path, PathBuf},
-        time::{Duration, Instant},
-    };
-
-    use hachimi_avatar::InspectedAvatar;
-    use hachimi_protocol::{
-        AppSettings, AvatarAdaptationProfile, AvatarAssessment, AvatarCompatibility, AvatarFormat,
-        ClientId, LipSyncCapability, ThemeProfile, ThemeScheme,
-    };
-    use hachimi_voice::{InspectedVoiceModel, VoiceAssetPaths};
-
-    fn compatible_inspection(sha256: &str, modified_millis: u128) -> InspectedAvatar {
-        InspectedAvatar {
-            original_file_name: "avatar.vrm".into(),
-            size_bytes: 42,
-            sha256: sha256.into(),
-            format: AvatarFormat::Vrm1,
-            assessment: AvatarAssessment {
-                compatibility: AvatarCompatibility::RuntimeReady,
-                ..AvatarAssessment::default()
-            },
-            profile: AvatarAdaptationProfile::default(),
-            modified_millis,
-        }
-    }
-
-    #[test]
-    fn pet_pcm_is_allowed_only_when_the_avatar_can_move_its_mouth() {
-        let mut profile = AvatarAdaptationProfile::default();
-        assert!(!profile_supports_pet_voice(&profile));
-        profile.lip_sync = LipSyncCapability::Jaw;
-        assert!(profile_supports_pet_voice(&profile));
-        profile.lip_sync = LipSyncCapability::FiveViseme;
-        assert!(profile_supports_pet_voice(&profile));
-    }
-
-    fn pending(owner: &str, expires_at: Instant) -> PendingAvatarImport {
-        PendingAvatarImport {
-            owner: ClientId(owner.into()),
-            source: PathBuf::from("avatar.vrm"),
-            inspection: compatible_inspection("sha", 7),
-            expires_at,
-        }
-    }
-
-    fn compatible_voice_inspection(sha256: &str, modified_millis: u128) -> InspectedVoiceModel {
-        InspectedVoiceModel {
-            original_file_name: "voice.tar.bz2".into(),
-            size_bytes: 42,
-            sha256: sha256.into(),
-            modified_millis,
-            model_type: "vits".into(),
-            languages: vec!["zh-CN".into()],
-            sample_rate: 22_050,
-            speaker_count: 1,
-            suggested_speaker_id: 0,
-            license_summary: "License: Test".into(),
-            license_warning: false,
-            compatible: true,
-            issues: Vec::new(),
-            paths: VoiceAssetPaths::default(),
-        }
-    }
-
-    fn pending_voice(owner: &str, expires_at: Instant) -> PendingVoiceImport {
-        PendingVoiceImport {
-            owner: ClientId(owner.into()),
-            source: PathBuf::from("voice.tar.bz2"),
-            inspection: compatible_voice_inspection("sha", 7),
-            expires_at,
-        }
-    }
-
-    #[test]
-    fn frontend_logs_are_bounded_and_secrets_are_redacted() {
-        let value = sanitize_log_message(
-            "Bearer token-value sk-example-secret apiKey=another-secret\nnext line",
-        );
-        assert!(!value.contains("token-value"));
-        assert!(!value.contains("sk-example-secret"));
-        assert!(!value.contains("another-secret"));
-        assert!(!value.contains('\n'));
-        assert!(value.contains("[REDACTED]"));
-    }
-
-    #[test]
-    fn debug_storage_is_kept_under_target_for_binaries_and_tests() {
-        assert_eq!(
-            debug_data_root(Path::new(
-                r"D:\workspace\hachimi\target\debug\hachimi-desktop.exe"
-            )),
-            Some(PathBuf::from(r"D:\workspace\hachimi\target\hachimi-data"))
-        );
-        assert_eq!(
-            debug_data_root(Path::new(
-                r"D:\workspace\hachimi\target\debug\deps\hachimi-desktop.exe"
-            )),
-            Some(PathBuf::from(r"D:\workspace\hachimi\target\hachimi-data"))
-        );
-    }
-
-    #[test]
-    fn reset_restores_an_edited_builtin_theme() {
-        let mut settings = AppSettings::default();
-        settings.appearance.themes[1].accent = "#FF00FF".into();
-        reset_theme_in_settings(&mut settings, "codex-dark").expect("reset");
-        assert_eq!(
-            settings
-                .appearance
-                .profile("codex-dark")
-                .expect("dark")
-                .accent,
-            "#2EA8FF"
-        );
-    }
-
-    #[test]
-    fn reset_supports_every_builtin_theme() {
-        let mut settings = AppSettings::default();
-        settings
-            .appearance
-            .themes
-            .iter_mut()
-            .find(|profile| profile.id == "github-dark")
-            .expect("github dark")
-            .accent = "#FF00FF".into();
-        reset_theme_in_settings(&mut settings, "github-dark").expect("reset");
-        assert_eq!(
-            settings
-                .appearance
-                .profile("github-dark")
-                .expect("github dark")
-                .accent,
-            "#2F81F7"
-        );
-    }
-
-    #[test]
-    fn deleting_selected_custom_theme_falls_back_safely() {
-        let mut settings = AppSettings::default();
-        let mut custom = ThemeProfile::codex_dark();
-        custom.id = "theme-custom".into();
-        custom.name = "Custom".into();
-        custom.builtin = false;
-        custom.scheme = ThemeScheme::Dark;
-        settings.appearance.dark_theme_id = custom.id.clone();
-        settings.appearance.themes.push(custom);
-        delete_theme_in_settings(&mut settings, "theme-custom").expect("delete");
-        assert_eq!(settings.appearance.dark_theme_id, "codex-dark");
-        assert!(settings.appearance.profile("theme-custom").is_none());
-    }
-
-    #[test]
-    fn app_settings_validation_rejects_invalid_appearance() {
-        let mut settings = AppSettings::default();
-        settings.appearance.themes[0].background = "white".into();
-        assert_eq!(
-            validate_app_settings(&settings).expect_err("invalid").code,
-            "invalid_appearance"
-        );
-    }
-
-    #[test]
-    fn avatar_import_tokens_expire_are_client_bound_and_single_use() {
-        let now = Instant::now();
-        let mut imports = BTreeMap::from([
-            (
-                "valid".into(),
-                pending("workbench", now + Duration::from_secs(60)),
-            ),
-            (
-                "expired".into(),
-                pending("workbench", now - Duration::from_secs(1)),
-            ),
-        ]);
-        assert!(
-            consume_pending_avatar_import(&mut imports, "valid", &ClientId("other".into()), now)
-                .is_none()
-        );
-        assert!(
-            consume_pending_avatar_import(
-                &mut imports,
-                "expired",
-                &ClientId("workbench".into()),
-                now
-            )
-            .is_none()
-        );
-        assert!(
-            consume_pending_avatar_import(
-                &mut imports,
-                "valid",
-                &ClientId("workbench".into()),
-                now
-            )
-            .is_some()
-        );
-        assert!(
-            consume_pending_avatar_import(
-                &mut imports,
-                "valid",
-                &ClientId("workbench".into()),
-                now
-            )
-            .is_none()
-        );
-    }
-
-    #[test]
-    fn avatar_import_token_cancel_and_source_change_fail_closed() {
-        let now = Instant::now();
-        let mut imports = BTreeMap::from([(
-            "token".into(),
-            pending("workbench", now + Duration::from_secs(60)),
-        )]);
-        assert!(!cancel_pending_avatar_import(
-            &mut imports,
-            "token",
-            &ClientId("other".into()),
-            now,
-        ));
-        assert!(cancel_pending_avatar_import(
-            &mut imports,
-            "token",
-            &ClientId("workbench".into()),
-            now,
-        ));
-        assert!(!imports.contains_key("token"));
-
-        let original = compatible_inspection("sha", 7);
-        assert!(avatar_source_is_unchanged(
-            &original,
-            &compatible_inspection("sha", 7)
-        ));
-        assert!(!avatar_source_is_unchanged(
-            &original,
-            &compatible_inspection("different", 7)
-        ));
-        assert!(!avatar_source_is_unchanged(
-            &original,
-            &compatible_inspection("sha", 8)
-        ));
-    }
-
-    #[test]
-    fn voice_import_tokens_expire_are_client_bound_single_use_and_cancellable() {
-        let now = Instant::now();
-        let owner = ClientId("workbench".into());
-        let other = ClientId("other".into());
-        let mut imports = BTreeMap::from([
-            (
-                "valid".into(),
-                pending_voice("workbench", now + Duration::from_secs(60)),
-            ),
-            (
-                "expired".into(),
-                pending_voice("workbench", now - Duration::from_secs(1)),
-            ),
-            (
-                "cancel".into(),
-                pending_voice("workbench", now + Duration::from_secs(60)),
-            ),
-        ]);
-
-        assert!(consume_pending_voice_import(&mut imports, "valid", &other, now).is_none());
-        assert!(consume_pending_voice_import(&mut imports, "expired", &owner, now).is_none());
-        assert!(consume_pending_voice_import(&mut imports, "valid", &owner, now).is_some());
-        assert!(consume_pending_voice_import(&mut imports, "valid", &owner, now).is_none());
-        assert!(!cancel_pending_voice_import(
-            &mut imports,
-            "cancel",
-            &other,
-            now
-        ));
-        assert!(cancel_pending_voice_import(
-            &mut imports,
-            "cancel",
-            &owner,
-            now
-        ));
-        assert!(!imports.contains_key("cancel"));
-    }
-
-    #[test]
-    fn voice_import_source_changes_fail_closed() {
-        let original = compatible_voice_inspection("sha", 7);
-        assert!(voice_source_is_unchanged(
-            &original,
-            &compatible_voice_inspection("sha", 7)
-        ));
-        assert!(!voice_source_is_unchanged(
-            &original,
-            &compatible_voice_inspection("different", 7)
-        ));
-        assert!(!voice_source_is_unchanged(
-            &original,
-            &compatible_voice_inspection("sha", 8)
-        ));
-        let mut incompatible = compatible_voice_inspection("sha", 7);
-        incompatible.compatible = false;
-        assert!(!voice_source_is_unchanged(&original, &incompatible));
-    }
-}
+#[path = "main_tests.rs"]
+mod logging_tests;

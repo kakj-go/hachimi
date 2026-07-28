@@ -10,6 +10,7 @@ pub enum WindowKind {
     Pet,
     Settings,
     Workbench,
+    Service,
 }
 
 impl WindowKind {
@@ -19,6 +20,7 @@ impl WindowKind {
             Self::Pet => "pet",
             Self::Settings => "settings",
             Self::Workbench => "workbench",
+            Self::Service => "service",
         }
     }
 
@@ -28,6 +30,7 @@ impl WindowKind {
             "pet" => Some(Self::Pet),
             "settings" => Some(Self::Settings),
             "workbench" => Some(Self::Workbench),
+            "service" => Some(Self::Service),
             _ => None,
         }
     }
@@ -44,7 +47,8 @@ pub struct FeatureFlags {
     pub computer_control: bool,
     pub remote_tts: bool,
     pub remote_gateway: bool,
-    pub connector_plugins: bool,
+    pub mcp_runtime: bool,
+    pub scheduler: bool,
 }
 
 impl FeatureFlags {
@@ -59,7 +63,8 @@ impl FeatureFlags {
             computer_control: false,
             remote_tts: false,
             remote_gateway: false,
-            connector_plugins: false,
+            mcp_runtime: false,
+            scheduler: false,
         }
     }
 
@@ -70,7 +75,8 @@ impl FeatureFlags {
             || self.computer_observe
             || self.computer_control
             || self.remote_gateway
-            || self.connector_plugins
+            || self.mcp_runtime
+            || self.scheduler
     }
 }
 

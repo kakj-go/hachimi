@@ -1,0 +1,164 @@
+.review-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+  margin-bottom: 12px;
+  padding: 12px;
+  border: 1px solid var(--color-border-base);
+  border-radius: var(--radius-lg);
+  background: color-mix(in srgb, var(--color-bg-elevated) 88%, transparent);
+  box-shadow: var(--shadow-raised);
+}
+
+.review-panel-heading,
+.review-panel-heading > div,
+.review-heading-actions,
+.review-start-form,
+.review-history,
+.review-result > header,
+.review-result > header > div,
+.review-finding > header,
+.review-finding footer,
+.review-failure {
+  display: flex;
+  align-items: center;
+}
+
+.review-panel-heading,
+.review-result > header {
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.review-panel-heading > div,
+.review-heading-actions,
+.review-result > header > div,
+.review-finding > header,
+.review-finding footer {
+  gap: 7px;
+}
+
+.review-start-form {
+  align-items: flex-end;
+  flex-wrap: wrap;
+  gap: 10px;
+  padding: 11px;
+  border: 1px solid var(--color-border-muted);
+  border-radius: var(--radius-md);
+  background: var(--color-bg-control);
+}
+
+.review-start-form .field-stack {
+  min-width: 145px;
+  flex: 1;
+}
+
+.review-start-form > .ui-button {
+  min-height: 36px;
+}
+
+.review-failure {
+  gap: 7px;
+  margin: 0;
+  color: var(--color-state-danger);
+  font-size: var(--font-size-xs);
+}
+
+.review-history {
+  gap: 6px;
+  overflow-x: auto;
+  padding-bottom: 2px;
+}
+
+.review-history > button {
+  flex: 0 0 auto;
+}
+
+.review-history > button.active {
+  border-color: var(--color-border-strong);
+  background: var(--color-overlay-hover);
+}
+
+.review-result {
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid var(--color-border-muted);
+  border-radius: var(--radius-md);
+  background: color-mix(in srgb, var(--color-bg-canvas) 62%, transparent);
+}
+
+.review-result > header > span {
+  color: var(--color-text-muted);
+  font-family: var(--font-code);
+  font-size: var(--font-size-xs);
+}
+
+.review-summary,
+.review-empty,
+.review-finding p {
+  margin: 0;
+  color: var(--color-text-muted);
+  font-size: var(--font-size-sm);
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+}
+
+.review-findings {
+  display: grid;
+  gap: 8px;
+}
+
+.review-finding {
+  display: grid;
+  gap: 8px;
+  padding: 11px;
+  border: 1px solid var(--color-border-muted);
+  border-left: 3px solid var(--color-state-info);
+  border-radius: var(--radius-md);
+  background: var(--color-bg-elevated);
+}
+
+.review-finding[data-severity="warning"] {
+  border-left-color: var(--color-state-warning);
+}
+
+.review-finding[data-severity="error"],
+.review-finding[data-severity="critical"] {
+  border-left-color: var(--color-state-danger);
+}
+
+.review-finding > header strong {
+  min-width: 0;
+  flex: 1;
+  overflow-wrap: anywhere;
+}
+
+.review-finding > header > span:last-child {
+  color: var(--color-text-faint);
+  font-size: var(--font-size-xs);
+}
+
+.review-finding code {
+  color: var(--color-text-muted);
+  font-family: var(--font-code);
+  font-size: var(--font-size-xs);
+}
+
+.review-finding footer {
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+@media (max-width: 720px) {
+  .review-start-form {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .review-start-form .field-stack,
+  .review-start-form > .ui-button {
+    width: 100%;
+  }
+}

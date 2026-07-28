@@ -12,5 +12,14 @@ hachimi-capabilities.workspace = true
 hachimi-core.workspace = true
 hachimi-policy.workspace = true
 hachimi-protocol.workspace = true
+hachimi-storage.workspace = true
+hachimi-user-input.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+tokio-util.workspace = true
+tokio.workspace = true
+uuid.workspace = true
 
+[dev-dependencies]
+sqlx.workspace = true

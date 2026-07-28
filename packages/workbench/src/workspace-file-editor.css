@@ -1,0 +1,113 @@
+.workspace-file-editor {
+  max-height: 54%;
+  min-height: 210px;
+  display: flex;
+  flex-direction: column;
+  border-top: 1px solid var(--color-border-base);
+  background: var(--color-bg-base);
+}
+
+.workspace-file-editor > header {
+  min-height: 36px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 7px;
+  border-bottom: 1px solid var(--color-border-muted);
+}
+
+.workspace-file-editor > header strong {
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--font-size-xs);
+}
+
+.workspace-file-editor > header button,
+.workspace-editor-conflict button {
+  min-height: 26px;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0 7px;
+  border: 1px solid var(--color-border-base);
+  border-radius: var(--radius-md);
+  background: var(--color-bg-control);
+  color: var(--color-text-muted);
+  font-size: var(--font-size-xs);
+}
+
+.workspace-editor-dirty {
+  color: var(--color-state-warning);
+  font-size: var(--font-size-xs);
+}
+
+.workspace-editor-conflict {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 7px 9px;
+  color: var(--color-state-warning);
+  background: color-mix(in srgb, var(--color-state-warning) 9%, transparent);
+  font-size: var(--font-size-xs);
+}
+
+.workspace-editor-conflict span {
+  min-width: 0;
+  flex: 1;
+}
+
+.workspace-monaco-editor,
+.workspace-editor-fallback,
+.workspace-editor-readonly {
+  min-height: 174px;
+  flex: 1;
+}
+
+.workspace-monaco-editor:not(.ready) {
+  display: none;
+}
+
+.workspace-editor-fallback {
+  width: 100%;
+  resize: none;
+  border: 0;
+  outline: 0;
+  padding: 9px 11px;
+  background: var(--color-bg-base);
+  color: var(--color-text-base);
+  font: 12px/1.55 var(--font-code);
+  tab-size: 2;
+}
+
+.workspace-editor-fallback.hidden {
+  display: none;
+}
+
+.workspace-editor-readonly {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.workspace-editor-readonly > p {
+  margin: 0;
+  padding: 7px 9px;
+  color: var(--color-text-muted);
+  background: var(--color-bg-control);
+  font-size: var(--font-size-xs);
+}
+
+.workspace-editor-readonly > pre {
+  min-height: 0;
+  flex: 1;
+  margin: 0;
+  padding: 9px;
+  overflow: auto;
+  color: var(--color-text-muted);
+  font: var(--font-xs)/1.5 var(--font-code);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}

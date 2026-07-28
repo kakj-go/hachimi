@@ -8,6 +8,8 @@ export const WORKBENCH_ROUTES: readonly WorkbenchRoute[] = [
   "settings/avatar",
   "settings/motion",
   "settings/voice",
+  "settings/skills",
+  "settings/mcp",
   "developer/motion-lab",
 ];
 

@@ -14,639 +14,742 @@ export type AppSettings = {
 	developerMode?: boolean,
 };
 
-export type AppearanceConfig = {
-	lightThemeId: string,
-	darkThemeId: string,
-	themes: ThemeProfile[],
-	preferences: AppearancePreferences,
-};
+export type AppearanceConfig = { lightThemeId: string, darkThemeId: string, themes: ThemeProfile[], preferences: AppearancePreferences, };
 
-export type AppearancePreferences = {
-	pointerCursor: boolean,
-	reducedMotion: ReducedMotion,
-	uiFontSize: number,
-	codeFontSize: number,
-	diffMarkers: DiffMarkerMode,
-};
+export type AppearancePreferences = { pointerCursor: boolean, reducedMotion: ReducedMotion, uiFontSize: number, codeFontSize: number, diffMarkers: DiffMarkerMode, density: UiDensity, };
 
-export type AvatarAdaptationProfile = {
-	vrmVersion: AvatarFormat,
-	bones: AvatarRestBone[],
-	expressions: AvatarExpressionBinding[],
-	lookAt: AvatarLookAtProfile,
-	springBoneGroupCount: number,
-	colliderCount: number,
-	jointLimits: AvatarJointLimit[],
-	proportions: AvatarBodyProportions,
-	contacts: AvatarContactPoint[],
-	collisionCapsules: AvatarCollisionCapsule[],
-	leftKneePole: [(number | null), (number | null), (number | null)],
-	rightKneePole: [(number | null), (number | null), (number | null)],
-	leftElbowPole: [(number | null), (number | null), (number | null)],
-	rightElbowPole: [(number | null), (number | null), (number | null)],
-	lipSync: LipSyncCapability,
-	hasFingerBones: boolean,
-	hasToeBones: boolean,
-};
+export type ApprovalDecisionRequest = { approvalId: ApprovalId, decision: ApprovalStatus, expectedRunId: RunId, expectedGeneration: number, };
 
-export type AvatarAssessment = {
-	compatibility: AvatarCompatibility,
-	detectorVersion: number,
-	capabilities: AvatarCapability[],
-	statistics: AvatarStatistics,
-	requirements: AvatarRequirementResult[],
-	issues: AvatarIssue[],
-};
+export type ApprovalGrantScope = "once" | "session" | "timed_lease";
 
-export type AvatarBodyProportions = {
-	height: number | null,
-	shoulderWidth: number | null,
-	hipWidth: number | null,
-	spineLength: number | null,
-	leftUpperArmLength: number | null,
-	leftLowerArmLength: number | null,
-	rightUpperArmLength: number | null,
-	rightLowerArmLength: number | null,
-	leftUpperLegLength: number | null,
-	leftLowerLegLength: number | null,
-	rightUpperLegLength: number | null,
-	rightLowerLegLength: number | null,
-	leftHandLength: number | null,
-	rightHandLength: number | null,
-	leftFootLength: number | null,
-	rightFootLength: number | null,
-	footHeight: number | null,
-};
+export type ApprovalId = string;
+
+export type ApprovalPolicy = "only_when_needed" | "always_ask_side_effects" | "never_prompt";
+
+export type ApprovalRequestRecord = { id: ApprovalId, sessionId: SessionId, runId: RunId, toolCallId: ToolCallId, runGeneration: number, status: ApprovalStatus, action: string, resource: string, parameterHash: string, riskSummary: string, targetHost: string, requiredScopes: string[], grantScope: ApprovalGrantScope, usesRemaining: number, requesterPrincipal: string, resolvedBy: string | null, expiresAtMs: number | null, createdAtMs: number, resolvedAtMs: number | null, };
+
+export type ApprovalResolution = { approvalId: ApprovalId, decision: ApprovalStatus, parameterHash: string, runGeneration: number, resolvedBy: string, resolvedAtMs: number, };
+
+export type ApprovalStatus = "pending" | "approved" | "denied" | "expired" | "cancelled";
+
+export type ArtifactId = string;
+
+export type ArtifactKind = "diff_evidence" | "command_evidence";
+
+export type ArtifactRecord = { id: ArtifactId, runId: RunId | null, kind: ArtifactKind, displayName: string, contentHash: string | null, metadata: unknown, createdAtMs: number, };
+
+export type AttachmentId = string;
+
+export type AttachmentRecord = { id: AttachmentId, contentHash: string, originalName: string, mimeType: string, byteSize: number, createdAtMs: number, };
+
+export type AvatarAdaptationProfile = { vrmVersion: AvatarFormat, bones: AvatarRestBone[], expressions: AvatarExpressionBinding[], lookAt: AvatarLookAtProfile, springBoneGroupCount: number, colliderCount: number, jointLimits: AvatarJointLimit[], proportions: AvatarBodyProportions, contacts: AvatarContactPoint[], collisionCapsules: AvatarCollisionCapsule[], leftKneePole: [(number | null), (number | null), (number | null)], rightKneePole: [(number | null), (number | null), (number | null)], leftElbowPole: [(number | null), (number | null), (number | null)], rightElbowPole: [(number | null), (number | null), (number | null)], lipSync: LipSyncCapability, hasFingerBones: boolean, hasToeBones: boolean, };
+
+export type AvatarAssessment = { compatibility: AvatarCompatibility, detectorVersion: number, capabilities: AvatarCapability[], statistics: AvatarStatistics, requirements: AvatarRequirementResult[], issues: AvatarIssue[], };
+
+export type AvatarBodyProportions = { height: number | null, shoulderWidth: number | null, hipWidth: number | null, spineLength: number | null, leftUpperArmLength: number | null, leftLowerArmLength: number | null, rightUpperArmLength: number | null, rightLowerArmLength: number | null, leftUpperLegLength: number | null, leftLowerLegLength: number | null, rightUpperLegLength: number | null, rightLowerLegLength: number | null, leftHandLength: number | null, rightHandLength: number | null, leftFootLength: number | null, rightFootLength: number | null, footHeight: number | null, };
 
 export type AvatarCapability = "renderable_mesh" | "skinned_mesh" | "built_in_animations" | "humanoid_skeleton" | "blink" | "viseme" | "look_at" | "happy_expression" | "sad_expression" | "angry_expression" | "spring_bone" | "standard_motion_retarget" | "runtime_ready" | "m_toon" | "spring_bone_collider" | "five_finger_hands" | "five_visemes" | "standard_expressions" | "lip_sync_jaw" | "lip_sync_five_viseme";
 
-export type AvatarCatalogSnapshot = {
-	entries: AvatarEntry[],
-	currentId: string | null,
-};
+export type AvatarCatalogSnapshot = { entries: AvatarEntry[], currentId: string | null, };
 
-export type AvatarCollisionCapsule = {
-	bone: string,
-	radius: number | null,
-	halfHeight: number | null,
-};
+export type AvatarCollisionCapsule = { bone: string, radius: number | null, halfHeight: number | null, };
 
 export type AvatarCompatibility = "runtime_ready" | "incompatible";
 
-export type AvatarContactPoint = {
-	id: string,
-	bone: string,
-	localPosition: [(number | null), (number | null), (number | null)],
-	localNormal: [(number | null), (number | null), (number | null)],
-	radius: number | null,
-};
+export type AvatarContactPoint = { id: string, bone: string, localPosition: [(number | null), (number | null), (number | null)], localNormal: [(number | null), (number | null), (number | null)], radius: number | null, };
 
-export type AvatarEntry = {
-	id: string,
-	name: string,
-	originalFileName: string,
-	sizeBytes: number,
-	sha256: string,
-	importedAt: string,
-	isCurrent: boolean,
-	protected: boolean,
-	format: AvatarFormat,
-	assessment: AvatarAssessment,
-};
+export type AvatarEntry = { id: string, name: string, originalFileName: string, sizeBytes: number, sha256: string, importedAt: string, isCurrent: boolean, protected: boolean, format: AvatarFormat, assessment: AvatarAssessment, };
 
-export type AvatarExpressionBinding = {
-	expression: string,
-	nodeIndex: number,
-	morphIndex: number,
-};
+export type AvatarExpressionBinding = { expression: string, nodeIndex: number, morphIndex: number, };
 
 export type AvatarFormat = "glb" | "vrm0" | "vrm1";
 
-export type AvatarImportCommitRequest = {
-	token: string,
-	name: string,
-};
+export type AvatarId = string;
 
-export type AvatarImportInspection = {
-	token: string | null,
-	originalFileName: string,
-	sizeBytes: number,
-	sha256: string,
-	format: AvatarFormat,
-	assessment: AvatarAssessment,
-};
+export type AvatarImportCommitRequest = { token: string, name: string, };
 
-export type AvatarIssue = {
-	code: string,
-	severity: AvatarIssueSeverity,
-};
+export type AvatarImportInspection = { token: string | null, originalFileName: string, sizeBytes: number, sha256: string, format: AvatarFormat, assessment: AvatarAssessment, };
+
+export type AvatarIssue = { code: string, severity: AvatarIssueSeverity, };
 
 export type AvatarIssueSeverity = "info" | "warning" | "error";
 
-export type AvatarJointLimit = {
-	bone: string,
-	swingDegrees: number | null,
-	twistMinDegrees: number | null,
-	twistMaxDegrees: number | null,
-};
+export type AvatarJointLimit = { bone: string, swingDegrees: number | null, twistMinDegrees: number | null, twistMaxDegrees: number | null, };
 
-export type AvatarLookAtProfile = {
-	eyeForwardAxis: [(number | null), (number | null), (number | null)],
-	horizontalInnerDegrees: number | null,
-	horizontalOuterDegrees: number | null,
-	verticalUpDegrees: number | null,
-	verticalDownDegrees: number | null,
-};
+export type AvatarLookAtProfile = { eyeForwardAxis: [(number | null), (number | null), (number | null)], horizontalInnerDegrees: number | null, horizontalOuterDegrees: number | null, verticalUpDegrees: number | null, verticalDownDegrees: number | null, };
 
-export type AvatarRequirementResult = {
-	requirement: string,
-	passed: boolean,
-	detail: string,
-};
+export type AvatarRequirementResult = { requirement: string, passed: boolean, detail: string, };
 
-export type AvatarRestBone = {
-	bone: string,
-	nodeIndex: number,
-	parentBone: string | null,
-	localTranslation: [(number | null), (number | null), (number | null)],
-	localRotation: [(number | null), (number | null), (number | null), (number | null)],
-	length: number | null,
-};
+export type AvatarRestBone = { bone: string, nodeIndex: number, parentBone: string | null, localTranslation: [(number | null), (number | null), (number | null)], localRotation: [(number | null), (number | null), (number | null), (number | null)], length: number | null, };
 
-export type AvatarRuntimeAsset = {
-	entryId: string,
-	name: string,
-	sha256: string,
-	assetUrl: string,
-	format: AvatarFormat,
-	profile: AvatarAdaptationProfile,
-};
+export type AvatarRuntimeAsset = { entryId: string, name: string, sha256: string, assetUrl: string, format: AvatarFormat, profile: AvatarAdaptationProfile, };
 
-export type AvatarStatistics = {
-	nodeCount?: number,
-	meshCount?: number,
-	primitiveCount?: number,
-	triangleCount?: number,
-	materialCount?: number,
-	textureCount?: number,
-	boneCount?: number,
-	animationCount?: number,
-	morphTargetCount?: number,
-	maxTextureDimension?: number,
-	estimatedTextureMemoryBytes?: number,
-};
+export type AvatarStatistics = { nodeCount?: number, meshCount?: number, primitiveCount?: number, triangleCount?: number, materialCount?: number, textureCount?: number, boneCount?: number, animationCount?: number, morphTargetCount?: number, maxTextureDimension?: number, estimatedTextureMemoryBytes?: number, };
 
 export type BehaviorChannel = "root" | "locomotion" | "full_body" | "lower_body" | "upper_body" | "left_arm" | "right_arm" | "fingers" | "head" | "gaze" | "face" | "mouth" | "spring";
 
-export type BootstrapState = {
-	protocolVersion: number,
-	windowKind: WindowKind,
-	locale: Locale,
-	theme: ThemeMode,
-	appearance: AppearanceConfig,
-	alwaysOnTop: boolean,
-	featureFlags: FeatureFlags,
-};
+export type BehaviorMode = "default" | "plan";
+
+export type BootstrapState = { protocolVersion: number, windowKind: WindowKind, locale: Locale, theme: ThemeMode, appearance: AppearanceConfig, alwaysOnTop: boolean, featureFlags: FeatureFlags, };
+
+export type CapabilityDegradation = { capability: string, code: string, message: string, };
+
+export type CapabilityGrantSet = { profile: PermissionProfile, scope: PermissionGrantScope, sessionId: SessionId, runId: RunId | null, source: string, fileSystem: FileSystemGrant[], network: NetworkGrant, process: ProcessGrant, computer: ComputerGrant, reviewEachCommand: boolean, expiresAtMs: number | null, };
+
+export type CheckoutId = string;
+
+export type CheckoutKind = "local" | "managed_worktree";
+
+export type CheckoutRecord = { id: CheckoutId, projectId: ProjectId, kind: CheckoutKind, path: string, baseRevision: string | null, headRevision: string | null, status: CheckoutStatus, pinned: boolean, createdAtMs: number, updatedAtMs: number, };
+
+export type CheckoutStatus = "preparing" | "ready" | "dirty" | "cleanup_blocked" | "removed";
 
 export type ClientId = string;
 
-export type ClipMotionRequest = {
-	requestId: string,
-	motionId: string,
-	active: boolean,
-	priority: number,
-	mirror: boolean,
-	channelWeights: MotionChannelWeight[],
-};
+export type ClipMotionRequest = { requestId: string, motionId: string, active: boolean, priority: number, mirror: boolean, channelWeights: MotionChannelWeight[], };
 
-export type ControlError = {
-	code: ControlErrorCode,
-	message: string,
-};
+export type CompactionCheckpoint = { id: CompactionCheckpointId, sessionId: SessionId, runId: RunId | null, previousCheckpointId: CompactionCheckpointId | null, coveredThroughSequence: number, reason: CompactionReason, lifecycle?: CompactionLifecycle, summary: CompactionSummary, quality: CompactionQuality, createdAtMs: number, };
+
+export type CompactionCheckpointId = string;
+
+export type CompactionImplementation = "local" | "remote";
+
+export type CompactionLifecycle = { trigger: CompactionTrigger, phase: CompactionPhase, implementation: CompactionImplementation, tokenSnapshot: CompactionTokenSnapshot | null, trimmedHistoryGroups: number, };
+
+export type CompactionPhase = "pre_run" | "mid_run" | "standalone";
+
+export type CompactionQuality = { accepted: boolean, sourceItems: number, sourceChars: number, summaryChars: number, recentTailItems: number, preservedIdentifierCount: number, warnings: string[], };
+
+export type CompactionReason = "automatic" | "manual" | "reactive";
+
+export type CompactionSummary = { semanticMarkdown: string, latestUserGoal: string | null, preservedIdentifiers: string[], };
+
+export type CompactionTokenSnapshot = { billedUsage: TokenUsage, activeContextTokensBefore: number, activeContextTokensAfter: number, remainingContextTokens: number, source: TokenCountSource, };
+
+export type CompactionTrigger = "auto" | "manual" | "provider_overflow";
+
+export type ComputerGrant = { observe: boolean, act: boolean, targetWindows: string[], maxActions: number | null, };
+
+export type ControlError = { code: ControlErrorCode, message: string, };
 
 export type ControlErrorCode = "invalid_protocol_version" | "invalid_request" | "unknown_method" | "permission_denied" | "approval_required" | "feature_disabled" | "conflict" | "internal";
 
+export type ControlInitializeRequest = { clientVersion: string, protocolVersion: number, supportedFeatures: string[], experimentalFeatures: string[], };
+
+export type ControlInitializeResponse = { protocolVersion: number, enabledFeatures: string[], experimentalFeatures: string[], warnings: string[], sandbox: SandboxCapabilityReport, };
+
+export type DeliveryPolicy = "task_tab_only" | "task_tab_and_system_notification";
+
+export type DeliveryStatus = "pending" | "not_requested" | "delivered" | "failed";
+
+export type DiffHunk = { header: string, lines: DiffLine[], };
+
+export type DiffLine = { kind: string, oldLine: number | null, newLine: number | null, text: string, };
+
 export type DiffMarkerMode = "color" | "signs";
 
-export type FeatureFlags = {
-	workbench: boolean,
-	motionLab: boolean,
-	workspaceTools: boolean,
-	browserControl: boolean,
-	computerObserve: boolean,
-	computerControl: boolean,
-	remoteTts: boolean,
-	remoteGateway: boolean,
-	connectorPlugins: boolean,
-};
+/** Reads one file's unified Diff without exposing an arbitrary Artifact identifier or host path. */ export type DiffReadFileRequest = { scope: DiffScope, path: string, offset: number, limit: number, ifMatch: string | null, };
 
-export type FrontendLogEntry = {
-	level: FrontendLogLevel,
-	message: string,
-};
+/** A byte-bounded part of one file's unified Diff. The final response remains authoritative. */ export type DiffReadFileResponse = { scope: DiffScope, path: string, offset: number, nextOffset: number, byteSize: number, eof: boolean, dataBase64: string, utf8Text: string | null, etag: string, };
+
+export type DiffScope = { kind: "run"; run_id: RunId } | { kind: "checkout"; checkout_id: CheckoutId };
+
+export type DynamicToolRegistration = { namespace: string, name: string, description: string, inputSchema: unknown, deferred: boolean, requiresStrictSchema: boolean, outputMedia: string[], };
+
+export type DynamicToolValidationError = { code: string, field: string, message: string, };
+
+export type EntryProfile = "workbench" | "pet_conversation" | "desktop_control";
+
+export type EventSubscriptionId = string;
+
+export type EventSubscriptionRecord = { id: EventSubscriptionId, sessionId: SessionId, clientId: ClientId, afterSequence: number, };
+
+export type EventSubscriptionRequest = { sessionId: SessionId, afterSequence: number, };
+
+export type EventSubscriptionSnapshot = { subscription: EventSubscriptionRecord, catchUp: RunEventEnvelope[], };
+
+export type ExecutionTarget = { kind: "local"; project_id: ProjectId } | { kind: "managed_worktree"; project_id: ProjectId; base_revision: string };
+
+export type FeatureFlags = { workbench: boolean, motionLab: boolean, workspaceTools: boolean, browserControl: boolean, computerObserve: boolean, computerControl: boolean, remoteTts: boolean, remoteGateway: boolean, mcpRuntime: boolean, scheduler: boolean, };
+
+export type FileDiffStatus = "added" | "modified" | "deleted" | "renamed" | "type_changed" | "binary";
+
+export type FileDiffSummary = { path: string, previousPath: string | null, status: FileDiffStatus, additions: number, deletions: number, binary: boolean, tooLarge: boolean, hunks: DiffHunk[], };
+
+export type FileSystemAccess = "read" | "write" | "deny";
+
+export type FileSystemGrant = { access: FileSystemAccess, roots: string[], globs: string[], specialRoots: string[], };
+
+export type FrontendLogEntry = { level: FrontendLogLevel, message: string, };
 
 export type FrontendLogLevel = "info" | "warn" | "error";
 
-export type InteractionMotionBinding = {
-	region: InteractionRegion,
-	motionId: string,
-	cooldownMs: number,
-	mirrorBySide: boolean,
-};
+export type FsChangeEvent = { watchId: FsWatchId, generation: number, kind: FsChangeKind, paths: string[], overflowed: boolean, };
 
-export type InteractionMotionBindingUpdateRequest = {
-	region: InteractionRegion,
-	motionId?: string | null,
-	cooldownMs?: number | null,
-	mirrorBySide?: boolean | null,
-};
+export type FsChangeKind = "created" | "modified" | "removed" | "renamed" | "invalidated";
 
-export type InteractionMotionPreviewRequest = {
-	region: InteractionRegion,
-};
+export type FsEntry = { path: string, name: string, kind: FsEntryKind, byteSize: number | null, modifiedAtMs: number | null, hidden: boolean, hasChildren: boolean, gitStatus: string | null, };
+
+export type FsEntryKind = "file" | "directory" | "symlink" | "other";
+
+export type FsFileChunk = { path: string, offset: number, nextOffset: number, byteSize: number, eof: boolean, binary: boolean, dataBase64: string, utf8Text: string | null, etag: string, };
+
+export type FsListPage = { path: string, entries: FsEntry[], nextCursor: string | null, etag: string, };
+
+export type FsListRequest = { sessionId: SessionId, checkoutId: CheckoutId, path: string, cursor: string | null, limit: number, };
+
+export type FsReadChunkRequest = { sessionId: SessionId, checkoutId: CheckoutId, path: string, offset: number, limit: number, ifMatch: string | null, };
+
+export type FsSearchId = string;
+
+export type FsSearchResult = { path: string, score: number, matchIndices: number[], };
+
+export type FsSearchSnapshot = { searchId: FsSearchId, generation: number, query: string, results: FsSearchResult[], complete: boolean, truncated: boolean, };
+
+export type FsSearchStartRequest = { sessionId: SessionId, checkoutId: CheckoutId, query: string, maxResults: number, };
+
+export type FsSearchUpdateRequest = { searchId: FsSearchId, expectedGeneration: number, query: string, };
+
+export type FsWatchId = string;
+
+export type FsWatchRegistration = { id: FsWatchId, sessionId: SessionId, checkoutId: CheckoutId, path: string, generation: number, };
+
+export type FsWatchRequest = { sessionId: SessionId, checkoutId: CheckoutId, path: string, recursive: boolean, };
+
+/** * Explicit user-initiated text save. The ETag must be the SHA-256 returned by * the authoritative full-file read and the mutation context fences retries to * the selected Session/Run generation. */ export type FsWriteRequest = { context: MutationContext, sessionId: SessionId, checkoutId: CheckoutId, path: string, content: string, ifMatch: string, };
+
+export type FsWriteResponse = { path: string, byteSize: number, etag: string, };
+
+export type GitCommitSummary = { sha: string, abbreviatedSha: string, subject: string, authorName: string, committedAtMs: number, };
+
+export type GitFileStatus = { indexStatus: string, worktreeStatus: string, path: string, previousPath: string | null, };
+
+export type GitMutation = { kind: "stage"; paths: string[] } | { kind: "unstage"; paths: string[] } | { kind: "commit"; message: string } | { kind: "create_empty_initial_commit"; author_name: string; author_email: string };
+
+export type GitMutationRequest = { context: MutationContext, sessionId: SessionId, checkoutId: CheckoutId, mutation: GitMutation, };
+
+export type GitMutationResponse = { snapshot: GitWorkspaceSnapshot, commitSha: string | null, };
+
+export type GitRefRecord = { name: string, revision: string, remote: boolean, current: boolean, };
+
+export type GitWorkspaceRequest = { sessionId: SessionId, checkoutId: CheckoutId, historyLimit: number, };
+
+export type GitWorkspaceSnapshot = { branch: string | null, headSha: string | null, detached: boolean, status: GitFileStatus[], recentCommits: GitCommitSummary[], };
+
+export type InteractionMotionBinding = { region: InteractionRegion, motionId: string, cooldownMs: number, mirrorBySide: boolean, };
+
+export type InteractionMotionBindingUpdateRequest = { region: InteractionRegion, motionId?: string | null, cooldownMs?: number | null, mirrorBySide?: boolean | null, };
+
+export type InteractionMotionPreviewRequest = { region: InteractionRegion, };
 
 export type InteractionRegion = "head_top" | "face" | "chest" | "belly" | "hips" | "left_hand" | "right_hand" | "left_arm" | "right_arm" | "left_leg" | "right_leg" | "foot" | "generic";
 
-export type InteractiveRegionsUpdate = {
-	windowLabel: string,
-	revision: number,
-	windowWidth: number | null,
-	windowHeight: number | null,
-	regions: LogicalRect[],
-};
+export type InteractiveRegionsUpdate = { windowLabel: string, revision: number, windowWidth: number | null, windowHeight: number | null, regions: LogicalRect[], };
+
+export type ItemId = string;
+
+export type ItemPayload = { type: "user"; data: { text: string, attachment_ids: AttachmentId[], } } | { type: "assistant"; data: { text: string, } } | { type: "reasoning"; data: { summary: string, } } | { type: "plan"; data: { plan_id: PlanId, revision: number, text: string, steps: PlanStep[], } } | { type: "tool_execution"; data: { tool_call_id: ToolCallId, name: string, arguments: unknown, step_revision: number, tool_plan_hash: string, registry_revision: string, result: ToolExecutionResult | null, } } | { type: "approval"; data: { approval_id: ApprovalId, status: ApprovalStatus, summary: string, } } | { type: "user_input_request"; data: { request_id: UserInputRequestId, questions: UserInputQuestion[], } } | { type: "command_execution"; data: { process_session_id: ProcessSessionId, command_summary: string, status: string, } } | { type: "file_change"; data: { path: string, change_kind: string, artifact_id: ArtifactId | null, } } | { type: "mcp_call"; data: { server_id: McpServerId, tool_name: string, status: string, } } | { type: "dynamic_tool_call"; data: { namespace: string, name: string, status: string, } } | { type: "context_compaction"; data: { checkpoint_id: CompactionCheckpointId | null, trigger: CompactionTrigger, phase: CompactionPhase, implementation: CompactionImplementation, reason: CompactionReason, token_snapshot: CompactionTokenSnapshot | null, trimmed_history_groups: number, warnings: string[], error_code: string | null, } } | { type: "review"; data: { review_id: ReviewId, summary: string, overall_correctness: string, overall_confidence_score: number | null, finding_count: number, used_plain_text_fallback: boolean, } } | { type: "system_context"; data: { code: string, message: string, } };
+
+export type ItemRelations = { toolCallId?: ToolCallId | null, approvalId?: ApprovalId | null, userInputRequestId?: UserInputRequestId | null, processSessionId?: ProcessSessionId | null, planStepId?: PlanStepId | null, artifactIds?: ArtifactId[], };
+
+export type ItemStatus = "pending" | "in_progress" | "completed" | "failed" | "interrupted";
 
 export type LipSyncCapability = "none" | "jaw" | "five_viseme";
 
-export type LlmSettings = {
-	baseUrl: string,
-	modelName: string,
-	maxInputTokens: number,
-	maxOutputTokens: number,
-};
+export type LlmSettings = { baseUrl: string, modelName: string, maxInputTokens: number, maxOutputTokens: number, structuredOutputMode?: StructuredOutputMode, };
 
-export type LlmSettingsInput = {
-	baseUrl: string,
-	modelName: string,
-	maxInputTokens: number,
-	maxOutputTokens: number,
-	/**  Missing or blank keeps the existing secret. Secrets are never returned to the WebView. */
-	apiKey: string | null,
-	clearApiKey: boolean,
-};
+export type LlmSettingsInput = { baseUrl: string, modelName: string, maxInputTokens: number, maxOutputTokens: number, structuredOutputMode: StructuredOutputMode, /** Missing or blank keeps the existing secret. Secrets are never returned to the WebView. */ apiKey: string | null, clearApiKey: boolean, };
 
-export type LlmSettingsView = {
-	baseUrl: string,
-	modelName: string,
-	maxInputTokens: number,
-	maxOutputTokens: number,
-	apiKeyConfigured: boolean,
-};
+export type LlmSettingsView = { baseUrl: string, modelName: string, maxInputTokens: number, maxOutputTokens: number, structuredOutputMode: StructuredOutputMode, apiKeyConfigured: boolean, };
 
-export type LlmTestResult = {
-	success: boolean,
-	latencyMs: number,
-	responsePreview: string,
-};
+export type LlmTestResult = { success: boolean, latencyMs: number, responsePreview: string, capabilityProbe: ProviderCapabilityProbe, };
 
 export type Locale = "zh-CN" | "en-US";
 
-export type LogicalRect = {
-	x: number | null,
-	y: number | null,
-	width: number | null,
-	height: number | null,
-};
+export type LogicalRect = { x: number | null, y: number | null, width: number | null, height: number | null, };
 
-export type MotionAssetBindingsClearRequest = {
-	motionId: string,
-};
+export type McpAuthStatus = "unsupported" | "not_logged_in" | "bearer_token" | "oauth";
 
-export type MotionBindingResetRequest = {
-	region: InteractionRegion,
-};
+export type McpAuthStatusRecord = { serverId: McpServerId, status: McpAuthStatus, scopesSupported: string[], };
 
-export type MotionCatalogEntry = {
-	id: string,
-	source: MotionSource,
-	protected: boolean,
-	name: string,
-	nameZh?: string,
-	description: string,
-	descriptionZh?: string,
-	fileName: string,
-	sha256: string,
-	sizeBytes: number,
-	durationMs: number,
-	category: MotionCategory,
-	tags: string[],
-	playbackMode: MotionPlaybackMode,
-	rootMode: MotionRootMode,
-	channels: BehaviorChannel[],
-	animatedBones: string[],
-	fingerBoneCount: number,
-	hasFingerMotion: boolean,
-	hasExpression: boolean,
-	hasLookAt: boolean,
-	mirrorable: boolean,
-	transitionInMs: number,
-	transitionOutMs: number,
-	sourceProject: string,
-	sourcePaths: string[],
-	warnings?: string[],
-};
+export type McpCallOutcome = "succeeded" | "tool_error" | "transport_error" | "cancelled";
 
-export type MotionCatalogSnapshot = {
-	entries: MotionCatalogEntry[],
-	bindings: InteractionMotionBinding[],
-	disabledMotionIds: string[],
-};
+export type McpCallSummaryListRequest = { serverId: McpServerId | null, sessionId: SessionId | null, limit: number, };
+
+export type McpCallSummaryRecord = { id: ToolCallId, serverId: McpServerId, sessionId: SessionId, runId: RunId, toolName: string, outcome: McpCallOutcome, durationMs: number, createdAtMs: number, };
+
+export type McpConnectionTestResult = { success: boolean, serverName: string | null, serverVersion: string | null, protocolVersion: string | null, tools: McpToolView[], errorCode: string | null, };
+
+export type McpHeaderInput = { name: string, value: string | null, secret: boolean, };
+
+export type McpHeaderView = { name: string, value: string | null, secret: boolean, configured: boolean, };
+
+export type McpInventorySnapshot = { serverId: McpServerId, resources: McpResource[], resourceTemplates: McpResourceTemplate[], prompts: McpPrompt[], errors: { [key in string]: string }, stale: boolean, refreshedAtMs: number, };
+
+export type McpMediaReference = { id: string, mimeType: string, byteLength: number, sha256: string, };
+
+export type McpOAuthLoginRequest = { serverId: McpServerId, scopes: string[], timeoutSecs: number | null, };
+
+export type McpOAuthLoginResponse = { authorizationUrl: string, };
+
+export type McpPrompt = { name: string, title: string | null, description: string | null, arguments: McpPromptArgument[], };
+
+export type McpPromptArgument = { name: string, description: string | null, required: boolean, };
+
+export type McpPromptGetRequest = { serverId: McpServerId, name: string, arguments: { [key in string]: string }, };
+
+export type McpPromptMessage = { role: McpPromptRole, content: unknown, };
+
+export type McpPromptResult = { description: string | null, messages: McpPromptMessage[], };
+
+export type McpPromptRole = "user" | "assistant";
+
+export type McpResource = { uri: string, name: string, title: string | null, description: string | null, mimeType: string | null, size: number | null, annotations: unknown | null, meta: unknown | null, };
+
+export type McpResourceContent = { uri: string, mimeType: string | null, text: string | null, blobBase64: string | null, contentReference?: McpMediaReference | null, };
+
+export type McpResourceReadRequest = { serverId: McpServerId, uri: string, };
+
+export type McpResourceTemplate = { uriTemplate: string, name: string, title: string | null, description: string | null, mimeType: string | null, annotations: unknown | null, meta: unknown | null, };
+
+export type McpServerDraft = { id: McpServerId, displayName: string, enabled: boolean, transport: McpServerTransport, headers: McpHeaderInput[], readOnlyTools: string[], startupTimeoutMs: number, requestTimeoutMs: number, maxMessageBytes: number, };
+
+export type McpServerHealthRecord = { serverId: McpServerId, state: McpServerHealthState, serverName: string | null, serverVersion: string | null, protocolVersion: string | null, toolCount: number, /** Stable, non-sensitive error category. Transport payloads and stderr are never persisted. */ errorCode: string | null, checkedAtMs: number, };
+
+export type McpServerHealthState = "disabled" | "stopped" | "starting" | "ready" | "failed";
+
+export type McpServerId = string;
+
+export type McpServerRecord = { id: McpServerId, displayName: string, enabled: boolean, transport: McpServerTransport, headers: McpHeaderView[], /** * Tool names explicitly classified by the user as read-only. A server's own annotations * never populate this list and therefore cannot grant itself lower-risk access. */ readOnlyTools: string[], startupTimeoutMs: number, requestTimeoutMs: number, maxMessageBytes: number, createdAtMs: number, updatedAtMs: number, };
+
+export type McpServerTransport = { kind: "stdio"; command: string; args: string[]; cwd: string | null } | { kind: "streamable_http"; url: string };
+
+export type McpServerView = { configuration: McpServerRecord, health: McpServerHealthRecord, };
+
+export type McpToolOverride = { serverId: McpServerId, toolName: string, enabled: boolean, updatedAtMs: number, };
+
+export type McpToolProgressRecord = { serverId: McpServerId, sessionId: SessionId, runId: RunId, runGeneration: number, toolCallId: ToolCallId, progress: number | null, total: number | null, message: string | null, };
+
+export type McpToolSelection = { serverId: McpServerId, toolName: string, schemaHash: string, hostIdentityHash: string, };
+
+export type McpToolView = { serverId: McpServerId, name: string, exposedName: string, description: string | null, inputSchema: unknown, requiredParameters: string[], enabled: boolean, stale: boolean, validationError: string | null, schemaHash: string, /** * Hash of the configured MCP Host identity (transport, endpoint/command, * and sandbox profile), excluding credentials and header values. */ hostIdentityHash: string, discoveredAtMs: number, };
+
+export type MisfirePolicy = "skip" | "catch_up_once";
+
+export type ModelCompactionRequest = { messages: ModelMessage[], maxOutputTokens: number, };
+
+export type ModelCompactionResult = { replacementMessages: ModelMessage[], usage: TokenUsage, };
+
+export type ModelEvent = { type: "text_delta"; delta: string } | /** * Provider-authored reasoning summary delta. This variant is emitted only * when the negotiated provider capability explicitly supports summaries. */ { type: "reasoning_delta"; delta: string } | { type: "tool_call_delta"; index: number; id: ToolCallId | null; name_delta: string; arguments_delta: string } | { type: "tool_call_completed"; call: ModelToolCall } | { type: "usage"; usage: TokenUsage } | { type: "completed"; finish_reason: ModelFinishReason };
+
+export type ModelFinishReason = "stop" | "tool_calls" | "length" | "content_filter" | "unknown";
+
+export type ModelMessage = { role: ModelRole, content: string, name: string | null, toolCallId: ToolCallId | null, toolCalls: ModelToolCall[], };
+
+export type ModelRequest = { messages: ModelMessage[], tools: ToolDescriptor[], parallelToolCalls: boolean, maxOutputTokens: number | null, };
+
+export type ModelRole = "system" | "user" | "assistant" | "tool";
+
+export type ModelToolCall = { id: ToolCallId, name: string, arguments: unknown, };
+
+export type MotionAssetBindingsClearRequest = { motionId: string, };
+
+export type MotionBindingResetRequest = { region: InteractionRegion, };
+
+export type MotionCatalogEntry = { id: string, source: MotionSource, protected: boolean, name: string, nameZh?: string, description: string, descriptionZh?: string, fileName: string, sha256: string, sizeBytes: number, durationMs: number, category: MotionCategory, tags: string[], playbackMode: MotionPlaybackMode, rootMode: MotionRootMode, channels: BehaviorChannel[], animatedBones: string[], fingerBoneCount: number, hasFingerMotion: boolean, hasExpression: boolean, hasLookAt: boolean, mirrorable: boolean, transitionInMs: number, transitionOutMs: number, sourceProject: string, sourcePaths: string[], warnings?: string[], };
+
+export type MotionCatalogSnapshot = { entries: MotionCatalogEntry[], bindings: InteractionMotionBinding[], disabledMotionIds: string[], };
 
 export type MotionCategory = "idle" | "reaction" | "gesture" | "speech" | "locomotion" | "performance";
 
-export type MotionChannelWeight = {
-	channel: BehaviorChannel,
-	/**  Semantic channel weight in permille, clamped by consumers to 0..=1000. */
-	weight: number,
-};
+export type MotionChannelWeight = { channel: BehaviorChannel, /** Semantic channel weight in permille, clamped by consumers to 0..=1000. */ weight: number, };
 
-export type MotionEnabledUpdateRequest = {
-	id: string,
-	enabled: boolean,
-};
+export type MotionEnabledUpdateRequest = { id: string, enabled: boolean, };
 
-export type MotionImportCommitRequest = {
-	token: string,
-	name: string,
-	description: string,
-	category: MotionCategory,
-	playbackMode: MotionPlaybackMode,
-	rootMode: MotionRootMode,
-	interactionRegion?: InteractionRegion | null,
-};
+export type MotionImportCommitRequest = { token: string, name: string, description: string, category: MotionCategory, playbackMode: MotionPlaybackMode, rootMode: MotionRootMode, interactionRegion?: InteractionRegion | null, };
 
-export type MotionImportInspection = {
-	token: string | null,
-	originalFileName: string,
-	sizeBytes: number,
-	sha256: string,
-	durationMs: number,
-	animatedBones: string[],
-	fingerBoneCount: number,
-	hasExpression: boolean,
-	hasLookAt: boolean,
-	warnings: string[],
-};
+export type MotionImportInspection = { token: string | null, originalFileName: string, sizeBytes: number, sha256: string, durationMs: number, animatedBones: string[], fingerBoneCount: number, hasExpression: boolean, hasLookAt: boolean, warnings: string[], };
 
-export type MotionMetadataUpdateRequest = {
-	id: string,
-	name: string,
-	description: string,
-	category: MotionCategory,
-	playbackMode: MotionPlaybackMode,
-	rootMode: MotionRootMode,
-};
+export type MotionMetadataUpdateRequest = { id: string, name: string, description: string, category: MotionCategory, playbackMode: MotionPlaybackMode, rootMode: MotionRootMode, };
 
 export type MotionPlaybackMode = "once" | "loop" | "hold";
 
 export type MotionRootMode = "discard" | "in_place" | "stage";
 
-export type MotionRuntimeAsset = {
-	entry: MotionCatalogEntry,
-	assetUrl: string,
-};
+export type MotionRuntimeAsset = { entry: MotionCatalogEntry, assetUrl: string, };
 
 export type MotionSource = "builtin" | "user";
 
-export type PetContextMenuRequest = {
-	x: number | null,
-	y: number | null,
-};
+export type MutationContext = { requestId: RequestId, clientId: ClientId, protocolVersion: number, idempotencyKey: string, expectedRunId: RunId | null, expectedGeneration: number | null, };
+
+export type NetworkGrant = { enabled: boolean, hosts: string[], protocols: string[], };
+
+export type PermissionGrantScope = "session" | "run";
+
+export type PermissionProfile = "read_only" | "workspace_write" | "external_sandbox";
+
+export type PetContextMenuRequest = { x: number | null, y: number | null, };
 
 export type PetTurnEvent = { type: "started"; runId: string } | { type: "text_delta"; runId: string; delta: string } | { type: "completed"; runId: string; text: string; speechQueued: boolean } | { type: "cancelled"; runId: string } | { type: "failed"; runId: string; code: string; message: string };
 
-export type PetTurnRequest = {
-	runId: string,
-	text: string,
-};
+export type PetTurnRequest = { runId: string, text: string, };
+
+export type PlanAcceptanceRequest = { idempotencyKey: string, planId: PlanId, };
+
+export type PlanId = string;
+
+export type PlanStep = { id: PlanStepId, description: string, status: PlanStepStatus, };
+
+export type PlanStepId = string;
+
+export type PlanStepStatus = "pending" | "in_progress" | "completed";
+
+export type ProcessEvent = { kind: "output"; process_session_id: ProcessSessionId; chunk: ProcessOutputChunk } | { kind: "exited"; process_session_id: ProcessSessionId; sequence: number; exit_code: number } | { kind: "closed"; process_session_id: ProcessSessionId; sequence: number };
+
+export type ProcessGrant = { spawn: boolean, interactive: boolean, allowedCommands: string[], };
+
+export type ProcessListRequest = { sessionId: SessionId | null, runId: RunId | null, includeTerminal: boolean, };
+
+export type ProcessOutputChunk = { sequence: number, stream: ProcessOutputStream, deltaBase64: string, capReached: boolean, };
+
+export type ProcessOutputStream = "stdout" | "stderr";
+
+export type ProcessReadRequest = { processSessionId: ProcessSessionId, afterSequence: number | null, maxBytes: number | null, waitMs: number | null, };
+
+export type ProcessReadSnapshot = { process: ProcessSessionRecord, chunks: ProcessOutputChunk[], nextSequence: number, closed: boolean, };
+
+export type ProcessResizeRequest = { context: MutationContext, processSessionId: ProcessSessionId, size: ProcessTerminalSize, };
+
+export type ProcessSessionId = string;
+
+export type ProcessSessionRecord = { id: ProcessSessionId, sessionId: SessionId, runId: RunId | null, checkoutId: CheckoutId, runGeneration: number | null, ownerClientId: ClientId, commandSummary: string, interactive: boolean, status: ProcessStatus, exitCode: number | null, outputLimitBytes: number, createdAtMs: number, updatedAtMs: number, reconnectExpiresAtMs: number | null, };
+
+export type ProcessSpawnRequest = { context: MutationContext, sessionId: SessionId, checkoutId: CheckoutId, command: string[], tty: boolean, streamStdin: boolean, streamOutput: boolean, outputBytesCap: number | null, timeoutMs: number | null, environment: { [key in string]: string | null }, size: ProcessTerminalSize | null, };
+
+export type ProcessStatus = "starting" | "running" | "exited" | "terminated" | "failed" | "expired";
+
+export type ProcessTerminalSize = { rows: number, cols: number, };
+
+export type ProcessTerminateRequest = { context: MutationContext, processSessionId: ProcessSessionId, };
+
+export type ProcessWriteRequest = { context: MutationContext, processSessionId: ProcessSessionId, writeId: string, deltaBase64: string | null, closeStdin: boolean, };
+
+export type ProjectGitInitialCommitRequest = { context: MutationContext, projectId: ProjectId, authorName: string, authorEmail: string, };
+
+export type ProjectGitInitialCommitResponse = { snapshot: ProjectGitSnapshot, commitSha: string, };
+
+export type ProjectGitSnapshot = { projectId: ProjectId, gitRoot: string | null, state: ProjectGitState, observedAtMs: number, };
+
+export type ProjectGitState = { kind: "not_repository" } | { kind: "unborn"; branch: string } | { kind: "ready"; branch: string | null; head: string } | { kind: "detached"; head: string } | { kind: "unavailable"; error_code: string };
+
+export type ProjectId = string;
+
+export type ProjectRecord = { id: ProjectId, displayName: string, rootPath: string, gitRoot: string | null, trusted: boolean, createdAtMs: number, updatedAtMs: number, };
+
+export type ProposedPlan = { id: PlanId, sessionId: SessionId, runId: RunId, revision: number, goal: string, assumptions: string[], steps: PlanStep[], affectedResources: string[], verification: string[], risks: string[], openQuestions: string[], contentMarkdown: string, status: ProposedPlanStatus, acceptedRunId: RunId | null, createdAtMs: number, acceptedAtMs: number | null, };
+
+export type ProposedPlanStatus = "proposed" | "accepted" | "superseded";
+
+export type ProviderCapabilities = { toolCalls?: boolean, parallelToolCalls?: boolean, namespacedTools?: boolean, deferredTools?: boolean, strictJsonSchema?: boolean, outputSchema?: boolean, textInput?: boolean, imageInput?: boolean, audioInput?: boolean, streamingUsage?: boolean, reasoningSummary?: boolean, realtime?: boolean, httpTransport?: boolean, websocketTransport?: boolean, remoteCompaction?: boolean, contextWindow?: number | null, maxOutputTokens?: number | null, };
+
+export type ProviderCapabilityProbe = { strictJsonSchema: boolean, outputSchema: boolean, source: ProviderCapabilityProbeSource, stableErrorCode: string | null, };
+
+export type ProviderCapabilityProbeSource = "probe" | "user_override" | "disabled";
+
+export type RealtimeSessionId = string;
 
 export type ReducedMotion = "system" | "on" | "off";
 
 export type RequestId = string;
 
-export type ResourceEntryRequest = {
-	id: string,
-};
+export type ResourceEntryRequest = { id: string, };
 
-export type ResourceImportRequest = {
-	name: string,
-};
+export type ResourceImportRequest = { name: string, };
+
+export type ReviewDelivery = "inline" | "detached";
+
+export type ReviewFinding = { id: ReviewFindingId, reviewId: ReviewId, severity: ReviewSeverity, file: string | null, line: number | null, message: string, evidence: string, status: ReviewFindingStatus, };
+
+export type ReviewFindingId = string;
+
+export type ReviewFindingStatus = "open" | "acknowledged" | "resolved" | "dismissed";
+
+export type ReviewFindingUpdateRequest = { context: MutationContext, reviewId: ReviewId, findingId: ReviewFindingId, status: ReviewFindingStatus, };
+
+export type ReviewId = string;
+
+export type ReviewRecord = { id: ReviewId, sessionId: SessionId, runId: RunId, target: ReviewTarget, delivery: ReviewDelivery, createdAtMs: number, };
+
+export type ReviewSeverity = "info" | "warning" | "error" | "critical";
+
+export type ReviewSnapshot = { review: ReviewRecord, run: RunRecord, findings: ReviewFinding[], summary: string | null, overallCorrectness: string | null, overallConfidenceScore: number | null, };
+
+export type ReviewStartRequest = { context: MutationContext, sessionId: SessionId, target: ReviewTarget, delivery: ReviewDelivery, };
+
+export type ReviewStartSnapshot = { review: ReviewRecord, session: SessionRecord, run: RunRecord, };
+
+export type ReviewTarget = { kind: "uncommitted_changes" } | { kind: "base_branch"; value: string } | { kind: "commit"; value: string } | { kind: "custom"; value: string };
+
+export type RunBudget = { maxModelRequests: number, maxToolCalls: number, maxParallelReadTools: number, modelTimeoutMs: number, toolTimeoutMs: number, };
+
+export type RunConfiguration = { modelSnapshot: LlmSettings, driver: RunDriverKind, entryProfile: EntryProfile, workloadOverride: WorkloadKind | null, behaviorMode: BehaviorMode, executionTarget: ExecutionTarget | null, approvalPolicy: ApprovalPolicy, permissionProfile: PermissionProfile, budget: RunBudget, acceptedPlanId?: PlanId | null, acceptedPlanRevision?: number | null, };
+
+export type RunControlRequest = { context: MutationContext, runId: RunId, input: string | null, };
+
+export type RunDiffSnapshot = { scope: DiffScope, files: FileDiffSummary[], artifactId: ArtifactId | null, truncated: boolean, generatedAtMs: number, };
+
+export type RunDriverKind = "tool_loop" | "realtime";
+
+export type RunEventEnvelope = { protocolVersion: number, sequence: number, sessionId: SessionId, runId: RunId | null, payload: RunEventPayload, createdAtMs: number, };
+
+export type RunEventPayload = { type: "item_started"; data: { item_id: ItemId, kind: TranscriptItemKind, } } | { type: "item_delta"; data: { item_id: ItemId, delta: string, } } | { type: "item_completed"; data: { item_id: ItemId, status: ItemStatus, payload: ItemPayload, } } | { type: "plan_updated"; data: { plan_id: PlanId, steps: PlanStep[], } } | { type: "diff_updated"; data: { artifact_id: ArtifactId, } } | { type: "user_input_requested"; data: { request_id: UserInputRequestId, } } | { type: "generic"; data: { event: string, data: unknown, } };
+
+export type RunId = string;
+
+export type RunOrigin = { kind: "interactive" } | { kind: "handoff"; source_session_id: SessionId; source_run_id: RunId } | { kind: "scheduled"; schedule_id: ScheduleId; task_run_id: TaskRunId; scheduled_for_ms: number };
+
+export type RunPurpose = "task" | "review" | "automation";
+
+export type RunRecord = { id: RunId, sessionId: SessionId, status: RunStatus, purpose: RunPurpose, origin?: RunOrigin, generation: number, configuration: RunConfiguration, requestedCapabilities: ProviderCapabilities, negotiatedCapabilities: ProviderCapabilities, providerCapabilityProbe: ProviderCapabilityProbe | null, capabilityDegradations: CapabilityDegradation[], failureCode: string | null, createdAtMs: number, updatedAtMs: number, };
+
+export type RunStatus = "queued" | "preparing" | "running" | "waiting_approval" | "waiting_user_input" | "cancelling" | "succeeded" | "failed" | "timed_out" | "cancelled" | "interrupted" | "lost";
+
+export type RunSteerRecord = { id: ItemId, sessionId: SessionId, runId: RunId, runGeneration: number, input: string, status: RunSteerStatus, createdAtMs: number, consumedAtMs: number | null, };
+
+export type RunSteerStatus = "pending" | "consumed" | "interrupted";
+
+export type RunUsageSnapshot = { runId: RunId, billedUsage: TokenUsage, activeContextTokens: number, remainingContextTokens: number, source: TokenCountSource, updatedAtMs: number, };
 
 export type RuntimeControllerKind = "cursor" | "drag" | "contact" | "root_motion" | "locomotion" | "speech";
 
-export type RuntimeControllerRequest = {
-	kind: RuntimeControllerKind,
-	active: boolean,
-	/**  Controller-specific normalized target. Locomotion currently consumes the X component. */
-	target: [(number | null), (number | null), (number | null)],
-	intensity: number | null,
-	sequence: number,
-};
+export type RuntimeControllerRequest = { kind: RuntimeControllerKind, active: boolean, /** Controller-specific normalized target. Locomotion currently consumes the X component. */ target: [(number | null), (number | null), (number | null)], intensity: number | null, sequence: number, };
 
-export type Scope = "pet.interact" | "agent.run" | "settings.read" | "settings.write" | "llm.read" | "llm.write" | "llm.test" | "llm.chat" | "avatar.read" | "avatar.manage" | "avatar.runtime" | "motion.read" | "motion.manage" | "motion.runtime" | "voice.read" | "voice.manage" | "voice.playback" | "voice.capture" | "workbench.open" | "workbench.window" | "workspace.read" | "workspace.write" | "workspace.exec" | "browser.observe" | "browser.control" | "computer.observe" | "computer.control" | "connectors.invoke" | "devices.pair" | "admin.policy";
+export type SandboxCapabilityReport = { backend: string, readiness: SandboxReadiness, osEnforced: boolean, filesystemEnforced: boolean, processEnforced: boolean, networkEnforced: boolean, version: string | null, stableErrorCode: string | null, diagnostics: string[], };
 
-export type SpeechPlaybackEvent = {
-	playbackId: string,
-	runId: string | null,
-	source: SpeechPlaybackSource,
-	phase: SpeechPlaybackPhase,
-	mediaPositionMs: number,
-	durationMs: number,
-	sequence: number,
-	timeline: SpeechTimeline | null,
-	segmentIndex: number,
-	textStart: number,
-	textEnd: number,
-	/**
-	 *  Display text is attached to Pet playback preparation so the WebView
-	 *  can reveal the complete sentence when its PCM segment starts.
-	 */
-	displayText: string | null,
-};
+export type SandboxReadiness = "unavailable" | "setup_required" | "degraded" | "ready";
+
+export type SandboxRepairRequest = { context: MutationContext, };
+
+export type SandboxRuntimeSnapshot = { revision: number, report: SandboxCapabilityReport, repairing: boolean, };
+
+export type ScheduleAuthorizationScope = { entryProfile: EntryProfile, workloadOverride: WorkloadKind | null, contextTemplate: ScheduleContextTemplate, toolAllowlist: string[], skillAllowlist: SkillId[], skillRevisions?: ScheduleSkillSelection[], mcpToolAllowlist: McpToolSelection[], permissionConfig: SchedulePermissionConfig, };
+
+export type ScheduleContextTemplate = { kind: "general" } | { kind: "project"; project_id: ProjectId; execution_target: ExecutionTarget };
+
+export type ScheduleCreateRequest = { context: MutationContext, definition: ScheduleDefinition, authorize: boolean, };
+
+export type ScheduleDefinition = { id: ScheduleId, name: string, enabled: boolean, prompt: string, schedule: ScheduleSpec, entryProfile: EntryProfile, workloadOverride: WorkloadKind | null, contextTemplate: ScheduleContextTemplate, toolAllowlist: string[], skillAllowlist: SkillId[], mcpToolAllowlist: McpToolSelection[], permissionConfig: SchedulePermissionConfig, permissionRevision: number, timeoutMs: number, misfirePolicy: MisfirePolicy, deliveryPolicy: DeliveryPolicy, configRevision: number, createdBy: string, nextRunAtMs: number | null, health: ScheduleHealth, healthReason: string | null, createdAtMs: number, updatedAtMs: number, };
+
+export type ScheduleGrantId = string;
+
+export type ScheduleGrantRecord = { id: ScheduleGrantId, scheduleId: ScheduleId, permissionRevision: number, scopeHash: string, scope: ScheduleAuthorizationScope, status: ScheduleGrantStatus, grantedBy: string, createdAtMs: number, revokedAtMs: number | null, };
+
+export type ScheduleGrantStatus = "active" | "revoked" | "superseded";
+
+export type ScheduleHealth = "healthy" | "needs_authorization" | "needs_attention" | "invalid";
+
+export type ScheduleId = string;
+
+export type SchedulePermissionConfig = { permissionProfile: PermissionProfile, allowFileRead: boolean, allowFileWrite: boolean, allowExec: boolean, externalTargets: string[], };
+
+export type SchedulePreview = { valid: boolean, errorCode: string | null, nextOccurrencesMs: number[], };
+
+export type ScheduleSkillSelection = { skillId: SkillId, contentHash: string, treeRevision: string, };
+
+export type ScheduleSnapshot = { definition: ScheduleDefinition, activeGrant: ScheduleGrantRecord | null, recentRuns: TaskRunRecord[], };
+
+export type ScheduleSpec = { kind: "at"; timestamp_ms: number } | { kind: "every"; interval_ms: number; anchor_ms: number } | { kind: "cron"; expression: string; timezone: string };
+
+export type ScheduleUpdateRequest = { context: MutationContext, definition: ScheduleDefinition, expectedConfigRevision: number, };
+
+export type Scope = "pet.interact" | "agent.run" | "settings.read" | "settings.write" | "llm.read" | "llm.write" | "llm.test" | "llm.chat" | "avatar.read" | "avatar.manage" | "avatar.runtime" | "motion.read" | "motion.manage" | "motion.runtime" | "voice.read" | "voice.manage" | "voice.playback" | "voice.capture" | "workbench.open" | "workbench.window" | "workspace.read" | "workspace.write" | "workspace.exec" | "browser.observe" | "browser.control" | "computer.observe" | "computer.control" | "connectors.invoke" | "connectors.manage" | "skills.manage" | "skills.use" | "devices.pair" | "admin.policy";
+
+export type SessionContextBinding = { kind: "general" } | { kind: "project"; project_id: ProjectId; checkout_id: CheckoutId } | { kind: "avatar"; avatar_id: AvatarId | null };
+
+export type SessionCursor = { updatedAtMs: number, id: SessionId, };
+
+export type SessionForkRequest = { context: MutationContext, sourceSessionId: SessionId, sourceRunId: RunId | null, title: string, };
+
+export type SessionId = string;
+
+export type SessionMetadataUpdateRequest = { context: MutationContext, sessionId: SessionId, title: string | null, archived: boolean | null, pinned: boolean | null, };
+
+export type SessionPage = { items: SessionRecord[], nextCursor: SessionCursor | null, };
+
+export type SessionRecord = { id: SessionId, context: SessionContextBinding, entryProfile: EntryProfile, title: string, archived: boolean, pinned: boolean, parentSessionId: SessionId | null, sourceRunId: RunId | null, createdAtMs: number, updatedAtMs: number, };
+
+export type SessionResumeRequest = { sessionId: SessionId, metadataOnly: boolean, transcriptBeforeSequence: number | null, transcriptLimit: number, };
+
+export type SessionResumeSnapshot = { session: SessionRecord, activeRun: RunRecord | null, transcript: TranscriptItem[], pendingApprovals: ApprovalRequestRecord[], pendingUserInputs: UserInputRequestRecord[], usageSnapshot: RunUsageSnapshot | null, /** * Process-local, non-authoritative deltas for an active Run. These are * never persisted and are discarded once the authoritative Item completes. */ activeEventReplay?: RunEventEnvelope[], snapshotSequence: number, previousTranscriptCursor: number | null, };
+
+export type SessionSearchRequest = { projectId: ProjectId | null, query: string | null, archived: boolean | null, before: SessionCursor | null, limit: number, };
+
+export type SideEffectExecutionId = string;
+
+export type SideEffectExecutionRecord = { id: SideEffectExecutionId, sessionId: SessionId, runId: RunId, runGeneration: number, toolCallId: ToolCallId, idempotencyKey: string, parameterHash: string, approvalId: ApprovalId | null, hostRequestId: string | null, status: SideEffectExecutionStatus, resultCode: string | null, resultReference: ArtifactId | null, createdAtMs: number, updatedAtMs: number, };
+
+export type SideEffectExecutionStatus = "claimed" | "dispatched" | "succeeded" | "failed" | "cancelled" | "indeterminate";
+
+export type SkillActivation = { id: SkillActivationId, skillId: SkillId, contentRevision: string, source: SkillActivationSource, activatedAtStepRevision: number, classifiedWorkload: WorkloadKind, };
+
+export type SkillActivationId = string;
+
+export type SkillActivationSource = "explicit_selection" | "mention" | "model_read" | "built_in_discovery";
+
+export type SkillChangeEvent = { skillId: SkillId, relativePaths: string[], kind: SkillChangeKind, treeRevision: string, };
+
+export type SkillChangeKind = "created" | "updated" | "renamed" | "removed" | "reindexed";
+
+export type SkillClassification = { skillId: SkillId, contentRevision: string, workload: WorkloadKind, confidenceBasisPoints: number, reason: string, classifierRevision: string, classifiedAtMs: number, };
+
+export type SkillDiagnostic = { code: string, message: string, relativePath: string | null, severity: SkillDiagnosticSeverity, };
+
+export type SkillDiagnosticSeverity = "info" | "warning" | "error";
+
+export type SkillEditorKind = "markdown" | "text" | "unsupported";
+
+export type SkillEntryCreateRequest = { skillId: SkillId, parentPath: string, name: string, kind: SkillEntryKind, };
+
+export type SkillEntryKind = "file" | "directory";
+
+export type SkillEntryRenameRequest = { skillId: SkillId, relativePath: string, newName: string, };
+
+export type SkillFileSnapshot = { skillId: SkillId, relativePath: string, editorKind: SkillEditorKind, content: string | null, sizeBytes: number, revision: string, diagnostics: SkillDiagnostic[], };
+
+export type SkillFileWriteRequest = { skillId: SkillId, relativePath: string, content: string, expectedRevision: string | null, };
+
+export type SkillId = string;
+
+/** * Optional presentation metadata loaded from `agents/openai.yaml`. * Paths remain Skill-relative references and never grant host filesystem access. */ export type SkillInterface = { displayName: string | null, shortDescription: string | null, iconSmall: string | null, iconLarge: string | null, brandColor: string | null, defaultPrompt: string | null, };
+
+/** * Invocation policy declared by a Skill package. This only narrows discovery; * it cannot register a tool or create an authorization grant. */ export type SkillPolicy = { allowImplicitInvocation: boolean | null, /** * Classification hint only. It is trusted for Built-in Skills; User/Repo * Skills still require the bounded structured classifier. */ workload: WorkloadKind | null, };
+
+export type SkillPreviewResource = { skillId: SkillId, sourcePath: string, relativePath: string, editorKind: SkillEditorKind, text: string | null, mediaType: string | null, dataBase64: string | null, sizeBytes: number, revision: string, };
+
+export type SkillPreviewResourceRequest = { skillId: SkillId, sourcePath: string, destination: string, };
+
+export type SkillRecord = { id: SkillId, scope: SkillScope, namespace: string | null, name: string, qualifiedName: string, description: string, interface?: SkillInterface | null, policy?: SkillPolicy, dependencies: SkillToolDependency[], editable: boolean, enabled: boolean, contentHash: string, treeRevision: string, diagnostics: SkillDiagnostic[], updatedAtMs: number, };
+
+/** * Host-owned discovery scope for a Skill. Ordering is resolved by the Skill * catalog and is not an authorization grant. */ export type SkillScope = "built_in" | "user" | "repo" | "system" | "admin";
+
+export type SkillSubscriptionId = string;
+
+/** * Optional tool dependency declared by `agents/openai.yaml` next to a Skill. * Dependency metadata is diagnostic only and never registers or authorizes a tool. */ export type SkillToolDependency = { type: string, value: string, description: string | null, transport: string | null, command: string | null, url: string | null, };
+
+export type SkillTreeNode = { name: string, relativePath: string, kind: SkillEntryKind, editorKind: SkillEditorKind, sizeBytes: number, revision: string | null, children: SkillTreeNode[], };
+
+export type SpeechPlaybackEvent = { playbackId: string, runId: string | null, source: SpeechPlaybackSource, phase: SpeechPlaybackPhase, mediaPositionMs: number, durationMs: number, sequence: number, timeline: SpeechTimeline | null, segmentIndex: number, textStart: number, textEnd: number, /** * Display text is attached to Pet playback preparation so the WebView * can reveal the complete sentence when its PCM segment starts. */ displayText: string | null, };
 
 export type SpeechPlaybackPhase = "prepared" | "playing" | "progress" | "completed" | "stopped" | "failed";
 
 export type SpeechPlaybackSource = "pet_turn" | "workbench_preview";
 
-export type SpeechRecognitionRuntimeState = {
-	installed: boolean,
-	installing: boolean,
-	bundled: boolean,
-	modelName: string,
-	provider: string,
-	languages: string[],
-	sizeBytes: number,
-	computeMode: VoiceComputeMode,
-	backend: VoiceComputeBackend | null,
-	computeDevice: VoiceComputeDevice | null,
-	fallbackReason: string | null,
-	loading: boolean,
-	error: string | null,
-};
+export type SpeechRecognitionRuntimeState = { installed: boolean, installing: boolean, bundled: boolean, modelName: string, provider: string, languages: string[], sizeBytes: number, computeMode: VoiceComputeMode, backend: VoiceComputeBackend | null, computeDevice: VoiceComputeDevice | null, fallbackReason: string | null, loading: boolean, error: string | null, };
 
-export type SpeechRecognitionSettingsInput = {
-	computeMode: VoiceComputeMode,
-};
+export type SpeechRecognitionSettingsInput = { computeMode: VoiceComputeMode, };
 
-export type SpeechTimeline = {
-	frameDurationMs: number,
-	jawOpen: number[],
-	visemes: SpeechVisemeFrame[] | null,
-	quality: SpeechTimelineQuality,
-};
+export type SpeechTimeline = { frameDurationMs: number, jawOpen: number[], visemes: SpeechVisemeFrame[] | null, quality: SpeechTimelineQuality, };
 
 export type SpeechTimelineQuality = "energy_locked" | "phoneme_timed";
 
-export type SpeechTurnEvent = {
-	runId: string,
-	phase: SpeechTurnPhase,
-	message: string | null,
-};
+export type SpeechTurnEvent = { runId: string, phase: SpeechTurnPhase, message: string | null, };
 
 export type SpeechTurnPhase = "started" | "completed" | "stopped" | "skipped" | "failed";
 
-export type SpeechVisemeFrame = {
-	timeMs: number,
-	aa: number,
-	ih: number,
-	ou: number,
-	ee: number,
-	oh: number,
-};
+export type SpeechVisemeFrame = { timeMs: number, aa: number, ih: number, ou: number, ee: number, oh: number, };
+
+export type StructuredOutputMode = "auto" | "enabled" | "disabled";
+
+export type TaskInteractiveContinuation = { taskRun: TaskRunRecord, session: SessionRecord, run: RunRecord, };
+
+export type TaskRunId = string;
+
+export type TaskRunRecord = { id: TaskRunId, scheduleId: ScheduleId | null, scheduleRevision: number | null, trigger: TaskRunTrigger, scheduledForMs: number | null, invocationKey: string, requesterSessionId: SessionId | null, executionSessionId: SessionId | null, runId: RunId | null, permissionSnapshotHash: string | null, status: TaskRunStatus, progressPercent: number | null, resultSummary: string | null, errorCode: string | null, errorSummary: string | null, artifactIds: ArtifactId[], deliveryStatus: DeliveryStatus, deliveryErrorCode: string | null, createdAtMs: number, startedAtMs: number | null, finishedAtMs: number | null, updatedAtMs: number, };
+
+export type TaskRunStatus = "queued" | "preparing" | "running" | "needs_attention" | "succeeded" | "failed" | "timed_out" | "cancelled" | "lost" | "skipped";
+
+export type TaskRunTrigger = "scheduled" | "manual" | "retry" | "catch_up";
 
 export type ThemeMode = "light" | "dark" | "system";
 
-export type ThemeProfile = {
-	id: string,
-	name: string,
-	scheme: ThemeScheme,
-	builtin: boolean,
-	accent: string,
-	background: string,
-	foreground: string,
-	uiFont: string,
-	codeFont: string,
-	translucentSidebar: boolean,
-	contrast: number,
-};
+export type ThemeProfile = { id: string, name: string, scheme: ThemeScheme, builtin: boolean, accent: string, background: string, foreground: string, uiFont: string, codeFont: string, translucentSidebar: boolean, contrast: number, };
 
-export type ThemeProfileDocument = {
-	format: string,
-	version: number,
-	profile: ThemeProfile,
-};
+export type ThemeProfileDocument = { format: string, version: number, profile: ThemeProfile, };
 
 export type ThemeScheme = "light" | "dark";
 
-export type VoiceCatalogSnapshot = {
-	entries: VoiceModelEntry[],
-	currentId: string,
-};
+export type TokenCountSource = "provider" | "tokenizer" | "conservative_estimate";
+
+export type TokenUsage = { inputTokens: number, outputTokens: number, };
+
+export type ToolCallId = string;
+
+export type ToolDescriptor = { name: string, description: string, inputSchema: unknown, effect: ToolEffect, parallelSafe: boolean, requiredScopes: string[], };
+
+export type ToolEffect = "read_only" | "workspace_write" | "process" | "external_side_effect" | "computer_observe" | "computer_act";
+
+export type ToolExecutionResult = { status: string, modelContent: string, structuredContent: unknown, stableResultCode: string, };
+
+export type TranscriptItem = { id: ItemId, sessionId: SessionId, runId: RunId | null, sequence: number, kind: TranscriptItemKind, status: ItemStatus, payload: ItemPayload, relations: ItemRelations, createdAtMs: number, };
+
+export type TranscriptItemKind = "user" | "assistant" | "reasoning" | "tool_execution" | "plan" | "approval" | "user_input_request" | "command_execution" | "file_change" | "mcp_call" | "dynamic_tool_call" | "context_compaction" | "review" | "system_context";
+
+export type UiDensity = "compact" | "default" | "comfortable";
+
+export type UserInputAnswer = { questionId: string, value: string, };
+
+export type UserInputOption = { label: string, value: string, description: string | null, };
+
+export type UserInputQuestion = { id: string, header: string, prompt: string, options: UserInputOption[], secret: boolean, autoResolutionMs: number | null, defaultAnswer: string | null, };
+
+export type UserInputRequestId = string;
+
+export type UserInputRequestRecord = { id: UserInputRequestId, sessionId: SessionId, runId: RunId, runGeneration: number, itemId: ItemId, questions: UserInputQuestion[], status: UserInputStatus, expiresAtMs: number | null, createdAtMs: number, resolvedAtMs: number | null, resolvedBy: string | null, };
+
+export type UserInputResolution = { requestId: UserInputRequestId, expectedRunId: RunId, expectedGeneration: number, action?: UserInputResolutionAction, answers: UserInputAnswer[], resolvedBy: string, resolvedAtMs: number, };
+
+export type UserInputResolutionAction = "submit" | "decline" | "cancel";
+
+export type UserInputStatus = "pending" | "resolved" | "cancelled" | "expired" | "interrupted";
+
+export type VoiceCatalogSnapshot = { entries: VoiceModelEntry[], currentId: string, };
 
 export type VoiceComputeBackend = "direct_ml" | "cpu";
 
-export type VoiceComputeDevice = {
-	deviceId: number,
-	name: string,
-	dedicatedMemoryMb: number,
-};
+export type VoiceComputeDevice = { deviceId: number, name: string, dedicatedMemoryMb: number, };
 
 export type VoiceComputeMode = "auto" | "direct_ml" | "cpu";
 
-export type VoiceImportCommitRequest = {
-	token: string,
-	name: string,
-	licenseAcknowledged: boolean,
-	speakerId: number,
-};
+export type VoiceImportCommitRequest = { token: string, name: string, licenseAcknowledged: boolean, speakerId: number, };
 
-export type VoiceModelEntry = {
-	id: string,
-	name: string,
-	sha256: string,
-	originalFileName: string,
-	sizeBytes: number,
-	origin: VoiceModelOrigin,
-	modelType: string,
-	languages: string[],
-	sampleRate: number,
-	speakerCount?: number,
-	speakerId?: number,
-	licenseSummary: string,
-	licenseWarning: boolean,
-	protected: boolean,
-	importedAt: string,
-};
+export type VoiceModelEntry = { id: string, name: string, sha256: string, originalFileName: string, sizeBytes: number, origin: VoiceModelOrigin, modelType: string, languages: string[], sampleRate: number, speakerCount?: number, speakerId?: number, licenseSummary: string, licenseWarning: boolean, protected: boolean, importedAt: string, };
 
-export type VoiceModelInspection = {
-	token: string | null,
-	originalFileName: string,
-	sizeBytes: number,
-	sha256: string,
-	modelType: string,
-	languages: string[],
-	sampleRate: number,
-	speakerCount: number,
-	suggestedSpeakerId: number,
-	requiredFiles: string[],
-	licenseSummary: string,
-	licenseWarning: boolean,
-	compatible: boolean,
-	issues: string[],
-};
+export type VoiceModelInspection = { token: string | null, originalFileName: string, sizeBytes: number, sha256: string, modelType: string, languages: string[], sampleRate: number, speakerCount: number, suggestedSpeakerId: number, requiredFiles: string[], licenseSummary: string, licenseWarning: boolean, compatible: boolean, issues: string[], };
 
 export type VoiceModelOrigin = "built_in" | "imported";
 
-export type VoiceRuntimeState = {
-	available: boolean,
-	muted: boolean,
-	modelId: string | null,
-	voiceName: string,
-	speaking: boolean,
-	speedPercent: number,
-	provider: string,
-	computeMode: VoiceComputeMode,
-	backend: VoiceComputeBackend | null,
-	computeDevice: VoiceComputeDevice | null,
-	fallbackReason: string | null,
-	loading: boolean,
-	languages: string[],
-	speakerCount: number,
-	speakerId: number,
-};
+export type VoiceRuntimeState = { available: boolean, muted: boolean, modelId: string | null, voiceName: string, speaking: boolean, speedPercent: number, provider: string, computeMode: VoiceComputeMode, backend: VoiceComputeBackend | null, computeDevice: VoiceComputeDevice | null, fallbackReason: string | null, loading: boolean, languages: string[], speakerCount: number, speakerId: number, };
 
-export type VoiceSettings = {
-	muted: boolean,
-	speedPercent?: number,
-	computeMode?: VoiceComputeMode,
-	/**  SenseVoice has its own session and can fall back independently from TTS. */
-	recognitionComputeMode?: VoiceComputeMode,
-};
+export type VoiceSettings = { muted: boolean, speedPercent?: number, computeMode?: VoiceComputeMode, /** SenseVoice has its own session and can fall back independently from TTS. */ recognitionComputeMode?: VoiceComputeMode, };
 
-export type VoiceSettingsInput = {
-	speedPercent: number,
-	computeMode: VoiceComputeMode,
-};
+export type VoiceSettingsInput = { speedPercent: number, computeMode: VoiceComputeMode, };
 
-export type WindowKind = "pet" | "settings" | "workbench";
+export type WindowKind = "pet" | "settings" | "workbench" | "service";
 
-export type WindowPlacementV1 = {
-	x: number,
-	y: number,
-	width: number,
-	height: number,
-	monitorName: string | null,
-	scaleFactor: number | null,
-};
+export type WindowPlacementV1 = { x: number, y: number, width: number, height: number, monitorName: string | null, scaleFactor: number | null, };
 
-export type WorkbenchRoute = "home" | "settings/general" | "settings/appearance" | "settings/llm" | "settings/avatar" | "settings/motion" | "settings/voice" | "developer/motion-lab";
+export type WorkbenchPlanAcceptanceSnapshot = { plan: ProposedPlan, task: WorkbenchTaskSnapshot, };
 
+export type WorkbenchRoute = "home" | "settings/general" | "settings/appearance" | "settings/llm" | "settings/avatar" | "settings/motion" | "settings/voice" | "settings/skills" | "settings/mcp" | "developer/motion-lab";
+
+export type WorkbenchSessionSnapshot = { session: SessionRecord, runs: RunRecord[], events: RunEventEnvelope[], transcript: TranscriptItem[], pendingApprovals: ApprovalRequestRecord[], proposedPlans: ProposedPlan[], artifacts: ArtifactRecord[], };
+
+export type WorkbenchTaskSnapshot = { project: ProjectRecord, checkout: CheckoutRecord, session: SessionRecord, run: RunRecord, };
+
+export type WorkbenchTaskStartRequest = { idempotencyKey: string, projectId: ProjectId, prompt: string, executionTarget: ExecutionTarget, behaviorMode: BehaviorMode, approvalPolicy: ApprovalPolicy, attachmentIds: AttachmentId[], /** * Explicit Skill identities selected by the user. This is authoritative * when names collide; `$name` remains only an unambiguous text shortcut. */ skillIds?: SkillId[], };
+
+export type WorkloadKind = "general" | "coding" | "office";
+
+export type WorkloadResolution = { workload: WorkloadKind, source: WorkloadResolutionSource, activatedSkillIds: SkillId[], reason: string, classifierRevision: string | null, };
+
+export type WorkloadResolutionSource = "user_override" | "explicit_skill" | "built_in_skill" | "structured_classification" | "general_fallback";

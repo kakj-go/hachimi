@@ -1,5 +1,7 @@
 import { ContextMenu as KContextMenu } from "@kobalte/core";
 import { For, Show, onCleanup, onMount, type JSX } from "solid-js";
+import type { UiDensity } from "../theme/context";
+import { componentState, type ComponentStateProps } from "./types";
 
 export interface ContextMenuAction {
   kind?: "item";
@@ -22,6 +24,13 @@ export interface ContextMenuProps {
   entries: readonly ContextMenuEntry[];
   onOpenChange?: (open: boolean) => void;
   contentRef?: (element: HTMLDivElement) => void;
+  variant?: ComponentStateProps["variant"];
+  size?: ComponentStateProps["size"];
+  tone?: ComponentStateProps["tone"];
+  density?: UiDensity;
+  disabled?: boolean;
+  loading?: boolean;
+  invalid?: boolean;
 }
 
 export function ContextMenu(props: ContextMenuProps) {
@@ -60,16 +69,25 @@ export function ContextMenu(props: ContextMenuProps) {
     >
       <KContextMenu.Trigger
         data-component="context-menu-trigger"
-        data-variant="default"
-        data-size="normal"
+        data-variant={props.variant ?? "default"}
+        data-size={props.size ?? "normal"}
+        data-tone={props.tone ?? "neutral"}
+        data-density={props.density}
+        data-state={componentState(props)}
+        data-invalid={props.invalid || undefined}
+        aria-busy={props.loading || undefined}
+        aria-invalid={props.invalid || undefined}
+        disabled={Boolean(props.disabled || props.loading)}
       >
         {props.trigger}
       </KContextMenu.Trigger>
       <KContextMenu.Portal>
         <KContextMenu.Content
           data-component="menu-content"
-          data-variant="default"
-          data-size="normal"
+          data-variant={props.variant ?? "default"}
+          data-size={props.size ?? "normal"}
+          data-tone={props.tone ?? "neutral"}
+          data-density={props.density}
           data-state="open"
           ref={(element) => {
             contentElement = element;

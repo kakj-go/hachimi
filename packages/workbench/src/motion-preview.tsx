@@ -5,7 +5,7 @@ import {
   type MotionCatalogEntry,
 } from "@hachimi/contracts";
 import { useI18n } from "@hachimi/i18n";
-import { Button, Play, Square, Switch as Toggle } from "@hachimi/ui";
+import { Button, Play, RangeField, Square, Switch as Toggle } from "@hachimi/ui";
 import { Show, createEffect, createMemo, createSignal, on, onCleanup, onMount } from "solid-js";
 import { MotionLabRuntime, type MotionLabFrame } from "./motion-lab-runtime";
 
@@ -119,20 +119,22 @@ export function MotionPreviewCanvas(props: {
           <span>{text("当前模型", "Current avatar")}</span>
           <strong>{currentAvatar()?.name ?? text("未选择", "Not selected")}</strong>
         </div>
-        <Button
-          size="small"
-          onClick={() => {
-            const next = !playing();
-            setPlaying(next);
-            runtime?.setPlaying(next);
-          }}
-        >
-          {playing() ? <Square size={14} /> : <Play size={14} />}
-          {playing() ? text("暂停", "Pause") : text("播放", "Play")}
-        </Button>
-        <Button size="small" onClick={() => runtime?.restart()}>
-          {text("重播", "Restart")}
-        </Button>
+        <div class="motion-preview-actions">
+          <Button
+            size="small"
+            onClick={() => {
+              const next = !playing();
+              setPlaying(next);
+              runtime?.setPlaying(next);
+            }}
+          >
+            {playing() ? <Square size={14} /> : <Play size={14} />}
+            {playing() ? text("暂停", "Pause") : text("播放", "Play")}
+          </Button>
+          <Button size="small" onClick={() => runtime?.restart()}>
+            {text("重播", "Restart")}
+          </Button>
+        </div>
         <div class="motion-preview-mirror">
           <div>
             <strong>{text("镜像预览", "Mirror preview")}</strong>
@@ -152,33 +154,26 @@ export function MotionPreviewCanvas(props: {
       </div>
       <div class="motion-preview-stage" ref={host} />
       <div class="motion-preview-controls">
-        <label>
-          <span>{text("时间", "Time")}</span>
-          <input
-            type="range"
-            min={0}
-            max={selectedMotion()?.durationMs ?? 1}
-            step={10}
-            value={Math.min(frame()?.timeMs ?? 0, selectedMotion()?.durationMs ?? 1)}
-            onInput={(event) => runtime?.setTimeMs(event.currentTarget.valueAsNumber)}
-          />
-          <output>{Math.round(frame()?.timeMs ?? 0)} ms</output>
-        </label>
-        <label>
-          <span>{text("速度", "Speed")}</span>
-          <input
-            type="range"
-            min={0.25}
-            max={3}
-            step={0.05}
-            value={speed()}
-            onInput={(event) => {
-              setSpeed(event.currentTarget.valueAsNumber);
-              runtime?.setSpeed(event.currentTarget.valueAsNumber);
-            }}
-          />
-          <output>{speed().toFixed(2)}×</output>
-        </label>
+        <RangeField
+          label={text("时间", "Time")}
+          min={0}
+          max={selectedMotion()?.durationMs ?? 1}
+          step={10}
+          unit=" ms"
+          value={Math.min(frame()?.timeMs ?? 0, selectedMotion()?.durationMs ?? 1)}
+          onInput={(value) => runtime?.setTimeMs(value)}
+        />
+        <RangeField
+          label={text("速度", "Speed")}
+          min={0.25}
+          max={3}
+          step={0.05}
+          value={speed()}
+          onInput={(value) => {
+            setSpeed(value);
+            runtime?.setSpeed(value);
+          }}
+        />
       </div>
       <Show when={failure()}>{(message) => <p class="settings-error">{message()}</p>}</Show>
     </section>

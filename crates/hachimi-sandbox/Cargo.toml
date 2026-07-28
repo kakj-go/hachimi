@@ -5,7 +5,45 @@ edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true
 
-[dependencies]
-serde.workspace = true
-specta.workspace = true
+[features]
+windows-smoke = []
 
+[dependencies]
+hachimi-protocol.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+specta.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true, features = [
+  "Win32_Foundation",
+  "Win32_Security",
+  "Win32_Security_Authorization",
+  "Win32_Security_Isolation",
+  "Win32_Storage_FileSystem",
+  "Win32_System_Console",
+  "Win32_System_JobObjects",
+  "Win32_System_Pipes",
+  "Win32_System_Registry",
+  "Win32_System_Threading",
+  "Win32_UI_Shell",
+  "Win32_UI_WindowsAndMessaging",
+] }
+
+[[bin]]
+name = "hachimi-sandbox-launcher"
+path = "src/bin/hachimi-sandbox-launcher.rs"
+
+[[bin]]
+name = "hachimi-sandbox-canary"
+path = "src/bin/hachimi-sandbox-canary.rs"
+
+[[bin]]
+name = "hachimi-sandbox-setup"
+path = "src/bin/hachimi-sandbox-setup.rs"
+
+[dev-dependencies]
+tempfile.workspace = true

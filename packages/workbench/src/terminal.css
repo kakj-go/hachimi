@@ -1,0 +1,86 @@
+.terminal-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 12px;
+  padding: 12px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  background: color-mix(in srgb, var(--surface-raised) 86%, transparent);
+}
+
+.terminal-panel-heading,
+.terminal-panel-heading > div,
+.terminal-actions,
+.terminal-input-row {
+  display: flex;
+  align-items: center;
+}
+
+.terminal-panel-heading {
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.terminal-panel-heading > div:first-child {
+  gap: 8px;
+}
+
+.terminal-actions {
+  gap: 6px;
+}
+
+.terminal-status {
+  color: var(--text-muted);
+  font-family: var(--font-code);
+  font-size: var(--font-xs);
+}
+
+.terminal-output {
+  min-height: 120px;
+  max-height: 320px;
+  margin: 0;
+  overflow: auto;
+  padding: 12px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: var(--surface-inset);
+  color: var(--text-primary);
+  font-family: var(--font-code);
+  font-size: var(--font-xs);
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.terminal-input-row {
+  gap: 8px;
+}
+
+.terminal-input-row .field-stack {
+  min-width: 0;
+  flex: 1;
+}
+
+.terminal-input-row .ui-input {
+  height: 32px;
+  padding: 0 10px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: var(--surface-inset);
+  color: var(--text-primary);
+  font-family: var(--font-code);
+  font-size: var(--font-xs);
+}
+
+.terminal-failure {
+  margin: 0;
+  color: var(--status-danger);
+  font-size: var(--font-xs);
+}
+
+.terminal-output-cap {
+  margin: -4px 0 0;
+  color: var(--status-warning);
+  font-size: var(--font-xs);
+}

@@ -7,6 +7,7 @@ publish.workspace = true
 
 [dependencies]
 hachimi-core.workspace = true
+hachimi-model-runtime.workspace = true
 hachimi-protocol.workspace = true
 keyring.workspace = true
 reqwest.workspace = true
@@ -15,6 +16,7 @@ serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
+tokio-stream.workspace = true
 url.workspace = true
 
 [dev-dependencies]

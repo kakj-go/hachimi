@@ -1,7 +1,7 @@
 import { render } from "solid-js/web";
 import { installFrontendLogging } from "@hachimi/contracts";
-import { WorkbenchApp } from "@hachimi/workbench";
 import "@hachimi/ui/styles";
+import { WorkbenchApp } from "@hachimi/workbench";
 
 installFrontendLogging();
 

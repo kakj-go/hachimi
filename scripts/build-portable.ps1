@@ -41,12 +41,18 @@ try {
 
     New-Item -ItemType Directory -Path $stageRoot -Force | Out-Null
     Copy-Item -LiteralPath (Join-Path $releaseRoot "hachimi-desktop.exe") -Destination $stageRoot
+    Copy-Item -LiteralPath (Join-Path $releaseRoot "hachimi-workspace-worker.exe") -Destination $stageRoot
+    Copy-Item -LiteralPath (Join-Path $releaseRoot "hachimi-sandbox-launcher.exe") -Destination $stageRoot
+    Copy-Item -LiteralPath (Join-Path $releaseRoot "hachimi-sandbox-canary.exe") -Destination $stageRoot
+    Copy-Item -LiteralPath (Join-Path $releaseRoot "hachimi-sandbox-attest.exe") -Destination $stageRoot
+    Copy-Item -LiteralPath (Join-Path $releaseRoot "hachimi-sandbox-setup.exe") -Destination $stageRoot
     Copy-Item -LiteralPath (Join-Path $releaseRoot "DirectML.dll") -Destination $stageRoot
     Copy-Item -LiteralPath (Join-Path $releaseRoot "onnxruntime.dll") -Destination $stageRoot
     Copy-Item -LiteralPath (Join-Path $releaseRoot "sherpa-onnx-c-api.dll") -Destination $stageRoot
     Copy-Item -LiteralPath (Join-Path $releaseRoot "resources") -Destination $stageRoot -Recurse
     Copy-Item -LiteralPath (Join-Path $repoRoot "scripts\reset-portable-data.ps1") -Destination $stageRoot
     Copy-Item -LiteralPath (Join-Path $repoRoot "scripts\reset-portable-data.cmd") -Destination $stageRoot
+    Copy-Item -LiteralPath (Join-Path $repoRoot "scripts\setup-portable-sandbox.ps1") -Destination $stageRoot
     New-Item -ItemType File -Path (Join-Path $stageRoot "hachimi.portable") -Force | Out-Null
 
     Compress-Archive -LiteralPath $stageRoot -DestinationPath $archivePath -CompressionLevel Optimal

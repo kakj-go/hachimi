@@ -1,11 +1,27 @@
 //! Metadata-only audit events. Raw prompts, screenshots and tool payloads are excluded.
 
-use parking_lot::RwLock;
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AuditEvent {
     pub operation: &'static str,
     pub outcome: &'static str,
+    pub principal: Option<String>,
+}
+
+impl AuditEvent {
+    #[must_use]
+    pub const fn decision(operation: &'static str, outcome: &'static str) -> Self {
+        Self {
+            operation,
+            outcome,
+            principal: None,
+        }
+    }
+
+    #[must_use]
+    pub fn with_principal(mut self, principal: impl Into<String>) -> Self {
+        self.principal = Some(principal.into());
+        self
+    }
 }
 
 pub trait AuditSink: Send + Sync {
@@ -13,19 +29,8 @@ pub trait AuditSink: Send + Sync {
 }
 
 #[derive(Debug, Default)]
-pub struct InMemoryAudit {
-    events: RwLock<Vec<AuditEvent>>,
-}
+pub struct NoopAudit;
 
-impl AuditSink for InMemoryAudit {
-    fn record(&self, event: AuditEvent) {
-        self.events.write().push(event);
-    }
-}
-
-impl InMemoryAudit {
-    #[must_use]
-    pub fn snapshot(&self) -> Vec<AuditEvent> {
-        self.events.read().clone()
-    }
+impl AuditSink for NoopAudit {
+    fn record(&self, _event: AuditEvent) {}
 }

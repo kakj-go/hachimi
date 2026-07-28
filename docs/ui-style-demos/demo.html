@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="dark" />
+    <title>Hachimi 前端视觉方向 Demo</title>
+    <link rel="stylesheet" href="demo-shared.css" />
+  </head>
+  <body class="gallery-body">
+    <main class="gallery">
+      <header class="gallery-heading">
+        <p class="gallery-eyebrow">Hachimi UI Direction · 讨论稿</p>
+        <h1>先统一信息层级，再选择视觉气质</h1>
+        <p>三个方案使用同一套内容结构与字号规则，只改变色彩、密度、圆角和表面关系，便于判断哪一种更适合 Hachimi。</p>
+      </header>
+
+      <section class="gallery-grid" aria-label="视觉方案">
+        <a class="gallery-card" href="demo-01-quiet-graphite.html">
+          <div class="gallery-preview" style="--preview-canvas:#111316;--preview-side:#17191d;--preview-rail:#17191d;--preview-surface:#191c20;--preview-line:#66717f;--preview-border:rgb(255 255 255 / 9%)">
+            <span class="preview-lines"><i></i><i></i><i></i><b></b></span>
+          </div>
+          <div class="gallery-card-copy">
+            <header><h2>A · 静谧石墨</h2><span>推荐</span></header>
+            <p>克制、清晰、适合长时间工作。减少大面积品牌色，让强调色只服务操作与状态。</p>
+          </div>
+        </a>
+
+        <a class="gallery-card" href="demo-02-hachimi-mist.html">
+          <div class="gallery-preview" style="--preview-canvas:#16141a;--preview-side:#211d2a;--preview-rail:#1c1923;--preview-surface:#1e1b23;--preview-line:#6f647b;--preview-border:rgb(255 244 255 / 10%)">
+            <span class="preview-lines"><i></i><i></i><i></i><b></b></span>
+          </div>
+          <div class="gallery-card-copy">
+            <header><h2>B · 雾紫 Hachimi</h2><span>品牌感</span></header>
+            <p>延续当前紫色侧栏和柔和圆角，品牌记忆更强，但需要控制装饰强度与层级数量。</p>
+          </div>
+        </a>
+
+        <a class="gallery-card" href="demo-03-paper-focus.html">
+          <div class="gallery-preview" style="--preview-canvas:#f8f7f3;--preview-side:#eeece7;--preview-rail:#f8f7f3;--preview-surface:#fff;--preview-line:#a8abb1;--preview-border:rgb(31 36 45 / 11%)">
+            <span class="preview-lines"><i></i><i></i><i></i><b></b></span>
+          </div>
+          <div class="gallery-card-copy">
+            <header><h2>C · 纸白专注</h2><span>办公感</span></header>
+            <p>更接近文档与 IDE 的浅色生产力工具，信息扫描效率最高，个性相对收敛。</p>
+          </div>
+        </a>
+      </section>
+
+      <aside class="gallery-note">
+        <strong>建议先看 A：</strong>它最适合作为正式设计系统的基线；如果希望保留更多 Hachimi 个性，可以把 B 的雾紫侧栏与 A 的组件密度组合，而不是整套照搬 B。
+      </aside>
+    </main>
+  </body>
+</html>

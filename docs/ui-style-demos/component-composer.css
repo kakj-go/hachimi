@@ -1,0 +1,242 @@
+.composer-demo-stage {
+  width: 100%;
+  display: grid;
+  gap: var(--space-2);
+}
+
+.composer-notice {
+  min-height: 34px;
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid color-mix(in srgb, var(--warning) 32%, var(--border));
+  border-radius: var(--radius-md);
+  background: color-mix(in srgb, var(--warning) 8%, var(--surface));
+  color: color-mix(in srgb, var(--warning) 58%, var(--text));
+  font-size: var(--font-xs);
+}
+
+.composer-context-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  min-height: 28px;
+  padding-inline: var(--space-1);
+}
+
+.composer-context-row button,
+.composer-policy,
+.composer-icon-button,
+.composer-send,
+.attachment-card > button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  color: var(--muted);
+}
+
+.composer-context-row button {
+  min-height: 28px;
+  gap: 6px;
+  padding: 0 var(--space-2);
+  border-radius: var(--radius-sm);
+  font-size: var(--font-xs);
+}
+
+.composer-context-row button:hover,
+.composer-policy:hover,
+.composer-icon-button:hover {
+  background: var(--hover);
+  color: var(--text);
+}
+
+.composer-context-row button .icon:last-child,
+.composer-policy .icon:last-child {
+  width: 12px;
+  height: 12px;
+}
+
+.composer-demo {
+  width: 100%;
+  min-height: 184px;
+  display: grid;
+  grid-template-rows: auto minmax(48px, 1fr) auto;
+  gap: var(--space-2);
+  padding: var(--space-3);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-lg);
+  background: var(--surface-strong);
+  box-shadow: var(--shadow-raised);
+}
+
+.composer-demo textarea {
+  width: 100%;
+  min-height: 48px;
+  resize: none;
+  padding: 0;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: var(--text);
+}
+
+.composer-demo textarea::placeholder {
+  color: var(--faint);
+}
+
+.attachment-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.attachment-card {
+  position: relative;
+  width: 172px;
+  height: 64px;
+  display: grid;
+  grid-template-columns: 48px minmax(0, 1fr);
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+}
+
+.attachment-card.image {
+  width: 64px;
+  grid-template-columns: 1fr;
+}
+
+.attachment-file-icon,
+.attachment-preview {
+  width: 48px;
+  height: 48px;
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+  border-radius: var(--radius-sm);
+  background: var(--surface-strong);
+  color: var(--muted);
+}
+
+.attachment-preview {
+  background:
+    radial-gradient(circle at 72% 24%, rgb(255 255 255 / 64%) 0 7%, transparent 8%),
+    linear-gradient(145deg, #d9d5ff, #8275df 54%, #31323b);
+}
+
+.attachment-preview i {
+  width: 28px;
+  height: 28px;
+  display: grid;
+  place-items: center;
+  border-radius: 999px;
+  background: rgb(17 19 22 / 78%);
+  color: #ffffff;
+  font-size: var(--font-xs);
+  font-style: normal;
+  font-weight: 700;
+}
+
+.attachment-copy {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+
+.attachment-copy strong,
+.attachment-copy small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.attachment-copy strong {
+  font-size: var(--font-xs);
+  font-weight: 600;
+}
+
+.attachment-copy small {
+  color: var(--faint);
+  font-size: 11px;
+}
+
+.attachment-card > button {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  width: 20px;
+  height: 20px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--surface-strong) 86%, transparent);
+}
+
+.attachment-card > button:hover {
+  background: var(--control);
+  color: var(--text);
+}
+
+.attachment-card > button .icon {
+  width: 12px;
+  height: 12px;
+}
+
+.composer-demo footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+}
+
+.composer-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+}
+
+.composer-icon-button,
+.composer-send {
+  width: 30px;
+  height: 30px;
+  border-radius: var(--radius-md);
+}
+
+.composer-policy {
+  min-height: 30px;
+  gap: 6px;
+  padding: 0 var(--space-2);
+  border-radius: var(--radius-md);
+  color: color-mix(in srgb, var(--warning) 72%, var(--text));
+  font-size: var(--font-xs);
+}
+
+.composer-send {
+  background: var(--control);
+  color: var(--faint);
+}
+
+.composer-send:hover {
+  background: var(--accent);
+  color: var(--accent-contrast);
+}
+
+.composer-hint {
+  color: var(--faint);
+  font-size: 11px;
+  line-height: 1.5;
+  text-align: center;
+}
+
+@media (max-width: 560px) {
+  .composer-notice {
+    align-items: flex-start;
+  }
+
+  .attachment-card {
+    width: min(172px, calc(100% - 72px));
+  }
+}

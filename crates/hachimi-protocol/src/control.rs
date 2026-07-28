@@ -1,0 +1,118 @@
+use super::{Scope, WindowKind};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ControlMethod {
+    SystemBootstrap,
+    SettingsRead,
+    SettingsWrite,
+    WindowInteract,
+    WorkbenchOpen,
+    WorkbenchWindow,
+    LlmRead,
+    LlmWrite,
+    LlmTest,
+    LlmChat,
+    AvatarRead,
+    AvatarManage,
+    AvatarRuntime,
+    MotionRead,
+    MotionManage,
+    MotionRuntime,
+    VoiceRead,
+    VoiceManage,
+    VoicePlayback,
+    VoiceCapture,
+    ConnectorsManage,
+    SkillsManage,
+}
+
+impl ControlMethod {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::SystemBootstrap => "system.bootstrap",
+            Self::SettingsRead => "settings.read",
+            Self::SettingsWrite => "settings.write",
+            Self::WindowInteract => "window.interact",
+            Self::WorkbenchOpen => "workbench.open",
+            Self::WorkbenchWindow => "workbench.window",
+            Self::LlmRead => "llm.read",
+            Self::LlmWrite => "llm.write",
+            Self::LlmTest => "llm.test",
+            Self::LlmChat => "llm.chat",
+            Self::AvatarRead => "avatar.read",
+            Self::AvatarManage => "avatar.manage",
+            Self::AvatarRuntime => "avatar.runtime",
+            Self::MotionRead => "motion.read",
+            Self::MotionManage => "motion.manage",
+            Self::MotionRuntime => "motion.runtime",
+            Self::VoiceRead => "voice.read",
+            Self::VoiceManage => "voice.manage",
+            Self::VoicePlayback => "voice.playback",
+            Self::VoiceCapture => "voice.capture",
+            Self::ConnectorsManage => "connectors.manage",
+            Self::SkillsManage => "skills.manage",
+        }
+    }
+
+    #[must_use]
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "system.bootstrap" => Some(Self::SystemBootstrap),
+            "settings.read" => Some(Self::SettingsRead),
+            "settings.write" => Some(Self::SettingsWrite),
+            "window.interact" => Some(Self::WindowInteract),
+            "workbench.open" => Some(Self::WorkbenchOpen),
+            "workbench.window" => Some(Self::WorkbenchWindow),
+            "llm.read" => Some(Self::LlmRead),
+            "llm.write" => Some(Self::LlmWrite),
+            "llm.test" => Some(Self::LlmTest),
+            "llm.chat" => Some(Self::LlmChat),
+            "avatar.read" => Some(Self::AvatarRead),
+            "avatar.manage" => Some(Self::AvatarManage),
+            "avatar.runtime" => Some(Self::AvatarRuntime),
+            "motion.read" => Some(Self::MotionRead),
+            "motion.manage" => Some(Self::MotionManage),
+            "motion.runtime" => Some(Self::MotionRuntime),
+            "voice.read" => Some(Self::VoiceRead),
+            "voice.manage" => Some(Self::VoiceManage),
+            "voice.playback" => Some(Self::VoicePlayback),
+            "voice.capture" => Some(Self::VoiceCapture),
+            "connectors.manage" => Some(Self::ConnectorsManage),
+            "skills.manage" => Some(Self::SkillsManage),
+            _ => None,
+        }
+    }
+
+    #[must_use]
+    pub const fn required_scope(self, window_kind: WindowKind) -> Scope {
+        match self {
+            Self::SystemBootstrap => match window_kind {
+                WindowKind::Pet => Scope::PetInteract,
+                WindowKind::Settings | WindowKind::Workbench => Scope::SettingsRead,
+                WindowKind::Service => Scope::AdminPolicy,
+            },
+            Self::SettingsRead => Scope::SettingsRead,
+            Self::SettingsWrite => Scope::SettingsWrite,
+            Self::WindowInteract => Scope::PetInteract,
+            Self::WorkbenchOpen => Scope::WorkbenchOpen,
+            Self::WorkbenchWindow => Scope::WorkbenchWindow,
+            Self::LlmRead => Scope::LlmRead,
+            Self::LlmWrite => Scope::LlmWrite,
+            Self::LlmTest => Scope::LlmTest,
+            Self::LlmChat => Scope::LlmChat,
+            Self::AvatarRead => Scope::AvatarRead,
+            Self::AvatarManage => Scope::AvatarManage,
+            Self::AvatarRuntime => Scope::AvatarRuntime,
+            Self::MotionRead => Scope::MotionRead,
+            Self::MotionManage => Scope::MotionManage,
+            Self::MotionRuntime => Scope::MotionRuntime,
+            Self::VoiceRead => Scope::VoiceRead,
+            Self::VoiceManage => Scope::VoiceManage,
+            Self::VoicePlayback => Scope::VoicePlayback,
+            Self::VoiceCapture => Scope::VoiceCapture,
+            Self::ConnectorsManage => Scope::ConnectorsManage,
+            Self::SkillsManage => Scope::SkillsManage,
+        }
+    }
+}

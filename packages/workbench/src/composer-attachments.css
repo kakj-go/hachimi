@@ -1,0 +1,140 @@
+.composer-attachment-input {
+  display: none;
+}
+
+.composer-attachment-list {
+  max-height: 174px;
+  display: flex;
+  align-items: flex-start;
+  flex-wrap: wrap;
+  gap: 9px;
+  margin: 0 0 10px;
+  padding: 0 1px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-color: color-mix(in srgb, var(--color-text-base) 24%, transparent) transparent;
+  scrollbar-width: thin;
+}
+
+.composer-attachment-card {
+  width: min(188px, 100%);
+  min-width: 0;
+  height: 76px;
+  position: relative;
+  display: grid;
+  grid-template-columns: 56px minmax(0, 1fr);
+  align-items: center;
+  gap: 10px;
+  padding: 9px 32px 9px 9px;
+  overflow: hidden;
+  border: 1px solid color-mix(in srgb, var(--color-text-base) 13%, transparent);
+  border-radius: var(--radius-xl);
+  background: color-mix(in srgb, var(--color-bg-control) 94%, transparent);
+  color: var(--color-text-base);
+  box-shadow: inset 0 1px 0 color-mix(in srgb, var(--color-text-base) 4%, transparent);
+  transition:
+    border-color var(--duration-fast) var(--ease-standard),
+    background var(--duration-fast) var(--ease-standard),
+    transform var(--duration-fast) var(--ease-standard);
+}
+
+.composer-attachment-card:hover {
+  border-color: color-mix(in srgb, var(--color-text-base) 20%, transparent);
+  background: color-mix(in srgb, var(--color-bg-control) 88%, var(--color-text-base) 4%);
+  transform: translateY(-1px);
+}
+
+.composer-attachment-card.image {
+  width: 76px;
+  grid-template-columns: 1fr;
+  gap: 0;
+  padding: 0;
+  background: var(--color-bg-control);
+}
+
+.composer-attachment-card.image img {
+  width: 100%;
+  height: 100%;
+  display: block;
+  object-fit: cover;
+}
+
+.composer-attachment-file-icon {
+  width: 56px;
+  height: 56px;
+  display: inline-grid;
+  place-items: center;
+  border-radius: var(--radius-lg);
+  background: color-mix(in srgb, var(--color-bg-base) 72%, transparent);
+  color: var(--color-text-muted);
+}
+
+.composer-attachment-card.folder .composer-attachment-file-icon {
+  color: var(--warning);
+}
+
+.composer-attachment-copy {
+  min-width: 0;
+  display: grid;
+  gap: 6px;
+}
+
+.composer-attachment-copy strong,
+.composer-attachment-copy small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.composer-attachment-copy strong {
+  font-size: var(--font-size-sm);
+  font-weight: 560;
+}
+
+.composer-attachment-copy small {
+  color: var(--color-text-faint);
+  font-size: var(--font-size-xs);
+}
+
+.composer-attachment-remove {
+  width: 23px;
+  height: 23px;
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  display: inline-grid;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--color-bg-floating) 88%, var(--color-text-inverse) 12%);
+  color: var(--color-text-base);
+  box-shadow: var(--shadow-raised);
+  opacity: 0.88;
+  transition:
+    opacity var(--duration-fast) var(--ease-standard),
+    transform var(--duration-fast) var(--ease-standard),
+    background var(--duration-fast) var(--ease-standard);
+}
+
+.composer-attachment-remove:hover,
+.composer-attachment-remove:focus-visible {
+  background: color-mix(in srgb, var(--color-bg-floating) 76%, var(--color-text-inverse) 24%);
+  opacity: 1;
+  transform: scale(1.06);
+}
+
+.composer-attachment-remove:active {
+  transform: scale(0.94);
+}
+
+html[data-color-scheme="light"] .composer-attachment-remove {
+  background: color-mix(in srgb, var(--color-bg-floating) 92%, var(--color-text-inverse));
+  color: var(--text);
+}
+
+@media (max-width: 720px) {
+  .composer-attachment-card {
+    width: min(176px, calc(100vw - 64px));
+  }
+}

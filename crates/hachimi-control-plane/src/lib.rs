@@ -5,18 +5,69 @@ use std::sync::{
     atomic::{AtomicU64, Ordering},
 };
 
-use hachimi_approvals::{
-    ApprovalBroker, ApprovalDecision, ApprovalRequirement, NonInteractiveApproval,
-};
-use hachimi_audit::{AuditEvent, AuditSink, InMemoryAudit};
+use hachimi_approvals::{ApprovalBroker, NonInteractiveApproval};
+use hachimi_audit::{AuditEvent, AuditSink, NoopAudit};
 use hachimi_capabilities::CapabilityRegistry;
 use hachimi_core::FeatureFlags;
-use hachimi_policy::{DefaultPolicy, PolicyDecision, PolicyEngine};
+use hachimi_policy::{DefaultPolicy, PolicyContext, PolicyDecision, PolicyEngine};
 use hachimi_protocol::{
     CONTROL_PROTOCOL_VERSION, ClientContext, ControlError, ControlErrorCode, ControlMethod,
     ControlRequest, ControlResponse,
 };
 use serde_json::{Value, json};
+
+mod agent_lifecycle;
+mod app_server;
+mod app_server_domain;
+mod mcp_service;
+
+pub use agent_lifecycle::{AgentLifecycleError, AgentLifecycleService};
+pub use app_server::{
+    AppServer, AppServerContext, AppServerError, AppServerRequest, AppServerResponse,
+};
+pub use app_server_domain::*;
+pub use mcp_service::{
+    EmptyMcpSecretResolver, McpControlService, McpControlServiceError, McpReadyRuntime,
+    McpSecretResolver, mcp_host_identity_hash,
+};
+
+#[derive(Debug, Clone)]
+pub struct PersistentControlAuditSink {
+    store: hachimi_storage::AgentStore,
+}
+
+impl PersistentControlAuditSink {
+    #[must_use]
+    pub const fn new(store: hachimi_storage::AgentStore) -> Self {
+        Self { store }
+    }
+}
+
+impl AuditSink for PersistentControlAuditSink {
+    fn record(&self, event: AuditEvent) {
+        let store = self.store.clone();
+        let principal = event
+            .principal
+            .unwrap_or_else(|| "service:control-plane".to_owned());
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            runtime.spawn(async move {
+                let _ = store
+                    .append_audit_metadata(hachimi_storage::AuditMetadataRecord {
+                        principal,
+                        session_id: None,
+                        run_id: None,
+                        run_generation: None,
+                        operation: event.operation.to_owned(),
+                        target_summary: "control_method".into(),
+                        decision: event.outcome.to_owned(),
+                        result_code: event.outcome.to_owned(),
+                        created_at_ms: unix_time_ms(),
+                    })
+                    .await;
+            });
+        }
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AuthorizationError {
@@ -63,12 +114,17 @@ impl Default for ControlPlane {
 impl ControlPlane {
     #[must_use]
     pub fn new(feature_flags: FeatureFlags) -> Self {
+        Self::with_audit(feature_flags, Arc::new(NoopAudit))
+    }
+
+    #[must_use]
+    pub fn with_audit(feature_flags: FeatureFlags, audit: Arc<dyn AuditSink>) -> Self {
         Self {
             feature_flags,
             policy: Arc::new(DefaultPolicy),
             approvals: Arc::new(NonInteractiveApproval),
             capabilities: Arc::new(CapabilityRegistry::default()),
-            audit: Arc::new(InMemoryAudit::default()),
+            audit,
             event_sequence: AtomicU64::new(0),
         }
     }
@@ -76,6 +132,16 @@ impl ControlPlane {
     #[must_use]
     pub const fn feature_flags(&self) -> FeatureFlags {
         self.feature_flags
+    }
+
+    #[must_use]
+    pub const fn approval_broker(&self) -> &Arc<dyn ApprovalBroker> {
+        &self.approvals
+    }
+
+    #[must_use]
+    pub const fn capability_registry(&self) -> &Arc<CapabilityRegistry> {
+        &self.capabilities
     }
 
     #[must_use]
@@ -94,31 +160,29 @@ impl ControlPlane {
         method: ControlMethod,
     ) -> Result<(), AuthorizationError> {
         let required_scope = method.required_scope(client.window_kind);
-        if self.policy.evaluate(client, method, required_scope) == PolicyDecision::Deny {
-            self.audit.record(AuditEvent {
-                operation: method.as_str(),
-                outcome: "denied",
-            });
+        let policy_context = PolicyContext::control(client, method, required_scope);
+        let decision = self.policy.evaluate(&policy_context);
+        if let PolicyDecision::Deny { code } = decision {
+            self.audit.record(
+                AuditEvent::decision(method.as_str(), "denied")
+                    .with_principal(client.client_id.0.clone()),
+            );
             return Err(AuthorizationError {
                 code: ControlErrorCode::PermissionDenied,
-                message: format!("scope {required_scope:?} is required"),
+                message: format!("authorization denied: {code}"),
             });
         }
-
-        let decision = self
-            .approvals
-            .decide(client, method, ApprovalRequirement::NotRequired);
-        if decision == ApprovalDecision::Denied {
+        if let PolicyDecision::RequireApproval { code } = decision {
             return Err(AuthorizationError {
                 code: ControlErrorCode::ApprovalRequired,
-                message: "interactive approval is unavailable".into(),
+                message: format!("approval required: {code}"),
             });
         }
 
-        self.audit.record(AuditEvent {
-            operation: method.as_str(),
-            outcome: "allowed",
-        });
+        self.audit.record(
+            AuditEvent::decision(method.as_str(), "allowed")
+                .with_principal(client.client_id.0.clone()),
+        );
         Ok(())
     }
 
@@ -142,6 +206,16 @@ impl ControlPlane {
             }),
         }
     }
+}
+
+fn unix_time_ms() -> i64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| {
+            i64::try_from(duration.as_millis()).unwrap_or(i64::MAX)
+        })
 }
 
 impl InProcessTransport for ControlPlane {
@@ -191,6 +265,8 @@ impl InProcessTransport for ControlPlane {
 mod tests {
     use hachimi_core::WindowKind;
     use hachimi_protocol::{ClientId, RequestId};
+    use hachimi_storage::AgentStore;
+    use sqlx::Row;
 
     use super::*;
 
@@ -291,6 +367,9 @@ mod tests {
         let mut llm = request(CONTROL_PROTOCOL_VERSION, "llm.test");
         llm.client_id = client.client_id.clone();
         assert!(plane.dispatch(&client, llm).ok);
+        let mut connectors = request(CONTROL_PROTOCOL_VERSION, "connectors.manage");
+        connectors.client_id = client.client_id.clone();
+        assert!(plane.dispatch(&client, connectors).ok);
 
         let mut pet = request(CONTROL_PROTOCOL_VERSION, "window.interact");
         pet.client_id = client.client_id.clone();
@@ -327,6 +406,17 @@ mod tests {
                 .code,
             ControlErrorCode::PermissionDenied
         );
+        assert_eq!(
+            plane
+                .dispatch(
+                    &client,
+                    request(CONTROL_PROTOCOL_VERSION, "connectors.manage")
+                )
+                .error
+                .expect("denied")
+                .code,
+            ControlErrorCode::PermissionDenied
+        );
     }
 
     #[test]
@@ -334,5 +424,41 @@ mod tests {
         let plane = ControlPlane::default();
         assert_eq!(plane.next_event_sequence(), 1);
         assert_eq!(plane.next_event_sequence(), 2);
+    }
+
+    #[tokio::test]
+    async fn control_audit_persists_only_authenticated_metadata() {
+        let store = AgentStore::connect_in_memory().await.expect("store");
+        let plane = ControlPlane::with_audit(
+            FeatureFlags::all_disabled(),
+            Arc::new(PersistentControlAuditSink::new(store.clone())),
+        );
+        let client = ClientContext::for_window(WindowKind::Workbench);
+        let mut control_request = request(CONTROL_PROTOCOL_VERSION, "llm.test");
+        control_request.client_id = client.client_id.clone();
+        let response = plane.dispatch(&client, control_request);
+        assert!(response.ok);
+        let mut rows = Vec::new();
+        for _ in 0..20 {
+            rows = sqlx::query(
+                "SELECT principal, operation, target_summary, result_code FROM audit_events",
+            )
+            .fetch_all(store.pool())
+            .await
+            .expect("audit rows");
+            if !rows.is_empty() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].get::<String, _>("principal"), client.client_id.0);
+        assert_eq!(rows[0].get::<String, _>("operation"), "llm.test");
+        assert_eq!(rows[0].get::<String, _>("target_summary"), "control_method");
+        assert_eq!(rows[0].get::<String, _>("result_code"), "allowed");
+        let serialized = serde_json::to_string(&rows[0].get::<String, _>("target_summary"))
+            .expect("metadata serialization");
+        assert!(!serialized.contains("prompt"));
+        assert!(!serialized.contains("secret"));
     }
 }

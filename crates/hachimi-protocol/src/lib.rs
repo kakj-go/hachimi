@@ -1,12 +1,25 @@
 //! Transport-neutral protocol and serializable desktop contracts.
 
+mod agent;
+mod control;
+mod settings;
+mod voice;
+mod workspace;
+
+pub use control::ControlMethod;
+
+pub use agent::*;
+pub use settings::*;
+pub use voice::*;
+pub use workspace::*;
+
 use std::collections::BTreeSet;
 
 use hachimi_core::{FeatureFlags, WindowKind};
 use serde::{Deserialize, Serialize};
 use specta::Type;
 
-pub const CONTROL_PROTOCOL_VERSION: u32 = 17;
+pub const CONTROL_PROTOCOL_VERSION: u32 = 18;
 pub const SETTINGS_SCHEMA_VERSION: u32 = 8;
 pub const THEME_PROFILE_FORMAT: &str = "hachimi-theme";
 pub const THEME_PROFILE_FORMAT_VERSION: u32 = 1;
@@ -127,6 +140,12 @@ pub enum Scope {
     ComputerControl,
     #[serde(rename = "connectors.invoke")]
     ConnectorsInvoke,
+    #[serde(rename = "connectors.manage")]
+    ConnectorsManage,
+    #[serde(rename = "skills.manage")]
+    SkillsManage,
+    #[serde(rename = "skills.use")]
+    SkillsUse,
     #[serde(rename = "devices.pair")]
     DevicesPair,
     #[serde(rename = "admin.policy")]
@@ -168,12 +187,25 @@ impl ClientContext {
                 Scope::VoiceManage,
                 Scope::VoicePlayback,
                 Scope::WorkbenchWindow,
+                Scope::ConnectorsManage,
+                Scope::SkillsManage,
+                Scope::SkillsUse,
             ]),
+            WindowKind::Service => BTreeSet::new(),
         };
         Self {
             client_id: ClientId(format!("window:{}", window_kind.label())),
             window_kind,
             scopes,
+        }
+    }
+
+    #[must_use]
+    pub fn for_internal(principal: &str) -> Self {
+        Self {
+            client_id: ClientId(format!("service:{principal}")),
+            window_kind: WindowKind::Service,
+            scopes: BTreeSet::new(),
         }
     }
 }
@@ -209,6 +241,15 @@ pub enum DiffMarkerMode {
     #[default]
     Color,
     Signs,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum UiDensity {
+    Compact,
+    #[default]
+    Default,
+    Comfortable,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
@@ -258,13 +299,13 @@ impl ThemeProfile {
     pub fn codex_light() -> Self {
         Self::builtin(
             "codex-light",
-            "Codex Light",
+            "Quiet Graphite Light",
             ThemeScheme::Light,
-            "#1677D2",
-            "#F5F4F7",
-            "#202126",
+            "#4358C5",
+            "#F8F7F3",
+            "#24272D",
             true,
-            45,
+            54,
         )
     }
 
@@ -272,11 +313,11 @@ impl ThemeProfile {
     pub fn codex_dark() -> Self {
         Self::builtin(
             "codex-dark",
-            "Codex Dark",
+            "Quiet Graphite",
             ThemeScheme::Dark,
-            "#2EA8FF",
-            "#151616",
-            "#F1F1F3",
+            "#7062D5",
+            "#111316",
+            "#F1F3F5",
             true,
             60,
         )
@@ -508,6 +549,8 @@ pub struct AppearancePreferences {
     pub ui_font_size: u8,
     pub code_font_size: u8,
     pub diff_markers: DiffMarkerMode,
+    #[serde(default)]
+    pub density: UiDensity,
 }
 
 impl Default for AppearancePreferences {
@@ -518,6 +561,7 @@ impl Default for AppearancePreferences {
             ui_font_size: 14,
             code_font_size: 12,
             diff_markers: DiffMarkerMode::Color,
+            density: UiDensity::Default,
         }
     }
 }
@@ -557,6 +601,31 @@ impl Default for AppearanceConfig {
 impl AppearanceConfig {
     pub fn merge_missing_builtin_profiles(&mut self) -> bool {
         let mut changed = false;
+        for profile in &mut self.themes {
+            let replacement = match profile.id.as_str() {
+                "codex-light"
+                    if profile.builtin
+                        && profile.accent.eq_ignore_ascii_case("#1677D2")
+                        && profile.background.eq_ignore_ascii_case("#F5F4F7")
+                        && profile.foreground.eq_ignore_ascii_case("#202126") =>
+                {
+                    Some(ThemeProfile::codex_light())
+                }
+                "codex-dark"
+                    if profile.builtin
+                        && profile.accent.eq_ignore_ascii_case("#2EA8FF")
+                        && profile.background.eq_ignore_ascii_case("#151616")
+                        && profile.foreground.eq_ignore_ascii_case("#F1F1F3") =>
+                {
+                    Some(ThemeProfile::codex_dark())
+                }
+                _ => None,
+            };
+            if let Some(replacement) = replacement {
+                *profile = replacement;
+                changed = true;
+            }
+        }
         for profile in ThemeProfile::builtin_profiles() {
             if self.themes.len() >= MAX_THEME_PROFILES {
                 break;
@@ -682,6 +751,10 @@ pub enum WorkbenchRoute {
     SettingsMotion,
     #[serde(rename = "settings/voice")]
     SettingsVoice,
+    #[serde(rename = "settings/skills")]
+    SettingsSkills,
+    #[serde(rename = "settings/mcp")]
+    SettingsMcp,
     #[serde(rename = "developer/motion-lab")]
     DeveloperMotionLab,
 }
@@ -697,72 +770,11 @@ impl WorkbenchRoute {
             Self::SettingsAvatar => "settings/avatar",
             Self::SettingsMotion => "settings/motion",
             Self::SettingsVoice => "settings/voice",
+            Self::SettingsSkills => "settings/skills",
+            Self::SettingsMcp => "settings/mcp",
             Self::DeveloperMotionLab => "developer/motion-lab",
         }
     }
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Type)]
-#[serde(rename_all = "camelCase")]
-pub struct LlmSettings {
-    pub base_url: String,
-    pub model_name: String,
-    pub max_input_tokens: u32,
-    pub max_output_tokens: u32,
-}
-
-impl Default for LlmSettings {
-    fn default() -> Self {
-        Self {
-            base_url: "http://localhost:11434/v1".into(),
-            model_name: "gemma4:e4b".into(),
-            max_input_tokens: 0,
-            max_output_tokens: 0,
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Type)]
-#[serde(rename_all = "camelCase")]
-pub struct LlmSettingsView {
-    pub base_url: String,
-    pub model_name: String,
-    pub max_input_tokens: u32,
-    pub max_output_tokens: u32,
-    pub api_key_configured: bool,
-}
-
-impl LlmSettingsView {
-    #[must_use]
-    pub fn from_settings(settings: &LlmSettings, api_key_configured: bool) -> Self {
-        Self {
-            base_url: settings.base_url.clone(),
-            model_name: settings.model_name.clone(),
-            max_input_tokens: settings.max_input_tokens,
-            max_output_tokens: settings.max_output_tokens,
-            api_key_configured,
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Type)]
-#[serde(rename_all = "camelCase")]
-pub struct LlmSettingsInput {
-    pub base_url: String,
-    pub model_name: String,
-    pub max_input_tokens: u32,
-    pub max_output_tokens: u32,
-    /// Missing or blank keeps the existing secret. Secrets are never returned to the WebView.
-    pub api_key: Option<String>,
-    pub clear_api_key: bool,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Type)]
-#[serde(rename_all = "camelCase")]
-pub struct LlmTestResult {
-    pub success: bool,
-    pub latency_ms: u32,
-    pub response_preview: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
@@ -1333,331 +1345,6 @@ pub struct AvatarCatalogSnapshot {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
-pub struct VoiceSettings {
-    pub muted: bool,
-    #[serde(default = "default_voice_speed_percent")]
-    pub speed_percent: u16,
-    #[serde(default)]
-    pub compute_mode: VoiceComputeMode,
-    /// SenseVoice has its own session and can fall back independently from TTS.
-    #[serde(default)]
-    pub recognition_compute_mode: VoiceComputeMode,
-}
-
-impl Default for VoiceSettings {
-    fn default() -> Self {
-        Self {
-            muted: false,
-            speed_percent: default_voice_speed_percent(),
-            compute_mode: VoiceComputeMode::Auto,
-            recognition_compute_mode: VoiceComputeMode::Auto,
-        }
-    }
-}
-
-#[must_use]
-pub const fn default_voice_speed_percent() -> u16 {
-    100
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
-#[serde(rename_all = "camelCase")]
-pub struct VoiceSettingsInput {
-    pub speed_percent: u16,
-    pub compute_mode: VoiceComputeMode,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
-#[serde(rename_all = "camelCase")]
-pub struct SpeechRecognitionSettingsInput {
-    pub compute_mode: VoiceComputeMode,
-}
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, Type)]
-#[serde(rename_all = "snake_case")]
-pub enum VoiceComputeMode {
-    #[default]
-    Auto,
-    DirectMl,
-    Cpu,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type)]
-#[serde(rename_all = "snake_case")]
-pub enum VoiceComputeBackend {
-    DirectMl,
-    Cpu,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
-#[serde(rename_all = "camelCase")]
-pub struct VoiceComputeDevice {
-    pub device_id: u32,
-    pub name: String,
-    pub dedicated_memory_mb: u32,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type)]
-#[serde(rename_all = "snake_case")]
-pub enum VoiceModelOrigin {
-    BuiltIn,
-    Imported,
-}
-
-const fn default_voice_speaker_count() -> u32 {
-    1
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
-#[serde(rename_all = "camelCase")]
-pub struct VoiceModelEntry {
-    pub id: String,
-    pub name: String,
-    pub sha256: String,
-    pub original_file_name: String,
-    pub size_bytes: u32,
-    pub origin: VoiceModelOrigin,
-    pub model_type: String,
-    pub languages: Vec<String>,
-    pub sample_rate: u32,
-    #[serde(default = "default_voice_speaker_count")]
-    pub speaker_count: u32,
-    #[serde(default)]
-    pub speaker_id: u32,
-    pub license_summary: String,
-    pub license_warning: bool,
-    pub protected: bool,
-    pub imported_at: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
-#[serde(rename_all = "camelCase")]
-pub struct VoiceCatalogSnapshot {
-    pub entries: Vec<VoiceModelEntry>,
-    pub current_id: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
-#[serde(rename_all = "camelCase")]
-pub struct VoiceModelInspection {
-    pub token: Option<String>,
-    pub original_file_name: String,
-    pub size_bytes: u32,
-    pub sha256: String,
-    pub model_type: String,
-    pub languages: Vec<String>,
-    pub sample_rate: u32,
-    pub speaker_count: u32,
-    pub suggested_speaker_id: u32,
-    pub required_files: Vec<String>,
-    pub license_summary: String,
-    pub license_warning: bool,
-    pub compatible: bool,
-    pub issues: Vec<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
-#[serde(rename_all = "camelCase")]
-pub struct VoiceImportCommitRequest {
-    pub token: String,
-    pub name: String,
-    pub license_acknowledged: bool,
-    pub speaker_id: u32,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Type)]
-#[serde(rename_all = "camelCase")]
-pub struct AvatarRuntimeAsset {
-    pub entry_id: String,
-    pub name: String,
-    pub sha256: String,
-    pub asset_url: String,
-    pub format: AvatarFormat,
-    pub profile: AvatarAdaptationProfile,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type)]
-#[serde(rename_all = "snake_case")]
-pub enum SpeechTimelineQuality {
-    EnergyLocked,
-    PhonemeTimed,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
-#[serde(rename_all = "camelCase")]
-pub struct SpeechVisemeFrame {
-    pub time_ms: u32,
-    pub aa: u8,
-    pub ih: u8,
-    pub ou: u8,
-    pub ee: u8,
-    pub oh: u8,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
-#[serde(rename_all = "camelCase")]
-pub struct SpeechTimeline {
-    pub frame_duration_ms: u16,
-    pub jaw_open: Vec<u8>,
-    pub visemes: Option<Vec<SpeechVisemeFrame>>,
-    pub quality: SpeechTimelineQuality,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type)]
-#[serde(rename_all = "snake_case")]
-pub enum SpeechPlaybackSource {
-    PetTurn,
-    WorkbenchPreview,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type)]
-#[serde(rename_all = "snake_case")]
-pub enum SpeechPlaybackPhase {
-    Prepared,
-    Playing,
-    Progress,
-    Completed,
-    Stopped,
-    Failed,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
-#[serde(rename_all = "camelCase")]
-pub struct SpeechPlaybackEvent {
-    pub playback_id: String,
-    pub run_id: Option<String>,
-    pub source: SpeechPlaybackSource,
-    pub phase: SpeechPlaybackPhase,
-    pub media_position_ms: u32,
-    pub duration_ms: u32,
-    pub sequence: u32,
-    pub timeline: Option<SpeechTimeline>,
-    pub segment_index: u32,
-    pub text_start: u32,
-    pub text_end: u32,
-    /// Display text is attached to Pet playback preparation so the WebView
-    /// can reveal the complete sentence when its PCM segment starts.
-    pub display_text: Option<String>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type)]
-#[serde(rename_all = "snake_case")]
-pub enum SpeechTurnPhase {
-    Started,
-    Completed,
-    Stopped,
-    Skipped,
-    Failed,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
-#[serde(rename_all = "camelCase")]
-pub struct SpeechTurnEvent {
-    pub run_id: String,
-    pub phase: SpeechTurnPhase,
-    pub message: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
-#[serde(rename_all = "camelCase")]
-pub struct VoiceRuntimeState {
-    pub available: bool,
-    pub muted: bool,
-    pub model_id: Option<String>,
-    pub voice_name: String,
-    pub speaking: bool,
-    pub speed_percent: u16,
-    pub provider: String,
-    pub compute_mode: VoiceComputeMode,
-    pub backend: Option<VoiceComputeBackend>,
-    pub compute_device: Option<VoiceComputeDevice>,
-    pub fallback_reason: Option<String>,
-    pub loading: bool,
-    pub languages: Vec<String>,
-    pub speaker_count: u32,
-    pub speaker_id: u32,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
-#[serde(rename_all = "camelCase")]
-pub struct SpeechRecognitionRuntimeState {
-    pub installed: bool,
-    pub installing: bool,
-    pub bundled: bool,
-    pub model_name: String,
-    pub provider: String,
-    pub languages: Vec<String>,
-    pub size_bytes: u32,
-    pub compute_mode: VoiceComputeMode,
-    pub backend: Option<VoiceComputeBackend>,
-    pub compute_device: Option<VoiceComputeDevice>,
-    pub fallback_reason: Option<String>,
-    pub loading: bool,
-    pub error: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
-#[serde(rename_all = "camelCase")]
-pub struct PetTurnRequest {
-    pub run_id: String,
-    pub text: String,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, Type)]
-#[serde(rename_all = "camelCase")]
-pub struct PetContextMenuRequest {
-    pub x: f64,
-    pub y: f64,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type)]
-#[serde(rename_all = "snake_case")]
-pub enum FrontendLogLevel {
-    Info,
-    Warn,
-    Error,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
-#[serde(rename_all = "camelCase")]
-pub struct FrontendLogEntry {
-    pub level: FrontendLogLevel,
-    pub message: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum PetTurnEvent {
-    Started {
-        #[serde(rename = "runId")]
-        run_id: String,
-    },
-    TextDelta {
-        #[serde(rename = "runId")]
-        run_id: String,
-        delta: String,
-    },
-    Completed {
-        #[serde(rename = "runId")]
-        run_id: String,
-        text: String,
-        #[serde(rename = "speechQueued")]
-        speech_queued: bool,
-    },
-    Cancelled {
-        #[serde(rename = "runId")]
-        run_id: String,
-    },
-    Failed {
-        #[serde(rename = "runId")]
-        run_id: String,
-        code: String,
-        message: String,
-    },
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
-#[serde(rename_all = "camelCase")]
 pub struct ResourceImportRequest {
     pub name: String,
 }
@@ -1757,114 +1444,6 @@ pub struct BootstrapState {
     pub feature_flags: FeatureFlags,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum ControlMethod {
-    SystemBootstrap,
-    SettingsRead,
-    SettingsWrite,
-    WindowInteract,
-    WorkbenchOpen,
-    WorkbenchWindow,
-    LlmRead,
-    LlmWrite,
-    LlmTest,
-    LlmChat,
-    AvatarRead,
-    AvatarManage,
-    AvatarRuntime,
-    MotionRead,
-    MotionManage,
-    MotionRuntime,
-    VoiceRead,
-    VoiceManage,
-    VoicePlayback,
-    VoiceCapture,
-}
-
-impl ControlMethod {
-    #[must_use]
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::SystemBootstrap => "system.bootstrap",
-            Self::SettingsRead => "settings.read",
-            Self::SettingsWrite => "settings.write",
-            Self::WindowInteract => "window.interact",
-            Self::WorkbenchOpen => "workbench.open",
-            Self::WorkbenchWindow => "workbench.window",
-            Self::LlmRead => "llm.read",
-            Self::LlmWrite => "llm.write",
-            Self::LlmTest => "llm.test",
-            Self::LlmChat => "llm.chat",
-            Self::AvatarRead => "avatar.read",
-            Self::AvatarManage => "avatar.manage",
-            Self::AvatarRuntime => "avatar.runtime",
-            Self::MotionRead => "motion.read",
-            Self::MotionManage => "motion.manage",
-            Self::MotionRuntime => "motion.runtime",
-            Self::VoiceRead => "voice.read",
-            Self::VoiceManage => "voice.manage",
-            Self::VoicePlayback => "voice.playback",
-            Self::VoiceCapture => "voice.capture",
-        }
-    }
-
-    #[must_use]
-    pub fn parse(value: &str) -> Option<Self> {
-        match value {
-            "system.bootstrap" => Some(Self::SystemBootstrap),
-            "settings.read" => Some(Self::SettingsRead),
-            "settings.write" => Some(Self::SettingsWrite),
-            "window.interact" => Some(Self::WindowInteract),
-            "workbench.open" => Some(Self::WorkbenchOpen),
-            "workbench.window" => Some(Self::WorkbenchWindow),
-            "llm.read" => Some(Self::LlmRead),
-            "llm.write" => Some(Self::LlmWrite),
-            "llm.test" => Some(Self::LlmTest),
-            "llm.chat" => Some(Self::LlmChat),
-            "avatar.read" => Some(Self::AvatarRead),
-            "avatar.manage" => Some(Self::AvatarManage),
-            "avatar.runtime" => Some(Self::AvatarRuntime),
-            "motion.read" => Some(Self::MotionRead),
-            "motion.manage" => Some(Self::MotionManage),
-            "motion.runtime" => Some(Self::MotionRuntime),
-            "voice.read" => Some(Self::VoiceRead),
-            "voice.manage" => Some(Self::VoiceManage),
-            "voice.playback" => Some(Self::VoicePlayback),
-            "voice.capture" => Some(Self::VoiceCapture),
-            _ => None,
-        }
-    }
-
-    #[must_use]
-    pub const fn required_scope(self, window_kind: WindowKind) -> Scope {
-        match self {
-            Self::SystemBootstrap => match window_kind {
-                WindowKind::Pet => Scope::PetInteract,
-                WindowKind::Settings | WindowKind::Workbench => Scope::SettingsRead,
-            },
-            Self::SettingsRead => Scope::SettingsRead,
-            Self::SettingsWrite => Scope::SettingsWrite,
-            Self::WindowInteract => Scope::PetInteract,
-            Self::WorkbenchOpen => Scope::WorkbenchOpen,
-            Self::WorkbenchWindow => Scope::WorkbenchWindow,
-            Self::LlmRead => Scope::LlmRead,
-            Self::LlmWrite => Scope::LlmWrite,
-            Self::LlmTest => Scope::LlmTest,
-            Self::LlmChat => Scope::LlmChat,
-            Self::AvatarRead => Scope::AvatarRead,
-            Self::AvatarManage => Scope::AvatarManage,
-            Self::AvatarRuntime => Scope::AvatarRuntime,
-            Self::MotionRead => Scope::MotionRead,
-            Self::MotionManage => Scope::MotionManage,
-            Self::MotionRuntime => Scope::MotionRuntime,
-            Self::VoiceRead => Scope::VoiceRead,
-            Self::VoiceManage => Scope::VoiceManage,
-            Self::VoicePlayback => Scope::VoicePlayback,
-            Self::VoiceCapture => Scope::VoiceCapture,
-        }
-    }
-}
-
 pub fn registered_types() -> specta::Types {
     specta::Types::default()
         .register::<RequestId>()
@@ -1872,10 +1451,277 @@ pub fn registered_types() -> specta::Types {
         .register::<ControlErrorCode>()
         .register::<ControlError>()
         .register::<Scope>()
+        .register::<ProjectId>()
+        .register::<CheckoutId>()
+        .register::<SessionId>()
+        .register::<RunId>()
+        .register::<ItemId>()
+        .register::<ToolCallId>()
+        .register::<AttachmentId>()
+        .register::<ApprovalId>()
+        .register::<TaskRunId>()
+        .register::<PlanId>()
+        .register::<ArtifactId>()
+        .register::<CompactionCheckpointId>()
+        .register::<McpServerId>()
+        .register::<SkillId>()
+        .register::<SkillSubscriptionId>()
+        .register::<UserInputRequestId>()
+        .register::<ProcessSessionId>()
+        .register::<ReviewId>()
+        .register::<ReviewFindingId>()
+        .register::<RealtimeSessionId>()
+        .register::<PlanStepId>()
+        .register::<EventSubscriptionId>()
+        .register::<FsWatchId>()
+        .register::<FsSearchId>()
+        .register::<SideEffectExecutionId>()
+        .register::<AvatarId>()
+        .register::<ScheduleId>()
+        .register::<ScheduleGrantId>()
+        .register::<SkillActivationId>()
+        .register::<ExecutionTarget>()
+        .register::<RunDriverKind>()
+        .register::<RunPurpose>()
+        .register::<EntryProfile>()
+        .register::<WorkloadKind>()
+        .register::<WorkloadResolutionSource>()
+        .register::<WorkloadResolution>()
+        .register::<SessionContextBinding>()
+        .register::<RunOrigin>()
+        .register::<BehaviorMode>()
+        .register::<ApprovalPolicy>()
+        .register::<PermissionProfile>()
+        .register::<RunBudget>()
+        .register::<RunConfiguration>()
+        .register::<CheckoutKind>()
+        .register::<CheckoutStatus>()
+        .register::<RunStatus>()
+        .register::<TaskRunStatus>()
+        .register::<ScheduleSpec>()
+        .register::<ScheduleContextTemplate>()
+        .register::<MisfirePolicy>()
+        .register::<DeliveryPolicy>()
+        .register::<ScheduleHealth>()
+        .register::<McpToolSelection>()
+        .register::<SchedulePermissionConfig>()
+        .register::<ScheduleDefinition>()
+        .register::<ScheduleGrantStatus>()
+        .register::<ScheduleAuthorizationScope>()
+        .register::<ScheduleGrantRecord>()
+        .register::<TaskRunTrigger>()
+        .register::<DeliveryStatus>()
+        .register::<ScheduleCreateRequest>()
+        .register::<ScheduleUpdateRequest>()
+        .register::<SchedulePreview>()
+        .register::<ScheduleSnapshot>()
+        .register::<TaskInteractiveContinuation>()
+        .register::<UserInputStatus>()
+        .register::<UserInputOption>()
+        .register::<UserInputQuestion>()
+        .register::<UserInputAnswer>()
+        .register::<UserInputRequestRecord>()
+        .register::<UserInputResolution>()
+        .register::<UserInputResolutionAction>()
+        .register::<ItemStatus>()
+        .register::<PlanStepStatus>()
+        .register::<PlanStep>()
+        .register::<ItemRelations>()
+        .register::<TranscriptItemKind>()
+        .register::<ItemPayload>()
+        .register::<ToolExecutionResult>()
+        .register::<TranscriptItem>()
+        .register::<CompactionReason>()
+        .register::<CompactionTrigger>()
+        .register::<CompactionPhase>()
+        .register::<CompactionImplementation>()
+        .register::<TokenCountSource>()
+        .register::<CompactionTokenSnapshot>()
+        .register::<CompactionLifecycle>()
+        .register::<CompactionSummary>()
+        .register::<CompactionQuality>()
+        .register::<CompactionCheckpoint>()
+        .register::<RunUsageSnapshot>()
+        .register::<SideEffectExecutionStatus>()
+        .register::<SideEffectExecutionRecord>()
+        .register::<FsEntryKind>()
+        .register::<FsEntry>()
+        .register::<FsListRequest>()
+        .register::<FsListPage>()
+        .register::<FsReadChunkRequest>()
+        .register::<FsFileChunk>()
+        .register::<FsWriteRequest>()
+        .register::<FsWriteResponse>()
+        .register::<GitFileStatus>()
+        .register::<GitCommitSummary>()
+        .register::<GitWorkspaceRequest>()
+        .register::<GitWorkspaceSnapshot>()
+        .register::<GitMutation>()
+        .register::<GitMutationRequest>()
+        .register::<GitMutationResponse>()
+        .register::<FsChangeKind>()
+        .register::<FsWatchRequest>()
+        .register::<FsWatchRegistration>()
+        .register::<FsChangeEvent>()
+        .register::<FsSearchStartRequest>()
+        .register::<FsSearchUpdateRequest>()
+        .register::<FsSearchResult>()
+        .register::<FsSearchSnapshot>()
+        .register::<DiffScope>()
+        .register::<FileDiffStatus>()
+        .register::<DiffLine>()
+        .register::<DiffHunk>()
+        .register::<FileDiffSummary>()
+        .register::<RunDiffSnapshot>()
+        .register::<DiffReadFileRequest>()
+        .register::<DiffReadFileResponse>()
+        .register::<RunEventEnvelope>()
+        .register::<RunEventPayload>()
+        .register::<ProposedPlanStatus>()
+        .register::<ProposedPlan>()
+        .register::<ProjectRecord>()
+        .register::<ProjectGitState>()
+        .register::<ProjectGitSnapshot>()
+        .register::<ProjectGitInitialCommitRequest>()
+        .register::<ProjectGitInitialCommitResponse>()
+        .register::<AttachmentRecord>()
+        .register::<CheckoutRecord>()
+        .register::<SessionRecord>()
+        .register::<RunRecord>()
+        .register::<TaskRunRecord>()
+        .register::<SkillDiagnosticSeverity>()
+        .register::<SkillDiagnostic>()
+        .register::<SkillEntryKind>()
+        .register::<SkillEditorKind>()
+        .register::<SkillScope>()
+        .register::<SkillToolDependency>()
+        .register::<SkillTreeNode>()
+        .register::<SkillRecord>()
+        .register::<SkillActivationSource>()
+        .register::<SkillClassification>()
+        .register::<SkillActivation>()
+        .register::<SkillFileSnapshot>()
+        .register::<SkillFileWriteRequest>()
+        .register::<SkillPreviewResourceRequest>()
+        .register::<SkillPreviewResource>()
+        .register::<SkillEntryCreateRequest>()
+        .register::<SkillEntryRenameRequest>()
+        .register::<SkillChangeKind>()
+        .register::<SkillChangeEvent>()
+        .register::<McpServerTransport>()
+        .register::<McpHeaderView>()
+        .register::<McpHeaderInput>()
+        .register::<McpServerRecord>()
+        .register::<McpServerUpsertRequest>()
+        .register::<McpServerHealthState>()
+        .register::<McpServerHealthRecord>()
+        .register::<McpServerView>()
+        .register::<McpToolView>()
+        .register::<McpToolOverride>()
+        .register::<McpConnectionTestResult>()
+        .register::<McpResource>()
+        .register::<McpResourceTemplate>()
+        .register::<McpResourceContent>()
+        .register::<McpMediaReference>()
+        .register::<McpPromptArgument>()
+        .register::<McpPrompt>()
+        .register::<McpPromptRole>()
+        .register::<McpPromptMessage>()
+        .register::<McpPromptResult>()
+        .register::<McpInventorySnapshot>()
+        .register::<McpResourceReadRequest>()
+        .register::<McpPromptGetRequest>()
+        .register::<McpCallOutcome>()
+        .register::<McpCallSummaryRecord>()
+        .register::<McpCallSummaryListRequest>()
+        .register::<McpToolProgressRecord>()
+        .register::<McpAuthStatus>()
+        .register::<McpAuthStatusRecord>()
+        .register::<McpOAuthLoginRequest>()
+        .register::<McpOAuthLoginResponse>()
+        .register::<ArtifactKind>()
+        .register::<ArtifactRecord>()
+        .register::<ApprovalStatus>()
+        .register::<ApprovalGrantScope>()
+        .register::<ApprovalRequestRecord>()
+        .register::<ApprovalResolution>()
+        .register::<ToolEffect>()
+        .register::<ToolDescriptor>()
+        .register::<DynamicToolRegistration>()
+        .register::<DynamicToolValidationError>()
+        .register::<ModelRole>()
+        .register::<ModelToolCall>()
+        .register::<ModelMessage>()
+        .register::<ModelRequest>()
+        .register::<ModelCompactionRequest>()
+        .register::<ModelCompactionResult>()
+        .register::<TokenUsage>()
+        .register::<ModelFinishReason>()
+        .register::<ModelEvent>()
+        .register::<ProviderCapabilities>()
+        .register::<CapabilityDegradation>()
+        .register::<MutationContext>()
+        .register::<PermissionGrantScope>()
+        .register::<FileSystemAccess>()
+        .register::<FileSystemGrant>()
+        .register::<NetworkGrant>()
+        .register::<ProcessGrant>()
+        .register::<ComputerGrant>()
+        .register::<CapabilityGrantSet>()
+        .register::<SandboxReadiness>()
+        .register::<SandboxCapabilityReport>()
+        .register::<SandboxRuntimeSnapshot>()
+        .register::<SandboxRepairRequest>()
+        .register::<ProcessStatus>()
+        .register::<ProcessSessionRecord>()
+        .register::<ProcessTerminalSize>()
+        .register::<ProcessOutputStream>()
+        .register::<ProcessSpawnRequest>()
+        .register::<ProcessWriteRequest>()
+        .register::<ProcessResizeRequest>()
+        .register::<ProcessTerminateRequest>()
+        .register::<ProcessReadRequest>()
+        .register::<ProcessListRequest>()
+        .register::<ProcessOutputChunk>()
+        .register::<ProcessReadSnapshot>()
+        .register::<ProcessEvent>()
+        .register::<ReviewDelivery>()
+        .register::<ReviewTarget>()
+        .register::<ReviewSeverity>()
+        .register::<ReviewFindingStatus>()
+        .register::<ReviewRecord>()
+        .register::<ReviewFinding>()
+        .register::<ReviewStartRequest>()
+        .register::<ReviewStartSnapshot>()
+        .register::<ReviewSnapshot>()
+        .register::<ReviewFindingUpdateRequest>()
+        .register::<ControlInitializeRequest>()
+        .register::<ControlInitializeResponse>()
+        .register::<SessionCursor>()
+        .register::<SessionSearchRequest>()
+        .register::<SessionPage>()
+        .register::<RunSteerStatus>()
+        .register::<RunSteerRecord>()
+        .register::<SessionResumeRequest>()
+        .register::<SessionResumeSnapshot>()
+        .register::<EventSubscriptionRequest>()
+        .register::<EventSubscriptionRecord>()
+        .register::<EventSubscriptionSnapshot>()
+        .register::<SessionForkRequest>()
+        .register::<SessionMetadataUpdateRequest>()
+        .register::<RunControlRequest>()
+        .register::<GitRefRecord>()
+        .register::<WorkbenchTaskStartRequest>()
+        .register::<WorkbenchTaskSnapshot>()
+        .register::<WorkbenchSessionSnapshot>()
+        .register::<ApprovalDecisionRequest>()
+        .register::<PlanAcceptanceRequest>()
+        .register::<WorkbenchPlanAcceptanceSnapshot>()
         .register::<ThemeMode>()
         .register::<ThemeScheme>()
         .register::<ReducedMotion>()
         .register::<DiffMarkerMode>()
+        .register::<UiDensity>()
         .register::<ThemeProfile>()
         .register::<AppearancePreferences>()
         .register::<AppearanceConfig>()
@@ -1886,6 +1732,9 @@ pub fn registered_types() -> specta::Types {
         .register::<LlmSettingsView>()
         .register::<LlmSettingsInput>()
         .register::<LlmTestResult>()
+        .register::<StructuredOutputMode>()
+        .register::<ProviderCapabilityProbeSource>()
+        .register::<ProviderCapabilityProbe>()
         .register::<AvatarFormat>()
         .register::<AvatarCompatibility>()
         .register::<BehaviorChannel>()
@@ -2006,6 +1855,7 @@ mod tests {
     fn default_appearance_is_valid_and_has_both_schemes() {
         let appearance = AppearanceConfig::default();
         assert!(appearance.validate().is_ok());
+        assert_eq!(appearance.preferences.density, UiDensity::Default);
         assert_eq!(appearance.themes.len(), 18);
         assert!(appearance.profile("catppuccin-dark").is_some());
         assert!(appearance.profile("github-light").is_some());
@@ -2026,6 +1876,17 @@ mod tests {
     }
 
     #[test]
+    fn legacy_appearance_without_density_uses_default_density() {
+        let mut value = serde_json::to_value(AppearanceConfig::default()).unwrap();
+        value["preferences"]
+            .as_object_mut()
+            .unwrap()
+            .remove("density");
+        let appearance: AppearanceConfig = serde_json::from_value(value).unwrap();
+        assert_eq!(appearance.preferences.density, UiDensity::Default);
+    }
+
+    #[test]
     fn missing_builtins_are_added_without_overwriting_existing_profiles() {
         let mut appearance = AppearanceConfig::default();
         appearance
@@ -2036,6 +1897,31 @@ mod tests {
         assert_eq!(appearance.themes.len(), 18);
         assert_eq!(appearance.profile("codex-light").unwrap().accent, "#123456");
         assert!(!appearance.merge_missing_builtin_profiles());
+    }
+
+    #[test]
+    fn legacy_codex_defaults_upgrade_to_quiet_graphite_without_overwriting_custom_colors() {
+        let mut appearance = AppearanceConfig::default();
+        let light = appearance.profile("codex-light").unwrap().clone();
+        let dark = appearance.profile("codex-dark").unwrap().clone();
+        appearance.themes[0] = ThemeProfile {
+            name: "Codex Light".into(),
+            accent: "#1677D2".into(),
+            background: "#F5F4F7".into(),
+            foreground: "#202126".into(),
+            ..light
+        };
+        appearance.themes[1] = ThemeProfile {
+            name: "Custom dark".into(),
+            accent: "#123456".into(),
+            ..dark
+        };
+        assert!(appearance.merge_missing_builtin_profiles());
+        assert_eq!(
+            appearance.profile("codex-light").unwrap().name,
+            "Quiet Graphite Light"
+        );
+        assert_eq!(appearance.profile("codex-dark").unwrap().accent, "#123456");
     }
 
     #[test]

@@ -1,0 +1,42 @@
+name: Windows Release Gate
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  sandbox-release:
+    if: github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
+    runs-on: [self-hosted, windows, x64, hachimi-sandbox]
+    environment: hachimi-sandbox-release
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24.10.0
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - run: corepack enable
+      - run: corepack prepare pnpm@11.15.1 --activate
+      - run: pnpm install --frozen-lockfile
+      - name: Elevated Sandbox and Desktop release suite
+        run: pnpm test:windows:release
+      - name: Upload sanitized release evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-release-validation-${{ github.run_id }}
+          path: target/windows-release-validation/**/summary.json
+          if-no-files-found: error
+          retention-days: 14

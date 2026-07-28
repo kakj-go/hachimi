@@ -1,0 +1,7 @@
+interface:
+  display_name: "Office PDF"
+  short_description: "Create inspect and validate PDF files"
+  default_prompt: "Use $office-pdf to create or inspect and validate the requested PDF."
+policy:
+  allow_implicit_invocation: true
+  workload: "office"

@@ -7,6 +7,8 @@ describe("workbench routing", () => {
     expect(normalizeWorkbenchRoute("settings/avatar")).toBe("settings/avatar");
     expect(normalizeWorkbenchRoute("settings/appearance")).toBe("settings/appearance");
     expect(normalizeWorkbenchRoute("settings/motion")).toBe("settings/motion");
+    expect(normalizeWorkbenchRoute("settings/skills")).toBe("settings/skills");
+    expect(normalizeWorkbenchRoute("settings/mcp")).toBe("settings/mcp");
     expect(normalizeWorkbenchRoute("developer/motion-lab")).toBe("developer/motion-lab");
     for (const route of WORKBENCH_ROUTES) expect(normalizeWorkbenchRoute(route)).toBe(route);
     expect(normalizeWorkbenchRoute("settings/plugins")).toBe("settings/general");

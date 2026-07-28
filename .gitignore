@@ -1,5 +1,6 @@
 # Rust / Tauri build output
 target/
+target-*/
 **/*.rs.bk
 apps/desktop/src-tauri/gen/schemas/
 
@@ -7,6 +8,8 @@ apps/desktop/src-tauri/gen/schemas/
 node_modules/
 .pnpm-store/
 **/dist/
+apps/desktop/src-tauri/binaries/*
+!apps/desktop/src-tauri/binaries/.gitkeep
 **/storybook-static/
 **/test-results/
 **/playwright-report/

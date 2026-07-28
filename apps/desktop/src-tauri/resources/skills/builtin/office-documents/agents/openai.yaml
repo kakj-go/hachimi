@@ -1,0 +1,7 @@
+interface:
+  display_name: "Office Documents"
+  short_description: "Create and revise professional documents"
+  default_prompt: "Use $office-documents to create and validate a professional document."
+policy:
+  allow_implicit_invocation: true
+  workload: "office"

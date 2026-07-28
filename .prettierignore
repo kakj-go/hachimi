@@ -1,4 +1,5 @@
 target
+target-*
 node_modules
 dist
 storybook-static
@@ -7,6 +8,7 @@ Cargo.lock
 packages/contracts/src/generated.ts
 apps/desktop/src-tauri/gen/
 apps/desktop/src-tauri/resources/ai-models/
+apps/desktop/src-tauri/installer/windows/*.wxs
 assets/avatar-motions-v4/catalog.json
 demo.html
 demo2.html

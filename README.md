@@ -131,6 +131,11 @@ Windows 人工验收表见：
 - [Phase 0/1 Windows 验收](docs/PHASE_0_1_WINDOWS_VALIDATION.md)
 - [Workbench 与设置中心验收](docs/WORKBENCH_WINDOWS_VALIDATION.md)
 
+未来 Agent 与工作台实现文档：
+
+- [Hachimi 路线图](docs/ROADMAP.md)
+- [统一 Harness Agent 架构与实施流程](docs/HARNESS_AGENT_ARCHITECTURE_AND_IMPLEMENTATION.md)
+
 ## Windows 构建产物
 
 生成 MSI 与 NSIS 安装程序：

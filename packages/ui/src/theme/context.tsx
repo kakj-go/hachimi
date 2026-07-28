@@ -14,6 +14,7 @@ export type ResolvedTheme = "light" | "dark";
 export type ThemeScheme = "light" | "dark";
 export type ReducedMotion = "system" | "on" | "off";
 export type DiffMarkerMode = "color" | "signs";
+export type UiDensity = "compact" | "default" | "comfortable";
 
 export interface ThemeProfile {
   id: string;
@@ -35,6 +36,8 @@ export interface AppearancePreferences {
   uiFontSize: number;
   codeFontSize: number;
   diffMarkers: DiffMarkerMode;
+  /** Always present after legacy settings are normalized by the provider. */
+  density: UiDensity;
 }
 
 export interface AppearanceConfig {
@@ -79,8 +82,17 @@ export const DEFAULT_APPEARANCE: AppearanceConfig = {
   lightThemeId: "codex-light",
   darkThemeId: "codex-dark",
   themes: [
-    builtinTheme("codex-light", "Codex Light", "light", "#1677D2", "#F5F4F7", "#202126", true, 45),
-    builtinTheme("codex-dark", "Codex Dark", "dark", "#2EA8FF", "#151616", "#F1F1F3", true, 60),
+    builtinTheme(
+      "codex-light",
+      "Quiet Graphite Light",
+      "light",
+      "#4358C5",
+      "#F8F7F3",
+      "#24272D",
+      true,
+      54,
+    ),
+    builtinTheme("codex-dark", "Quiet Graphite", "dark", "#7062D5", "#111316", "#F1F3F5", true, 60),
     builtinTheme(
       "catppuccin-light",
       "Catppuccin Latte",
@@ -194,6 +206,7 @@ export const DEFAULT_APPEARANCE: AppearanceConfig = {
     uiFontSize: 14,
     codeFontSize: 12,
     diffMarkers: "color",
+    density: "default",
   },
 };
 
@@ -209,6 +222,39 @@ export function isThemeMode(value: unknown): value is ThemeMode {
 
 export function isHexColor(value: unknown): value is string {
   return typeof value === "string" && /^#[\dA-Fa-f]{6}$/.test(value);
+}
+
+export function isUiDensity(value: unknown): value is UiDensity {
+  return value === "compact" || value === "default" || value === "comfortable";
+}
+
+export function normalizeAppearanceConfig(config: AppearanceConfig): AppearanceConfig {
+  const themes = config.themes.map((profile) => {
+    const isLegacyLight =
+      profile.id === "codex-light" &&
+      profile.builtin &&
+      profile.accent.toUpperCase() === "#1677D2" &&
+      profile.background.toUpperCase() === "#F5F4F7" &&
+      profile.foreground.toUpperCase() === "#202126";
+    const isLegacyDark =
+      profile.id === "codex-dark" &&
+      profile.builtin &&
+      profile.accent.toUpperCase() === "#2EA8FF" &&
+      profile.background.toUpperCase() === "#151616" &&
+      profile.foreground.toUpperCase() === "#F1F1F3";
+    if (!isLegacyLight && !isLegacyDark) return profile;
+    return {
+      ...DEFAULT_APPEARANCE.themes.find((candidate) => candidate.id === profile.id)!,
+    };
+  });
+  return {
+    ...config,
+    themes,
+    preferences: {
+      ...config.preferences,
+      density: isUiDensity(config.preferences.density) ? config.preferences.density : "default",
+    },
+  };
 }
 
 export function isAppearanceConfig(value: unknown): value is AppearanceConfig {
@@ -280,7 +326,8 @@ export function isAppearanceConfig(value: unknown): value is AppearanceConfig {
     Number.isInteger(preferences.codeFontSize) &&
     preferences.codeFontSize >= 10 &&
     preferences.codeFontSize <= 20 &&
-    ["color", "signs"].includes(preferences.diffMarkers)
+    ["color", "signs"].includes(preferences.diffMarkers) &&
+    (preferences.density === undefined || isUiDensity(preferences.density))
   );
 }
 
@@ -370,15 +417,20 @@ export function accentForeground(accent: string): "#000000" | "#FFFFFF" {
 }
 
 export function appearanceTokens(profile: ThemeProfile): Record<string, string> {
-  const isCodexDark =
+  const isQuietGraphiteDark =
     profile.id === "codex-dark" &&
-    profile.background.toUpperCase() === "#151616" &&
-    profile.foreground.toUpperCase() === "#F1F1F3";
+    profile.background.toUpperCase() === "#111316" &&
+    profile.foreground.toUpperCase() === "#F1F3F5";
+  const isQuietGraphiteLight =
+    profile.id === "codex-light" &&
+    profile.background.toUpperCase() === "#F8F7F3" &&
+    profile.foreground.toUpperCase() === "#24272D";
   const isDark = profile.scheme === "dark";
   const panelWeight = isDark ? 0.055 : 0.035;
   const controlWeight = isDark ? 0.115 : 0.08;
   const contrastScale = 0.25 + profile.contrast / 80;
-  const adjustCodexDarkSurface = (value: string, highContrastWeight: number) => {
+  const accentRgb = hexToRgb(profile.accent);
+  const adjustQuietGraphiteSurface = (value: string, highContrastWeight: number) => {
     if (profile.contrast === 60) return value;
     if (profile.contrast < 60) {
       return mix(value, profile.background, (60 - profile.contrast) / 60);
@@ -389,22 +441,38 @@ export function appearanceTokens(profile: ThemeProfile): Record<string, string> 
     "--appearance-background": profile.background,
     "--appearance-foreground": profile.foreground,
     "--appearance-accent": profile.accent,
+    "--appearance-accent-rgb": `${accentRgb.r} ${accentRgb.g} ${accentRgb.b}`,
     "--appearance-accent-foreground": accentForeground(profile.accent),
-    "--appearance-panel": isCodexDark
-      ? adjustCodexDarkSurface("#222323", 0.18)
-      : mix(profile.background, profile.foreground, panelWeight * contrastScale),
-    "--appearance-control": isCodexDark
-      ? adjustCodexDarkSurface("#303131", 0.22)
-      : mix(profile.background, profile.foreground, controlWeight * contrastScale),
-    "--appearance-titlebar": isCodexDark
-      ? adjustCodexDarkSurface("#211E28", 0.14)
-      : mix(profile.background, profile.foreground, (isDark ? 0.07 : 0.045) * contrastScale),
-    "--appearance-sidebar-start": isCodexDark
-      ? adjustCodexDarkSurface("#211E29", 0.14)
-      : mix(profile.background, profile.accent, (isDark ? 0.08 : 0.055) * contrastScale),
-    "--appearance-sidebar-end": isCodexDark
-      ? adjustCodexDarkSurface("#281936", 0.16)
-      : mix(profile.background, profile.accent, (isDark ? 0.14 : 0.09) * contrastScale),
+    "--appearance-panel": isQuietGraphiteDark
+      ? adjustQuietGraphiteSurface("#191C20", 0.18)
+      : isQuietGraphiteLight
+        ? "#FFFFFF"
+        : mix(profile.background, profile.foreground, panelWeight * contrastScale),
+    "--appearance-surface-strong": isQuietGraphiteDark
+      ? adjustQuietGraphiteSurface("#20242A", 0.2)
+      : isQuietGraphiteLight
+        ? "#F1EFE9"
+        : mix(profile.background, profile.foreground, (isDark ? 0.09 : 0.055) * contrastScale),
+    "--appearance-control": isQuietGraphiteDark
+      ? adjustQuietGraphiteSurface("#252A31", 0.22)
+      : isQuietGraphiteLight
+        ? "#EBE9E3"
+        : mix(profile.background, profile.foreground, controlWeight * contrastScale),
+    "--appearance-titlebar": isQuietGraphiteDark
+      ? adjustQuietGraphiteSurface("#15171B", 0.14)
+      : isQuietGraphiteLight
+        ? "#F2F0EB"
+        : mix(profile.background, profile.foreground, (isDark ? 0.07 : 0.045) * contrastScale),
+    "--appearance-sidebar-start": isQuietGraphiteDark
+      ? adjustQuietGraphiteSurface("#17191D", 0.14)
+      : isQuietGraphiteLight
+        ? "#EEECE7"
+        : mix(profile.background, profile.accent, (isDark ? 0.08 : 0.055) * contrastScale),
+    "--appearance-sidebar-end": isQuietGraphiteDark
+      ? adjustQuietGraphiteSurface("#17191D", 0.16)
+      : isQuietGraphiteLight
+        ? "#EEECE7"
+        : mix(profile.background, profile.accent, (isDark ? 0.14 : 0.09) * contrastScale),
     "--appearance-border-muted": mix(
       profile.background,
       profile.foreground,
@@ -415,11 +483,15 @@ export function appearanceTokens(profile: ThemeProfile): Record<string, string> 
       profile.foreground,
       (isDark ? 0.15 : 0.12) * contrastScale,
     ),
-    "--appearance-muted": mix(
-      profile.background,
-      profile.foreground,
-      (isDark ? 0.48 : 0.44) + (profile.contrast / 100) * 0.3,
-    ),
+    "--appearance-muted": isQuietGraphiteDark
+      ? "#A5ADB8"
+      : isQuietGraphiteLight
+        ? "#505762"
+        : mix(
+            profile.background,
+            profile.foreground,
+            (isDark ? 0.48 : 0.44) + (profile.contrast / 100) * 0.3,
+          ),
     "--appearance-contrast": String(profile.contrast),
     "--font-ui": profile.uiFont,
     "--font-code": profile.codeFont,
@@ -436,21 +508,29 @@ export function applyAppearance(
   const profile = selectedTheme(appearance, resolved);
   root.dataset.themeMode = mode;
   root.dataset.colorScheme = resolved;
+  root.dataset.appearanceTheme = resolved;
   root.dataset.pointerCursor = appearance.preferences.pointerCursor ? "on" : "off";
   root.dataset.reducedMotion = appearance.preferences.reducedMotion;
   root.dataset.diffMarkers = appearance.preferences.diffMarkers;
   root.dataset.translucentSidebar = profile.translucentSidebar ? "on" : "off";
+  root.dataset.appearanceDensity = appearance.preferences.density ?? "default";
   if (root.style) {
     for (const [name, value] of Object.entries(appearanceTokens(profile))) {
       root.style.setProperty(name, value);
     }
     const uiSize = appearance.preferences.uiFontSize;
-    root.style.setProperty("--font-size-xs", `${Math.max(10, uiSize - 2)}px`);
-    root.style.setProperty("--font-size-sm", `${Math.max(11, uiSize - 1)}px`);
-    root.style.setProperty("--font-size-md", `${uiSize}px`);
-    root.style.setProperty("--font-size-lg", `${uiSize + 2}px`);
-    root.style.setProperty("--font-size-xl", `${uiSize + 6}px`);
-    root.style.setProperty("--font-size-2xl", `${uiSize + 14}px`);
+    const typeScale = {
+      xs: `${Math.max(10, uiSize - 2)}px`,
+      sm: `${Math.max(11, uiSize - 1)}px`,
+      md: `${uiSize}px`,
+      lg: `${uiSize + 2}px`,
+      xl: `${uiSize + 6}px`,
+      "2xl": `${uiSize + 14}px`,
+    };
+    for (const [step, value] of Object.entries(typeScale)) {
+      root.style.setProperty(`--font-size-${step}`, value);
+      root.style.setProperty(`--font-${step}`, value);
+    }
     root.style.setProperty("--font-size-code", `${appearance.preferences.codeFontSize}px`);
   }
   return resolved;
@@ -463,7 +543,12 @@ export function preloadTheme(
 ): ResolvedTheme {
   const mirror = storedMirror(storage);
   const mode = mirror?.mode ?? storedTheme(storage);
-  return applyAppearance(root, mode, mirror?.appearance ?? DEFAULT_APPEARANCE, systemDark);
+  return applyAppearance(
+    root,
+    mode,
+    normalizeAppearanceConfig(mirror?.appearance ?? DEFAULT_APPEARANCE),
+    systemDark,
+  );
 }
 
 interface ThemeContextValue {
@@ -490,7 +575,7 @@ export function AppearanceProvider(props: AppearanceProviderProps) {
   const media = window.matchMedia("(prefers-color-scheme: dark)");
   const [mode, setModeValue] = createSignal<ThemeMode>(props.initialMode ?? "system");
   const [appearance, setAppearanceValue] = createSignal<AppearanceConfig>(
-    props.initialAppearance ?? DEFAULT_APPEARANCE,
+    normalizeAppearanceConfig(props.initialAppearance ?? DEFAULT_APPEARANCE),
   );
   const [systemDark, setSystemDark] = createSignal(media.matches);
   const resolved = () => resolveTheme(mode(), systemDark());
@@ -505,7 +590,7 @@ export function AppearanceProvider(props: AppearanceProviderProps) {
 
   createEffect(() => {
     if (props.appearance && isAppearanceConfig(props.appearance)) {
-      setAppearanceValue(props.appearance);
+      setAppearanceValue(normalizeAppearanceConfig(props.appearance));
     }
   });
 
@@ -528,7 +613,9 @@ export function AppearanceProvider(props: AppearanceProviderProps) {
       props.onModeChange?.(nextMode);
     },
     setAppearance(nextAppearance) {
-      if (isAppearanceConfig(nextAppearance)) setAppearanceValue(nextAppearance);
+      if (isAppearanceConfig(nextAppearance)) {
+        setAppearanceValue(normalizeAppearanceConfig(nextAppearance));
+      }
     },
   };
   return <ThemeContext.Provider value={value}>{props.children}</ThemeContext.Provider>;

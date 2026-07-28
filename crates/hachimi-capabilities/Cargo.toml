@@ -6,7 +6,29 @@ rust-version.workspace = true
 publish.workspace = true
 
 [dependencies]
+base64.workspace = true
+hachimi-protocol.workspace = true
+hachimi-sandbox.workspace = true
 parking_lot.workspace = true
+reqwest.workspace = true
 serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
 specta.workspace = true
+specta-typescript.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+url.workspace = true
+uuid.workspace = true
+futures-util.workspace = true
 
+[[bin]]
+name = "hachimi-mcp-test-server"
+path = "src/bin/hachimi-mcp-test-server.rs"
+test = false
+
+[dev-dependencies]
+hachimi-agent.workspace = true
+hachimi-protocol.workspace = true
+tempfile.workspace = true

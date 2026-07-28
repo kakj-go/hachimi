@@ -1,462 +1,177 @@
-# Hachimi 路线图
-
-> 基线日期：2026-07-25
->
-> 路线图按照建议实施顺序排列。上半部分用于追踪进度，下半部分描述每项任务的目标、实现要点和完成标准。
-
-## 路线图清单
-
-### 第一阶段：角色、声音与动作体验
-
-- [ ] **T01：选型并替换默认 TTS 模型**（原需求 1）
-  - [ ] 确定模型体积、最低硬件、支持语言和授权要求
-  - [ ] 收集中文或多语言二次元声音候选模型
-  - [ ] 建立中文、中英混读、长句和情绪文本评测集
-  - [ ] 测试自然度、首句延迟、实时率、内存和安装包体积
-  - [ ] 确认模型、训练数据和声音的使用及再分发许可
-  - [ ] 将优胜模型接入现有 Rust/sherpa-onnx TTS 管线
-  - [ ] 完成字幕、口型、取消和 DirectML/CPU 回归测试
-  - [ ] 替换默认模型并更新资源清单、哈希和第三方许可
-
-- [ ] **T02：确定并内置一套完全适配的 VRM 模型与 VRMA 动作**（原需求 2）
-  - [ ] 明确默认角色的美术风格、模型规格和授权要求
-  - [ ] 寻找或定制可随安装包分发的 Runtime Ready VRM
-  - [ ] 整理待机、交流、情绪、工作状态和点击反馈动作清单
-  - [ ] 寻找或制作风格统一的 VRMA 动作套装
-  - [ ] 在默认模型上逐个检查骨骼、表情、视线、脚滑和穿模
-  - [ ] 删除质量差、语义重复或与角色风格不一致的动作
-  - [ ] 固定模型和动作版本、SHA-256、来源及许可证
-  - [ ] 完成默认资源的安装包集成和干净系统验证
-
-- [ ] **T03：完善 VRMA 动作的流畅切换**（原需求 3）
-  - [ ] 为动作补充进入、循环、退出、优先级和可打断点元数据
-  - [ ] 划分 Base、Ambient、Attention、Speech、Gesture、Reaction 和 Drag 通道
-  - [ ] 完善 cross-fade、惯性化和动作速度连续性
-  - [ ] 处理 Root Motion、脚底接触、IK 和循环接缝
-  - [ ] 保证动作结束回到自然姿态而不是 T-Pose 或末帧冻结
-  - [ ] 处理语音、点击、拖动和连续动作之间的抢占与恢复
-  - [ ] 在默认模型和兼容性测试模型上完成录屏对比与指标验证
-
-- [ ] **T04：统一用户点击模型与动作反馈**（原需求 4）
-  - [ ] 定义头、脸、躯干、左右手臂等稳定互动区域语义
-  - [ ] 统一点击、双击、长按和拖动的判定规则
-  - [ ] 为每个互动意图定义动作、镜像、视线、表情和冷却规则
-  - [ ] 让左右区域自动选择镜像动作或左右动作变体
-  - [ ] 让角色视线和局部反馈与实际点击位置一致
-  - [ ] 让用户点击和 Agent 触发复用同一动作调度器
-  - [ ] 补充快速点击、拖动误触、动作加载失败和打断恢复测试
-
-- [ ] **T05：为 Agent 提供角色动作工具**（原需求 13）
-  - [ ] 定义稳定的动作意图，如问候、点头、疑惑、庆祝和安慰
-  - [ ] 设计 `perform_avatar_behavior` 工具协议和参数白名单
-  - [ ] 将一个行为意图映射为 VRMA、表情、视线和语音时间线
-  - [ ] 支持动作实际开始、降级、拒绝、取消和完成结果
-  - [ ] 限制 Agent 直接传入文件路径、骨骼变换或任意脚本
-  - [ ] 保证用户点击和拖动可以抢占 Agent 自发动作
-  - [ ] 为不支持 Tool Call 的模型保留纯文字降级路径
-
-- [ ] **T06：研究并实现用户 VRM 的动作动态适配**（原需求 5）
-  - [ ] 建立不同身高、比例、VRM0/VRM1 和缺少可选骨骼的测试集
-  - [ ] 从用户模型生成标准 `AvatarAdaptationProfile`
-  - [ ] 根据身高和肢体比例修正 Root、步幅、动作幅度及接触点
-  - [ ] 使用重定向、IK、足底锁定、关节限制和碰撞完成确定性适配
-  - [ ] 在 Motion Lab 中展示适配评分、问题片段和降级原因
-  - [ ] 评估 LLM/视觉模型是否只用于诊断和选择参数模板
-  - [ ] 验证参数化方案无法处理的模型，再决定是否研究学习型重定向
-  - [ ] 将适配结果保存为可预览、可撤销的模型专属配置
-
-### 第二阶段：工作台与 Harness Agent 基础
-
-- [ ] **T07：清点工作台占位功能并建立实施清单**（拆分自原需求 14）
-  - [ ] 清点所有按钮、菜单、快捷键、路由和静态示例数据
-  - [ ] 标记为真实可用、禁用占位、点击无效果或应该删除
-  - [ ] 将每个占位控件映射到后续 T08–T15 的具体任务
-  - [ ] 为暂不可用功能提供明确禁用状态和说明
-  - [ ] 禁止保留看似可操作但点击后没有反馈的控件
-  - [ ] 建立可持续更新的工作台功能验收表
-
-- [ ] **T08：实现 Harness Agent 核心运行时**（原需求 6）
-  - [ ] 抽象统一 `ModelRuntime`，隔离不同 LLM Provider 协议
-  - [ ] 支持流式文本、Tool Call、结构化输出和能力探测
-  - [ ] 实现 Run 与 Session，以及开始、工具调用、审批和完成事件
-  - [ ] 支持多轮工具循环、取消、超时、重试和迟到结果丢弃
-  - [ ] 实现 Tool Registry、参数验证、结果限制和动态工具列表
-  - [ ] 实现计划生成、步骤状态更新和完成证据展示
-  - [ ] 实现会话持久化、上下文裁剪、摘要压缩和恢复
-  - [ ] 接入 Scope、Policy、Approval 和 Audit
-  - [ ] 为重复副作用、Prompt Injection、取消竞争和超长上下文补充测试
-
-- [ ] **T09：在统一运行时中实现三种 Agent 行为模式**（原需求 7）
-  - [ ] 实现桌宠日常对话 `PetStateless` 模式
-  - [ ] 实现编程和日常办公使用的 `WorkbenchSession` 模式
-  - [ ] 实现短期桌面任务使用的 `ComputerUseScoped` 模式
-  - [ ] 为三种模式分别配置 System Prompt、上下文、工具和预算
-  - [ ] 隔离 Pet、Workbench 和 Computer 的 Session 与权限
-  - [ ] 允许从桌宠将复杂任务转交工作台，但不转移高权限授权
-  - [ ] 确定工作台中编程、办公和桌面任务的入口与状态展示
-  - [ ] 验证三种模式共享运行时但不会发生工具或权限串域
-
-### 第三阶段：编程、Skills、MCP 与办公
-
-- [ ] **T10：实现 Codex 式编程工作台**（原需求 12）
-  - [ ] 实现工作区选择、最近项目、文件树和全文搜索
-  - [ ] 实现文件查看、Monaco 编辑、Diff 和变更审阅
-  - [ ] 实现 Git 状态、历史、分支、暂存和提交
-  - [ ] 实现 Git worktree 创建、查看、切换和安全清理
-  - [ ] 让每个 Agent Session 绑定明确的 workspace/worktree
-  - [ ] 实现隔离的 Workspace Worker、命令执行和 PTY 终端
-  - [ ] 支持测试、格式化、诊断、取消和后台任务输出
-  - [ ] 实现计划任务、步骤时间线、检查点和失败恢复
-  - [ ] 支持 Agent 修改文件后展示 Diff、测试证据和最终摘要
-  - [ ] 为危险命令、工作区外写入、推送和 PR 设置审批
-
-- [ ] **T11：实现 MCP 接入**（原需求 10）
-  - [ ] 实现 MCP Client 和 Server Registry
-  - [ ] 优先支持本地 `stdio` Server，远程连接后置
-  - [ ] 支持协议版本、能力、Resources、Prompts 和 Tools 协商
-  - [ ] 支持启动、停止、超时、取消、健康检查和故障隔离
-  - [ ] 使用 Server namespace 解决工具名称冲突
-  - [ ] 将 MCP Tool 映射到 Hachimi 的 Scope、风险和审批策略
-  - [ ] 将凭据保存在系统 Keyring，并对日志和错误脱敏
-  - [ ] 限制 MCP 返回文本、图片和资源大小并防御 Prompt Injection
-  - [ ] 实现配置、连接测试、启停和调用记录界面
-
-- [ ] **T12：实现 Skills 接入**（原需求 9）
-  - [ ] 定义 Skill 清单、版本、指令、资源、脚本和依赖格式
-  - [ ] 声明 Skill 适用的 Agent 模式、工具和所需 Scope
-  - [ ] 实现本地安装、启用、禁用、更新和卸载
-  - [ ] 展示 Skill 来源、版本、哈希、权限和兼容状态
-  - [ ] 检查路径穿越、符号链接、脚本和依赖供应链风险
-  - [ ] Skill 新增权限时要求用户重新确认
-  - [ ] 保证 Skill 指令不能绕过 Tool Policy、Sandbox 和 Approval
-  - [ ] 提供内置 Skill 模板、开发检查和错误诊断
-  - [ ] 支持 Skill 组合使用内置工具和已授权 MCP 工具
-
-- [ ] **T13：实现日常办公能力**（原需求 11）
-  - [ ] 确定首批办公场景和对应端到端验收任务
-  - [ ] 支持文档、表格、演示文稿和 PDF 的读取与生成
-  - [ ] 支持修改、预览、Diff、导出和失败恢复
-  - [ ] 支持授权目录内的文件搜索、整理和批量重命名
-  - [ ] 通过 MCP/API 接入日历、邮件、待办或笔记
-  - [ ] 为发送、邀请、删除、共享等外部副作用增加审批
-  - [ ] 实现带时区、重复规则和失败通知的计划任务与提醒
-  - [ ] 支持办公模板、常用流程和可管理的个人偏好
-  - [ ] 展示任务产物、数据来源、修改内容和已执行副作用
-
-### 第四阶段：桌面控制与工作台收口
-
-- [ ] **T14：实现桌面控制功能**（原需求 8）
-  - [ ] 将 Computer Host 独立于 Tauri/WebView 主进程
-  - [ ] 实现窗口和应用枚举以及系统权限检测
-  - [ ] 先实现只观察模式：截图、Frame ID 和 Accessibility Tree
-  - [ ] 优先通过 Accessibility/UI Automation 操作稳定控件
-  - [ ] 将视觉识别和坐标点击作为最后回退方案
-  - [ ] 实现鼠标、键盘、滚动和拖放等单步动作
-  - [ ] 每次动作后重新观察，并拒绝使用过期 Frame
-  - [ ] 将授权限制到目标应用、窗口、时长、动作数和任务
-  - [ ] 实现明显的控制指示器、用户接管暂停和全局紧急停止
-  - [ ] 隔离截图、剪贴板、凭据和审批界面等敏感信息
-  - [ ] 先完成 Windows 验证，再分别处理 macOS 和 Linux 降级
-
-- [ ] **T15：逐步替换并清除工作台全部假功能**（拆分自原需求 14）
-  - [ ] 使用真实项目、Session、任务和产物替换首页示例数据
-  - [ ] 接通项目、会话、消息发送、搜索和导航控件
-  - [ ] 接通编辑器、Diff、Git、worktree、终端和计划任务控件
-  - [ ] 接通 Skills、MCP、办公与桌面控制的设置和状态页面
-  - [ ] 为所有操作补充加载、空数据、成功、错误和权限拒绝状态
-  - [ ] 补充快捷键、键盘导航、中英文和无障碍行为
-  - [ ] 删除不再需要的按钮、静态文案、示例会话和死路由
-  - [ ] 更新自动测试、视觉回归和 Windows 人工验收清单
-  - [ ] 完成最终清点，确保不存在无说明的假按钮
-
-## 任务细节
+# Hachimi Agent 路线图（Codex 产品与 Runtime 主基线）
+
+更新时间：2026-07-28
+
+本路线图描述当前唯一架构及已排期的后续 Host，不保留旧 Runtime、旧 DTO 或旧数据库兼容路线。代码派生固定参考 Codex `4c43465133428898aa84f0bfc02c306ed65fb66a` 和 OpenClaw `f6d456235cf011004f7cffc71a95acf6fbf1fa0a`。Codex 是统一 Agent、Browser/Computer、Skills、MCP、Plugins/Connectors、Session/Thread 恢复和 Scheduled Tasks 产品行为与权限模型的主基线；OpenClaw 只作为本地常驻 Gateway、Channel 插件与确定性消息路由、Cron/Heartbeat/事件触发、Task ledger、投递和后台任务重启 reconciliation 的深度参考；Claude Code Best 只用于 clean-room Compaction 行为研究。产品文档不是代码来源，代码派生范围以 `HARNESS_AGENT_SOURCE_PROVENANCE.md` 为准。
+
+## 参考分工
+
+| 能力                          | 主基线                                                                                                                                | 补充基线                                                                                                                 | 当前状态                                                |
+| ----------------------------- | ------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------- |
+| Agent Kernel、编程、办公      | Codex Session/Turn/Item、Tool Orchestrator、Skills、MCP、Workspace、Process、Sandbox                                                  | Claude Code Best Compaction 公开行为                                                                                     | 当前阶段已落地，仍有 Windows 发布验收                   |
+| Browser/Chrome                | Codex Browser、Chrome extension、站点授权、敏感操作确认和受控 CDP 产品行为与权限模型                                                  | Codex 未公开的 Host 细节只选择性研究 OpenClaw 的 navigation guard、request policy、Profile、CDP session 与 tab ownership | 下一阶段；当前 `hachimi-browser` 关闭                   |
+| Computer Use                  | Codex App-scoped observe/act、用户接管和系统权限边界                                                                                  | Hachimi 原创 typed Computer Host                                                                                         | 下一阶段；当前 `DesktopControl` 关闭                    |
+| Session/Thread 恢复           | Codex rollout reconstruction、thread resume 和持久历史恢复                                                                            | Hachimi SQLite snapshot/watermark 与 fail-closed recovery                                                                | 已落地；活跃 Run 重启后标记 interrupted，不伪造原地续跑 |
+| Plugins/Connectors 与三方软件 | Codex Plugin manifest/marketplace、Skills/Hooks、Connectors/MCP、Browser extension、Scheduled task template、custom UI 和运行时权限链 | Hachimi Connector Host                                                                                                   | MCP 已落地；完整 Plugin/Connector 后置                  |
+| Channels/Gateway              | OpenClaw Channel plugin、确定性 session/message routing、常驻 Gateway、pairing 和 delivery                                            | Codex 式 Tool/Approval/Sandbox/Host 权限约束                                                                             | 下一阶段；只在确有跨消息平台需求时启用                  |
+| 定时与提示词日常任务          | Codex Scheduled Tasks 的独立任务、对话续接、Skills/Plugins 和 Worktree 产品语义                                                       | OpenClaw 单 timer、Task ledger、并发与重启 reconciliation                                                                | 独立 Schedule/Task 已落地；对话内定时续接后置           |
+| 上下文压缩                    | Codex `compact.rs` 代码基线                                                                                                           | Claude Code Best recent tail、未完成事项和失败保留旧 checkpoint 行为                                                     | 已落地                                                  |
+
+## 目标架构
+
+```text
+Tauri / Scheduler / future Browser · Computer · Connector · Channel/Gateway Hosts
+                           │ typed AppServer + authenticated principal
+                           ▼
+AgentRunExecutor → TurnRuntime → immutable StepContext + ToolPlan
+                           │
+                           ├─ ModelClientSession
+                           ├─ Tool Orchestrator (schema → policy → approval → sandbox → host)
+                           ├─ Skills progressive disclosure + WorkloadResolver
+                           ├─ CompactionService + token reconciliation
+                           └─ Projector → SQLite Transcript/Event + active delta hub
+```
+
+Session 是唯一长生命周期容器，Run 对应 Codex Turn，Transcript Item 对应 Codex Item。Interactive、Coding、Office、General 和 Scheduled Run 不得创建第二套 loop。
+
+## 已完成
+
+- [x] 三个 fresh migration baseline：`0001_agent_kernel.sql`、`0002_workspace_extensions.sql`、`0003_automation.sql`。
+- [x] `hachimi-model-runtime` 与唯一 `AgentRunExecutor`；Workbench 和 Scheduler 使用同一入口。
+- [x] Session lane、generation fencing、取消、后台并发、恢复 reconciliation 和幂等副作用 ledger。
+- [x] typed Item/RunEvent；Tool、Assistant、Reasoning 支持 `started → delta → completed`，completed payload 是权威值。
+- [x] SQLite 持久 sequence、snapshot watermark、断线 catch-up 与有界 active delta replay；delta 不落盘。
+- [x] typed asynchronous AppServer façade；Tauri 生命周期命令只做认证、DTO 和事件桥接。
+- [x] metadata-only SQLite Audit；principal、目标摘要、决策和稳定结果码入库，Prompt/secret/完整 Tool Payload 不入库。
+- [x] Codex 式分层 `AGENTS.md`、原子 `apply_patch`、Workspace Host 边界、Run Diff、Process/Review 基础协议。
+- [x] Codex progressive Skill Catalog：分页 list、显式 `$name`/ID、首次读取激活、资源 revision fencing、User Skill 结构化分类。
+- [x] Provider capability negotiation：`Auto|Enabled|Disabled`、静态 strict-schema probe、Run probe/degradation 持久化和严格 User Skill workload classifier；unsupported 固定回退 General。
+- [x] `WorkloadResolver`：用户 override > 显式 Skill > Built-in Office Skill > 结构化任务分类 > General；分类不产生授权。
+- [x] 五个 Built-in Office Skill：`office-documents`、`office-spreadsheets`、`office-presentations`、`office-pdf`、`office-file-organizer`。它们只提供知识、模板和验证要求，实际操作走 Workspace Tool/MCP。
+- [x] MCP Tools、Resources、Templates、Prompts、OAuth/Keyring、Elicitation、progress、媒体引用和 stdio/HTTP Host 边界。
+- [x] 本地 Schedule/Task：产品语义与 Codex Scheduled Tasks 的后台任务、Skills/MCP 和 Worktree 模式对齐；持久调度实现参考 OpenClaw 的 At/Every/Cron、单 timer、TaskRun ledger、并发和重启 reconciliation，并支持通知、Worktree 上限和交互 continuation。
+- [x] ScheduleGrant：Skill content/tree revision、MCP schema/Host identity、权限快照和漂移 `NeedsAttention`；自动加载不得扩大授权。
+- [x] Compaction 生命周期：Local/Remote、overflow 分组删除、checkpoint 原子安装、失败保留旧 checkpoint、billed/active/remaining token reconciliation。
+- [x] D2a 文件树、分块读取、Watch、取消搜索和 Run/Checkout Diff；C2.1 Sandbox runtime manager、restricted process 和 fail-closed 路径策略。
+
+## 当前收口项（仍属于本轮 Agent/任务范围）
+
+### A：Runtime 与 AppServer 收口
+
+- [x] 生产代码无 `AgentRunExecutor::execute_registered`、入口级 ToolLoop/Registry/Compactor、InMemoryAudit 和 Agent 事件轮询。
+- [x] AppServer 统一生命周期、Approval、UserInput、fs、process、review、mcp、skills、schedule、task 的 typed request/response；Desktop 注入单一 domain handler，Tauri command 不组装 Agent Runtime。
+- [x] scheduler service principal 的无窗口集成测试直接进入唯一 `AgentRunExecutor`，验证后台优先级、Run/Transcript/Usage/终态持久化，证明后台 Run 不依赖 Tauri WebView。
+- [x] 每次 sampling/Tool boundary 动态刷新 `AGENTS.md`、Skill、固定 MCP、Host 和 Sandbox intersection；Tool Call 使用 `step_revision + tool_plan_hash + registry_revision` 三重 fencing。
+- [x] Release 默认开启 `workspace_tools`、`mcp_runtime`、`scheduler`，并保留三个 `HACHIMI_DISABLE_*` emergency kill switch；默认启用不产生 Grant。
+
+### B：实时 Item 投影
+
+- [x] Assistant/Reasoning/Tool 的稳定 Item ID、started/completed 事件和 active delta replay。
+- [x] UI active item reducer 按稳定 Item ID 投影 Assistant/Reasoning/Tool delta；completed 删除临时缓冲并以持久 payload 为权威。
+- [x] 连接重建的 active replay、completed 清理和 Run interrupted/lost 的真实 WebView2 Desktop E2E。
 
-### T01：选型并替换默认 TTS 模型
+### C：Windows 发布门槛
+
+- [x] Restricted launch 同时使用 AppContainer security capabilities 和 explicit handle list；sentinel 单元/管理员 smoke 证明未列 inheritable handle 不可访问。
+- [x] 统一 `pnpm test:windows:release`、脱敏报告和受保护的 `self-hosted/windows/x64/hachimi-sandbox` workflow 已实现，外部 PR 不执行管理员任务。
+- [x] linked worktree Git mutation ACL 同时覆盖 shared common-dir 与 absolute per-worktree git-dir，stage/commit 使用两个独立 lease 并在每次操作后恢复显式 RX；管理员 smoke 已扩展但尚未执行。
+- [ ] 在管理员 Runner 实际通过 setup helper、ACL、restricted token、Job Object、子孙进程、junction/reparse、deny-read、deny-all-network。
+- [ ] 在管理员 Runner 实际通过 Workspace Worker、Agent Exec、MCP stdio、Terminal/ConPTY、portable target 重启 attestation 和真实 Desktop/Toast。
+- [x] Sandbox readiness 未达到四项 enforced 时，后台副作用任务进入 `NeedsAttention`；General 只读任务可继续。
+
+### D：Office Skill 验收
+
+- [x] 五个 Skill 的 metadata、implicit activation、资源验证和 Workload overlay。
+- [x] Desktop E2E 验证模型通过 `skills.list`/`skills.read` 隐式激活 `office-documents`，下一 Step 切换 Office overlay；无效资源读取失败后可恢复，且不扩大 CapabilityGrant。
+- [x] Desktop fixture 验证五个 Office Skill 显式选择、四类真实容器 Artifact、文件整理 preview 和受控 delivery。
+- [x] 文件整理 fixture 覆盖 preview plan、冲突后缀、回滚 manifest 和授权目录边界。
+- [x] MCP schema 漂移会使后台任务进入 `NeedsAttention`，真实 WebView2 流程可创建 fresh interactive continuation；不会恢复旧 Grant、Tool Plan 或 generation。
+- [x] Release E2E 已实现 restricted stdio MCP 的修改、预览、Diff、导出、Artifact 校验、文件整理回滚和中断恢复路径。
+- [ ] 上述 restricted stdio/真实 Sandbox Office 路径仍待管理员 Windows runner 实际通过。
+
+### E：Task 生命周期验收
+
+- [x] Scheduler Rust 测试覆盖 At/Every/Cron、IANA timezone、重复 invocation、重叠跳过、retry 合法终态和 fresh invocation key。
+- [x] ignored release soak 使用真实 `SystemClock` 覆盖短期 At、anchored Every、6-field Cron 和至少 20 次 occurrence，无重复 invocation、timer drift 或 active launch 泄漏。
+- [x] 成功 TaskRun 禁止 retry；Failed/TimedOut/Cancelled/Lost 可 retry；通知失败只改变 DeliveryStatus，不改变成功执行状态。
+- [x] Workbench 测试覆盖高级 Cron/timezone DTO、Cancelled retry 和 NeedsAttention continuation；真实 WebView2 覆盖 MCP schema 漂移后的 NeedsAttention/continuation。
+- [x] Windows Shell UI Automation 的 Toast 断言已接入管理员 Desktop E2E，通知只匹配任务名和终态且排除 Hachimi 自身 WebView。
+- [ ] 真实墙钟自然触发 At/Every/Cron、系统 Toast 和 UI retry 的完整管理员 WebView2 长时间执行仍属于发布环境验收。
+
+### F：固定门槛
 
-**目标**
+每次收口运行：
 
-用体积可控、中文自然、声音具有二次元角色感的模型替换当前默认 MeloTTS。优先保证中文质量，多语言支持作为重要加分项。
+```text
+pnpm format:check
+pnpm typecheck
+pnpm lint
+pnpm test
+cargo test --workspace
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+pnpm contracts:check
+pnpm provenance:check
+pnpm test:p0-adversarial
+pnpm test:desktop:e2e
+pnpm test:windows:release
+cargo test -p hachimi-sandbox --features windows-smoke -- --ignored --test-threads=1
+```
 
-**实现要点**
+本机未具备管理员 UAC、WebView2 driver 或真实 NTFS smoke 条件时，只报告阻塞，不伪造通过。
 
-- 候选模型使用同一批文本进行自动性能测试和人工盲听，不能只根据网络演示判断。
-- 重点记录首句延迟、实时率、峰值内存、模型大小、长句稳定性和混合语言表现。
-- 优先选择可以继续复用当前 Rust 进程内推理方案的模型。需要 Python、独立 HTTP 服务或运行时静默下载的候选不作为默认模型。
-- 如果新模型能提供音素或字级时间戳，应将其接入口型和字幕时间线；否则继续使用音频包络方案并验证同步效果。
-- 必须确认模型权重、训练数据和声音权利允许目标发布方式，避免使用未经授权的真人声音克隆。
+2026-07-28 本机非管理员门槛已通过：format、typecheck、lint/clippy、全量 Rust workspace tests、contracts、provenance/architecture、P0 adversarial；完整 `pnpm test:desktop:e2e` 单次执行通过 3 个 spec、9 个场景，覆盖真实 WebView2 核心生命周期、Terminal/重启、Skills/MCP 与 Task/Office。Desktop E2E 清理回归证明测试期间应用实例最大为 1、后台 Worker/MCP 无可见控制台、结束后相关进程为 0。最新 portable target 已构建且 sidecar/Office Skill 完整。当前 shell 非管理员，真实 setup 在受信 Git runtime ACL 阶段以 Windows error 5 fail closed；`test:windows:release` 与 Windows Sandbox ignored smoke 尚未执行。
 
-**完成标准**
+## 下一阶段路线（当前未实现）
 
-- 在目标 Windows 设备断网、无 Python环境下能够稳定合成。
-- 中文盲听结果优于当前默认声音，中英混读不出现大面积漏字或错误停顿。
-- TTS 取消、静音、语速、字幕、口型、DirectML 和 CPU 回退通过测试。
-- 模型版本、来源、SHA-256 和许可证已进入安装包资源清单。
+以下能力已经进入总路线，但不属于当前发布收口项，也不能因存在协议、Feature Flag 或空 Host crate 宣称完成。
 
-### T02：确定并内置 VRM 与 VRMA 套装
+### G：Pet 输出适配
 
-**目标**
+- [ ] 统一 Agent 通过受控 Pet Host 播放 Motion Catalog 中已有的 VRMA，并支持停止或替换当前动作；Motion ID 必须来自受控 Catalog，不能接受任意文件路径。
+- [ ] Assistant 的稳定文本可通过现有本地 TTS 输出并支持停止；不得朗读 secret、Approval、UserInput 或原始 Tool Result。
+- [ ] Pet 输出只属于 Delivery/Presentation 层，复用现有 Session、Run、StepContext、Policy 和 Tool Orchestrator，不创建专用 Agent Runtime；Scheduled Run 默认不得自动播放动作或语音。
 
-建立一套可以代表 Hachimi 默认体验的角色和动作资产。默认套装重视统一风格和完整语义，不以动作数量作为主要指标。
+### H：Browser Host
 
-**实现要点**
+- [ ] 提供隔离 Profile 的内置 Browser；如接入用户现有 Chrome Profile，必须使用独立扩展、显式配对和域名授权。
+- [ ] Observe、Act、Download、Upload、Cookie/Storage 和 CDP 分权；页面内容始终视为不可信输入，敏感提交、购买、删除、权限变化单独确认。
+- [ ] 以 Codex Browser/Chrome 产品行为与安全边界为主基线；Codex 未公开的 Host 细节只选择性研究 OpenClaw `extensions/browser/src/browser/{navigation-guard,request-policy,profiles,cdp-page-session,chrome-mcp-tabs}.ts` 及对应测试，但必须逐文件登记来源。
 
-- 默认动作至少覆盖待机、呼吸、问候、点头、摇头、思考、疑惑、开心、庆祝、安慰、道歉、倾听、说话、等待工具、执行成功、执行失败和点击反馈。
-- 默认 VRM 必须通过 Runtime Ready 检测，并具备适合口型、表情、LookAt 和 SpringBone 的能力。
-- 每个动作在默认模型上检查正面、侧面和斜面效果，同时观察手脚接触、重心、穿模和动作结束姿态。
-- 若未来可能商业发布，默认模型和动作必须允许商业使用、修改和再分发。当前禁止商业使用的默认 VRM 不能继续用于商业安装包。
+### I：Computer Host
 
-**完成标准**
+- [ ] DesktopControl 使用 App-scoped observe/act、稳定 Frame ID、动作后重观察、用户真实输入接管和随时停止；不得控制 Hachimi 自身审批界面或代替系统权限确认。
+- [ ] Windows 前台占用、截图/Accessibility/剪贴板数据边界、Always-allow App 决策和高风险操作确认必须有真实桌面 E2E。
+- [ ] 以 Codex Computer Use 产品行为与权限模型为主基线；Computer Host 采用 Hachimi typed Host 独立实现，不能因存在协议枚举或 Feature Flag 宣称完成。
 
-- 默认模型与精选动作在长时间运行中无明显 T-Pose、脚滑、穿模、末帧冻结或资源增长。
-- 所有资产具备固定版本、来源、哈希和明确许可。
-- 干净系统安装后无需额外下载即可展示完整默认体验。
+### J：Plugins、Connectors 与三方软件
 
-### T03：完善 VRMA 流畅切换
+- [ ] 采用 Codex Plugin manifest/marketplace/bundle 模型；Plugin 可组合 Skill、Hook、Connector/MCP、Browser extension、Scheduled task template 和 custom UI，安装、启用、账号连接、工具暴露与运行时权限保持分层。
+- [ ] Connector Host 覆盖 OAuth/Keyring、Host identity、健康检查、Schema/Action 漂移、限流、重试、幂等、Webhook/Poll、撤销和 metadata-only Audit。
+- [ ] 以 Codex Connector-to-MCP routing 和 MCP Tool/Approval/Sandbox/Host 权限链为主基线；结构化 API 能完成的流程不得自动退化为 Browser/Computer 坐标控制。
+- [ ] 生产级邮件、日历、Office、Slack/飞书等 Connector 必须逐个声明数据范围、外部副作用和恢复路径；Kernel 不增加应用特判。
 
-**目标**
+### K：Channels 与常驻 Gateway
 
-让待机、说话、情绪、点击、拖动等动作在连续触发或互相打断时保持自然，不出现硬切和违和感。
+- [ ] 仅在产品需要从 Slack、飞书、Telegram、Discord 等外部消息入口持续接收与回复时引入；普通 Connector API 不经过 Channel/Gateway。
+- [ ] 深度参考 OpenClaw Channel plugin、Account/Peer/Thread session key、确定性 reply routing、DM/group/thread 隔离、pairing/allowlist、bot-loop protection 和 durable ingress/delivery。
+- [ ] Gateway 只承担认证连接、Channel 生命周期、事件入口、投递队列和健康/重载，不创建第二套 Agent Runtime；所有消息最终提交 typed AppServer request。
+- [ ] 默认 loopback、显式认证、速率限制、连接身份和 metadata-only Audit；远程 Gateway、移动节点与多租户继续后置。
 
-**实现要点**
+### L：Scheduled Tasks 产品语义补齐
 
-- 动作元数据描述身体 Mask、进入/退出时长、循环区间、可打断点、Root Motion、接触约束和优先级。
-- 多通道调度允许嘴型、表情、视线和身体动作组合，而不是切换身体动作时全部重置。
-- 切换同时考虑姿态和速度连续性；只做固定时长 cross-fade 仍可能产生突然停顿。
-- 脚或手存在接触时保持目标锁定，其他时间减少过度 IK 造成的僵硬。
-- 连续触发相同行为时根据语义选择忽略、合并、重启或排队。
+- [x] 独立 Schedule 每次 invocation 创建 fresh TaskRun/Session/Run，支持 At/Every/Cron、时区、Worktree、Skills/MCP allowlist 和 NeedsAttention。
+- [ ] 增加 Session-bound scheduled continuation：在现有 Session lane 中创建 fresh Run，复用经压缩的对话上下文，但重新捕获 StepContext、ToolPlan、Grant 和 Host readiness，绝不恢复旧 Approval、secret 或 lease。
+- [ ] Scheduled Task 可组合 Plugin/Connector，并在权限或 Schema 漂移时进入 NeedsAttention；支持用户明确的停止条件和线程内 heartbeat。
 
-**完成标准**
+### M：更后阶段能力
 
-- 动作结束始终回到 Relaxed Base Pose。
-- 语音过程中点击、点击过程中拖动、动作连续排队等组合场景均能恢复。
-- 现有骨骼跳变、Root 位移、脚漂、穿透和运行时性能指标继续通过。
+长期 Memory、多 Agent、远程 Workspace/Control Plane、push/PR 和完整 Provider 扩展继续后置，需独立设计与授权模型。
 
-### T04：统一点击模型与动作反馈
+## 来源与许可证
 
-**目标**
+- Codex 开源代码当前只选择性适配 Session/Turn/Tool/Skills/MCP/Sandbox/Process/Workspace/Compaction 控制流，并固定到登记 commit。
+- Codex Browser、Computer Use 和 Scheduled Tasks 官方文档定义产品行为与安全验收；固定 commit 同时提供 Session/Thread recovery、Plugins/Connectors 与 MCP 公开实现。产品文档不视为可复制的实现代码，也不证明对应 Host 已经落地。
+- OpenClaw 当前已派生代码仍只包括 Session lane、Schedule、Task ledger、单 timer 和重启 reconciliation。Channels/Gateway 已进入下一阶段参考范围；Browser 只补充研究 Codex 未公开的底层 Host 细节。所有逐文件实现仍必须先完成来源登记。
+- Claude Code Best 仅用于 Compaction 行为测试，不复制源码、提示词、注释、测试或内部标识符。
 
-让用户点到哪里、角色看向哪里、播放什么动作以及给出什么表情形成一致反馈，并且不同 VRM 使用相同交互语义。
-
-**实现要点**
-
-- 从射线命中结果生成 `InteractionIntent`，再由调度器决定动作，而不是在 UI 中直接绑定和播放文件。
-- 点击和拖动使用明确移动阈值；双击、长按与单击需要互斥，避免一次操作触发多次反馈。
-- 左右身体区域自动镜像动作，无法安全镜像的动作使用明确左右变体。
-- 动作加载成功并真正进入调度后再同步表情、音效或台词，失败时给出可理解的降级反馈。
-
-**完成标准**
-
-- 同一互动配置能应用到兼容性测试集中的不同 VRM。
-- 左右反应、点击位置注视、冷却、打断和恢复均可重复验证。
-- 快速点击不会无限排队，拖动不会同时触发点击动作。
-
-### T05：Agent 角色动作工具
-
-**目标**
-
-允许 LLM 使用一个受限工具表达角色行为，由运行时触发一组连贯的 VRMA、表情、视线和语音，而不是让模型直接控制底层骨骼。
-
-**实现要点**
-
-- 工具参数以行为意图为核心，可以附带强度、情绪和台词，但所有值都必须由协议白名单验证。
-- 行为意图到具体动作序列的映射由本地运行时掌握，可以根据当前 VRM 能力自动降级。
-- 动作、表情、字幕、口型和音频共享同一播放 ID 和媒体时间线。
-- 工具必须返回真实执行状态，不能在动作尚未加载时直接向模型报告成功。
-
-**完成标准**
-
-- 支持 Tool Call 的模型可以触发全部白名单行为。
-- 异常参数、任意路径和未知动作意图被拒绝且不会破坏当前动作状态。
-- 不支持 Tool Call 的模型仍能完成普通文字及语音对话。
-
-### T06：用户 VRM 动作动态适配
-
-**目标**
-
-让同一套标准 VRMA 尽可能适配用户上传的不同 VRM，并对无法完全适配的情况给出明确诊断。
-
-**实现要点**
-
-- 优先使用标准 Humanoid、模型比例、关节限制、IK 和碰撞等确定性数据解决问题。
-- `AvatarAdaptationProfile` 保存身高、肢体比例、可选骨骼、接触点、碰撞体和模型能力。
-- LLM 可以根据诊断报告建议参数模板，但不能直接输出未经约束的逐帧骨骼变换。
-- 只有在测试证明确定性重定向无法覆盖关键模型类型后，再研究学习型 Motion Retargeting。
-
-**完成标准**
-
-- 用户导入模型能够获得可理解的动作适配报告和预览结果。
-- 自动调整不会覆盖用户原始 VRM 或 VRMA。
-- 不支持的骨骼和动作会明确降级或拒绝，不以错误姿态勉强播放。
-
-### T07：清点工作台占位功能
-
-**目标**
-
-建立工作台所有假按钮和静态数据的唯一清单，使后续实现范围可追踪。
-
-**实现要点**
-
-- 清点首页、侧栏、标题栏、消息编辑器、项目区、设置页、编辑器和底部面板。
-- 每个控件记录当前状态、目标功能、所属任务、依赖和验收用例。
-- 暂时不能实现的入口应明确禁用并解释原因；没有产品价值的占位直接删除。
-
-**完成标准**
-
-- 任意可见控件都能在验收表中找到对应记录。
-- 不存在点击后没有任何反馈的可交互控件。
-- T08–T15 完成时能够据此逐项关闭占位问题。
-
-### T08：Harness Agent 核心运行时
-
-**目标**
-
-建立可以持续执行模型推理、工具调用、审批、计划和恢复的通用 Agent Runtime，为编程、办公和桌面控制提供共同底座。
-
-**实现要点**
-
-- `ModelRuntime` 负责屏蔽 Chat Completions、Responses 风格或本地模型接口差异。
-- 每个 Run 有唯一 ID、取消令牌、token/时间/工具次数预算和完整生命周期。
-- 每个 Session 使用串行 Run lane，避免同一上下文中的工具和文件修改互相竞争。
-- Tool Descriptor 声明 Scope、风险、副作用、幂等性、目标和审批要求。
-- 模型、工具内容和 Skill 都不能替用户响应审批或扩大权限。
-
-**完成标准**
-
-- Agent 可以完成多轮“推理—工具—结果—继续推理”循环。
-- 任意阶段可以可靠取消，迟到的模型或工具结果不会继续产生副作用。
-- 应用重启后可以恢复持久 Session，但不会自动恢复高权限授权。
-
-### T09：三种 Agent 行为模式
-
-**目标**
-
-在一套 Agent Runtime 上提供桌宠对话、工作台任务和桌面控制三种行为模式，而不是维护三套重复实现。
-
-**实现要点**
-
-- `PetStateless` 只提供角色行为等低风险工具，不具有文件、Shell 和桌面权限。
-- `WorkbenchSession` 持有项目或办公上下文，可以使用经过授权的 Workspace、Skills 和 MCP 工具。
-- `ComputerUseScoped` 只服务一个明确桌面任务，限制目标 App、时间、动作数和 token。
-- 从 Pet 转交到 Workbench 时只传递用户确认的任务内容，不传递工作台 Scope 或历史授权。
-
-**完成标准**
-
-- 三种模式共享事件、取消、预算和 Provider 适配能力。
-- 每种模式看到的工具列表与权限严格匹配。
-- 自动测试证明 Pet 无法枚举或调用 Workspace、MCP 和 Computer 工具。
-
-### T10：Codex 式编程工作台
-
-**目标**
-
-让用户在工作台中选择代码仓库，由 Agent 查看代码、制定计划、修改文件、运行检查、审阅 Diff，并通过 Git worktree 隔离任务。
-
-**实现要点**
-
-- 先完成“选择项目—只读代码—计划—修改—测试—Diff”的最小纵向闭环，再增加完整 IDE 能力。
-- Workspace Worker 独立承载文件、Git 和 Exec/PTY；授权范围绑定到规范化后的 workspace/worktree 根目录。
-- 一个 Agent Session 绑定一个明确 worktree。创建、切换和清理 worktree 前检查脏状态、占用和未合并变更。
-- 计划任务展示步骤状态、工具时间线、后台输出、失败原因和最终证据。
-- 推送、PR、危险命令和工作区外写入属于额外副作用，不能由普通文件编辑权限隐式允许。
-
-**完成标准**
-
-- Agent 能在独立 worktree 中完成真实仓库的小型修改并运行项目检查。
-- 用户可以逐文件审阅和拒绝变更，取消任务不会污染其他 worktree。
-- 文件、终端、Git、计划和结果区域不再使用静态示例数据。
-
-### T11：MCP 接入
-
-**目标**
-
-让 Agent 通过标准 MCP Server 使用外部工具和数据源，同时纳入 Hachimi 自身的权限、审批和审计体系。
-
-**实现要点**
-
-- 第一版优先支持由 Hachimi 启动和管理的本地 `stdio` Server。
-- MCP Server 声明能力不代表 Agent 已获准调用；每个 Tool 仍要映射本地 Scope 和 Approval。
-- 远程内容、Resources 和工具结果全部按不可信输入处理，并限制数据大小。
-- 单个 Server 故障不能阻塞 Agent Runtime 或其他 MCP Server。
-
-**完成标准**
-
-- 用户可以配置、测试、启用和停用 MCP Server。
-- Agent 能发现并调用已授权工具，未经授权的工具不出现在 Tool Schema 中。
-- 凭据不会出现在普通配置、前端返回值或日志中。
-
-### T12：Skills 接入
-
-**目标**
-
-允许通过可安装的 Skill 为 Agent 增加专门知识、工作流程和工具使用规范。
-
-**实现要点**
-
-- Skill 包必须有明确清单、版本、入口指令、资源和权限声明。
-- 安装和升级时检查来源、哈希、路径、脚本、依赖与新增权限。
-- Skill 只是 Agent 行为扩展，不是安全边界；任何工具调用仍经过参数验证、Sandbox 和审批。
-- Skill 可以引用内置工具或 MCP 工具，但缺少依赖时应明确显示不可用原因。
-
-**完成标准**
-
-- 用户可以安全安装、查看、启停、升级和卸载 Skill。
-- 至少有一个编程 Skill 和一个办公 Skill 完成端到端验证。
-- 恶意或损坏 Skill 不会获得未声明权限或写出授权目录。
-
-### T13：日常办公能力
-
-**目标**
-
-让工作台能够完成真实日常事务，并优先使用文件工具、MCP 和应用 API，而不是依赖桌面坐标点击。
-
-**实现要点**
-
-- 第一批建议覆盖文档、表格、演示文稿和 PDF，再根据需求接入邮件、日历、待办和笔记。
-- 文件修改提供预览、Diff、版本或备份，外部发送和共享提供最终确认。
-- 计划任务需要保存时区、重复规则、失败处理和通知方式。
-- 用户偏好和长期记忆必须可查看、编辑、导出、关闭和删除。
-
-**完成标准**
-
-- 完成“生成并修改文档”“分析并导出表格”“创建需审批的外部日程或待办”等端到端任务。
-- 结构化工具能够完成的流程不会自动退化为桌面控制。
-- 每个任务都能展示数据来源、修改内容、产物和外部副作用。
-
-### T14：桌面控制
-
-**目标**
-
-在用户明确授权和随时可停止的前提下，让 Agent 观察并操作没有结构化接口的桌面应用。
-
-**实现要点**
-
-- 按“应用 API/MCP—Accessibility—视觉坐标”顺序选择控制方式。
-- Observe 和 Act 分开实现、分开授权；先验证只观察能力，再开放输入注入。
-- 每个动作绑定最新 Frame ID，一次只执行一个动作，完成后重新观察。
-- Computer Host 使用独立窄协议，不能提供通用 `eval`、任意命令或操作 Hachimi 审批界面的能力。
-- 控制期间显示目标、剩余授权时间和停止按钮；检测到用户真实输入立即暂停。
-
-**完成标准**
-
-- Helper 缺失、权限不足、Frame 过期、审批不可用、授权到期和用户接管时全部安全拒绝。
-- 截图、Accessibility Tree、剪贴板和凭据不进入普通日志。
-- Windows 完成独立安全与可用性验收后才标记首个平台完成。
-
-### T15：清除工作台全部假功能
-
-**目标**
-
-在各能力完成后逐步接通对应 UI，并在路线图收尾时保证整个工作台没有看起来可用但实际无效的按钮和静态数据。
-
-**实现要点**
-
-- 每完成 T08–T14 的一个纵向功能，同步关闭 T07 清单中的对应占位项。
-- 所有真实操作都提供加载、成功、空状态、错误、取消和权限拒绝反馈。
-- 对不再符合产品结构的控件直接删除，不为保持旧截图而保留死入口。
-- 主页、侧栏、会话、消息、编辑器、Git、终端、Skills、MCP、办公和 Computer 页面全部使用真实状态。
-
-**完成标准**
-
-- T07 功能清单中的占位项全部关闭或有明确延期说明。
-- 自动化和人工测试遍历全部可交互控件，不存在点击无反馈、死路由或伪造成功状态。
-- 工作台中英文、键盘操作、缩放和主要无障碍流程通过验收。
+实际复制、翻译或实质改写前必须先更新 `HARNESS_AGENT_SOURCE_PROVENANCE.md`；所有派生文件保留对应许可证、固定 commit、源路径和修改说明。

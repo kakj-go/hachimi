@@ -1,0 +1,301 @@
+/*
+ * Production page adapters for the canonical docs/ui-style-demos contract.
+ * This file contains only page composition; component tokens remain owned by
+ * the shared Demo CSS imported through @hachimi/ui/styles.
+ */
+
+.home-layout {
+  grid-template-columns: var(--sidebar-width) minmax(0, 1fr);
+  background: var(--sidebar);
+}
+
+.settings-layout {
+  grid-template-columns: var(--settings-sidebar) minmax(0, 1fr);
+  background: var(--sidebar);
+}
+
+.project-sidebar,
+.settings-sidebar {
+  background: var(--sidebar);
+}
+
+.home-main,
+.settings-main {
+  border-radius: 0;
+  background: var(--canvas);
+}
+
+.settings-main {
+  grid-template-rows: 58px minmax(0, 1fr);
+}
+
+.settings-header {
+  min-height: 58px;
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding-inline: var(--space-4);
+  border-bottom: 1px solid var(--border);
+  background: var(--canvas);
+}
+
+.settings-header strong {
+  color: var(--text);
+  font-size: var(--font-md);
+  font-weight: 600;
+}
+
+.settings-header > span {
+  color: var(--faint);
+  font-size: var(--font-xs);
+}
+
+.settings-header-actions {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.saved-state {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  color: var(--faint);
+  font-size: var(--font-xs);
+}
+
+.status-dot {
+  width: 8px;
+  height: 8px;
+  display: inline-block;
+  border-radius: 50%;
+  background: var(--success);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--color-bg-accent) 8%, transparent);
+}
+
+.settings-page,
+.appearance-page {
+  width: min(100% - 64px, 1020px);
+  gap: var(--space-6);
+  padding: 48px 0 80px;
+}
+
+.settings-page-heading h1,
+.page-heading h1 {
+  color: var(--text);
+  font-size: var(--font-2xl);
+  font-weight: 600;
+  line-height: var(--line-tight);
+}
+
+.settings-page-heading p,
+.page-heading p {
+  color: var(--muted);
+  font-size: var(--font-sm);
+  line-height: var(--line-reading);
+}
+
+.settings-page [data-component="settings-section"] {
+  gap: var(--space-3);
+}
+
+.settings-page [data-component="settings-section-title"] {
+  color: var(--text);
+  font-size: var(--font-lg);
+  font-weight: 600;
+}
+
+.settings-page [data-component="settings-section"] > .settings-section-heading p {
+  color: var(--faint);
+  font-size: var(--font-sm);
+}
+
+.settings-card,
+.theme-profile-card,
+.theme-picker,
+.live-preview-card {
+  border-color: var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--surface);
+}
+
+.theme-layout {
+  grid-template-columns: minmax(0, 1fr) 340px;
+  gap: var(--space-3);
+}
+
+.theme-picker {
+  gap: var(--space-3);
+  padding: var(--space-4);
+}
+
+.appearance-mode-grid {
+  gap: var(--space-2);
+}
+
+.appearance-mode-card {
+  gap: var(--space-2);
+  padding: var(--space-2);
+  border-color: var(--border);
+  border-radius: var(--radius-md);
+  background: transparent;
+}
+
+.appearance-mode-card.selected {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--color-bg-accent) 7%, transparent);
+  box-shadow: inset 0 0 0 1px var(--accent);
+}
+
+.appearance-mode-preview {
+  height: 100px;
+  border-radius: var(--radius-sm);
+}
+
+.theme-profile {
+  padding-top: var(--space-1);
+  color: var(--muted);
+  font-size: var(--font-sm);
+}
+
+.theme-profile strong {
+  color: var(--text);
+  font-weight: 500;
+}
+
+.accent-chip[data-component="button"] {
+  width: 24px;
+  height: 24px;
+  min-height: 24px;
+  padding: 0;
+  --chip-color: attr(data-chip-color type(<color>), var(--color-bg-accent));
+  background: var(--chip-color);
+}
+
+.settings-card [data-component="settings-row"],
+.theme-profile-card [data-component="settings-row"] {
+  min-height: var(--density-row-height);
+  padding: var(--space-3) var(--density-card-padding);
+  border-color: var(--border);
+  background: transparent;
+}
+
+.settings-card [data-component="settings-row"] > div:last-child,
+.theme-profile-card [data-component="settings-row"] > div:last-child {
+  flex-basis: 360px;
+}
+
+.settings-nav-row,
+.settings-nav-group button {
+  min-height: var(--density-row-height);
+  border-radius: var(--radius-md);
+}
+
+.settings-nav-row.selected,
+.settings-nav-row.active,
+.settings-nav-group button.selected {
+  background: var(--pressed);
+  color: var(--text);
+}
+
+.composer.composer-demo {
+  min-height: 184px;
+  padding: var(--space-3);
+  border-color: var(--border-strong);
+  border-radius: var(--radius-lg);
+  background: var(--surface-strong);
+  box-shadow: var(--shadow-raised);
+}
+
+.composer.composer-demo textarea {
+  min-height: 48px;
+  height: auto;
+  color: var(--text);
+}
+
+.composer.composer-demo textarea::placeholder {
+  color: var(--faint);
+}
+
+.composer-send {
+  width: 30px;
+  height: 30px;
+  min-height: 30px;
+  padding: 0;
+  border-radius: var(--radius-md);
+  background: var(--control);
+  color: var(--faint);
+}
+
+.composer-send:not(:disabled) {
+  background: var(--accent);
+  color: var(--accent-contrast);
+}
+
+.composer-options button,
+.composer-context button,
+.composer-select,
+.composer-inline-select {
+  min-height: 30px;
+  border-radius: var(--radius-md);
+  color: var(--faint);
+  font-size: var(--font-xs);
+}
+
+@media (max-width: 1100px) {
+  .home-layout {
+    grid-template-columns: 250px minmax(0, 1fr);
+  }
+}
+
+@media (max-width: 1080px) {
+  .guide-cards button {
+    min-height: 84px;
+    grid-template-rows: 28px auto;
+    gap: var(--space-2);
+    padding: var(--space-3);
+  }
+
+  .guide-cards button > span {
+    width: 28px;
+    height: 28px;
+  }
+
+  .guide-cards small {
+    display: none;
+  }
+}
+
+@media (max-width: 1040px) {
+  .settings-page,
+  .appearance-page {
+    width: calc(100% - 40px);
+  }
+
+  .theme-layout {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .live-preview-card {
+    display: none;
+  }
+}
+
+@media (max-width: 760px) {
+  .home-layout,
+  .settings-layout {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .project-sidebar,
+  .settings-sidebar {
+    display: none;
+  }
+
+  .settings-page,
+  .appearance-page {
+    width: calc(100% - 28px);
+    padding-top: var(--space-5);
+  }
+}

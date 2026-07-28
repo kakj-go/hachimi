@@ -1,0 +1,7 @@
+interface:
+  display_name: "Office File Organizer"
+  short_description: "Preview and organize authorized files safely"
+  default_prompt: "Use $office-file-organizer to preview and organize files in the authorized directory."
+policy:
+  allow_implicit_invocation: true
+  workload: "office"

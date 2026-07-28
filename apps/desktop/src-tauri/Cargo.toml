@@ -5,6 +5,11 @@ edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true
 
+[features]
+default = []
+# Deterministic UI automation seams. Release builds reject this feature at compile time.
+desktop-e2e = []
+
 [build-dependencies]
 serde_json.workspace = true
 sha2.workspace = true
@@ -12,21 +17,37 @@ tauri-build = { version = "=2.6.3", features = [] }
 
 [dependencies]
 arboard.workspace = true
+futures-util.workspace = true
+hachimi-agent.workspace = true
+hachimi-approvals.workspace = true
+hachimi-audit.workspace = true
 hachimi-control-plane.workspace = true
 hachimi-core.workspace = true
 hachimi-avatar.workspace = true
+hachimi-capabilities.workspace = true
 hachimi-llm.workspace = true
 hachimi-motion.workspace = true
+hachimi-policy.workspace = true
+hachimi-process.workspace = true
 hachimi-protocol.workspace = true
 hachimi-storage.workspace = true
+hachimi-user-input.workspace = true
+hachimi-sandbox.workspace = true
+hachimi-scheduler.workspace = true
+hachimi-skills.workspace = true
 hachimi-voice.workspace = true
 hachimi-windowing.workspace = true
+hachimi-workbench.workspace = true
+hachimi-workspace.workspace = true
 parking_lot.workspace = true
+keyring.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 specta.workspace = true
 rfd.workspace = true
 tauri = { workspace = true, features = ["tray-icon"] }
+tauri-plugin-notification.workspace = true
 tauri-runtime.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true

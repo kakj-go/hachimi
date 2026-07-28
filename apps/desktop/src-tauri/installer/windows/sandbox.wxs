@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+  <Fragment>
+    <DirectoryRef Id="TARGETDIR">
+      <Directory Id="CommonAppDataFolder">
+        <Directory Id="HachimiProgramData" Name="Hachimi">
+          <Directory Id="HachimiSandboxData" Name="sandbox">
+            <Directory Id="HachimiSandboxWindowsData" Name="windows" />
+          </Directory>
+        </Directory>
+      </Directory>
+    </DirectoryRef>
+  </Fragment>
+  <Fragment>
+    <ComponentGroup Id="HachimiSandboxSetupActions">
+      <Component Id="HachimiSandboxMarkerDirectory" Directory="HachimiSandboxWindowsData" Guid="*">
+        <CreateFolder />
+        <RemoveFolder Id="RemoveHachimiSandboxWindowsData" On="uninstall" />
+        <RegistryValue Root="HKLM" Key="Software\Hachimi" Name="SandboxSetupDirectory" Type="string" Value="[HachimiSandboxWindowsData]" KeyPath="yes" />
+      </Component>
+    </ComponentGroup>
+    <CustomAction
+      Id="RollbackHachimiSandbox"
+      Directory="INSTALLDIR"
+      ExeCommand='&quot;[INSTALLDIR]hachimi-sandbox-setup.exe&quot; --uninstall --marker &quot;[HachimiSandboxWindowsData]setup.json&quot;'
+      Execute="rollback"
+      Impersonate="no"
+      Return="ignore" />
+    <CustomAction
+      Id="InstallHachimiSandbox"
+      Directory="INSTALLDIR"
+      ExeCommand='&quot;[INSTALLDIR]hachimi-sandbox-setup.exe&quot; --marker &quot;[HachimiSandboxWindowsData]setup.json&quot; --launcher &quot;[INSTALLDIR]hachimi-sandbox-launcher.exe&quot;'
+      Execute="deferred"
+      Impersonate="no"
+      Return="check" />
+    <CustomAction
+      Id="UninstallHachimiSandbox"
+      Directory="INSTALLDIR"
+      ExeCommand='&quot;[INSTALLDIR]hachimi-sandbox-setup.exe&quot; --uninstall --marker &quot;[HachimiSandboxWindowsData]setup.json&quot;'
+      Execute="deferred"
+      Impersonate="no"
+      Return="ignore" />
+    <InstallExecuteSequence>
+      <Custom Action="RollbackHachimiSandbox" Before="InstallHachimiSandbox">NOT Installed</Custom>
+      <Custom Action="InstallHachimiSandbox" After="InstallFiles">NOT Installed</Custom>
+      <Custom Action="UninstallHachimiSandbox" Before="RemoveFiles">REMOVE~=&quot;ALL&quot;</Custom>
+    </InstallExecuteSequence>
+  </Fragment>
+</Wix>

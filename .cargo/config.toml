@@ -1,5 +1,5 @@
-[env]
-# sherpa-onnx-sys consumes this directory at link time. Keeping the import
-# libraries beside the bundled DLLs prevents Cargo from silently downloading
-# the CPU-only upstream Windows prebuilt.
-SHERPA_ONNX_LIB_DIR = { value = "apps/desktop/src-tauri/resources/native/sherpa-onnx-1.13.4-directml/windows-x64", relative = true }
+[target.x86_64-pc-windows-msvc]
+# AppContainer processes cannot assume the host VC runtime DLL is readable by application-package
+# identities. Static CRT linkage keeps Workspace Worker, MCP stdio, and Sandbox canaries inside
+# their exact file ACLs without widening a machine-wide system DLL ACL.
+rustflags = ["-C", "target-feature=+crt-static"]

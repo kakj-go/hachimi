@@ -1,0 +1,7 @@
+interface:
+  display_name: "Office Spreadsheets"
+  short_description: "Build and verify structured spreadsheets"
+  default_prompt: "Use $office-spreadsheets to build and validate the requested workbook."
+policy:
+  allow_implicit_invocation: true
+  workload: "office"

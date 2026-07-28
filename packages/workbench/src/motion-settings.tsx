@@ -18,6 +18,7 @@ import {
   Button,
   Dialog,
   NumberField,
+  PageHeading,
   SearchField,
   SelectField,
   StatusBanner,
@@ -355,19 +356,16 @@ export function MotionSettingsPage() {
   }
 
   return (
-    <div class="settings-page motion-settings-page">
-      <header class="page-heading">
-        <div>
-          <h1>{text("交互", "Interactions")}</h1>
-          <p>
-            {text(
-              "管理内置与用户 VRMA，并为桌宠各个互动区域设置一个确定动作。",
-              "Manage built-in and user VRMA assets and assign one deterministic motion per interaction region.",
-            )}
-          </p>
-        </div>
-        <Badge>{catalog().entries.length} VRMA</Badge>
-      </header>
+    <div class="settings-page settings-page-demo motion-settings-page">
+      <PageHeading
+        class="settings-page-heading"
+        title={text("交互", "Interactions")}
+        description={text(
+          "管理内置与用户 VRMA，并为桌宠各个互动区域设置一个确定动作。",
+          "Manage built-in and user VRMA assets and assign one deterministic motion per interaction region.",
+        )}
+        badge={`${catalog().entries.length} VRMA`}
+      />
 
       <Tabs
         value={tab()}
@@ -391,36 +389,44 @@ export function MotionSettingsPage() {
           <Switch>
             <Match when={tab() === "motions"}>
               <div class="motion-filter-bar">
-                <SearchField
-                  label={text("搜索动作", "Search motions")}
-                  value={query()}
-                  onInput={(event) => setQuery(event.currentTarget.value)}
-                />
-                <SelectField
-                  label={text("分类", "Category")}
-                  value={category()}
-                  options={[
-                    { value: "all", label: text("全部分类", "All categories") },
-                    ...MOTION_CATEGORIES.map((value) => ({
-                      value,
-                      label: motionCategoryLabel(value, i18n.locale()),
-                    })),
-                  ]}
-                  onChange={(value) => setCategory(value as MotionCategory | "all")}
-                />
-                <SelectField
-                  label={text("来源", "Source")}
-                  value={source()}
-                  options={[
-                    { value: "all", label: text("全部来源", "All sources") },
-                    { value: "builtin", label: text("内置动作", "Built-in") },
-                    { value: "user", label: text("用户动作", "User") },
-                  ]}
-                  onChange={(value) => setSource(value as MotionSourceFilter)}
-                />
-                <Button variant="primary" disabled={busy()} onClick={() => void inspectImport()}>
-                  <Upload size={14} /> {text("上传 VRMA", "Upload VRMA")}
-                </Button>
+                <div class="motion-filter-control search">
+                  <SearchField
+                    label={text("搜索动作", "Search motions")}
+                    value={query()}
+                    onInput={(event) => setQuery(event.currentTarget.value)}
+                  />
+                </div>
+                <div class="motion-filter-control category">
+                  <SelectField
+                    label={text("分类", "Category")}
+                    value={category()}
+                    options={[
+                      { value: "all", label: text("全部分类", "All categories") },
+                      ...MOTION_CATEGORIES.map((value) => ({
+                        value,
+                        label: motionCategoryLabel(value, i18n.locale()),
+                      })),
+                    ]}
+                    onChange={(value) => setCategory(value as MotionCategory | "all")}
+                  />
+                </div>
+                <div class="motion-filter-control source">
+                  <SelectField
+                    label={text("来源", "Source")}
+                    value={source()}
+                    options={[
+                      { value: "all", label: text("全部来源", "All sources") },
+                      { value: "builtin", label: text("内置动作", "Built-in") },
+                      { value: "user", label: text("用户动作", "User") },
+                    ]}
+                    onChange={(value) => setSource(value as MotionSourceFilter)}
+                  />
+                </div>
+                <div class="motion-filter-control upload">
+                  <Button variant="primary" disabled={busy()} onClick={() => void inspectImport()}>
+                    <Upload size={14} /> {text("上传 VRMA", "Upload VRMA")}
+                  </Button>
+                </div>
               </div>
               <div class="motion-entry-list" role="listbox" aria-label={text("动作库", "Library")}>
                 <For each={filteredEntries()}>
@@ -549,7 +555,7 @@ export function MotionSettingsPage() {
                       const entry = () =>
                         catalog().entries.find((value) => value.id === binding()?.motionId);
                       return (
-                        <button
+                        <Button
                           type="button"
                           classList={{ selected: selectedRegion() === region }}
                           onClick={() => selectInteractionRegion(region)}
@@ -564,7 +570,7 @@ export function MotionSettingsPage() {
                                 }`
                               : text("未绑定", "Unbound")}
                           </small>
-                        </button>
+                        </Button>
                       );
                     }}
                   </For>

@@ -1,0 +1,7 @@
+interface:
+  display_name: "Office Presentations"
+  short_description: "Design and validate presentation decks"
+  default_prompt: "Use $office-presentations to create and validate the requested deck."
+policy:
+  allow_implicit_invocation: true
+  workload: "office"

@@ -52,6 +52,19 @@ if (process.platform === "win32") {
   if (existsSync(join(directMlRuntime, "sherpa-onnx-c-api.lib"))) {
     childEnvironment.SHERPA_ONNX_LIB_DIR = directMlRuntime;
   }
+
+  // The sherpa build helper and Tauri's resource build both stage the same
+  // runtime DLLs beside the profile binary. Cargo may otherwise run those
+  // build scripts concurrently and Windows rejects the second open with
+  // ERROR_SHARING_VIOLATION. Quality checks favor deterministic staging over
+  // build-script parallelism; explicit caller configuration still wins.
+  if (
+    rustTool === "cargo" &&
+    rustToolArguments[0] === "clippy" &&
+    childEnvironment.CARGO_BUILD_JOBS === undefined
+  ) {
+    childEnvironment.CARGO_BUILD_JOBS = "1";
+  }
 }
 
 let executable;

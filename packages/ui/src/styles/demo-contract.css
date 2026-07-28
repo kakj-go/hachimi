@@ -1,0 +1,55 @@
+/*
+ * The files below are the canonical Hachimi UI contract. Keep the visual
+ * source in docs/ui-style-demos so the gallery and the product cannot drift.
+ */
+@import "../../../../docs/ui-style-demos/demo-shared.css";
+@import "../../../../docs/ui-style-demos/demo-settings.css";
+@import "../../../../docs/ui-style-demos/component-gallery.css";
+@import "../../../../docs/ui-style-demos/component-composer.css";
+
+/* Bridge the static demo token names to the typed Solid component tokens. */
+html[data-color-scheme] {
+  --app-bg: var(--appearance-background);
+  --canvas: var(--appearance-background);
+  --surface: var(--appearance-panel);
+  --surface-strong: var(--appearance-surface-strong);
+  --control: var(--appearance-control);
+  --titlebar: var(--appearance-titlebar);
+  --sidebar: var(--appearance-sidebar-start);
+  --text: var(--appearance-foreground);
+  --muted: var(--appearance-muted);
+  --faint: color-mix(in srgb, var(--appearance-foreground) 52%, var(--appearance-background));
+  --border: var(--appearance-border-muted);
+  --border-strong: var(--appearance-border);
+  --accent: var(--appearance-accent);
+  --accent-rgb: var(--appearance-accent-rgb);
+  --accent-contrast: var(--appearance-accent-foreground);
+  --hover: color-mix(in srgb, var(--appearance-foreground) 5%, transparent);
+  --pressed: color-mix(in srgb, var(--appearance-foreground) 9%, transparent);
+
+  --font-size-xs: var(--font-xs);
+  --font-size-sm: var(--font-sm);
+  --font-size-md: var(--font-md);
+  --font-size-lg: var(--font-lg);
+  --font-size-xl: var(--font-xl);
+  --font-size-2xl: var(--font-2xl);
+  --control-height-sm: var(--control-sm);
+  --control-height-md: var(--control-md);
+  --control-height-lg: var(--control-lg);
+  --control-height-xl: var(--control-lg);
+}
+
+html[data-color-scheme="dark"] {
+  color-scheme: dark;
+}
+
+html[data-color-scheme="light"] {
+  color-scheme: light;
+}
+
+html[data-translucent-sidebar="on"] .sidebar,
+html[data-translucent-sidebar="on"] .context-rail,
+html[data-translucent-sidebar="on"] .settings-sidebar {
+  background: color-mix(in srgb, var(--sidebar) 86%, transparent);
+  backdrop-filter: blur(16px);
+}

@@ -1,0 +1,28 @@
+[package]
+name = "hachimi-process"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+base64.workspace = true
+hachimi-protocol.workspace = true
+hachimi-sandbox.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true, features = [
+  "Win32_Foundation",
+  "Win32_Security",
+  "Win32_System_Console",
+  "Win32_System_JobObjects",
+  "Win32_System_Pipes",
+  "Win32_System_Threading",
+  "Win32_Storage_FileSystem",
+] }
+
+[dev-dependencies]
+tempfile.workspace = true

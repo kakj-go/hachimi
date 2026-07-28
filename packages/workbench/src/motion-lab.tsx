@@ -5,8 +5,16 @@ import {
   type MotionCatalogSnapshot,
 } from "@hachimi/contracts";
 import { useI18n } from "@hachimi/i18n";
-import { Badge, Button, Play, Square } from "@hachimi/ui";
-import { For, Show, createMemo, createSignal, onCleanup, onMount } from "solid-js";
+import {
+  Button,
+  MetricCard,
+  PageHeading,
+  Play,
+  RangeField,
+  SelectField,
+  Square,
+} from "@hachimi/ui";
+import { Show, createMemo, createSignal, onCleanup, onMount } from "solid-js";
 import { MotionLabPetController } from "./motion-lab-pet-control";
 import { MotionLabRuntime, type MotionLabFrame } from "./motion-lab-runtime";
 import {
@@ -101,39 +109,32 @@ export function MotionLabPage() {
 
   return (
     <div class="motion-lab-page">
-      <header class="motion-lab-header">
-        <div>
-          <p class="eyebrow">Avatar Motion Runtime V4</p>
-          <h1>{text("动作库实验室", "Motion Library Lab")}</h1>
-          <p class="settings-copy">
-            {text(
-              "直接预览内置和用户 VRMA，检查完整骨骼、手指、Root Motion、循环接缝与约束结果。",
-              "Preview built-in and user VRMA assets with full-bone, finger, root-motion, loop, and constraint diagnostics.",
-            )}
-          </p>
-        </div>
-        <Badge>{motions().entries.length} VRMA</Badge>
-      </header>
+      <PageHeading
+        class="motion-lab-header"
+        eyebrow="Avatar Motion Runtime V4"
+        title={text("动作库实验室", "Motion Library Lab")}
+        description={text(
+          "直接预览内置和用户 VRMA，检查完整骨骼、手指、Root Motion、循环接缝与约束结果。",
+          "Preview built-in and user VRMA assets with full-bone, finger, root-motion, loop, and constraint diagnostics.",
+        )}
+        badge={`${motions().entries.length} VRMA`}
+      />
       <Show when={failure()}>{(message) => <p class="settings-error">{message()}</p>}</Show>
       <div class="motion-lab-layout">
         <section class="motion-lab-stage-card">
           <div class="motion-lab-toolbar">
-            <label>
-              <span>{text("测试模型", "QA avatar")}</span>
-              <select
-                value={avatarId()}
-                onChange={(event) => {
-                  setAvatarId(event.currentTarget.value);
-                  void loadAvatar(event.currentTarget.value).catch((error) =>
-                    setFailure(commandFailure(error).message),
-                  );
-                }}
-              >
-                <For each={avatars()?.entries ?? []}>
-                  {(entry) => <option value={entry.id}>{entry.name}</option>}
-                </For>
-              </select>
-            </label>
+            <SelectField
+              label={text("测试模型", "QA avatar")}
+              value={avatarId() ?? ""}
+              options={(avatars()?.entries ?? []).map((entry) => ({
+                value: entry.id,
+                label: entry.name,
+              }))}
+              onChange={(value) => {
+                setAvatarId(value);
+                void loadAvatar(value).catch((error) => setFailure(commandFailure(error).message));
+              }}
+            />
             <Button
               onClick={() => {
                 const next = !playing();
@@ -147,18 +148,17 @@ export function MotionLabPage() {
             <Button onClick={() => runtime?.restart()}>{text("重新开始", "Restart")}</Button>
           </div>
           <div class="motion-lab-stage" ref={stage} />
-          <label class="motion-lab-scrubber">
-            <span>{text("动作时间", "Motion time")}</span>
-            <input
-              type="range"
+          <div class="motion-lab-scrubber">
+            <RangeField
+              label={text("动作时间", "Motion time")}
               min={0}
               max={selectedMotion()?.durationMs ?? 1}
               step={10}
+              unit=" ms"
               value={Math.min(frame()?.timeMs ?? 0, selectedMotion()?.durationMs ?? 1)}
-              onInput={(event) => runtime?.setTimeMs(event.currentTarget.valueAsNumber)}
+              onInput={(value) => runtime?.setTimeMs(value)}
             />
-            <output>{Math.round(frame()?.timeMs ?? 0)} ms</output>
-          </label>
+          </div>
           <div class="motion-lab-metrics">
             <Metric label={text("相位", "Phase")} value={(frame()?.phase ?? 0).toFixed(3)} />
             <Metric
@@ -178,36 +178,30 @@ export function MotionLabPage() {
           </div>
         </section>
         <aside class="motion-lab-panel">
-          <label class="motion-lab-field">
-            <span>{text("VRMA 动作", "VRMA motion")}</span>
-            <select
-              value={motionId()}
-              onChange={(event) => void chooseMotion(event.currentTarget.value)}
-            >
-              <For each={motions().entries}>
-                {(entry) => (
-                  <option value={entry.id}>
-                    {motionName(entry, i18n.locale())} · {entry.sourceProject}
-                  </option>
-                )}
-              </For>
-            </select>
-          </label>
-          <label class="motion-lab-range">
-            <span>{text("播放速度", "Playback rate")}</span>
-            <input
-              type="range"
+          <div class="motion-lab-field">
+            <SelectField
+              label={text("VRMA 动作", "VRMA motion")}
+              value={motionId() ?? ""}
+              options={motions().entries.map((entry) => ({
+                value: entry.id,
+                label: `${motionName(entry, i18n.locale())} · ${entry.sourceProject}`,
+              }))}
+              onChange={(value) => void chooseMotion(value)}
+            />
+          </div>
+          <div class="motion-lab-range">
+            <RangeField
+              label={text("播放速度", "Playback rate")}
               min={0.25}
               max={3}
               step={0.05}
               value={speed()}
-              onInput={(event) => {
-                setSpeed(event.currentTarget.valueAsNumber);
-                runtime?.setSpeed(event.currentTarget.valueAsNumber);
+              onInput={(value) => {
+                setSpeed(value);
+                runtime?.setSpeed(value);
               }}
             />
-            <output>{speed().toFixed(2)}</output>
-          </label>
+          </div>
           <section class="motion-lab-pet-test" aria-label={text("桌宠联调", "Pet integration")}>
             <h2>{text("桌宠联调", "Pet integration")}</h2>
             <p>
@@ -336,10 +330,5 @@ export function MotionLabPage() {
 }
 
 function Metric(props: { label: string; value: string }) {
-  return (
-    <div>
-      <span>{props.label}</span>
-      <strong>{props.value}</strong>
-    </div>
-  );
+  return <MetricCard label={props.label} value={props.value} />;
 }
