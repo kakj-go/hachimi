@@ -3,6 +3,8 @@ import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { deriveMsiVersion } from "./build-installers.mjs";
+
 export function readReleaseVersions(root) {
   const packageJson = JSON.parse(readFileSync(resolve(root, "package.json"), "utf8"));
   const tauri = JSON.parse(
@@ -47,6 +49,14 @@ export function verifyReleaseVersion(root, expectedTag = "") {
     throw new Error("release_license_metadata_mismatch");
   }
   const version = versions.package;
+  const msiVersion = deriveMsiVersion(version);
+  if (versions.tauriConfig.bundle?.targets?.includes("msi") !== true) {
+    throw new Error("release_msi_bundle_target_missing");
+  }
+  const packageScripts = JSON.parse(readFileSync(resolve(root, "package.json"), "utf8")).scripts;
+  if (packageScripts?.["build:installer"] !== "node scripts/release/build-installers.mjs") {
+    throw new Error("release_installer_builder_mismatch");
+  }
   for (const pkg of versions.jsPackages) {
     if (pkg.version !== version) throw new Error(`release_js_package_version_mismatch:${pkg.path}`);
     if (pkg.license !== "Apache-2.0") {
@@ -126,6 +136,7 @@ export function verifyReleaseVersion(root, expectedTag = "") {
   }
   return {
     version,
+    msiVersion,
     versions: { package: versions.package, tauri: versions.tauri, cargo: versions.cargo },
     license: "Apache-2.0",
     workspacePackages: metadata.packages.length,

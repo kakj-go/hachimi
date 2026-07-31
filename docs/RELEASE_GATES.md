@@ -111,7 +111,7 @@ Git fetch/push 通过 `WorkspaceHostClient` 与固定 managed Git 执行，凭�
 
 ## Windows 与发布
 
-`windows-release-gate.yml` 只构建一次 MSI、NSIS 和便携 ZIP。standard-user 与 elevated Runner 下载同一候选并重新哈希；前者必须是真实非 Administrators、未提升的交互账户并执行 `v0.2.0 → 候选`，后者必须是真正提升的交互管理员环境。NSIS 安装目录、MSI administrative image 和便携 ZIP 都会按源文件 SHA-256 验证 Apache LICENSE、根 NOTICE、默认 VRM/动作许可、语音第三方 NOTICE、模型许可及默认 VRM 本体，不能只依赖 Tauri 配置声明。
+`windows-release-gate.yml` 只构建一次 MSI、NSIS 和便携 ZIP。alpha 的 NSIS 和源码版本保持 `0.3.0-alpha.N`；由于 Wix/MSI 只接受数值 prerelease，MSI 打包阶段使用确定性 `0.3.0-N` overlay，artifact manifest 仍绑定完整源码版本、commit 和三类包哈希。手动运行默认 `candidate_only: true`，只生成不可变候选并跳过已后置的 standard-user/elevated 身份 Gate；显式关闭该输入或正式 push/tag 流程才会进入两类身份 Gate。standard-user 与 elevated Runner 下载同一候选并重新哈希；前者必须是真实非 Administrators、未提升的交互账户并执行 `v0.2.0 → 候选`，后者必须是真正提升的交互管理员环境。NSIS 安装目录、MSI administrative image 和便携 ZIP 都会按源文件 SHA-256 验证 Apache LICENSE、根 NOTICE、默认 VRM/动作许可、语音第三方 NOTICE、模型许可及默认 VRM 本体，不能只依赖 Tauri 配置声明。
 
 确定性 Desktop E2E 在 `target/desktop-e2e-tools/` 使用固定 `tauri-driver 2.0.6` 和与 Runner 已安装 Edge 精确匹配的 Microsoft Edge WebDriver。准备脚本校验 driver 版本、Microsoft Authenticode 签名和本地 SHA-256 manifest；缓存被安全清理后可重新获取，不要求 Runner 长期保留多套 driver。managed Chromium 已展开目录若仍通过逐文件 manifest 校验，也不再要求同时保留额外下载 ZIP。
 

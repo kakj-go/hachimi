@@ -5,6 +5,12 @@ on:
     branches: [main]
     tags: ["v*"]
   workflow_dispatch:
+    inputs:
+      candidate_only:
+        description: Build and upload the immutable candidate without running deferred Windows identity gates
+        required: true
+        default: true
+        type: boolean
 
 permissions:
   contents: read
@@ -63,6 +69,7 @@ jobs:
 
   standard-user-release:
     needs: build-candidate
+    if: ${{ github.event_name != 'workflow_dispatch' || !inputs.candidate_only }}
     runs-on: [self-hosted, windows, x64, hachimi-standard-user]
     environment: hachimi-standard-user-release
     timeout-minutes: 180
@@ -114,6 +121,7 @@ jobs:
 
   sandbox-release:
     needs: build-candidate
+    if: ${{ github.event_name != 'workflow_dispatch' || !inputs.candidate_only }}
     runs-on: [self-hosted, windows, x64, hachimi-sandbox]
     environment: hachimi-sandbox-release
     timeout-minutes: 150

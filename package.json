@@ -13,7 +13,7 @@
     "dev": "node scripts/run-with-rust.mjs tauri dev --config apps/desktop/src-tauri/tauri.conf.json",
     "build": "node scripts/run-with-rust.mjs tauri build --debug --no-bundle --config apps/desktop/src-tauri/tauri.conf.json",
     "build:debug": "node scripts/run-with-rust.mjs tauri build --debug --no-bundle --config apps/desktop/src-tauri/tauri.conf.json",
-    "build:installer": "node scripts/run-with-rust.mjs tauri build --bundles nsis,msi --config apps/desktop/src-tauri/tauri.conf.json",
+    "build:installer": "node scripts/release/build-installers.mjs",
     "build:portable": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/build-portable.ps1",
     "format": "prettier --write . && node scripts/run-with-rust.mjs cargo fmt --all",
     "format:check": "prettier --check . && node scripts/run-with-rust.mjs cargo fmt --all --check",

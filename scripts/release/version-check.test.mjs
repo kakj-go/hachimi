@@ -23,6 +23,7 @@ test("release version and license metadata are consistent across the workspace",
 
   const result = verifyReleaseVersion(workspaceRoot, "v0.3.0-alpha.8");
   assert.equal(result.version, "0.3.0-alpha.8");
+  assert.equal(result.msiVersion, "0.3.0-8");
   assert.equal(result.license, "Apache-2.0");
 });
 
