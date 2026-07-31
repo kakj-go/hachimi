@@ -7,10 +7,10 @@ use std::{collections::BTreeMap, future::Future, pin::Pin, sync::Arc, time::Dura
 
 use futures_util::{StreamExt, future::join_all};
 use hachimi_protocol::{
-    BehaviorMode, EntryProfile, ModelEvent, ModelFinishReason, ModelMessage, ModelRequest,
-    ModelToolCall, RecoveryRevisionSnapshot, RunBudget, RunId, RunOrigin, RunStepPhase,
-    SessionContextBinding, SessionId, SideEffectExecutionId, TokenCountSource, TokenUsage,
-    ToolCallId, ToolRecoveryPolicy, WorkloadKind,
+    BehaviorMode, CapabilityGrantSet, EntryProfile, ModelEvent, ModelFinishReason, ModelMessage,
+    ModelRequest, ModelToolCall, RecoveryRevisionSnapshot, RunBudget, RunId, RunOrigin,
+    RunStepPhase, SessionContextBinding, SessionId, SideEffectExecutionId, TokenCountSource,
+    TokenUsage, ToolCallId, ToolRecoveryPolicy, WorkloadKind,
 };
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
@@ -85,6 +85,7 @@ pub struct ToolLoopRunOptions<'a> {
     pub run_generation: u64,
     pub budget: &'a RunBudget,
     pub run_tool_allowlist: Option<Vec<String>>,
+    pub capability_grants: Option<CapabilityGrantSet>,
     pub request_context: Option<&'a str>,
     pub world_refresher: Option<Arc<dyn StepWorldStateRefresher>>,
     pub steering: Option<Arc<dyn SteeringSource>>,
@@ -144,6 +145,7 @@ impl ToolLoopDriver {
             run_generation,
             budget,
             run_tool_allowlist,
+            capability_grants,
             request_context,
             world_refresher,
             steering,
@@ -199,6 +201,7 @@ impl ToolLoopDriver {
                 registered_tools: registered_tools.clone(),
                 registry_revision: registry_revision.clone(),
                 run_tool_allowlist: run_tool_allowlist.clone(),
+                capability_grants: capability_grants.clone(),
             });
             tools_degraded |=
                 !registered_tools.is_empty() && step.tool_plan.descriptors().is_empty();
@@ -681,6 +684,7 @@ mod tests {
             run_generation: 1,
             budget,
             run_tool_allowlist: None,
+            capability_grants: None,
             request_context: None,
             world_refresher: None,
             steering: None,

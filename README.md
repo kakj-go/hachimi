@@ -2,7 +2,7 @@
 
 Hachimi 是一个 Windows 先行、保持跨平台边界的桌面 Agent 与透明 3D 桌宠。当前开发预览版由 Tauri 2、Rust、SolidJS 和 Three.js/three-vrm 构建，包含统一 Workbench/Pet Agent Runtime、项目与 Session、工具调用、Browser/Computer、本地 Plugins/Connectors、Gateway/Channels、Scheduled Tasks、离线语音识别和离线语音合成。
 
-> 项目目前处于 Beta 阶段，尚未发布正式稳定版。`v0.2.1` 封板现已暂缓，不再作为 0.3.0 功能开发前置；本轮只收口代码、migration、产品入口、单元测试与确定性本地集成测试，不执行真实外部服务或 Windows release Gate。当前仓库没有项目级 `LICENSE`，公开 fork、分发或接收外部贡献前应先明确项目许可证。
+> 项目目前处于 Beta 阶段，源码版本为 `0.3.0-alpha.8`，但 `v0.3.0-alpha.8` 尚未创建 tag 或发布。`v0.2.1` 已取消，升级验证基线仍为已发布的 `v0.2.0`；`alpha.1`–`alpha.7` 未发布并由 alpha.8 合并取代。源码采用 Apache-2.0，官方预编译包因默认 VRM 的许可限制属于非商业发行。
 
 ## 界面预览
 
@@ -26,7 +26,7 @@ Workbench 提供模型、动作、互动区域和语音等运行时配置，并�
 - Workbench 已实现 General/Project/DesktopControl Session、新 Run、活动 Run Steer、终态 Run Fork、rename/pin/archive/search、Monaco、Terminal、通用 Git push、Forge PR/MR、Browser 和 Computer 产品入口。
 - Scheduled Tasks 支持 At/Every/Cron/Event、Standalone/Session continuation、Worktree、ScheduleGrant、NeedsAttention、retry、停止条件、通知、事件去重 ledger 和重启 reconciliation。
 - Plugin contribution 的 install/enable/disable/update/rollback/uninstall、known-good revision、进程崩溃 reconciliation 和跨产品清理已实现；不建设 Marketplace。
-- 企业微信、钉钉、飞书的 REST Connector、Channel/EventSource、结构化 mention、受控附件下载与 Gateway ledger 已实现；企业微信 loopback AES callback、钉钉 Stream WebSocket 和飞书 WebSocket/protobuf supervisor 均有确定性 fixture 测试 [ref:WECOM-API-20260730] [ref:DINGTALK-STREAM-SDK-GO-20260731] [ref:FEISHU-SDK-GO-20260731]。真实三租户仍待验证，不能把 fixture 宣传为已连通租户。
+- 企业微信、钉钉、飞书的 REST Connector、Channel/EventSource、结构化 mention、受控附件下载与 Gateway ledger 已实现；企业微信 Gateway 支持官方 GET `echostr` 与 POST 加密 XML callback，钉钉使用 Stream WebSocket，飞书使用 WebSocket/protobuf supervisor [ref:WECOM-API-20260730] [ref:DINGTALK-STREAM-SDK-GO-20260731] [ref:FEISHU-SDK-GO-20260731]。三个真实外部企业组织仍待验证，不能把 fixture 宣传为真实连通。
 - Office 能力以本地 DOCX/XLSX/PPTX/PDF 和文件整理工作流为产品边界，通过 Skills、普通 Tool/MCP、Artifact 与真实格式校验实现，不依赖在线 Office 服务。
 - SenseVoice-Small INT8 在本地识别中文、英文、日语、韩语和粤语。
 - sherpa-onnx VITS/MeloTTS 在 Rust 进程内完成中英双语合成；支持导入 `.tar.bz2` VITS 模型、选择 Speaker ID、50%–200% 语速及静音。
@@ -38,24 +38,27 @@ Run crash recovery、Multi-Agent、通用 Git push、GitHub/GitLab/Gitee/Gitea/F
 
 当前控制协议已统一为 v29，并追加 `0019`–`0022` migration、共享迁移锁/Online Backup、Multi-Agent 启动 reconciliation、企业内容 Artifact fencing 和 Desktop generation fencing。八类发布能力默认开启并提供本地停用开关；关闭时 UI 隐藏入口、相关工具不注册，命令稳定返回 `feature_disabled` 和 feature key。
 
-Memory 保持远期，不采用 Codex Memory 方案。macOS/Linux 尚未验证；`v0.2.1` 已暂缓，各 `v0.3.0-alpha`、RC 与 GA 均未发布。每项能力的“实现状态”和“真实环境验证”双状态见 [路线图](docs/ROADMAP.md)。
+Memory 保持远期，不采用 Codex Memory 方案。macOS/Linux 尚未验证；`v0.2.1` 已取消，alpha.8、RC 与 GA 均未发布。每项能力的“实现状态”和“真实环境验证”双状态见 [路线图](docs/ROADMAP.md)。
 
 ## 功能状态与后置验证
 
-| 项目                | 实现状态           | 真实环境验证   | 结论                                                                                                  |
-| ------------------- | ------------------ | -------------- | ----------------------------------------------------------------------------------------------------- |
-| P1 Run Recovery     | 代码与本地测试完成 | 真实环境待验证 | 六阶段 crash injection、generation/lease fencing 与人工恢复决策已覆盖                                 |
-| P2–P3 Provider      | 代码与本地测试完成 | 真实环境待验证 | 三类公开协议、Remote Compaction 回退与公开 summary 过滤已覆盖；未执行真实 OpenAI staging              |
-| P4 Multi-Agent      | 代码与本地测试完成 | 真实环境待验证 | execution lease、启动 reconciliation、权限/预算/取消/Usage/Artifact lineage 已覆盖                    |
-| P5 Git/Forge        | 代码与本地测试完成 | 真实环境待验证 | 标准 Git 与四类 Forge adapter 已覆盖；未执行真实 Forge mutation                                       |
-| P6 Plugin lifecycle | 代码与本地测试完成 | 真实环境待验证 | 十类 contribution lifecycle 和无残留矩阵已覆盖                                                        |
-| P7 企业平台         | 代码与本地测试完成 | 真实环境待验证 | transport、mention、附件下载均已实现；未执行三个真实租户 Gate                                         |
-| P8 DesktopControl   | 代码与本地测试完成 | 真实环境待验证 | 产品入口、Browser/Computer 原语与 stale generation fencing 已覆盖；未执行 standard-user Windows smoke |
-| `v0.2.1` 封板       | 部分完成           | 真实环境待验证 | 暂缓；本轮不执行 `release:check-clean`、tag、发布、push 或 PR                                         |
+| 项目                  | 实现状态           | 真实环境验证   | 结论                                                                                                                          |
+| --------------------- | ------------------ | -------------- | ----------------------------------------------------------------------------------------------------------------------------- |
+| P1 Run Recovery       | 代码与本地测试完成 | 真实环境待验证 | 六阶段 crash injection、generation/lease fencing 与人工恢复决策已覆盖                                                         |
+| P2–P3 Provider        | 代码与本地测试完成 | 真实环境待验证 | 三类公开协议、Remote Compaction 回退与公开 summary 过滤已覆盖；未执行真实 OpenAI staging                                      |
+| P4 Multi-Agent        | 代码与本地测试完成 | 真实环境待验证 | execution lease、启动 reconciliation、权限/预算/取消/Usage/Artifact lineage 已覆盖                                            |
+| P5 Git/Forge          | 代码与本地测试完成 | 真实环境待验证 | 标准 Git、四类 Forge adapter、未知响应只读 reconciliation 与 supplied Approval 精确 fencing 已覆盖；未执行真实 Forge mutation |
+| P6 Plugin lifecycle   | 代码与本地测试完成 | 真实环境待验证 | 十类 contribution lifecycle 和无残留矩阵已覆盖                                                                                |
+| P7 企业平台           | 代码与本地测试完成 | 真实环境待验证 | transport、mention、附件下载与企业微信原始 callback 均已实现；未执行三个真实外部组织 Gate                                     |
+| P8 DesktopControl     | 代码与本地测试完成 | 真实环境待验证 | 产品入口、Browser/Computer 原语与 stale generation fencing 已覆盖；未执行 standard-user Windows smoke                         |
+| `v0.3.0-alpha.8` 发布 | 部分完成           | 真实环境待验证 | 版本/许可/Gate/证据与发布 workflow 已实现；未构建候选、未执行外部 Gate、未 tag 或发布                                         |
+| `v0.2.1`              | 取消               | 不适用         | 不再发布；跨版本升级基线固定为 `v0.2.0`                                                                                       |
 
-fixture、mock、loopback transport 和确定性 Host 只证明本地实现，不构成真实 OpenAI、Forge、企业租户或 standard-user/elevated Windows 发布证据。
+fixture、mock、loopback transport 和确定性 Host 只证明本地实现，不构成真实 OpenAI、Forge、外部企业组织或 standard-user/elevated Windows 发布证据。Hachimi 本身保持本机单用户运行，不提供登录或租户体系；企业配置中的 tenant/corp 仅是外部平台组织标识。
 
 本项目不建设 Marketplace；扩展继续使用本地、内容寻址且权限受控的 Plugin Bundle。Agent Workspace、AppServer 与 Gateway 保持本机单用户运行，不实现 Remote Workspace 或远程多租户 Control Plane。
+
+发布 Gate、受保护 JSON schema、Credential Manager 引用和证据格式见 [0.3.0 发布 Gate](docs/RELEASE_GATES.md)。
 
 Bundle Identifier：`com.hachimi.desktop`
 
@@ -112,7 +115,7 @@ Hachimi 的导入限制如下：
 
 `assets/avatar-default/2639776812528692620` 下的默认 VRM 由 **candyfloof** 创建并来自 VRoid Hub。模型嵌入许可允许所有人使用、修改和再分发且无需署名，因此会通过 Git LFS 提交并包含在 MSI、NSIS 和便携 ZIP 中。
 
-该许可同时明确禁止个人和企业商业使用。本仓库及安装包只能以非商业方式分发；任何商业发行都必须先替换默认模型或另行取得作者许可。嵌入许可地址、固定 SHA-256 和审计说明见 `assets/avatar-default/2639776812528692620/manifest.json` 与 `NOTICE.md`。
+该资源许可明确禁止个人和企业商业使用，因此包含该默认 VRM 的官方预编译包只能非商业分发。Hachimi 源代码仍按 Apache-2.0 使用；移除或替换该资源后，代码许可不变。嵌入许可地址、固定 SHA-256 和审计说明见 `assets/avatar-default/2639776812528692620/manifest.json`、[LICENSE](LICENSE) 与 [NOTICE](NOTICE.md)。
 
 内置 VRMA 动作来自 Clawatar 和 OpenMaiWaifu，采用 MIT License，来源、固定 commit 与许可证副本位于 `assets/avatar-motions-v4/notices`。语音模型、sherpa-onnx、ONNX Runtime 和 DirectML 的来源与许可证见 `apps/desktop/src-tauri/resources/ai-models/THIRD-PARTY-NOTICES.md`。
 
@@ -152,7 +155,20 @@ corepack pnpm check
 corepack pnpm --filter @hachimi/ui exec playwright install chromium
 ```
 
+Desktop E2E 会自动运行 `test:desktop:e2e:prepare`：固定使用 `tauri-driver 2.0.6`，并下载与当前 Edge 精确匹配且通过 Microsoft Authenticode、版本和 SHA-256 校验的 Edge WebDriver。工具缓存在 `target/desktop-e2e-tools/`，可安全删除并按需重建。
+
 两个 Windows 发布 Gate 会先执行 `corepack pnpm release:check-clean`，脏工作树或没有可验证 `HEAD` 时 fail closed，避免从不可复现的本地状态生成发布证据。
+
+版本、候选和证据本地接口：
+
+```powershell
+corepack pnpm release:version-check
+corepack pnpm release:artifact-manifest -- target/release-candidate
+corepack pnpm release:artifact-verify -- --root target/release-candidate
+corepack pnpm release:evidence:verify -- --root target/release-evidence
+```
+
+真实 OpenAI、Forge 与企业平台 Gate 分别使用 `test:staging:openai`、`test:staging:forge`、`test:staging:enterprise`；缺少受保护配置和 Credential Manager 引用时会 fail closed。alpha prerelease 只复用 Windows workflow 的候选构建产物并明确声明真实 Gate 尚未完成；RC/GA 必须聚合全部五类真实证据。完整配置与发布边界见 [0.3.0 发布 Gate](docs/RELEASE_GATES.md)。
 
 Windows 人工验收表见：
 
@@ -213,4 +229,4 @@ API Key 不会明文写入这些目录，而是由 Windows Credential Manager �
 
 ## GitHub 首次提交建议
 
-应提交源码、测试、视觉基线、文档、图标、Cargo/pnpm lockfile、动作资源与许可、完整语音模型运行文件、原生运行库及其哈希 manifest。两个大型 ONNX 必须以 Git LFS pointer 提交。不要提交 `target`、`node_modules`、`dist`、Storybook/Playwright 输出、IDE 配置、日志、本地数据、API Key/签名证书、安装程序，或许可禁止再分发的默认 VRM。
+应提交源码、测试、视觉基线、文档、图标、Cargo/pnpm lockfile、动作资源与许可、完整语音模型运行文件、默认 VRM 及其许可/哈希 manifest。两个大型 ONNX 和默认 VRM 必须以 Git LFS pointer 提交。不要提交 `target`、`node_modules`、`dist`、Storybook/Playwright 输出、IDE 配置、日志、本地数据、API Key/签名证书或安装程序；若后续替换为禁止再分发的资源，则该资源也不得提交。

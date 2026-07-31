@@ -66,7 +66,7 @@ pub use skill_runtime::{SKILLS_LIST_TOOL, SKILLS_READ_TOOL, skill_runtime_tools}
 pub use step_context::{
     AgentInstructionLayer, StepContext, StepContextFactory, StepContextInput, StepRuntimeSnapshot,
     StepRuntimeState, StepWorldState, StepWorldStateRefreshFuture, StepWorldStateRefresher,
-    ToolPlan,
+    ToolPlan, ToolPlanConstraints,
 };
 pub use tool_loop::{
     LoopEvent, RunCheckpointDraft, RunCheckpointFuture, RunCheckpointReporter, SteeringFuture,

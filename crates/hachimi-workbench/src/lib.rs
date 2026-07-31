@@ -630,13 +630,7 @@ impl WorkbenchService {
                         if request.project_id.is_some() || request.execution_target.is_some() {
                             return Err(WorkbenchError::SessionContextMismatch);
                         }
-                        (
-                            None,
-                            None,
-                            SessionContextBinding::General,
-                            None,
-                            Some(WorkloadKind::General),
-                        )
+                        (None, None, SessionContextBinding::General, None, None)
                     }
                     SessionContextBinding::Avatar { .. } => {
                         return Err(WorkbenchError::SessionContextMismatch);
@@ -668,13 +662,7 @@ impl WorkbenchService {
                 if request.execution_target.is_some() {
                     return Err(WorkbenchError::ProjectTargetMismatch);
                 }
-                (
-                    None,
-                    None,
-                    SessionContextBinding::General,
-                    None,
-                    Some(WorkloadKind::General),
-                )
+                (None, None, SessionContextBinding::General, None, None)
             };
         let now = now_ms();
         let requested_capabilities = requested_provider_capabilities(&model_snapshot);
@@ -700,10 +688,10 @@ impl WorkbenchService {
             approval_policy: request.approval_policy,
             permission_profile: if request.entry_profile == EntryProfile::DesktopControl {
                 PermissionProfile::ExternalSandbox
-            } else if project.is_none()
-                || request.behavior_mode == hachimi_protocol::BehaviorMode::Plan
-            {
+            } else if request.behavior_mode == hachimi_protocol::BehaviorMode::Plan {
                 PermissionProfile::ReadOnly
+            } else if project.is_none() {
+                PermissionProfile::ExternalSandbox
             } else {
                 PermissionProfile::WorkspaceWrite
             },

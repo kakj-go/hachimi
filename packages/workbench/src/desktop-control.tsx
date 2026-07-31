@@ -200,7 +200,7 @@ export function DesktopControlPage(props: {
     // eslint-disable-next-line solid/reactivity -- runBusy invokes this callback synchronously inside the tracked onMount scope.
     void runBusy("refresh", async () => {
       await commands.initializeAgentControl({
-        clientVersion: "hachimi-desktop/0.2.1",
+        clientVersion: "hachimi-desktop/0.3.0-alpha.8",
         protocolVersion: CONTROL_PROTOCOL_VERSION,
         supportedFeatures: [
           "session_lifecycle_v2",

@@ -33,7 +33,7 @@
 
 OpenClaw 的 Agent Core、通用 Plugin/Provider Runtime、Memory、多 Agent、产品 Prompt，以及有副作用 Turn 的自动恢复均不在默认参考范围。Browser 候选只补足 Codex 未公开的底层 Host 工程细节；一旦 Codex 提供等价公开实现，应优先重新评估 Codex 基线。
 
-P1–P8 新增代码均沿用上方固定派生边界或作为 Hachimi 原创模块实现。OpenAI 三类协议、四类 Forge adapter、企业微信 callback，以及 DingTalk Stream/Feishu 长连接 wire contract 已登记离线快照；普通 CI 校验路径、commit、许可证和 SHA-256。DingTalk/Feishu SDK 只作为协议来源，Rust transport 未引入 vendor SDK 运行时依赖。真实租户仍待验证，fixture、loopback WebSocket 和 protobuf/ACK 测试不能冒充真实平台连接。
+P1–P8 新增代码均沿用上方固定派生边界或作为 Hachimi 原创模块实现。OpenAI 三类协议、四类 Forge adapter、企业微信 callback，以及 DingTalk Stream/Feishu 长连接 wire contract 已登记离线快照；普通 CI 校验路径、commit、许可证和 SHA-256。DingTalk/Feishu SDK 只作为协议来源，Rust transport 未引入 vendor SDK 运行时依赖。真实外部企业组织仍待验证，fixture、loopback WebSocket 和 protobuf/ACK 测试不能冒充真实平台连接；外部组织身份不构成 Hachimi 租户。
 
 Memory 已调整为远期，当前不选择 Codex Memory 或其他实现方案，不登记候选派生路径；后续重新立项时再单独补充来源与 clean-room 边界。
 

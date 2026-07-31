@@ -91,7 +91,7 @@ Browser Host 已实现 managed Chromium 与 Chrome extension、history/input/wai
 
 ### Plugin/Connector、Channel/Gateway
 
-Plugin Bundle 已实现统一 lifecycle journal：stage/validate/permission review/activate/health/commit，以及 install/enable/disable/update/rollback/uninstall、known-good revision、崩溃 reconciliation、账号撤销和跨产品清理。所有 contribution 继续通过 Sandbox/唯一 Runtime。企业微信 loopback AES callback、钉钉 Stream WebSocket、飞书 WebSocket/protobuf、结构化 mention、受控附件下载和 durable ledger 已接入 [ref:WECOM-API-20260730] [ref:DINGTALK-STREAM-SDK-GO-20260731] [ref:FEISHU-SDK-GO-20260731]；三租户 Gate 真实环境待验证。
+Plugin Bundle 已实现统一 lifecycle journal：stage/validate/permission review/activate/health/commit，以及 install/enable/disable/update/rollback/uninstall、known-good revision、崩溃 reconciliation、账号撤销和跨产品清理。所有 contribution 继续通过 Sandbox/唯一 Runtime。企业微信官方 GET `echostr`/POST 加密 callback、钉钉 Stream、飞书 WebSocket/protobuf、结构化 mention、受控附件下载和 durable ledger 已接入 [ref:WECOM-API-20260730] [ref:DINGTALK-STREAM-SDK-GO-20260731] [ref:FEISHU-SDK-GO-20260731]；三个外部企业组织 Gate 真实环境待验证。
 
 ## 4. 收口实施顺序
 
@@ -103,14 +103,14 @@ Plugin Bundle 已实现统一 lifecycle journal：stage/validate/permission revi
 4. **已完成：无窗口后台 Runtime**：`service:scheduler` principal 直接进入唯一 `AgentRunExecutor`，验证 background priority 及 Run、Transcript、Usage、终态持久化。
 5. **已完成：Skill/Task 漂移收口**：Scheduled MCP 使用精确 server/tool/schema/Host identity fencing；隐式 Office activation 只改变下一 Step workload，不扩大 Grant；漂移进入 `NeedsAttention` 并创建 fresh continuation。
 6. **已完成：Task 高级终态**：成功 TaskRun 禁止 retry，Failed/TimedOut/Cancelled/Lost 使用 fresh TaskRun/invocation key retry；通知失败只影响 DeliveryStatus。
-7. **环境阻塞：Windows release Gate**：current-user NSIS、首次 bootstrap、Runtime restage/repair、四轴 attestation、Workspace owner/path 稳定拒绝和无 UAC 流程已接通。`test:windows:standard-user` 必须在真实非 Administrators 且未提升的 Runner 上，使用候选 0.2.1 与受保护环境变量指向的真实发布 0.2.0 NSIS 执行跨版本升级、managed Chromium、真实 Chrome extension、记事本 WGC/前台受控输入、HKCU Gateway startup 和不跳过的 Desktop E2E。`test:windows:release` 必须在 elevated Runner 上执行 linked-worktree ACL、handle sentinel、restricted Office/MCP、真实 Scheduler soak、系统 Toast与高权限拒绝。两个 Gate 都必须产出脱敏 `summary.json`、安装包哈希和必要日志，当前开发账户不能替代任一 Gate。
+7. **环境阻塞：Windows release Gate**：MSI/NSIS/便携 ZIP 只构建一次，两个 Runner 下载并重新哈希同一候选。`test:windows:standard-user` 必须在真实非 Administrators 且未提升的 Runner 上，使用真实发布的 0.2.0 NSIS 执行跨版本升级、managed Chromium、真实 Chrome extension、记事本 WGC/前台受控输入、HKCU Gateway startup 和不跳过的 Desktop E2E。`test:windows:release -SkipBuild` 必须在真正 elevated Runner 上执行 linked-worktree ACL、handle sentinel、restricted Office/MCP、真实 Scheduler soak、系统 Toast、便携恢复与高权限拒绝。
 8. **已完成：本地 Office 与 extension 验收**：restricted stdio MCP、本地 DOCX/XLSX/PPTX/PDF 修改/预览/Diff/导出/Artifact、中断恢复与文件整理回滚已覆盖；不增加在线 Office 服务依赖。
 9. **已完成：Desktop 测试进程生命周期**：restart/session/failure/finally 只保留最新的精确 E2E 应用实例并终止 WebDriver 进程树；Workspace Worker/MCP stdio 后台启动使用 `CREATE_NO_WINDOW`，完整 Desktop gate 结束后无残留进程。
 10. **已完成：Pet 统一执行与输出安全**：删除独立模型循环；稳定 Assistant 输出、取消、Approval/UserInput 跨界面接续及 secret 语音隔离已接通。
 11. **已完成：Browser Host 原语**：managed Chromium/Chrome extension、站点授权、owned tabs、history/input/wait/tab、transfer/storage 和静态 CDP allowlist 已实现；真实 Windows 证据环境阻塞。
 12. **已完成：Computer Host 原语**：WGC、鼠标/键盘/窗口/受控启动、Frame/input epoch fencing、接管与高权限拒绝已实现；真实记事本 smoke 环境阻塞。
 13. **已完成：Plugin lifecycle**：完整 contribution transaction、revision/known-good、升级/回滚/卸载与重启 reconciliation 已实现。
-14. **代码与本地测试完成：企业 Channel/Gateway**：本地 Gateway、三个企业 REST/事件安全层、WeCom callback、DingTalk Stream、Feishu 长连接、mention/附件和 Bundle 已实现；三租户 Gate 后置。
+14. **代码与本地测试完成：企业 Channel/Gateway**：本地 Gateway、三个企业 REST/事件安全层、WeCom URL 验证与加密 XML callback、DingTalk Stream、Feishu 长连接、mention/附件和 Bundle 已实现；三个外部组织 Gate 后置。
 15. **已完成：Session-bound Scheduled continuation**：既有 Session lane 的 fresh Run、压缩上下文续接、fresh Grant/Host snapshot、Task Center Connector selection、isolated Browser unattended Grant、Plugin/Connector 漂移、停止条件和 heartbeat 已实现；Computer unattended 稳定返回 `computer_unattended_unsupported`。
 16. **已完成：Thread/Workbench 延续**：终态 Run 边界 Fork 只复制可安全重建的完成历史并生成新 Item/sequence；General/Project Session 均可继续，活动 Run 走 generation-fenced Steer，列表支持 rename/pin/archive/search 和 lineage。
 17. **已完成：Computer 内存截图**：WGC Frame 使用 `Frame::buffer()` 与 PNG encoder 直接写入受 TTL/容量限制的内存仓库；read/release/expiry/takeover/错误路径均不创建新临时截图文件，启动只清理旧版明确匹配的 UUID PNG。
@@ -118,10 +118,10 @@ Plugin Bundle 已实现统一 lifecycle journal：stage/validate/permission revi
 19. **已完成 P1**：durable checkpoint、可信恢复分类、generation/revision fencing、`indeterminate` 与 Resume UI。
 20. **已完成 P2**：capability Provider registry 与 Chat/Responses/Embeddings strict adapter；真实 OpenAI Gate 环境阻塞。
 21. **已完成 P3**：Remote Compaction 本地回退与公开 summary 边界；真实 staging 环境阻塞。
-22. **已完成 P4**：父子 Agent Task/Run、权限/预算收窄、消息/取消/产物与 lineage UI。
-23. **已完成 P5 本地实现**：标准 Git push 与四类 Forge adapter、Credential Manager/GCM/SSH、审批、revision/OID/idempotency/side-effect ledger [ref:GITHUB-API-20260730] [ref:GITLAB-API-20260730] [ref:GITEE-API-20260730] [ref:GITEA-FORGEJO-API-20260730]；真实 staging 环境阻塞。source ref 因官方 API 限制只作为不可变前置条件。
+22. **已完成 P4**：父子 Agent Task/Run、权限/预算收窄、消息/取消/产物与 lineage UI；五个 `agent.*` 已加入 Workbench General/Coding/Office ToolPlan，Scheduled 只接受持久化精确 allowlist，Pet/DesktopControl 不开放；独立 Desktop E2E 已真实执行 spawn→wait→collect。
+23. **已完成 P5 本地实现**：标准 Git push、Agent 原生 `git.remotes/git.push/forge.change.query/forge.change.mutate` 与四类 Forge adapter 已接入；Agent 与 Workbench command 复用 Remote/Workspace/transport/Credential/reconciliation Host，Agent 只在交互式 Project Coding 注册；Project Remote 推导的精确 host/protocol Grant 只进入 Git/Forge 授权上下文；Credential Manager/GCM/SSH、审批、revision/OID/idempotency/side-effect ledger 已覆盖 [ref:GITHUB-API-20260730] [ref:GITLAB-API-20260730] [ref:GITEE-API-20260730] [ref:GITEA-FORGEJO-API-20260730]；supplied Approval 重新校验 generation/Tool/参数/主体/一次性 scope/有效期，保证 merge 使用独立精确审批；mutation 响应未知时返回 executor error 并保持统一 ledger `Indeterminate`，只按 source/target/字段/状态/OID 查询证明，不重复 mutation。真实 staging 环境阻塞。
 24. **已完成 P6**：完整 Plugin contribution lifecycle 与产品入口 reconciliation。
-25. **代码与本地测试完成 P7**：企业 REST、事件验证、Bundle、Channel/EventSource、transport supervisor、结构化 mention、附件下载与 ledger 已完成；真实三租户待验证。
+25. **代码与本地测试完成 P7**：企业 REST、事件验证、Bundle、Channel/EventSource、transport supervisor、结构化 mention、附件下载与 ledger 已完成；`enterprise.download_attachment` 已进入 General/Office ToolPlan，Scheduled 复用共享验证器精确校验 account、`download_attachment` action 和 contribution revision，缺失/漂移映射 `NeedsAttention`，通用 `connector_invoke` 不能绕过专用附件链；真实三个外部组织待验证。
 26. **已完成 P8 本地实现**：DesktopControl Session/UI/恢复、Observe-first、Browser/Computer 原语与 durable action ledger；真实 Windows smoke 环境阻塞。
 
 Memory 调整为远期，本轮不创建 migration、Store、检索方案或 Codex Memory 派生实现。
@@ -160,9 +160,9 @@ P1–P8 新增验收矩阵：
 
 - Run 恢复：进程在 sampling、Tool 等待、只读 dispatch、幂等 dispatch、未知副作用和 checkpoint 写入各边界崩溃，恢复后不得重复外部副作用或恢复临时授权。
 - Provider：Chat Completions、Responses 与 Embeddings 共用 provider-neutral conformance，覆盖 stream、Tool、usage、cancel、overflow、Remote Compaction、公开 summary、capability drift 和降级；不测试未支持的私有 Codex/媒体协议。
-- Multi-Agent：子 Agent 权限和预算只收窄，取消传播、Usage 汇总与 Artifact lineage 无缺口。
-- Git push/PR：任意标准 Remote 的 fetch/push conformance；GitHub、GitLab、Gitee、Gitea/Forgejo 的 PR adapter 覆盖 remote/ref 漂移、凭据撤销、重复请求、网络未知结果和并发更新。未知平台只能生成草稿。
-- Plugin/企业平台：升级/回滚/卸载无残留 contribution；企业微信、钉钉、飞书覆盖账号隔离、签名校验、入站去重、线程路由、限流、投递回执和重启恢复。
+- Multi-Agent：EntryProfile × Workload × Mode 正反矩阵、Feature Flag、Scheduled 精确 allowlist、子 Agent 权限/预算收窄、取消传播、重启恢复、Usage 汇总与 Artifact lineage 无缺口；产品 E2E 真实执行 spawn→wait→collect。
+- Git push/PR：Agent 与 Workbench UI 复用同一 Host；任意标准 Remote 的 fetch/push conformance；Plan mode 只保留 remotes/query；GitHub、GitLab、Gitee、Gitea/Forgejo 的 PR adapter 覆盖 remote/ref/OID 漂移、凭据撤销、重复请求、网络未知结果和并发更新；未知结果进入 `Indeterminate` 且 mutation 不重放。未知平台只能生成草稿。
+- Plugin/企业平台：升级/回滚/卸载无残留 contribution；企业微信、钉钉、飞书覆盖账号隔离、签名校验、入站去重、线程路由、限流、投递回执和重启恢复；Scheduled 企业附件覆盖 account/action/revision 成功、缺失和漂移的 `NeedsAttention` 路径。
 - DesktopControl/Hosts：正式入口只使用唯一 Runtime；新增 Browser/Computer 动作覆盖 stale observation/frame、接管、敏感动作审批和高权限/安全桌面拒绝。
 
 本轮新增完成证据：
@@ -177,10 +177,12 @@ P1–P8 新增验收矩阵：
 - `sample-crm` Webhook/Poll/retry ledger 与 `mock-poll` 重启/重复消息测试已加入；Gateway transport 不再组装 Agent Runtime，claimed ingress 经 typed AppServer 后由唯一 `AgentRunExecutor` 执行。
 - Windows release 脚本分别运行 handle sentinel、Workspace Worker、Agent `workspace_exec`、restricted stdio MCP 和 Terminal/ConPTY smoke；Toast 由 Windows Shell UI Automation 校验任务名与终态。
 - linked worktree Git mutation smoke 强制先用独立 lease stage 并恢复 RX，再用第二 lease commit；ACL 同时显式升级 shared common-dir 与 per-worktree git-dir，任一步准备失败都会回滚。
-- Desktop E2E 覆盖 Workbench core、Skills/MCP、Local Hosts 和 Task Center；Local Hosts spec 会跨应用重启验证 Plugin/Connector 与 Gateway ledger，并在结束前撤销临时 Connector 凭据；Workbench core 验证 Pet/Workbench 对同一 Approval/UserInput 的 CAS 接续；Task Center 覆盖 Event accepted/replayed/conflict 投影。
+- Desktop E2E 覆盖 Workbench core、Agent tools、Skills/MCP、Local Hosts 和 Task Center；独立 Agent tools spec 的 9 个场景验证 Multi-Agent 实际调用、General/Office 企业附件隔离、Git/Forge 全生命周期、Workbench UI/Agent 双入口共享 Host、一次性 Approval、Remote drift、凭据撤销、重复 mutation receipt 与未知结果不重放；独立 Feature Flag spec 在关闭 Multi-Agent、Git Remote Mutations 和 Enterprise Integrations 后验证真实模型 ToolPlan fail-closed，同时保留 Coding 只读 `git.remotes`。Local Hosts spec 会跨应用重启验证 Plugin/Connector 与 Gateway ledger，并在结束前撤销临时 Connector 凭据；Workbench core 验证 Pet/Workbench 对同一 Approval/UserInput 的 CAS 接续；Task Center 覆盖 Event accepted/replayed/conflict 投影。
 - Desktop E2E 已消除 deprecated frame API、stale element 和滚动降级噪音；串行完整 Gate 结束后 Hachimi、WebDriver、Gateway、Browser broker 与 sidecar 进程/端口均无残留。
 - Storybook 静态构建和 128 个严格视觉/可访问性场景通过，覆盖 light/dark、zh-CN/en-US、100%/125%/150%、生产 Workbench 响应式布局、Task Center、设置页、Pet 和 WCAG A/AA；Tool Execution 可滚动结果支持键盘聚焦，表单说明文字满足对比度门槛。
 
-代码能力与可执行本地 Gate 的双状态见路线图。`v0.2.1` 封板、两个 Windows 系统 Gate、真实 OpenAI/Forge/企业租户以及发布动作全部后置，本轮明确不执行。未来发布候选仍需在真实非 Administrators 账户完成 per-user clean-install/repair/真实跨版本 upgrade 与 Local Host Gate，再在 elevated Runner 完成管理员专项 Gate，并保存两份脱敏 `summary.json`、安装包 SHA-256 与必要日志。
+代码能力与可执行本地 Gate 的双状态见路线图。`v0.2.1` 已取消，当前源码统一为 `0.3.0-alpha.8`；许可、全 workspace 版本、候选 hash、staging harness、候选 Gateway callback、Forge 故障响应 reconciliation、三类包许可内容校验、五类证据聚合、Windows 单次构建和不可覆盖 tag 的发布 workflow 已实现。2026-07-31 当前 Windows 工作机已完整通过 `corepack pnpm check` 与独立 Feature Flag Desktop E2E。Desktop E2E 固定使用 `tauri-driver 2.0.6`，并按已安装 Edge 精确准备经过 Authenticode、版本和 SHA-256 校验的 Edge WebDriver；缓存可按需重建。真实 OpenAI/Forge/三个外部企业组织及两个 Windows 系统 Gate 仍后置。
 
-固定门槛见 `docs/ROADMAP.md`。fixture、mock、loopback transport 和确定性 Host 只证明本地实现；真实标准用户 Runner、elevated Runner、真实 0.2.0 基线、外部服务凭据或租户不可用时必须保持“真实环境待验证”，不能补造或伪造 Gate 证据。
+`publish-alpha-prerelease.yml` 只允许使用 `Windows Release Gate` 的成功候选构建产物发布 alpha，并在发布说明中固定披露真实外部 Gate 和两类 Windows 身份 Gate 尚未形成通过结论。`publish-release.yml` 只处理 RC/GA；五类真实证据不齐、commit/hash 漂移或存在 skip 时不得创建对应 tag 或发布。任何已存在 tag 都不得覆盖，失败后递增 alpha/RC 序号。
+
+固定门槛见 `docs/ROADMAP.md`，Gate 配置见 `docs/RELEASE_GATES.md`。fixture、mock、loopback transport 和确定性 Host 只证明本地实现；真实标准用户 Runner、elevated Runner、真实 0.2.0 基线、外部服务凭据或组织环境不可用时必须保持“真实环境待验证”，不能补造或伪造 Gate 证据。企业组织标识不引入 Hachimi 登录或租户体系。

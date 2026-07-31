@@ -59,6 +59,14 @@ export const zhCn = {
   "settings.data.resetConfirm":
     "将永久删除设置、模型库、语音库、动作开发库、日志、WebView 缓存和 API 密钥。应用会立即退出，下次启动按首次使用状态初始化。",
   "settings.data.resetting": "正在退出并清理…",
+  "settings.about.title": "关于与许可",
+  "settings.about.version": "版本",
+  "settings.about.sourceLicense": "源代码许可",
+  "settings.about.sourceLicenseDescription": "Hachimi 源代码采用 Apache License 2.0。",
+  "settings.about.binaryBoundary": "官方安装包为非商业发行",
+  "settings.about.binaryBoundaryDescription":
+    "内置默认 VRM 允许修改与再分发，但禁止个人和企业商业使用；替换或移除该资源不会改变源代码的 Apache-2.0 许可。",
+  "settings.about.notice": "完整第三方来源和许可随安装包的 NOTICE.md 与 resources 许可文件提供。",
   "settings.appearance.description": "选择 Hachimi 的界面主题，系统模式会实时跟随 Windows。",
   "settings.appearance.diffPreview": "代码差异预览",
   "settings.appearance.lightTheme": "浅色主题",
@@ -440,6 +448,16 @@ export const enUs: Record<MessageKey, string> = {
   "settings.data.resetConfirm":
     "This permanently deletes settings, model and voice libraries, developer motions, logs, WebView cache, and the API key. The app exits immediately and starts fresh next time.",
   "settings.data.resetting": "Exiting and cleaning…",
+  "settings.about.title": "About and licenses",
+  "settings.about.version": "Version",
+  "settings.about.sourceLicense": "Source license",
+  "settings.about.sourceLicenseDescription":
+    "The Hachimi source code is licensed under Apache License 2.0.",
+  "settings.about.binaryBoundary": "Official packages are non-commercial distributions",
+  "settings.about.binaryBoundaryDescription":
+    "The bundled default VRM permits modification and redistribution but disallows personal and corporate commercial use. Replacing or removing that asset does not change the Apache-2.0 source license.",
+  "settings.about.notice":
+    "Complete third-party sources and terms are provided in the packaged NOTICE.md and resource license files.",
   "settings.appearance.description":
     "Choose Hachimi's interface theme. System mode follows Windows in real time.",
   "settings.appearance.diffPreview": "Code diff preview",

@@ -173,6 +173,46 @@ pub fn verify_enterprise_event(
     }
 }
 
+pub fn verify_wecom_callback_echo(
+    credential: &EnterpriseCredential,
+    timestamp: &str,
+    nonce: &str,
+    signature: &str,
+    encrypted_echo: &str,
+    now_ms: i64,
+) -> Result<String, EnterpriseEventError> {
+    let (token, encoding_key) = credential
+        .wecom_callback()
+        .ok_or(EnterpriseEventError::CredentialMismatch)?;
+    let timestamp_seconds = timestamp
+        .parse::<i64>()
+        .map_err(|_| EnterpriseEventError::InvalidPayload)?;
+    validate_replay_window(timestamp_seconds.saturating_mul(1_000), now_ms)?;
+    let mut parts = [token, timestamp, nonce, encrypted_echo];
+    parts.sort_unstable();
+    let mut hasher = Sha1::new();
+    for part in parts {
+        hasher.update(part.as_bytes());
+    }
+    let expected = hasher
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    if !constant_time_eq(expected.as_bytes(), signature.as_bytes()) {
+        return Err(EnterpriseEventError::InvalidSignature);
+    }
+    let (mut plaintext, tenant) = decrypt_wecom(encoding_key, encrypted_echo)?;
+    if tenant != credential.tenant_id() {
+        plaintext.zeroize();
+        return Err(EnterpriseEventError::TenantMismatch);
+    }
+    if plaintext.is_empty() {
+        return Err(EnterpriseEventError::InvalidPayload);
+    }
+    String::from_utf8(plaintext).map_err(|_| EnterpriseEventError::InvalidPayload)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn verify_wecom(
     credential: &EnterpriseCredential,
@@ -546,6 +586,51 @@ mod tests {
             mention.kind == EnterpriseMentionKind::User
                 && mention.target_id.as_deref() == Some("user-2")
         }));
+    }
+
+    #[test]
+    fn wecom_url_verification_decrypts_only_a_valid_fresh_echo() {
+        let token = "callback-token";
+        let tenant = "corp-fixture";
+        let timestamp = "2000";
+        let nonce = "nonce-fixture";
+        let key = [0x42_u8; 32];
+        let encoding_key = STANDARD.encode(key).trim_end_matches('=').to_owned();
+        let (encrypted, signature) = wecom_fixture(
+            token,
+            &encoding_key,
+            tenant,
+            timestamp,
+            nonce,
+            "HACHIMI_ECHO_OK",
+        );
+        let credential = EnterpriseCredential::parse(&format!(
+            r#"{{"platform":"wecom","corpId":"{tenant}","corpSecret":"secret","agentId":1,"callbackToken":"{token}","encodingAesKey":"{encoding_key}"}}"#
+        ))
+        .expect("credential");
+        assert_eq!(
+            verify_wecom_callback_echo(
+                &credential,
+                timestamp,
+                nonce,
+                &signature,
+                &encrypted,
+                2_000_000,
+            )
+            .expect("echo"),
+            "HACHIMI_ECHO_OK"
+        );
+        assert!(
+            verify_wecom_callback_echo(
+                &credential,
+                timestamp,
+                nonce,
+                &"0".repeat(40),
+                &encrypted,
+                2_000_000,
+            )
+            .is_err()
+        );
     }
 
     #[test]

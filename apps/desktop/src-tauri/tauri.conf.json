@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Hachimi",
-  "version": "0.2.1",
+  "version": "0.3.0-alpha.8",
   "identifier": "com.hachimi.desktop",
   "build": {
     "beforeDevCommand": "node scripts/prepare-workspace-worker.mjs dev && powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/prepare-managed-git.ps1 && powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/prepare-managed-chromium.ps1 && corepack pnpm --dir apps/desktop/web dev",
@@ -39,7 +39,8 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["nsis"],
+    "targets": ["nsis", "msi"],
+    "licenseFile": "../../../LICENSE",
     "externalBin": [
       "binaries/hachimi-workspace-worker",
       "binaries/hachimi-sandbox-launcher",
@@ -49,6 +50,8 @@
     ],
     "icon": ["icons/32x32.png", "icons/128x128.png", "icons/icon.ico"],
     "resources": {
+      "../../../LICENSE": "LICENSE",
+      "../../../NOTICE.md": "NOTICE.md",
       "../../../assets/avatar-default/2639776812528692620/2639776812528692620.vrm": "resources/avatar-default/2639776812528692620/2639776812528692620.vrm",
       "../../../assets/avatar-default/2639776812528692620/manifest.json": "resources/avatar-default/2639776812528692620/manifest.json",
       "../../../assets/avatar-default/2639776812528692620/NOTICE.md": "resources/avatar-default/2639776812528692620/NOTICE.md",

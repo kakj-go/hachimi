@@ -683,6 +683,7 @@ impl AgentRunExecutor {
                             host_context: prepared.host_context,
                             state: prepared.state,
                             run_tool_allowlist: request.run_tool_allowlist.clone(),
+                            capability_grants: Some(request.capability_grants.clone()),
                             world_refresher: prepared.world_refresher,
                         },
                         combined,

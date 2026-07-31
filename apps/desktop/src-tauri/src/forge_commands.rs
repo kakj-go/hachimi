@@ -1,15 +1,13 @@
-use std::time::Duration;
-
 use hachimi_approvals::ApprovalBroker;
-use hachimi_forge::{ForgeClient, ForgeCredentialStore, ForgeError, SystemForgeCredentialStore};
+use hachimi_forge::{ForgeCredentialStore, ForgeError, SystemForgeCredentialStore};
 use hachimi_protocol::{
-    ApprovalGrantScope, ApprovalId, ApprovalRequestRecord, ApprovalStatus, ForgeChangeMutation,
+    ApprovalGrantScope, ApprovalId, ApprovalRequestRecord, ApprovalStatus,
     ForgeChangeMutationRequest, ForgeChangeQueryRequest, ForgeChangeRecord, ForgeCredentialState,
-    ForgeCredentialUpdateRequest, ForgeOperationId, ForgeOperationRecord, ForgeOperationStatus,
-    GitPushRequest, GitPushResponse, GitRemoteListRequest, GitRemoteRecord, SideEffectExecutionId,
-    SideEffectExecutionRecord, SideEffectExecutionStatus, ToolCallId,
+    ForgeCredentialUpdateRequest, GitPushRequest, GitPushResponse, GitRemoteListRequest,
+    GitRemoteRecord, RunStatus, SideEffectExecutionId, SideEffectExecutionRecord,
+    SideEffectExecutionStatus, ToolCallId,
 };
-use hachimi_workspace::{WorkspaceHostClient, WorkspaceOperation, WorkspaceOutput};
+use hachimi_workspace::WorkspaceHostClient;
 use serde::{Serialize, de::DeserializeOwned};
 use sha2::{Digest, Sha256};
 use tauri::{State, WebviewWindow};
@@ -17,8 +15,6 @@ use tokio_util::sync::CancellationToken;
 
 use super::{CommandError, DesktopState, epoch_millis, require_window, workspace_worker_path};
 use crate::workspace_commands::{ResolvedWorkspace, resolve_session_workspace};
-
-const FORGE_TIMEOUT: Duration = Duration::from_secs(90);
 
 fn authorize(
     window: &WebviewWindow,
@@ -101,21 +97,9 @@ pub(super) async fn list_git_remotes(
     authorize(&window, &state)?;
     let workspace =
         resolve_session_workspace(&state, &request.session_id, &request.checkout_id).await?;
-    match workspace_host(&workspace)
-        .execute(
-            WorkspaceOperation::GitRemotes,
-            Duration::from_secs(20),
-            CancellationToken::new(),
-        )
+    crate::git_forge_host::list_git_remotes(&workspace_host(&workspace), CancellationToken::new())
         .await
-        .map_err(workspace_error)?
-    {
-        WorkspaceOutput::GitRemotes { remotes } => Ok(remotes),
-        _ => Err(CommandError::new(
-            "git_remote_protocol_mismatch",
-            "Workspace Host did not return Git remotes",
-        )),
-    }
+        .map_err(host_error)
 }
 
 #[tauri::command]
@@ -185,40 +169,30 @@ pub(super) async fn push_git_remote(
         )
         .await
         .map_err(|error| CommandError::operation("git_push_dispatch_claim_failed", error))?;
-    let output = workspace_host(&workspace)
-        .execute(
-            WorkspaceOperation::GitPush {
-                remote_name: request.remote_name,
-                expected_remote_url_hash: request.expected_remote_url_hash,
-                source_ref: request.source_ref,
-                target_ref: request.target_ref,
-                expected_commit_oid: request.expected_commit_oid,
-            },
-            FORGE_TIMEOUT,
-            CancellationToken::new(),
-        )
-        .await;
+    let output = crate::git_forge_host::push_git_remote(
+        &workspace_host(&workspace),
+        crate::git_forge_host::GitPushSpec {
+            remote_name: request.remote_name,
+            expected_remote_url_hash: request.expected_remote_url_hash,
+            source_ref: request.source_ref,
+            target_ref: request.target_ref,
+            expected_commit_oid: request.expected_commit_oid,
+        },
+        CancellationToken::new(),
+    )
+    .await;
     match output {
-        Ok(WorkspaceOutput::GitPush { response }) => {
+        Ok(response) => {
             finish_side_effect(&state, &side_effect.id, &response).await?;
             Ok(response)
         }
-        Ok(_) => {
-            mark_indeterminate(&state, &side_effect.id, "git_push_protocol_mismatch").await?;
-            Err(CommandError::new(
-                "git_push_indeterminate",
-                "Git push dispatch returned an unexpected receipt",
-            ))
+        Err(error) if error.indeterminate => {
+            mark_indeterminate(&state, &side_effect.id, error.code).await?;
+            Err(host_error(error))
         }
         Err(error) => {
-            mark_indeterminate(&state, &side_effect.id, "git_push_unknown_outcome").await?;
-            Err(CommandError::new(
-                "git_push_indeterminate",
-                format!(
-                    "Git push may have reached the remote; refresh the remote ref before retrying ({})",
-                    error.message
-                ),
-            ))
+            finish_failed_side_effect(&state, &side_effect.id, error.code).await?;
+            Err(host_error(error))
         }
     }
 }
@@ -230,11 +204,9 @@ pub(super) async fn query_forge_change(
     request: ForgeChangeQueryRequest,
 ) -> Result<ForgeChangeRecord, CommandError> {
     authorize(&window, &state)?;
-    ForgeClient::system()
-        .map_err(forge_error)?
-        .query(&request.repository, request.number)
+    crate::git_forge_host::query_forge_change(&request.repository, request.number)
         .await
-        .map_err(forge_error)
+        .map_err(host_error)
 }
 
 #[tauri::command]
@@ -250,10 +222,17 @@ pub(super) async fn mutate_forge_change(
     let workspace =
         resolve_session_workspace(&state, &request.session_id, &request.checkout_id).await?;
     require_current_run(&workspace, &run_id, generation)?;
+    let repository = crate::git_forge_host::resolve_forge_repository_by_hash(
+        &workspace_host(&workspace),
+        &request.repository.remote_url_hash,
+        CancellationToken::new(),
+    )
+    .await
+    .map_err(host_error)?;
     let parameter_hash = request_hash(&(
         &request.session_id,
         &request.checkout_id,
-        &request.repository,
+        &repository,
         &request.mutation,
         &request.expected_revision,
         &request.expected_commit_oid,
@@ -271,18 +250,17 @@ pub(super) async fn mutate_forge_change(
     {
         return previous;
     }
-    let (operation_kind, source_ref, target_ref, resource, risk) =
-        mutation_metadata(&request.mutation, &request.repository);
+    let metadata = crate::git_forge_host::mutation_metadata(&request.mutation, &repository);
     let approval_id = resolve_approval(
         &state,
         request.approval_id.clone(),
         &workspace,
         &client.client_id.0,
         call_id.clone(),
-        operation_kind,
-        &resource,
+        metadata.operation_kind,
+        &metadata.resource,
         &parameter_hash,
-        risk,
+        metadata.risk,
     )
     .await?;
     let side_effect = claim_side_effect(
@@ -294,51 +272,6 @@ pub(super) async fn mutate_forge_change(
         Some(approval_id.clone()),
     )
     .await?;
-    let now = now_ms();
-    let operation = ForgeOperationRecord {
-        id: ForgeOperationId::random(),
-        session_id: request.session_id.clone(),
-        run_id: Some(run_id.clone()),
-        run_generation: Some(generation),
-        operation_kind: operation_kind.into(),
-        repository: request.repository.clone(),
-        source_ref,
-        target_ref,
-        commit_oid: request.expected_commit_oid.clone(),
-        expected_revision: request.expected_revision.clone(),
-        approval_id: Some(approval_id),
-        idempotency_key: request.context.idempotency_key.clone(),
-        request_hash: parameter_hash.clone(),
-        status: ForgeOperationStatus::Claimed,
-        result: None,
-        error_code: None,
-        created_at_ms: now,
-        updated_at_ms: now,
-    };
-    let operation = match state.agent_store.claim_forge_operation(&operation).await {
-        Ok(operation) => operation,
-        Err(error) => {
-            let _ = state
-                .agent_store
-                .cancel_claimed_side_effect(&side_effect.id, now_ms())
-                .await;
-            return Err(CommandError::operation(
-                "forge_operation_claim_failed",
-                error,
-            ));
-        }
-    };
-    if operation.status == ForgeOperationStatus::Confirmed {
-        return operation.result.ok_or_else(|| {
-            CommandError::new("forge_receipt_missing", "confirmed Forge result is missing")
-        });
-    }
-    if operation.status != ForgeOperationStatus::Claimed {
-        return Err(CommandError::new(
-            "forge_operation_indeterminate",
-            "the previous Forge mutation is not safe to repeat; query the PR/MR first",
-        ));
-    }
     state
         .agent_store
         .mark_side_effect_dispatched_if_current(
@@ -350,89 +283,37 @@ pub(super) async fn mutate_forge_change(
         )
         .await
         .map_err(|error| CommandError::operation("forge_dispatch_claim_failed", error))?;
-    state
-        .agent_store
-        .update_forge_operation(
-            &operation.id,
-            ForgeOperationStatus::Claimed,
-            ForgeOperationStatus::Dispatched,
-            None,
-            None,
-            now_ms(),
-        )
-        .await
-        .map_err(|error| CommandError::operation("forge_dispatch_ledger_failed", error))?;
-    let result = ForgeClient::system()
-        .map_err(forge_error)?
-        .mutate(
-            &request.repository,
-            &request.mutation,
-            request.expected_revision.as_deref(),
-            &request.expected_commit_oid,
-        )
-        .await;
+    let result = crate::git_forge_host::mutate_forge_change(
+        &state.agent_store,
+        &repository,
+        &request.mutation,
+        crate::git_forge_host::ForgeMutationLedgerContext {
+            session_id: request.session_id.clone(),
+            run_id,
+            run_generation: generation,
+            operation_kind: metadata.operation_kind.into(),
+            source_ref: metadata.source_ref,
+            target_ref: metadata.target_ref,
+            expected_commit_oid: request.expected_commit_oid,
+            expected_revision: request.expected_revision,
+            approval_id: Some(approval_id),
+            idempotency_key: request.context.idempotency_key,
+            request_hash: parameter_hash,
+        },
+    )
+    .await;
     match result {
         Ok(result) => {
-            state
-                .agent_store
-                .update_forge_operation(
-                    &operation.id,
-                    ForgeOperationStatus::Dispatched,
-                    ForgeOperationStatus::Confirmed,
-                    Some(&result),
-                    None,
-                    now_ms(),
-                )
-                .await
-                .map_err(|error| CommandError::operation("forge_receipt_store_failed", error))?;
             finish_side_effect(&state, &side_effect.id, &result).await?;
             Ok(result)
         }
-        Err(error) if forge_unknown(&error) => {
-            state
-                .agent_store
-                .update_forge_operation(
-                    &operation.id,
-                    ForgeOperationStatus::Dispatched,
-                    ForgeOperationStatus::Indeterminate,
-                    None,
-                    Some("forge_unknown_outcome"),
-                    now_ms(),
-                )
-                .await
-                .map_err(|store| CommandError::operation("forge_unknown_store_failed", store))?;
-            mark_indeterminate(&state, &side_effect.id, "forge_unknown_outcome").await?;
-            Err(CommandError::new(
-                "forge_operation_indeterminate",
-                format!("Forge mutation outcome is unknown; query before retrying ({error})"),
-            ))
+        Err(error) if error.indeterminate => {
+            mark_indeterminate(&state, &side_effect.id, error.code).await?;
+            Err(host_error(error))
         }
         Err(error) => {
-            state
-                .agent_store
-                .update_forge_operation(
-                    &operation.id,
-                    ForgeOperationStatus::Dispatched,
-                    ForgeOperationStatus::Failed,
-                    None,
-                    Some("forge_rejected"),
-                    now_ms(),
-                )
-                .await
-                .map_err(|store| CommandError::operation("forge_failure_store_failed", store))?;
-            state
-                .agent_store
-                .finish_side_effect(
-                    &side_effect.id,
-                    SideEffectExecutionStatus::Failed,
-                    Some("forge_rejected"),
-                    None,
-                    None,
-                    now_ms(),
-                )
-                .await
-                .map_err(|store| CommandError::operation("forge_failure_finish_failed", store))?;
-            Err(forge_error(error))
+            finish_failed_side_effect(&state, &side_effect.id, error.code).await?;
+            Err(host_error(error))
         }
     }
 }
@@ -474,7 +355,35 @@ async fn resolve_approval(
     risk: &str,
 ) -> Result<ApprovalId, CommandError> {
     if let Some(id) = supplied {
-        return Ok(id);
+        let approval = state
+            .agent_store
+            .get_approval(&id)
+            .await
+            .map_err(|error| CommandError::operation("forge_approval_get_failed", error))?
+            .ok_or_else(|| {
+                CommandError::new(
+                    "forge_approval_denied",
+                    "supplied Forge approval does not exist",
+                )
+            })?;
+        if !forge_approval_matches(
+            &approval,
+            &workspace.session_id,
+            &workspace.run.id,
+            workspace.run.generation,
+            principal,
+            &tool_call_id,
+            action,
+            resource,
+            parameter_hash,
+            now_ms(),
+        ) {
+            return Err(CommandError::new(
+                "forge_approval_denied",
+                "supplied Forge approval does not authorize these exact parameters",
+            ));
+        }
+        return Ok(approval.id);
     }
     let now = now_ms();
     let approval = ApprovalRequestRecord {
@@ -498,11 +407,19 @@ async fn resolve_approval(
         created_at_ms: now,
         resolved_at_ms: None,
     };
-    let resolved = state
+    enter_approval_wait(state, workspace).await?;
+    let resolution = state
         .approval_broker
         .request(approval, CancellationToken::new())
-        .await
-        .map_err(|error| CommandError::operation("forge_approval_failed", error))?;
+        .await;
+    let leave_result = leave_approval_wait(state, workspace).await;
+    let resolved = match (resolution, leave_result) {
+        (Ok(resolved), Ok(())) => resolved,
+        (Err(error), Ok(())) => {
+            return Err(CommandError::operation("forge_approval_failed", error));
+        }
+        (Ok(_), Err(error)) | (Err(_), Err(error)) => return Err(error),
+    };
     if resolved.status != ApprovalStatus::Approved
         || resolved.parameter_hash != parameter_hash
         || resolved.run_generation != workspace.run.generation
@@ -513,6 +430,116 @@ async fn resolve_approval(
         ));
     }
     Ok(resolved.id)
+}
+
+async fn enter_approval_wait(
+    state: &DesktopState,
+    workspace: &ResolvedWorkspace,
+) -> Result<(), CommandError> {
+    let run = state
+        .agent_store
+        .get_run(&workspace.run.id)
+        .await
+        .map_err(|error| CommandError::operation("forge_approval_run_get_failed", error))?
+        .ok_or_else(|| {
+            CommandError::new(
+                "forge_approval_run_missing",
+                "selected Run disappeared before Forge approval",
+            )
+        })?;
+    if run.generation != workspace.run.generation {
+        return Err(CommandError::new(
+            "forge_approval_run_drift",
+            "selected Run generation changed before Forge approval",
+        ));
+    }
+    match run.status {
+        RunStatus::Running => {
+            state
+                .agent_store
+                .transition_run(&run.id, RunStatus::WaitingApproval, None)
+                .await
+                .map_err(|error| {
+                    CommandError::operation("forge_approval_wait_enter_failed", error)
+                })?;
+            Ok(())
+        }
+        RunStatus::WaitingApproval => Ok(()),
+        status => Err(CommandError::new(
+            "forge_approval_run_state_invalid",
+            format!("selected Run cannot wait for Forge approval while it is {status:?}"),
+        )),
+    }
+}
+
+async fn leave_approval_wait(
+    state: &DesktopState,
+    workspace: &ResolvedWorkspace,
+) -> Result<(), CommandError> {
+    let run = state
+        .agent_store
+        .get_run(&workspace.run.id)
+        .await
+        .map_err(|error| CommandError::operation("forge_approval_run_get_failed", error))?
+        .ok_or_else(|| {
+            CommandError::new(
+                "forge_approval_run_missing",
+                "selected Run disappeared after Forge approval",
+            )
+        })?;
+    if run.generation != workspace.run.generation {
+        return Err(CommandError::new(
+            "forge_approval_run_drift",
+            "selected Run generation changed while Forge approval was pending",
+        ));
+    }
+    if run.status == RunStatus::WaitingApproval {
+        state
+            .agent_store
+            .transition_run(&run.id, RunStatus::Running, None)
+            .await
+            .map_err(|error| CommandError::operation("forge_approval_wait_leave_failed", error))?;
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn forge_approval_matches(
+    approval: &ApprovalRequestRecord,
+    session_id: &hachimi_protocol::SessionId,
+    run_id: &hachimi_protocol::RunId,
+    run_generation: u64,
+    principal: &str,
+    tool_call_id: &ToolCallId,
+    action: &str,
+    resource: &str,
+    parameter_hash: &str,
+    now: i64,
+) -> bool {
+    approval.status == ApprovalStatus::Approved
+        && &approval.session_id == session_id
+        && &approval.run_id == run_id
+        && approval.run_generation == run_generation
+        && &approval.tool_call_id == tool_call_id
+        && approval.action == action
+        && approval.resource == resource.chars().take(1_024).collect::<String>()
+        && approval.parameter_hash == parameter_hash
+        && approval.target_host == "forge-broker"
+        && approval.grant_scope == ApprovalGrantScope::Once
+        && approval.uses_remaining == 1
+        && approval
+            .resolved_by
+            .as_deref()
+            .is_some_and(|resolved| resolved == principal)
+        && approval.expires_at_ms.is_none_or(|expires| expires > now)
+        && approval
+            .required_scopes
+            .iter()
+            .any(|scope| scope == "network")
+        && approval
+            .required_scopes
+            .iter()
+            .any(|scope| scope == "forge.mutate")
 }
 
 async fn claim_side_effect(
@@ -645,6 +672,26 @@ async fn mark_indeterminate(
     Ok(())
 }
 
+async fn finish_failed_side_effect(
+    state: &DesktopState,
+    id: &SideEffectExecutionId,
+    code: &str,
+) -> Result<(), CommandError> {
+    state
+        .agent_store
+        .finish_side_effect(
+            id,
+            SideEffectExecutionStatus::Failed,
+            Some(code),
+            None,
+            None,
+            now_ms(),
+        )
+        .await
+        .map_err(|error| CommandError::operation("forge_failure_finish_failed", error))?;
+    Ok(())
+}
+
 fn request_hash(value: &impl Serialize) -> Result<String, CommandError> {
     let bytes = serde_json::to_vec(value)
         .map_err(|error| CommandError::operation("forge_request_invalid", error))?;
@@ -659,63 +706,6 @@ fn tool_call_id(prefix: &str, idempotency_key: &str) -> ToolCallId {
         "{prefix}:{}",
         idempotency_key.chars().take(96).collect::<String>()
     ))
-}
-
-fn mutation_metadata(
-    mutation: &ForgeChangeMutation,
-    repository: &hachimi_protocol::ForgeRepositoryIdentity,
-) -> (
-    &'static str,
-    Option<String>,
-    Option<String>,
-    String,
-    &'static str,
-) {
-    let repo = format!(
-        "{}:{}/{}",
-        repository.forge_kind.as_str(),
-        repository.owner,
-        repository.repository
-    );
-    match mutation {
-        ForgeChangeMutation::Create {
-            source_ref,
-            target_ref,
-            ..
-        } => (
-            "forge.change.create",
-            Some(source_ref.clone()),
-            Some(target_ref.clone()),
-            repo,
-            "Create a PR/MR on an external Forge",
-        ),
-        ForgeChangeMutation::Update {
-            number,
-            source_ref,
-            target_ref,
-            ..
-        } => (
-            "forge.change.update",
-            Some(source_ref.clone()),
-            Some(target_ref.clone()),
-            format!("{repo}#{number}"),
-            "Update an external PR/MR",
-        ),
-        ForgeChangeMutation::Close { number } => (
-            "forge.change.close",
-            None,
-            None,
-            format!("{repo}#{number}"),
-            "Close an external PR/MR",
-        ),
-        ForgeChangeMutation::Merge { number, .. } => (
-            "forge.change.merge",
-            None,
-            None,
-            format!("{repo}#{number}"),
-            "High risk: merge an external PR/MR into its target branch",
-        ),
-    }
 }
 
 fn validate_push(request: &GitPushRequest) -> Result<(), CommandError> {
@@ -750,11 +740,6 @@ fn validate_oid(oid: &str) -> Result<(), CommandError> {
     }
 }
 
-fn forge_unknown(error: &ForgeError) -> bool {
-    matches!(error, ForgeError::Indeterminate(_))
-        || matches!(error, ForgeError::Http { status, .. } if status.is_server_error())
-}
-
 fn forge_error(error: ForgeError) -> CommandError {
     let code = match &error {
         ForgeError::CredentialMissing | ForgeError::CredentialStore => "forge_credential_failed",
@@ -771,13 +756,84 @@ fn forge_error(error: ForgeError) -> CommandError {
     CommandError::new(code, error.to_string())
 }
 
-fn workspace_error(error: hachimi_workspace::WorkspaceError) -> CommandError {
-    CommandError::new(
-        format!("workspace_{:?}", error.code).to_lowercase(),
-        error.message,
-    )
+fn host_error(error: crate::git_forge_host::GitForgeHostError) -> CommandError {
+    CommandError::new(error.code, error.message)
 }
 
 fn now_ms() -> i64 {
     i64::try_from(epoch_millis()).unwrap_or(i64::MAX)
+}
+
+#[cfg(test)]
+mod tests {
+    use hachimi_protocol::{
+        ApprovalGrantScope, ApprovalId, ApprovalRequestRecord, ApprovalStatus, RunId, SessionId,
+        ToolCallId,
+    };
+
+    use super::forge_approval_matches;
+
+    fn approval() -> ApprovalRequestRecord {
+        ApprovalRequestRecord {
+            id: ApprovalId::from("forge-approval"),
+            session_id: SessionId::from("forge-session"),
+            run_id: RunId::from("forge-run"),
+            tool_call_id: ToolCallId::from("forge-call"),
+            run_generation: 3,
+            status: ApprovalStatus::Approved,
+            action: "forge.change.merge".into(),
+            resource: "github:team/repository".into(),
+            parameter_hash: "a".repeat(64),
+            risk_summary: "merge".into(),
+            target_host: "forge-broker".into(),
+            required_scopes: vec!["network".into(), "forge.mutate".into()],
+            grant_scope: ApprovalGrantScope::Once,
+            uses_remaining: 1,
+            requester_principal: "client".into(),
+            resolved_by: Some("client".into()),
+            expires_at_ms: Some(2_000),
+            created_at_ms: 1,
+            resolved_at_ms: Some(2),
+        }
+    }
+
+    fn matches(record: &ApprovalRequestRecord) -> bool {
+        forge_approval_matches(
+            record,
+            &SessionId::from("forge-session"),
+            &RunId::from("forge-run"),
+            3,
+            "client",
+            &ToolCallId::from("forge-call"),
+            "forge.change.merge",
+            "github:team/repository",
+            &"a".repeat(64),
+            1_000,
+        )
+    }
+
+    #[test]
+    fn supplied_forge_approval_is_exact_and_cannot_be_reused_for_another_generation() {
+        let valid = approval();
+        assert!(matches(&valid));
+        let mut stale = valid.clone();
+        stale.run_generation = 2;
+        assert!(!matches(&stale));
+        let mut different_parameters = valid.clone();
+        different_parameters.parameter_hash = "b".repeat(64);
+        assert!(!matches(&different_parameters));
+        let mut expired = valid;
+        expired.expires_at_ms = Some(999);
+        assert!(!matches(&expired));
+
+        let mut already_consumed = approval();
+        already_consumed.uses_remaining = 0;
+        assert!(!matches(&already_consumed));
+        let mut wider_scope = approval();
+        wider_scope.grant_scope = ApprovalGrantScope::Session;
+        assert!(!matches(&wider_scope));
+        let mut different_action = approval();
+        different_action.action = "forge.change.update".into();
+        assert!(!matches(&different_action));
+    }
 }

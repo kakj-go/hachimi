@@ -28,6 +28,35 @@ impl AgentStore {
         rows.iter().map(side_effect_from_row).collect()
     }
 
+    pub async fn get_side_effect_claim(
+        &self,
+        run_id: &RunId,
+        run_generation: u64,
+        idempotency_key: &str,
+    ) -> Result<Option<SideEffectClaim>, AgentStoreError> {
+        let row = sqlx::query(
+            "SELECT * FROM side_effect_executions WHERE run_id = ? AND run_generation = ? AND idempotency_key = ?",
+        )
+        .bind(run_id.as_str())
+        .bind(i64::try_from(run_generation).unwrap_or(i64::MAX))
+        .bind(idempotency_key)
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(|row| {
+            let record = side_effect_from_row(&row)?;
+            let persisted_result = row
+                .get::<Option<String>, _>("result_json")
+                .map(|value| serde_json::from_str(&value))
+                .transpose()?;
+            Ok(SideEffectClaim {
+                record,
+                created: false,
+                persisted_result,
+            })
+        })
+        .transpose()
+    }
+
     pub async fn claim_side_effect(
         &self,
         record: &SideEffectExecutionRecord,

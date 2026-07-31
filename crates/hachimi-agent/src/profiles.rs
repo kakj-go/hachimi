@@ -52,6 +52,11 @@ pub fn workload_profile_spec(
                 "list_mcp_resource_templates",
                 "read_mcp_resource",
                 "request_user_input",
+                "agent.spawn",
+                "agent.send",
+                "agent.wait",
+                "agent.cancel",
+                "agent.collect",
                 "browser_start",
                 "browser_observe",
                 "browser_act",
@@ -63,6 +68,7 @@ pub fn workload_profile_spec(
                 "computer_stop",
                 "connector_list_accounts",
                 "connector_invoke",
+                "enterprise.download_attachment",
                 "workspace_read_file",
                 "workspace_list_directory",
                 "workspace_search_text",
@@ -104,8 +110,17 @@ pub fn workload_profile_spec(
                 "workspace_git_diff",
                 "workspace_review_diff",
                 "workspace_exec",
+                "git.remotes",
+                "git.push",
+                "forge.change.query",
+                "forge.change.mutate",
                 "skills.list",
                 "skills.read",
+                "agent.spawn",
+                "agent.send",
+                "agent.wait",
+                "agent.cancel",
+                "agent.collect",
                 "mcp:*",
                 "list_mcp_resources",
                 "list_mcp_resource_templates",
@@ -153,6 +168,11 @@ pub fn workload_profile_spec(
                 "list_mcp_resource_templates",
                 "read_mcp_resource",
                 "request_user_input",
+                "agent.spawn",
+                "agent.send",
+                "agent.wait",
+                "agent.cancel",
+                "agent.collect",
                 "browser_start",
                 "browser_observe",
                 "browser_act",
@@ -164,6 +184,7 @@ pub fn workload_profile_spec(
                 "computer_stop",
                 "connector_list_accounts",
                 "connector_invoke",
+                "enterprise.download_attachment",
                 "workspace_read_file",
                 "workspace_list_directory",
                 "workspace_search_text",
@@ -322,5 +343,80 @@ mod tests {
             WorkloadKind::General,
             "workspace_read_file"
         ));
+    }
+
+    #[test]
+    fn agent_tools_are_workbench_only_for_every_workload() {
+        for workload in [
+            WorkloadKind::General,
+            WorkloadKind::Coding,
+            WorkloadKind::Office,
+        ] {
+            for tool in [
+                "agent.spawn",
+                "agent.send",
+                "agent.wait",
+                "agent.cancel",
+                "agent.collect",
+            ] {
+                assert!(profile_allows_tool(EntryProfile::Workbench, workload, tool));
+                assert!(!profile_allows_tool(
+                    EntryProfile::PetConversation,
+                    workload,
+                    tool
+                ));
+                assert!(!profile_allows_tool(
+                    EntryProfile::DesktopControl,
+                    workload,
+                    tool
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn enterprise_attachments_are_general_and_office_workbench_only() {
+        for workload in [WorkloadKind::General, WorkloadKind::Office] {
+            assert!(profile_allows_tool(
+                EntryProfile::Workbench,
+                workload,
+                "enterprise.download_attachment"
+            ));
+        }
+        for (entry_profile, workload) in [
+            (EntryProfile::Workbench, WorkloadKind::Coding),
+            (EntryProfile::PetConversation, WorkloadKind::General),
+            (EntryProfile::DesktopControl, WorkloadKind::General),
+        ] {
+            assert!(!profile_allows_tool(
+                entry_profile,
+                workload,
+                "enterprise.download_attachment"
+            ));
+        }
+    }
+
+    #[test]
+    fn remote_git_and_forge_are_coding_workbench_only() {
+        for tool in [
+            "git.remotes",
+            "git.push",
+            "forge.change.query",
+            "forge.change.mutate",
+        ] {
+            assert!(profile_allows_tool(
+                EntryProfile::Workbench,
+                WorkloadKind::Coding,
+                tool
+            ));
+            for (entry_profile, workload) in [
+                (EntryProfile::Workbench, WorkloadKind::General),
+                (EntryProfile::Workbench, WorkloadKind::Office),
+                (EntryProfile::PetConversation, WorkloadKind::Coding),
+                (EntryProfile::DesktopControl, WorkloadKind::Coding),
+            ] {
+                assert!(!profile_allows_tool(entry_profile, workload, tool));
+            }
+        }
     }
 }

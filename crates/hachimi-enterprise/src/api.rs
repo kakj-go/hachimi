@@ -153,16 +153,42 @@ impl EnterpriseApiClient {
         })
     }
 
+    /// Builds the production transport against a loopback-only endpoint.
+    ///
+    /// This is intentionally narrower than a generic endpoint override: local
+    /// integration tests can exercise the real HTTP, authentication and
+    /// streaming paths without making arbitrary clear-text remote hosts
+    /// configurable in the product.
+    pub fn with_loopback_endpoint(endpoint: &str) -> Result<Self, EnterpriseApiError> {
+        let parsed =
+            reqwest::Url::parse(endpoint).map_err(|_| EnterpriseApiError::InvalidRequest)?;
+        let loopback = parsed
+            .host_str()
+            .and_then(|host| host.parse::<std::net::IpAddr>().ok())
+            .is_some_and(|host| host.is_loopback());
+        if !matches!(parsed.scheme(), "http" | "https")
+            || !loopback
+            || parsed.username() != ""
+            || parsed.password().is_some()
+            || parsed.query().is_some()
+            || parsed.fragment().is_some()
+        {
+            return Err(EnterpriseApiError::InvalidRequest);
+        }
+        let endpoint = endpoint.trim_end_matches('/').to_owned();
+        let mut client = Self::new()?;
+        client.endpoints = EnterpriseEndpoints {
+            wecom: endpoint.clone(),
+            dingtalk_legacy: endpoint.clone(),
+            dingtalk_openapi: endpoint.clone(),
+            feishu: endpoint,
+        };
+        Ok(client)
+    }
+
     #[cfg(test)]
     fn with_single_endpoint(endpoint: &str) -> Self {
-        let mut client = Self::new().expect("client");
-        client.endpoints = EnterpriseEndpoints {
-            wecom: endpoint.into(),
-            dingtalk_legacy: endpoint.into(),
-            dingtalk_openapi: endpoint.into(),
-            feishu: endpoint.into(),
-        };
-        client
+        Self::with_loopback_endpoint(endpoint).expect("loopback client")
     }
 
     pub async fn account_identity(
@@ -928,6 +954,14 @@ mod tests {
         let client = EnterpriseApiClient::with_single_endpoint("http://127.0.0.1:1");
         assert_eq!(client.endpoints.wecom, "http://127.0.0.1:1");
         assert_eq!(client.endpoints.feishu, "http://127.0.0.1:1");
+        assert!(matches!(
+            EnterpriseApiClient::with_loopback_endpoint("http://example.com"),
+            Err(EnterpriseApiError::InvalidRequest)
+        ));
+        assert!(matches!(
+            EnterpriseApiClient::with_loopback_endpoint("file:///tmp/fixture"),
+            Err(EnterpriseApiError::InvalidRequest)
+        ));
     }
 
     #[tokio::test]

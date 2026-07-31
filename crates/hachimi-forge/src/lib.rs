@@ -91,6 +91,12 @@ pub struct ForgeClient {
     credentials: Arc<dyn ForgeCredentialStore>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ForgeMutationOutcome {
+    pub record: ForgeChangeRecord,
+    pub reconciled_after_unknown_response: bool,
+}
+
 impl std::fmt::Debug for ForgeClient {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
@@ -134,6 +140,18 @@ impl ForgeClient {
         expected_revision: Option<&str>,
         expected_commit_oid: &str,
     ) -> Result<ForgeChangeRecord, ForgeError> {
+        self.mutate_with_outcome(repository, mutation, expected_revision, expected_commit_oid)
+            .await
+            .map(|outcome| outcome.record)
+    }
+
+    pub async fn mutate_with_outcome(
+        &self,
+        repository: &ForgeRepositoryIdentity,
+        mutation: &ForgeChangeMutation,
+        expected_revision: Option<&str>,
+        expected_commit_oid: &str,
+    ) -> Result<ForgeMutationOutcome, ForgeError> {
         validate_repository(repository)?;
         validate_oid(expected_commit_oid)?;
         let token = self.token(repository)?;
@@ -158,14 +176,61 @@ impl ForgeClient {
             }
         }
         let request = build_mutation(repository, mutation, &token, expected_commit_oid)?;
-        if let Some(number) = mutation_number(mutation) {
-            self.send_ack(request).await?;
-            self.send(build_query(repository, number, &token)?, false)
-                .await
-                .map_err(|error| ForgeError::Indeterminate(error.to_string()))
+        let result = if let Some(number) = mutation_number(mutation) {
+            match self.send_ack(request).await {
+                Ok(()) => self
+                    .send(build_query(repository, number, &token)?, false)
+                    .await
+                    .map_err(|error| ForgeError::Indeterminate(error.to_string())),
+                Err(error) => Err(error),
+            }
         } else {
             self.send(request, true).await
+        };
+        match result {
+            Err(error) if mutation_outcome_unknown(&error) => {
+                match self
+                    .reconcile_mutation(repository, mutation, expected_commit_oid)
+                    .await
+                {
+                    Ok(Some(record)) => Ok(ForgeMutationOutcome {
+                        record,
+                        reconciled_after_unknown_response: true,
+                    }),
+                    Ok(None) | Err(_) => Err(error),
+                }
+            }
+            Ok(record) => Ok(ForgeMutationOutcome {
+                record,
+                reconciled_after_unknown_response: false,
+            }),
+            Err(error) => Err(error),
         }
+    }
+
+    /// Reconciles an unknown mutation by querying remote state. A record is
+    /// returned only when refs, visible fields, terminal state, and source OID
+    /// prove that the original operation completed. No mutation is retried.
+    pub async fn reconcile_mutation(
+        &self,
+        repository: &ForgeRepositoryIdentity,
+        mutation: &ForgeChangeMutation,
+        expected_commit_oid: &str,
+    ) -> Result<Option<ForgeChangeRecord>, ForgeError> {
+        validate_repository(repository)?;
+        validate_oid(expected_commit_oid)?;
+        let token = self.token(repository)?;
+        let candidates = if let Some(number) = mutation_number(mutation) {
+            vec![
+                self.send(build_query(repository, number, &token)?, false)
+                    .await?,
+            ]
+        } else {
+            self.send_list(build_list(repository, &token)?).await?
+        };
+        Ok(candidates
+            .into_iter()
+            .find(|record| mutation_matches_remote(mutation, record, expected_commit_oid)))
     }
 
     fn token(&self, repository: &ForgeRepositoryIdentity) -> Result<String, ForgeError> {
@@ -252,6 +317,42 @@ impl ForgeClient {
         }
         Ok(())
     }
+
+    async fn send_list(
+        &self,
+        request: ForgeHttpRequest,
+    ) -> Result<Vec<ForgeChangeRecord>, ForgeError> {
+        let mut builder = self.client.request(request.method, request.url);
+        for (name, value) in request.headers {
+            builder = builder.header(name, value);
+        }
+        let response = builder
+            .send()
+            .await
+            .map_err(|error| ForgeError::QueryFailed(error.to_string()))?;
+        let status = response.status();
+        let bytes = response
+            .bytes()
+            .await
+            .map_err(|error| ForgeError::QueryFailed(error.to_string()))?;
+        if bytes.len() > RESPONSE_LIMIT {
+            return Err(ForgeError::InvalidResponse(
+                "response exceeded 2 MiB".into(),
+            ));
+        }
+        if !status.is_success() {
+            return Err(ForgeError::Http {
+                status,
+                message: bounded(&String::from_utf8_lossy(&bytes), 1_000),
+            });
+        }
+        let values: Vec<Value> = serde_json::from_slice(&bytes)
+            .map_err(|error| ForgeError::InvalidResponse(error.to_string()))?;
+        values
+            .iter()
+            .map(|value| parse_change(request.forge_kind, value))
+            .collect()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -280,6 +381,13 @@ fn build_query(
         token,
         None,
     )
+}
+
+fn build_list(
+    repository: &ForgeRepositoryIdentity,
+    token: &str,
+) -> Result<ForgeHttpRequest, ForgeError> {
+    request(repository, Method::GET, list_path(repository), token, None)
 }
 
 fn build_mutation(
@@ -421,6 +529,17 @@ fn create_path(repository: &ForgeRepositoryIdentity) -> String {
         ),
         ForgeKind::Unknown => String::new(),
     }
+}
+
+fn list_path(repository: &ForgeRepositoryIdentity) -> String {
+    let separator = if repository.forge_kind == ForgeKind::GitLab {
+        "?scope=all&state=all&per_page=100"
+    } else if repository.forge_kind == ForgeKind::GiteaForgejo {
+        "?state=all&limit=100"
+    } else {
+        "?state=all&per_page=100"
+    };
+    format!("{}{separator}", create_path(repository))
 }
 
 fn create_body(
@@ -570,6 +689,48 @@ fn mutation_number(mutation: &ForgeChangeMutation) -> Option<u64> {
         | ForgeChangeMutation::Close { number }
         | ForgeChangeMutation::Merge { number, .. } => Some(*number),
     }
+}
+
+fn mutation_matches_remote(
+    mutation: &ForgeChangeMutation,
+    record: &ForgeChangeRecord,
+    expected_commit_oid: &str,
+) -> bool {
+    if record
+        .source_commit_oid
+        .as_deref()
+        .is_none_or(|oid| !oid.eq_ignore_ascii_case(expected_commit_oid))
+    {
+        return false;
+    }
+    match mutation {
+        ForgeChangeMutation::Create {
+            title,
+            body,
+            source_ref,
+            target_ref,
+        }
+        | ForgeChangeMutation::Update {
+            title,
+            body,
+            source_ref,
+            target_ref,
+            ..
+        } => {
+            record.title == *title
+                && record.body == *body
+                && record.source_ref == *source_ref
+                && record.target_ref == *target_ref
+                && record.state == ForgeChangeState::Open
+        }
+        ForgeChangeMutation::Close { .. } => record.state == ForgeChangeState::Closed,
+        ForgeChangeMutation::Merge { .. } => record.state == ForgeChangeState::Merged,
+    }
+}
+
+fn mutation_outcome_unknown(error: &ForgeError) -> bool {
+    matches!(error, ForgeError::Indeterminate(_))
+        || matches!(error, ForgeError::Http { status, .. } if status.is_server_error())
 }
 
 fn validate_repository(repository: &ForgeRepositoryIdentity) -> Result<(), ForgeError> {
@@ -818,5 +979,63 @@ mod tests {
         .expect("gitlab");
         assert_eq!(gitlab.state, ForgeChangeState::Merged);
         assert_ne!(github.revision, gitlab.revision);
+    }
+
+    #[test]
+    fn reconciliation_requires_exact_fields_state_and_source_oid() {
+        let record = ForgeChangeRecord {
+            forge_kind: ForgeKind::GitHub,
+            number: 9,
+            title: "Change".into(),
+            body: "Body".into(),
+            source_ref: "feature".into(),
+            target_ref: "main".into(),
+            source_commit_oid: Some("a".repeat(40)),
+            state: ForgeChangeState::Open,
+            web_url: None,
+            revision: "revision".into(),
+        };
+        let create = ForgeChangeMutation::Create {
+            title: "Change".into(),
+            body: "Body".into(),
+            source_ref: "feature".into(),
+            target_ref: "main".into(),
+        };
+        assert!(mutation_matches_remote(&create, &record, &"a".repeat(40)));
+        assert!(!mutation_matches_remote(&create, &record, &"b".repeat(40)));
+        let mut changed = record.clone();
+        changed.body = "remote drift".into();
+        assert!(!mutation_matches_remote(&create, &changed, &"a".repeat(40)));
+
+        let mut closed = record.clone();
+        closed.state = ForgeChangeState::Closed;
+        assert!(mutation_matches_remote(
+            &ForgeChangeMutation::Close { number: 9 },
+            &closed,
+            &"a".repeat(40)
+        ));
+        assert!(!mutation_matches_remote(
+            &ForgeChangeMutation::Merge {
+                number: 9,
+                merge_title: None,
+                merge_message: None,
+            },
+            &closed,
+            &"a".repeat(40)
+        ));
+    }
+
+    #[test]
+    fn reconciliation_lists_bounded_history_per_forge() {
+        assert!(
+            list_path(&repository(ForgeKind::GitHub)).ends_with("/pulls?state=all&per_page=100")
+        );
+        assert!(
+            list_path(&repository(ForgeKind::GitLab))
+                .ends_with("/merge_requests?scope=all&state=all&per_page=100")
+        );
+        assert!(
+            list_path(&repository(ForgeKind::GiteaForgejo)).ends_with("/pulls?state=all&limit=100")
+        );
     }
 }

@@ -14,13 +14,10 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  standard-user-release:
-    if: github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
-    runs-on: [self-hosted, windows, x64, hachimi-standard-user]
-    environment: hachimi-standard-user-release
+  build-candidate:
+    runs-on: [self-hosted, windows, x64, hachimi-sandbox]
+    environment: hachimi-sandbox-release
     timeout-minutes: 180
-    env:
-      HACHIMI_PREVIOUS_INSTALLER: ${{ vars.HACHIMI_PREVIOUS_INSTALLER }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -34,8 +31,72 @@ jobs:
       - run: corepack enable
       - run: corepack prepare pnpm@11.15.1 --activate
       - run: pnpm install --frozen-lockfile
+      - name: Verify self-hosted runner disk budget
+        shell: powershell
+        run: scripts/release/check-disk-space.ps1 -MinimumFreeGiB 80
+      - name: Verify clean versioned source
+        run: |
+          pnpm release:check-clean
+          pnpm release:version-check
+          pnpm check
+      - name: Build one immutable candidate set
+        run: |
+          pnpm runtime:prepare
+          pnpm build:installer
+          pnpm build:portable
+          New-Item -ItemType Directory -Path target/release-candidate -Force | Out-Null
+          Copy-Item target/release/bundle/nsis/*.exe target/release-candidate/
+          Copy-Item target/release/bundle/msi/*.msi target/release-candidate/
+          Copy-Item target/portable/*.zip target/release-candidate/
+          pnpm release:artifact-manifest -- target/release-candidate
+          pnpm release:artifact-verify -- --root target/release-candidate --expected-commit $env:GITHUB_SHA
+      - name: Upload immutable candidate
+        uses: actions/upload-artifact@v4
+        with:
+          name: hachimi-release-candidate-${{ github.run_id }}
+          path: target/release-candidate/*
+          if-no-files-found: error
+          retention-days: 90
+      - name: Prune archived build output
+        if: always()
+        run: cargo clean --target-dir ${{ github.workspace }}\target
+
+  standard-user-release:
+    needs: build-candidate
+    runs-on: [self-hosted, windows, x64, hachimi-standard-user]
+    environment: hachimi-standard-user-release
+    timeout-minutes: 180
+    env:
+      HACHIMI_PREVIOUS_INSTALLER: ${{ vars.HACHIMI_PREVIOUS_INSTALLER }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          lfs: true
+      - uses: actions/download-artifact@v4
+        with:
+          name: hachimi-release-candidate-${{ github.run_id }}
+          path: target/release-candidate
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24.10.0
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - run: corepack enable
+      - run: corepack prepare pnpm@11.15.1 --activate
+      - run: pnpm install --frozen-lockfile
+      - name: Verify disk and immutable candidate
+        shell: powershell
+        run: |
+          & scripts/release/check-disk-space.ps1 -MinimumFreeGiB 40
+          pnpm release:artifact-verify -- --root target/release-candidate --expected-commit $env:GITHUB_SHA
       - name: Standard-user install, upgrade, Local Host, and Desktop suite
-        run: pnpm test:windows:standard-user
+        shell: powershell
+        run: |
+          $artifacts = Get-ChildItem target/release-candidate -File | Where-Object { $_.Extension -in '.exe', '.msi', '.zip' }
+          $env:HACHIMI_RELEASE_ARTIFACTS = ($artifacts.FullName -join [System.IO.Path]::PathSeparator)
+          $installer = ($artifacts | Where-Object Extension -eq '.exe' | Select-Object -First 1).FullName
+          & scripts/test-windows-standard-user.ps1 -SkipBuild -InstallerPath $installer -PreviousInstallerPath $env:HACHIMI_PREVIOUS_INSTALLER
       - name: Upload sanitized standard-user evidence
         if: always()
         uses: actions/upload-artifact@v4
@@ -47,16 +108,23 @@ jobs:
             target/windows-standard-user-validation/**/*.sanitized.log
           if-no-files-found: error
           retention-days: 90
+      - name: Prune archived build output
+        if: always()
+        run: cargo clean --target-dir ${{ github.workspace }}\target
 
   sandbox-release:
-    if: github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
+    needs: build-candidate
     runs-on: [self-hosted, windows, x64, hachimi-sandbox]
     environment: hachimi-sandbox-release
-    timeout-minutes: 120
+    timeout-minutes: 150
     steps:
       - uses: actions/checkout@v4
         with:
           lfs: true
+      - uses: actions/download-artifact@v4
+        with:
+          name: hachimi-release-candidate-${{ github.run_id }}
+          path: target/release-candidate
       - uses: actions/setup-node@v4
         with:
           node-version: 24.10.0
@@ -66,9 +134,21 @@ jobs:
       - run: corepack enable
       - run: corepack prepare pnpm@11.15.1 --activate
       - run: pnpm install --frozen-lockfile
+      - name: Verify disk and immutable candidate
+        shell: powershell
+        run: |
+          & scripts/release/check-disk-space.ps1 -MinimumFreeGiB 40
+          pnpm release:artifact-verify -- --root target/release-candidate --expected-commit $env:GITHUB_SHA
       - name: Elevated Sandbox and Desktop release suite
-        run: pnpm test:windows:release
-      - name: Upload sanitized release evidence
+        shell: powershell
+        run: |
+          $artifacts = Get-ChildItem target/release-candidate -File | Where-Object { $_.Extension -in '.exe', '.msi', '.zip' }
+          $env:HACHIMI_RELEASE_ARTIFACTS = ($artifacts.FullName -join [System.IO.Path]::PathSeparator)
+          $installer = ($artifacts | Where-Object Extension -eq '.exe' | Select-Object -First 1).FullName
+          $msi = ($artifacts | Where-Object Extension -eq '.msi' | Select-Object -First 1).FullName
+          $portable = ($artifacts | Where-Object Extension -eq '.zip' | Select-Object -First 1).FullName
+          & scripts/test-windows-release.ps1 -SkipBuild -InstallerPath $installer -MsiPath $msi -PortablePath $portable
+      - name: Upload sanitized elevated evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -77,5 +157,31 @@ jobs:
             target/windows-release-validation/**/summary.json
             target/windows-release-validation/**/installer-sha256.txt
             target/windows-release-validation/**/*.sanitized.log
+          if-no-files-found: error
+          retention-days: 90
+      - name: Prune archived build output
+        if: always()
+        run: cargo clean --target-dir ${{ github.workspace }}\target
+
+  verify-evidence:
+    needs: [standard-user-release, sandbox-release]
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: windows-*-validation-${{ github.run_id }}
+          path: target/release-evidence
+          merge-multiple: true
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24.10.0
+      - name: Verify same-version, same-commit, same-artifact evidence
+        run: node scripts/release/verify-evidence.mjs --root target/release-evidence --required windows_standard_user,windows_elevated --output release-manifest.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-release-evidence-${{ github.run_id }}
+          path: target/release-evidence/release-manifest.json
           if-no-files-found: error
           retention-days: 90

@@ -25,5 +25,6 @@ url.workspace = true
 zeroize.workspace = true
 
 [dev-dependencies]
+keyring.workspace = true
 tempfile.workspace = true
 tokio.workspace = true

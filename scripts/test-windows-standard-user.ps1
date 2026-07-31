@@ -112,7 +112,55 @@ function Protect-SummaryText {
 function Get-TextSha256 {
     param([Parameter(Mandatory = $true)][string]$Text)
     $bytes = [System.Text.Encoding]::UTF8.GetBytes($Text)
-    return [Convert]::ToHexString([System.Security.Cryptography.SHA256]::HashData($bytes))
+    $sha256 = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        return -join ($sha256.ComputeHash($bytes) | ForEach-Object { $_.ToString("x2") })
+    } finally {
+        $sha256.Dispose()
+    }
+}
+
+function Write-JsonUtf8NoBom {
+    param(
+        [Parameter(Mandatory = $true)][string]$LiteralPath,
+        [Parameter(Mandatory = $true)][object]$Value,
+        [int]$Depth = 8
+    )
+    $json = $Value | ConvertTo-Json -Depth $Depth
+    [IO.File]::WriteAllText($LiteralPath, $json + [Environment]::NewLine, [Text.UTF8Encoding]::new($false))
+}
+
+function Get-SourceRegistryDigests {
+    param([Parameter(Mandatory = $true)][string]$Root)
+    return [ordered]@{
+        openai = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $Root "docs\references\openai\registry.json")).Hash.ToLowerInvariant()
+        forge = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $Root "docs\references\forge\registry.json")).Hash.ToLowerInvariant()
+        enterprise = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $Root "docs\references\enterprise\registry.json")).Hash.ToLowerInvariant()
+    }
+}
+
+function Get-ReleaseArtifactDigests {
+    param(
+        [Parameter(Mandatory = $true)][string]$PrimaryInstaller,
+        [AllowEmptyString()][string]$ConfiguredPaths
+    )
+    $paths = @($PrimaryInstaller)
+    if (-not [string]::IsNullOrWhiteSpace($ConfiguredPaths)) {
+        $paths += $ConfiguredPaths -split [System.IO.Path]::PathSeparator
+    }
+    return @($paths |
+        Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
+        ForEach-Object { [System.IO.Path]::GetFullPath($_) } |
+        Sort-Object -Unique |
+        ForEach-Object {
+            if (-not (Test-Path -LiteralPath $_ -PathType Leaf)) {
+                throw "Release artifact is missing: $_"
+            }
+            [ordered]@{
+                name = [System.IO.Path]::GetFileName($_)
+                sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $_).Hash.ToLowerInvariant()
+            }
+        })
 }
 
 if ($env:OS -ne "Windows_NT") {
@@ -131,8 +179,15 @@ if (-not $reportRoot.StartsWith($targetRoot, [StringComparison]::OrdinalIgnoreCa
 New-Item -ItemType Directory -Path $reportRoot -Force | Out-Null
 $summaryPath = Join-Path $reportRoot "summary.json"
 $summary = [ordered]@{
-    schemaVersion = 5
+    schemaVersion = 1
+    gateKind = "windows_standard_user"
     status = "running"
+    version = $null
+    commitSha = (& git -C $repoRoot rev-parse HEAD).Trim()
+    artifactSha256 = @()
+    sourceRegistrySha256 = (Get-SourceRegistryDigests -Root $repoRoot)
+    environmentFingerprint = (Get-TextSha256 -Text "$env:RUNNER_NAME|$env:OS|windows_standard_user")
+    checks = @()
     startedAtUtc = [DateTimeOffset]::UtcNow.ToString("O")
     completedAtUtc = $null
     accountSidSha256 = $null
@@ -173,6 +228,7 @@ $summary = [ordered]@{
     skipDesktopE2E = [bool]$SkipDesktopE2E
     desktopE2ESkipped = [bool]$SkipDesktopE2E
     desktopE2e = "not_run"
+    packageLicenses = "not_run"
     logsPath = $null
     failure = $null
 }
@@ -233,6 +289,8 @@ try {
         throw "Previous-version NSIS installer not found: $PreviousInstallerPath"
     }
     $summary.installerSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $InstallerPath).Hash
+    $summary.version = $expectedCandidateVersion
+    $summary.artifactSha256 = Get-ReleaseArtifactDigests -PrimaryInstaller $InstallerPath -ConfiguredPaths $env:HACHIMI_RELEASE_ARTIFACTS
     $summary.previousInstallerSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $PreviousInstallerPath).Hash
     if ($summary.installerSha256 -eq $summary.previousInstallerSha256) {
         throw "Previous and candidate installer hashes are identical; cross-version evidence is required."
@@ -271,6 +329,12 @@ try {
     if ([string]::IsNullOrWhiteSpace($executable)) {
         throw "Installed executable is missing: $executable"
     }
+    Invoke-Checked "powershell.exe" @(
+        "-NoProfile", "-ExecutionPolicy", "Bypass",
+        "-File", (Join-Path $repoRoot "scripts\release\test-package-licenses.ps1"),
+        "-PackageRoot", $installRoot
+    )
+    $summary.packageLicenses = "passed"
 
     $dataRoot = Join-Path $reportRoot "data"
     $summary.dataRoot = "<per-user-data-root>"
@@ -474,9 +538,14 @@ try {
 
     $summary.status = "passed"
     $summary.completedAtUtc = [DateTimeOffset]::UtcNow.ToString("O")
+    $summary.checks = @(
+        [ordered]@{ id = "windows_standard_user_release_suite"; status = "passed"; detailsHash = (Get-TextSha256 -Text "windows_standard_user_release_suite:passed") },
+        [ordered]@{ id = "desktop_e2e"; status = $summary.desktopE2e; detailsHash = (Get-TextSha256 -Text "desktop_e2e:$($summary.desktopE2e)") },
+        [ordered]@{ id = "nsis_package_licenses"; status = $summary.packageLicenses; detailsHash = (Get-TextSha256 -Text "nsis_package_licenses:$($summary.packageLicenses)") }
+    )
     $summary.initialMarkerHash = $initialMarkerHash
     $summary.repairedMarkerHash = $repairedMarkerHash
-    $summary | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $summaryPath -Encoding UTF8
+    Write-JsonUtf8NoBom -LiteralPath $summaryPath -Value $summary -Depth 8
     @(
         "status=passed",
         "administratorsMember=$($summary.administratorsMember)",
@@ -503,10 +572,15 @@ try {
         $env:USERPROFILE
     )
     $summary.failure = [ordered]@{
-        type = $_.Exception.GetType().FullName
+        code = "windows_standard_user_gate_failed"
         message = Protect-SummaryText -Text $_.Exception.Message -SensitivePaths $sensitivePaths
     }
-    $summary | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $summaryPath -Encoding UTF8
+    $summary.checks = @([ordered]@{
+        id = "windows_standard_user_release_suite"
+        status = "failed"
+        detailsHash = (Get-TextSha256 -Text $summary.failure.message)
+    })
+    Write-JsonUtf8NoBom -LiteralPath $summaryPath -Value $summary -Depth 8
     @(
         "status=failed",
         "administratorsMember=$($summary.administratorsMember)",

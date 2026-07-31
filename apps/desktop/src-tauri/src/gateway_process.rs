@@ -196,18 +196,53 @@ async fn serve_loopback(
         Ok(request) => request,
         Err(code) => return write_response(&mut stream, code, "invalid_request", None).await,
     };
-    if request.method != "POST" {
-        return write_response(&mut stream, 404, "not_found", None).await;
+    let (request_path, query) = request_target(&request.path);
+    if request_path == WECOM_CALLBACK_PATH && request.method == "GET" {
+        let Some(query) = wecom_query(query, true) else {
+            return write_response(&mut stream, 400, "invalid_wecom_callback", None).await;
+        };
+        let credential = match keyring::Entry::new(
+            "com.hachimi.channel",
+            &format!("wecom:{}", query.account_id),
+        )
+        .and_then(|entry| entry.get_password())
+        .ok()
+        .and_then(|raw| hachimi_enterprise::EnterpriseCredential::parse(&raw).ok())
+        {
+            Some(credential) => credential,
+            None => return write_response(&mut stream, 401, "unauthenticated", None).await,
+        };
+        let echo = match hachimi_enterprise::verify_wecom_callback_echo(
+            &credential,
+            &query.timestamp,
+            &query.nonce,
+            &query.signature,
+            query.echo.as_deref().unwrap_or_default(),
+            now_ms(),
+        ) {
+            Ok(echo) => echo,
+            Err(_) => return write_response(&mut stream, 401, "unauthenticated", None).await,
+        };
+        return write_plain_response(&mut stream, 200, &echo).await;
     }
-    if request.path == WECOM_CALLBACK_PATH {
-        let envelope = match serde_json::from_slice::<ChannelEnvelope>(&request.body) {
-            Ok(envelope) if envelope.route.channel == "wecom" => envelope,
-            _ => return write_response(&mut stream, 400, "invalid_envelope", None).await,
+    if request_path == WECOM_CALLBACK_PATH && request.method == "POST" {
+        let envelope = if let Some(query) = wecom_query(query, false) {
+            match wecom_callback_envelope(&query, &request.body) {
+                Some(envelope) => envelope,
+                None => {
+                    return write_response(&mut stream, 400, "invalid_wecom_callback", None).await;
+                }
+            }
+        } else {
+            match serde_json::from_slice::<ChannelEnvelope>(&request.body) {
+                Ok(envelope) if envelope.route.channel == "wecom" => envelope,
+                _ => return write_response(&mut stream, 400, "invalid_envelope", None).await,
+            }
         };
         return match gateway.ingest_provider("wecom", None, envelope).await {
-            Ok(receipt) => {
+            Ok(_receipt) => {
                 notify_desktop(token).await;
-                write_response(&mut stream, 202, "accepted", Some(&receipt)).await
+                write_plain_response(&mut stream, 200, "success").await
             }
             Err(error) => {
                 let (status, code) = match error {
@@ -220,10 +255,13 @@ async fn serve_loopback(
             }
         };
     }
+    if request.method != "POST" {
+        return write_response(&mut stream, 404, "not_found", None).await;
+    }
     if request.authorization.as_deref() != Some(&format!("Bearer {token}")) {
         return write_response(&mut stream, 401, "unauthenticated", None).await;
     }
-    if request.path == LOOPBACK_OUTBOX_PATH {
+    if request_path == LOOPBACK_OUTBOX_PATH {
         let delivery = match gateway
             .claim_next_delivery_for_channel("loopback-webhook", now_ms())
             .await
@@ -249,7 +287,7 @@ async fn serve_loopback(
             .await;
         return written;
     }
-    if request.path != LOOPBACK_PATH {
+    if request_path != LOOPBACK_PATH {
         return write_response(&mut stream, 404, "not_found", None).await;
     }
     let envelope = match serde_json::from_slice::<ChannelEnvelope>(&request.body) {
@@ -275,6 +313,99 @@ async fn serve_loopback(
             write_response(&mut stream, status, code, None).await
         }
     }
+}
+
+struct WecomQuery {
+    account_id: String,
+    signature: String,
+    timestamp: String,
+    nonce: String,
+    echo: Option<String>,
+}
+
+fn request_target(target: &str) -> (&str, Option<&str>) {
+    target
+        .split_once('?')
+        .map_or((target, None), |(path, query)| (path, Some(query)))
+}
+
+fn wecom_query(query: Option<&str>, require_echo: bool) -> Option<WecomQuery> {
+    let values = url::form_urlencoded::parse(query?.as_bytes())
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let account_id = values.get("account_id")?.to_string();
+    let signature = values.get("msg_signature")?.to_string();
+    let timestamp = values.get("timestamp")?.to_string();
+    let nonce = values.get("nonce")?.to_string();
+    let echo = values.get("echostr").map(ToString::to_string);
+    if account_id.is_empty()
+        || account_id.len() > 128
+        || !account_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b':'))
+        || signature.len() != 40
+        || !signature.bytes().all(|byte| byte.is_ascii_hexdigit())
+        || timestamp.is_empty()
+        || timestamp.len() > 20
+        || !timestamp.bytes().all(|byte| byte.is_ascii_digit())
+        || nonce.is_empty()
+        || nonce.len() > 128
+        || !nonce.bytes().all(|byte| byte.is_ascii_alphanumeric())
+        || (require_echo && echo.as_deref().is_none_or(str::is_empty))
+        || echo.as_ref().is_some_and(|value| value.len() > 48 * 1024)
+    {
+        return None;
+    }
+    Some(WecomQuery {
+        account_id,
+        signature,
+        timestamp,
+        nonce,
+        echo,
+    })
+}
+
+fn wecom_callback_envelope(query: &WecomQuery, body: &[u8]) -> Option<ChannelEnvelope> {
+    let xml = std::str::from_utf8(body).ok()?;
+    let encrypted = xml_tag(xml, "Encrypt")?;
+    if encrypted.is_empty() || encrypted.len() > 48 * 1024 {
+        return None;
+    }
+    Some(ChannelEnvelope {
+        message_id: hachimi_protocol::ChannelMessageId::new(format!(
+            "wecom:{}:{}",
+            query.account_id, query.signature
+        )),
+        route: hachimi_protocol::ChannelRouteKey {
+            channel: "wecom".into(),
+            account: query.account_id.clone(),
+            peer: "pending-verification".into(),
+            thread: "pending-verification".into(),
+        },
+        sender: "pending-verification".into(),
+        text: String::new(),
+        metadata: serde_json::json!({
+            "timestamp": query.timestamp,
+            "nonce": query.nonce,
+            "signature": query.signature,
+            "encrypted": encrypted,
+        }),
+        authenticated: false,
+        bot_generated: false,
+        received_at_ms: now_ms(),
+    })
+}
+
+fn xml_tag(xml: &str, tag: &str) -> Option<String> {
+    let start = format!("<{tag}>");
+    let end = format!("</{tag}>");
+    let value = xml.split_once(&start)?.1.split_once(&end)?.0.trim();
+    Some(
+        value
+            .strip_prefix("<![CDATA[")
+            .and_then(|value| value.strip_suffix("]]>"))
+            .unwrap_or(value)
+            .to_owned(),
+    )
 }
 
 fn executable_name(name: &str) -> String {
@@ -415,6 +546,22 @@ async fn write_response(
     );
     stream.write_all(header.as_bytes()).await?;
     stream.write_all(&body).await?;
+    stream.shutdown().await
+}
+
+async fn write_plain_response(
+    stream: &mut tokio::net::TcpStream,
+    status: u16,
+    body: &str,
+) -> Result<(), std::io::Error> {
+    let reason = if status == 200 { "OK" } else { "Accepted" };
+    let bytes = body.as_bytes();
+    let header = format!(
+        "HTTP/1.1 {status} {reason}\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\nCache-Control: no-store\r\n\r\n",
+        bytes.len()
+    );
+    stream.write_all(header.as_bytes()).await?;
+    stream.write_all(bytes).await?;
     stream.shutdown().await
 }
 
@@ -580,6 +727,26 @@ mod tests {
         let (mut stream, _) = listener.accept().await.expect("accept");
         assert_eq!(read_request(&mut stream).await.err(), Some(400));
         client.await.expect("client");
+    }
+
+    #[test]
+    fn wecom_callback_target_is_bounded_decoded_and_normalized() {
+        let query = wecom_query(
+            Some("account_id=release-wecom&msg_signature=0123456789abcdef0123456789abcdef01234567&timestamp=2000&nonce=abc123&echostr=echo%2Bvalue%3D"),
+            true,
+        )
+        .expect("query");
+        assert_eq!(query.account_id, "release-wecom");
+        assert_eq!(query.echo.as_deref(), Some("echo+value="));
+        let envelope = wecom_callback_envelope(
+            &query,
+            b"<xml><Encrypt><![CDATA[encrypted-value]]></Encrypt></xml>",
+        )
+        .expect("envelope");
+        assert_eq!(envelope.route.channel, "wecom");
+        assert_eq!(envelope.route.account, "release-wecom");
+        assert_eq!(envelope.metadata["encrypted"], "encrypted-value");
+        assert!(!envelope.authenticated);
     }
 
     #[tokio::test]

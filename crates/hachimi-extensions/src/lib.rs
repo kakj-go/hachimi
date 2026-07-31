@@ -39,6 +39,7 @@ use std::{
 };
 
 use hachimi_core::FeatureAvailability;
+use hachimi_enterprise::EnterpriseApiClient;
 use hachimi_protocol::{
     ConnectorAccount, ConnectorAccountId, ConnectorAccountUpsert, ConnectorHealth,
     ConnectorInvocationRequest, ConnectorInvocationResult, ConnectorRevision, ContributionRevision,
@@ -67,6 +68,7 @@ pub struct PluginHost {
     store: AgentStore,
     install_root: PathBuf,
     drivers: ConnectorDriverRegistry,
+    enterprise_api: EnterpriseApiClient,
     hook_backend: Arc<parking_lot::RwLock<Option<Arc<dyn hachimi_sandbox::SandboxBackend>>>>,
     hook_acl_roots: Arc<parking_lot::Mutex<BTreeSet<PathBuf>>>,
 }
@@ -77,6 +79,7 @@ impl std::fmt::Debug for PluginHost {
             .debug_struct("PluginHost")
             .field("install_root", &self.install_root)
             .field("drivers", &self.drivers)
+            .field("enterprise_api", &self.enterprise_api)
             .field("hook_runtime_attached", &self.hook_backend.read().is_some())
             .finish_non_exhaustive()
     }
@@ -89,6 +92,7 @@ impl PluginHost {
             store,
             install_root: install_root.into(),
             drivers: ConnectorDriverRegistry::with_builtin_drivers(),
+            enterprise_api: EnterpriseApiClient::default(),
             hook_backend: Arc::new(parking_lot::RwLock::new(None)),
             hook_acl_roots: Arc::new(parking_lot::Mutex::new(BTreeSet::new())),
         }
@@ -104,6 +108,7 @@ impl PluginHost {
             store,
             install_root: install_root.into(),
             drivers,
+            enterprise_api: EnterpriseApiClient::default(),
             hook_backend: Arc::new(parking_lot::RwLock::new(None)),
             hook_acl_roots: Arc::new(parking_lot::Mutex::new(BTreeSet::new())),
         }

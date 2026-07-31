@@ -1089,7 +1089,10 @@ struct EnterpriseAttachmentDownloadArgs {
 #[derive(Debug)]
 struct EnterpriseAttachmentDownloadTool {
     host: hachimi_extensions::PluginHost,
+    store: hachimi_storage::AgentStore,
+    session_id: SessionId,
     run_id: hachimi_protocol::RunId,
+    schedule_host_grant: Option<ScheduleHostGrant>,
 }
 
 impl ToolExecutor for EnterpriseAttachmentDownloadTool {
@@ -1116,7 +1119,10 @@ impl ToolExecutor for EnterpriseAttachmentDownloadTool {
 
     fn execute(&self, invocation: ToolInvocation) -> ToolFuture {
         let host = self.host.clone();
+        let store = self.store.clone();
+        let session_id = self.session_id.clone();
         let run_id = self.run_id.clone();
+        let schedule_host_grant = self.schedule_host_grant.clone();
         Box::pin(async move {
             let args: EnterpriseAttachmentDownloadArgs =
                 match serde_json::from_value(invocation.call.arguments.clone()) {
@@ -1128,6 +1134,33 @@ impl ToolExecutor for EnterpriseAttachmentDownloadTool {
                         ));
                     }
                 };
+            if let Some(grant) = &schedule_host_grant
+                && let Err(error) =
+                    crate::schedule_host_grants::authorize_enterprise_attachment_download(
+                        &host,
+                        &grant.connectors,
+                        &args.account_id,
+                    )
+                    .await
+            {
+                store
+                    .append_event(
+                        &session_id,
+                        Some(&run_id),
+                        crate::schedule_host_grants::SCHEDULE_HOST_GRANT_ATTENTION_EVENT,
+                        json!({ "code": error.code, "message": error.message }),
+                    )
+                    .await
+                    .map_err(|store_error| {
+                        hachimi_agent::ToolExecutionError::Failed(format!(
+                            "schedule_host_grant_event_failed:{store_error}"
+                        ))
+                    })?;
+                return Err(hachimi_agent::ToolExecutionError::Failed(format!(
+                    "{}:{}",
+                    error.code, error.message
+                )));
+            }
             let request = EnterpriseAttachmentDownloadRequest {
                 context: MutationContext {
                     request_id: RequestId(invocation.call.id.as_str().to_owned()),
@@ -1210,6 +1243,12 @@ impl ToolExecutor for ConnectorInvokeTool {
                         ));
                     }
                 };
+            if request.action == crate::schedule_host_grants::ENTERPRISE_ATTACHMENT_ACTION {
+                return Ok(ToolResult::rejected(
+                    &invocation.call,
+                    "download_attachment is available only through enterprise.download_attachment",
+                ));
+            }
             if let Some(grant) = &schedule_host_grant {
                 let Some(selection) = grant
                     .connectors
@@ -1337,7 +1376,7 @@ pub(super) fn local_host_tool_executors(
             }),
             Arc::new(ComputerStopTool {
                 host: computer,
-                session_id,
+                session_id: session_id.clone(),
             }),
         ] as [Arc<dyn ToolExecutor>; 9]);
     }
@@ -1349,11 +1388,14 @@ pub(super) fn local_host_tool_executors(
             }),
             Arc::new(ConnectorInvokeTool {
                 host: plugins.clone(),
-                schedule_host_grant,
+                schedule_host_grant: schedule_host_grant.clone(),
             }),
             Arc::new(EnterpriseAttachmentDownloadTool {
                 host: plugins,
+                store,
+                session_id,
                 run_id,
+                schedule_host_grant,
             }),
         ] as [Arc<dyn ToolExecutor>; 3]);
     }
@@ -1582,3 +1624,7 @@ mod audit_tests {
         assert!(!summary.contains("secret"));
     }
 }
+
+#[cfg(test)]
+#[path = "agent_host_tools_schedule_tests.rs"]
+mod schedule_tests;

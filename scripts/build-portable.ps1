@@ -50,6 +50,8 @@ try {
     Copy-Item -LiteralPath (Join-Path $releaseRoot "onnxruntime.dll") -Destination $stageRoot
     Copy-Item -LiteralPath (Join-Path $releaseRoot "sherpa-onnx-c-api.dll") -Destination $stageRoot
     Copy-Item -LiteralPath (Join-Path $releaseRoot "resources") -Destination $stageRoot -Recurse
+    Copy-Item -LiteralPath (Join-Path $repoRoot "LICENSE") -Destination $stageRoot
+    Copy-Item -LiteralPath (Join-Path $repoRoot "NOTICE.md") -Destination $stageRoot
     Copy-Item -LiteralPath (Join-Path $repoRoot "scripts\reset-portable-data.ps1") -Destination $stageRoot
     Copy-Item -LiteralPath (Join-Path $repoRoot "scripts\reset-portable-data.cmd") -Destination $stageRoot
     Copy-Item -LiteralPath (Join-Path $repoRoot "scripts\setup-portable-sandbox.ps1") -Destination $stageRoot

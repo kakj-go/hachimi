@@ -954,21 +954,49 @@ pub(super) fn spawn_workbench_run_with_recovery(
                 }
             } else {
                 snapshot.checkout.as_ref().map_or_else(
-                    || hachimi_protocol::CapabilityGrantSet {
-                        profile: hachimi_protocol::PermissionProfile::ReadOnly,
-                        session_id: snapshot.session.id.clone(),
-                        run_id: Some(snapshot.run.id.clone()),
-                        source: "general_session".into(),
-                        ..hachimi_protocol::CapabilityGrantSet::default()
+                    || {
+                        let external = snapshot.run.configuration.permission_profile
+                            != hachimi_protocol::PermissionProfile::ReadOnly
+                            && snapshot.run.configuration.behavior_mode
+                                != hachimi_protocol::BehaviorMode::Plan;
+                        hachimi_protocol::CapabilityGrantSet {
+                            profile: snapshot.run.configuration.permission_profile,
+                            session_id: snapshot.session.id.clone(),
+                            run_id: Some(snapshot.run.id.clone()),
+                            source: "general_session".into(),
+                            file_system: vec![hachimi_protocol::FileSystemGrant {
+                                access: hachimi_protocol::FileSystemAccess::Read,
+                                roots: Vec::new(),
+                                globs: Vec::new(),
+                                special_roots: Vec::new(),
+                            }],
+                            network: hachimi_protocol::NetworkGrant {
+                                enabled: external,
+                                hosts: Vec::new(),
+                                protocols: vec!["managed-connector".into(), "model-runtime".into()],
+                            },
+                            review_each_command: true,
+                            ..hachimi_protocol::CapabilityGrantSet::default()
+                        }
                     },
                     |checkout| {
-                        expand_permission_profile(
+                        let mut grants = expand_permission_profile(
                             snapshot.run.configuration.permission_profile,
                             snapshot.run.configuration.behavior_mode,
                             snapshot.session.id.clone(),
                             snapshot.run.id.clone(),
                             checkout.path.clone(),
-                        )
+                        );
+                        if snapshot.run.configuration.behavior_mode
+                            != hachimi_protocol::BehaviorMode::Plan
+                        {
+                            grants.network.enabled = true;
+                            grants
+                                .network
+                                .protocols
+                                .extend(["managed-connector".into(), "model-runtime".into()]);
+                        }
+                        grants
                     },
                 )
             };
@@ -1102,6 +1130,9 @@ impl hachimi_agent::ModelRuntime for DesktopE2eModel {
 
         if cancellation.is_cancelled() {
             return Box::pin(stream::iter([Err(ModelRuntimeError::Cancelled)]));
+        }
+        if let Some(response) = crate::desktop_e2e_agent_tools::response(&request) {
+            return Box::pin(stream::iter(response));
         }
         let plan_mode = request.messages.iter().any(|message| {
             message.role == ModelRole::System && message.content.contains("mode=Plan")

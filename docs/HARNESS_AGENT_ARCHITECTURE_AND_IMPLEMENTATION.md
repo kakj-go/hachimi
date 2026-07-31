@@ -8,7 +8,7 @@
 
 Hachimi 以 Codex 为统一 Agent 与权限模型主基线：当前选择性适配 Session/Turn/Item、Tool Orchestrator、`AGENTS.md`、Skills、MCP、Session/Thread 持久化恢复、Process、Workspace、Compaction 和 Sandbox 控制流，并以 Codex Browser/Chrome、Computer Use、Plugins/Connectors 和 Scheduled Tasks 的公开产品行为约束本地 Host。OpenClaw 只作为本地常驻 Gateway、Channel 插件与确定性消息路由、Cron/Heartbeat/事件触发、Task ledger、投递和后台任务重启 reconciliation 的深度参考；实际代码派生仍以来源登记为准。Compaction 仅把 Claude Code Best 用作 clean-room 行为参考。没有嵌入任一完整产品 Runtime、产品提示词或授权模型。
 
-当前实现边界已扩展到活动 Run 安全续跑、公开 OpenAI Chat/Responses/Embeddings、Remote Compaction/公开 summary、Multi-Agent、通用 Git/Forge、完整 Plugin lifecycle、企业 REST/事件安全层、DesktopControl 和完整 Browser/Computer 原语。本地代码完成不代表 alpha/GA 已发布；真实 Provider/Forge/企业租户与 Windows 证据仍按路线图阻塞。Memory 为远期，不采用 Codex Memory 方案。
+当前实现边界已扩展到活动 Run 安全续跑、公开 OpenAI Chat/Responses/Embeddings、Remote Compaction/公开 summary、Multi-Agent、通用 Git/Forge、完整 Plugin lifecycle、企业 REST/事件安全层、DesktopControl 和完整 Browser/Computer 原语。本地代码完成不代表 alpha/GA 已发布；真实 Provider/Forge、外部企业组织与 Windows 证据仍按路线图阻塞。Memory 为远期，不采用 Codex Memory 方案。Hachimi 保持本机单用户运行，不增加登录或租户体系。
 
 ## 2. Kernel 结构
 
@@ -35,6 +35,8 @@ Kernel 不直接访问文件系统、Windows token、Keyring、浏览器 Profile
 
 `EntryProfile::{Workbench,PetConversation,DesktopControl}` 和 Multi-Agent 子 Run 都进入唯一 `AgentRunExecutor`；`WorkloadKind::{General,Coding,Office}` 描述任务 overlay。Pet 的窗口/TTS/动作与 DesktopControl 的 Observe/Takeover 只是受控产品 Host，不拥有独立模型循环或 Grant。Profile、Skill/MCP/Host allowlist、Provider、Host readiness、Capability Grant、Mode 和 Run allowlist 求交集后才生成 ToolPlan。
 
+P4/P5/P7 的模型入口按产品边界固定：五个 `agent.*` 只进入 Workbench General/Coding/Office，Scheduled 还必须命中持久化精确 Tool allowlist；企业附件只进入 General/Office；四个 Git/Forge 工具只进入交互式 Project Coding。Pet 与 DesktopControl 均不注册这些工具。Plan mode 对 Multi-Agent 只保留 wait/collect，对 Git/Forge 只保留 remotes/query，并继续移除全部 mutation。
+
 WorkloadResolver 优先级固定为：用户 override → 显式且分类一致 Skill → Built-in Office Skill activation → Prompt/冲突 metadata 的 strict 分类 → General。分类、Prompt、Skill、MCP、Compaction 和模型输出永远不能产生授权。
 
 Provider 的结构化输出能力由 `StructuredOutputMode::{Auto,Enabled,Disabled}` 控制。`Auto` 在连接测试和首个 ModelClientSession 使用不含用户内容的静态 strict-schema 请求探测，并按 base URL、model 和 settings revision 做进程内缓存；`Enabled` 是用户确认而不是伪造成功，调用失败仍降级；`Disabled` 禁止 strict classifier 和要求 strict schema 的动态 Tool。Run 持久保存请求能力、协商能力、probe source/error 和 degradation。User Skill workload classifier 只接受严格反序列化后的 `General|Coding|Office`、有界 reason 和合法 confidence；不支持或响应非法时保持 General。
@@ -49,7 +51,8 @@ Browser、Computer、Connector 与 Channel/Gateway 不创建新的 Agent Loop，
 - Browser Host：managed Chromium 与任务 owned Chrome tabs 共享 deny-by-default 网络规则；history、input、wait、tab、transfer/storage 原语和静态 CDP allowlist 均绑定 origin、observation 和 Run generation。任意 `Runtime.evaluate`、Target attach、网络拦截和调试器逃逸拒绝。
 - Computer Host：Observe/Act 分离，鼠标/键盘/窗口/受控应用启动绑定 Frame、App/Window fingerprint、input epoch、前台窗口与 generation；用户接管、窗口变化或授权过期立即失效。Audit 不保存标题、输入、坐标或截图。
 - Plugin/Connector Host：typed Bundle 通过 lifecycle journal 执行 stage/validate/permission/activate/health/commit，支持 update/rollback/uninstall 与崩溃 reconciliation。Skill/Hook/EventSource/MCP/Connector/Browser extension/Scheduled template/assets/custom UI/Channel 的产品绑定在停用/卸载时清理；动态执行只能使用 Sandbox stdio sidecar。`sample-crm` 与三个企业 REST driver 复用统一 Connector registry。
-- Channel/Gateway Host：普通用户 `--gateway` 进程使用唯一 `ChannelProvider` registry，负责 Account/Peer/Thread、durable ingress/outbox、heartbeat、重试和 startup reconciliation。企业 Bundle 的内置 Channel contribution 只控制同一 Gateway provider，不启动第二个 sidecar。WeCom loopback AES callback listener、DingTalk Stream WebSocket supervisor、Feishu WebSocket/protobuf supervisor、ACK/heartbeat/reconnect/dedup 与企业 ledger 已实现 [ref:WECOM-API-20260730] [ref:DINGTALK-STREAM-SDK-GO-20260731] [ref:FEISHU-SDK-GO-20260731]；真实租户连接仍待验证。
+- Git/Forge Host：Workbench UI 与 Agent executor 复用 Remote 解析、Workspace Host dispatch、Forge transport、Credential Manager、revision/OID fencing 和远端 reconciliation；窗口鉴权与 UI ledger 留在 command 入口，Agent 入口由 `AuthorizedTool` 统一执行 Policy、Approval 和 side-effect ledger。交互式 Project Run 从当前 Remote 推导精确 host/protocol Grant，并只安装到 Git/Forge 的授权上下文，不扩大 Connector、Browser 或其他 Host。mutation 返回未知时 executor 必须报错，使统一 ledger 保持 `Indeterminate`，不能转成普通失败或重放。
+- Channel/Gateway Host：普通用户 `--gateway` 进程使用唯一 `ChannelProvider` registry，负责 Account/Peer/Thread、durable ingress/outbox、heartbeat、重试和 startup reconciliation。企业 Bundle 的内置 Channel contribution 只控制同一 Gateway provider，不启动第二个 sidecar。WeCom loopback listener 支持官方 GET `echostr` 与 POST 加密 XML，再由企业 Provider 完成 AES/签名/外部组织标识/重放校验；DingTalk Stream、Feishu WebSocket/protobuf 的 ACK/heartbeat/reconnect/dedup 与企业 ledger 已实现 [ref:WECOM-API-20260730] [ref:DINGTALK-STREAM-SDK-GO-20260731] [ref:FEISHU-SDK-GO-20260731]；真实外部组织连接仍待验证。
 
 Browser/Computer/Plugin/Connector 遵循 Codex 的目标产品行为和权限交互；Browser 底层 Host 可选择性研究 OpenClaw 的 CDP/Playwright 安全实现，Channel/Gateway 和本地调度深度参考 OpenClaw。最终暴露给模型的 MCP/Tool 都进入同一个 Codex 式 Orchestrator 安全链。任何 OpenClaw 源码只有在固定文件、许可证和修改说明登记后才能适配；当前完成结论来自可运行 Host 和测试，不来自 Feature Flag 或协议枚举。
 
@@ -123,7 +126,7 @@ Compaction 是唯一上下文裁剪入口，支持 Auto/Manual/ProviderOverflow�
 
 ScheduleDefinition 是持久主列表，Scheduler 只计算 occurrence、claim invocation、创建 fresh TaskRun/Run 并提交 AppServer。`Standalone` 创建新 Session；`SessionContinuation` 进入既有 Session lane 创建 fresh Run，并读取触发时已经压缩持久化的上下文。两者都重新捕获 generation、StepContext、ToolPlan、ScheduleGrant、Plugin/Connector revision 和 Host readiness，不恢复旧 Approval、UserInput secret、临时 Grant、Browser observation、Computer frame、MCP session 或进程 lease。
 
-ScheduleGrant 持久有效，但 Prompt/名称/时间/通知变化不撤销；Context、workload、权限、Tool/Skill/MCP/贡献点集合变化必须 reauthorize。Task Center 固定 Connector account/action/content/Host/Schema revision，以及 isolated Browser unattended 的 document/resource origin 与 Observe/Act/Download 能力；Upload/Cookie/CDP 默认关闭，Computer unattended 稳定拒绝。Skill content/tree、MCP schema/Host identity、Plugin/Connector/account、Browser network rule、Sandbox/Host readiness 漂移进入 NeedsAttention；后台不等待 Approval/UserInput。停止条件包括最大次数、截止时间、成功后停止与用户停用，每次 continuation 写入 thread heartbeat Item。
+ScheduleGrant 持久有效，但 Prompt/名称/时间/通知变化不撤销；Context、workload、权限、Tool/Skill/MCP/贡献点集合变化必须 reauthorize。Task Center 固定 Connector account/action/content/Host/Schema revision，以及 isolated Browser unattended 的 document/resource origin 与 Observe/Act/Download 能力；Upload/Cookie/CDP 默认关闭，Computer unattended 稳定拒绝。企业附件把保留动作 `download_attachment` 作为独立授权：执行前必须同时匹配 account、contribution revision 和 action，授权缺失返回 `schedule_enterprise_attachment_not_authorized`，revision 漂移返回 `schedule_connector_action_drift`，两者都通过共享 Schedule Host Grant 验证器映射为 `NeedsAttention`；`connector_invoke` 显式拒绝该保留动作，不能绕过附件专用链。Skill content/tree、MCP schema/Host identity、Plugin/Connector/account、Browser network rule、Sandbox/Host readiness 漂移进入 NeedsAttention；后台不等待 Approval/UserInput。停止条件包括最大次数、截止时间、成功后停止与用户停用，每次 continuation 写入 thread heartbeat Item。
 
 重启时 completed invocation 不重复、无执行器 running TaskRun → Lost、queued claim 可安全重新分派，旧临时 Grant/secret/Approval/UserInput/lease 不恢复。手动 Run 不改变 next occurrence；每个 Schedule 同时最多一个 invocation，全局后台并发上限为 2，交互优先。
 
@@ -139,10 +142,10 @@ Release 默认开启 Workspace、MCP、Scheduler 与本地 Host 框架，但默�
 
 ## 11. P1–P8 已落地架构与后置验证
 
-- **P1–P4**：durable Run recovery、三类 Provider、Remote context 和父子 Agent Task 已接入统一 Store/Executor/Projector；真实 OpenAI Gate仍环境阻塞。
-- **P5**：标准 Git Remote 与四类 Forge adapter 已接入 side-effect ledger、Credential Manager/GCM/SSH、expected revision/OID 和审批 [ref:GITHUB-API-20260730] [ref:GITLAB-API-20260730] [ref:GITEE-API-20260730] [ref:GITEA-FORGEJO-API-20260730]。官方 API 不支持原地替换源分支，source ref 作为不可变前置条件；真实 staging Gate 环境阻塞。
+- **P1–P4**：durable Run recovery、三类 Provider、Remote context 和父子 Agent Task 已接入统一 Store/Executor/Projector；`agent.spawn/send/wait/cancel/collect` 已通过实际 Workbench ToolPlan 和独立 Desktop E2E 调用，Scheduled 只允许持久化精确 allowlist；真实 OpenAI Gate仍环境阻塞。
+- **P5**：标准 Git Remote、Agent 原生 `git.remotes/git.push/forge.change.query/forge.change.mutate` 与四类 Forge adapter 已接入共享 Host、side-effect ledger、Credential Manager/GCM/SSH、expected revision/OID 和审批 [ref:GITHUB-API-20260730] [ref:GITLAB-API-20260730] [ref:GITEE-API-20260730] [ref:GITEA-FORGEJO-API-20260730]。mutation 响应未知时只做有界远端查询，并按 source/target、可见字段、状态和 commit OID 精确证明结果；无法证明仍保持 `indeterminate`，不会重放。supplied Approval 重新匹配 Session/Run generation/Tool call/参数哈希/解析主体/一次性 scope/有效期，不能复用旧审批完成 merge；source ref 仍是不可变前置条件。真实 staging Gate 环境阻塞。
 - **P6**：完整 contribution lifecycle 和跨产品 reconciliation 已接入；扩展只允许本地/内置/管理员 Bundle，不建设 Marketplace。
-- **P7**：三个企业 REST driver、事件认证、Channel contribution、EventSource、transport supervisor、结构化 mention、25 MiB 受控附件下载和 Artifact fencing 已接入 [ref:WECOM-API-20260730] [ref:DINGTALK-STREAM-SDK-GO-20260731] [ref:FEISHU-SDK-GO-20260731]；三租户 Gate 真实环境待验证。
+- **P7**：三个企业 REST driver、事件认证、Channel contribution、EventSource、transport supervisor、结构化 mention、General/Office 可达的 25 MiB 受控附件下载和 Artifact fencing 已接入 [ref:WECOM-API-20260730] [ref:DINGTALK-STREAM-SDK-GO-20260731] [ref:FEISHU-SDK-GO-20260731]；Scheduled account/action/revision fencing 与 `NeedsAttention` 已复用同一验证器；三个外部企业组织 Gate 真实环境待验证，外部组织标识不构成 Hachimi 租户。
 - **P8**：DesktopControl Session/UI、Observe-first、接管/恢复和 Browser/Computer 原语已接入；终态 Run 必须 fresh generation，真实 Windows UI smoke 环境阻塞。
 - **Office**：产品边界是本地 DOCX/XLSX/PPTX/PDF 和文件整理，通过 Skills、普通 Tool/MCP、Artifact 与格式验证完成，不增加在线 Office 服务依赖或专用 Agent Kernel。
 
@@ -150,10 +153,10 @@ Memory 不进入本轮架构；后续独立立项时再确定生命周期、隐�
 
 ## 12. 验收与后置
 
-实现状态与真实环境验证使用路线图定义的双状态；本架构文档不维护第二套状态。P1–P8 当前为“代码与本地测试完成／真实环境待验证”。
+实现状态与真实环境验证使用路线图定义的双状态；本架构文档不维护第二套状态。P1–P8 当前为“代码与本地测试完成／真实环境待验证”。2026-07-31 当前 Windows 工作机已完整通过统一 `corepack pnpm check`，并额外在三个 Runtime Feature Flag 关闭的独立 Desktop E2E 中验证模型 ToolPlan fail-closed；这些结果仍不替代后置真实外部与 Windows 身份 Gate。
 
-系统 Gate 包含两个缺一不可的隔离 Windows Runner：standard-user Runner 必须确认账户不属于 `BUILTIN\\Administrators` 且进程未提升，使用候选 0.2.1 与真实发布的 0.2.0 NSIS 验证 per-user setup/repair/跨版本 upgrade、Workspace/Exec/MCP、Pet、Browser、Computer、本地 Plugin/Connector/Gateway、Scheduled continuation 和不跳过的 Desktop E2E；elevated Runner 必须验证 linked-worktree ACL/双 lease、handle sentinel、restricted Office/MCP、真实 Scheduler soak、系统 Toast 和高权限边界。两个 Gate 都上传脱敏 `summary.json`、安装包 SHA-256 和必要日志，失败不自动重试。当前开发账户不能替代任一 Runner，也不能从当前源码补造 0.2.0 基线。
+系统 Gate 包含两个缺一不可的隔离 Windows Runner：standard-user Runner 必须确认账户不属于 `BUILTIN\\Administrators` 且进程未提升，使用真实发布的 0.2.0 NSIS 升级到同一不可变候选，验证 per-user setup/repair、Workspace/Exec/MCP、Pet、Browser、Computer、本地 Plugin/Connector/Gateway、Scheduled continuation 和不跳过的 Desktop E2E；elevated Runner 必须下载同一候选并验证 linked-worktree ACL/双 lease、handle sentinel、restricted Office/MCP、真实 Scheduler soak、系统 Toast、便携恢复和高权限边界。两个 Gate 都上传脱敏 `summary.json`、同一候选 SHA-256 和必要日志，失败不自动重试。
 
-`v0.2.1` 封板已暂缓，不再作为 P1–P8 开发前置；本轮不执行 `release:check-clean`、tag、发布、push 或 PR。P1–P8 的本地实现不能替代 alpha 安装 artifact 或外部 staging 证据。管理员窗口、UAC 和安全桌面只验证稳定拒绝，不进入控制范围。
+`v0.2.1` 已取消，升级基线固定为 `v0.2.0`。源码版本为 `0.3.0-alpha.8`；候选状态只由对应 clean commit 的 immutable manifest/Windows run artifact 记录，真实 Gate、tag 和 GitHub Release 尚未完成；alpha.1–alpha.7 未发布并由 alpha.8 合并取代。许可、候选哈希、来源哈希、五类 summary 聚合、候选 Gateway callback、故障代理 reconciliation、三类包解包后许可校验和不可覆盖 tag 的发布架构见 `docs/RELEASE_GATES.md`。管理员窗口、UAC 和安全桌面只验证稳定拒绝，不进入控制范围。
 
 路线图唯一状态见 `docs/ROADMAP.md`；来源登记唯一权威见 `docs/HARNESS_AGENT_SOURCE_PROVENANCE.md`。

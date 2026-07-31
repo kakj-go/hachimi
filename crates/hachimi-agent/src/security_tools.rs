@@ -262,6 +262,37 @@ impl ToolExecutor for AuthorizedTool {
                 }
                 PolicyDecision::RequireApproval { code } => {
                     let parameter_hash = parameter_hash(&invocation.call.arguments)?;
+                    if let Some(store) = &context.run_store {
+                        let idempotency_key =
+                            format!("tool:{}:{}", invocation.run_generation, invocation.call.id);
+                        if let Some(claim) = store
+                            .get_side_effect_claim(
+                                &context.run_id,
+                                invocation.run_generation,
+                                &idempotency_key,
+                            )
+                            .await
+                            .map_err(|error| {
+                                crate::ToolExecutionError::Failed(format!(
+                                    "side-effect replay lookup failed: {error}"
+                                ))
+                            })?
+                        {
+                            if claim.record.tool_call_id != invocation.call.id
+                                || claim.record.parameter_hash != parameter_hash
+                            {
+                                return Err(crate::ToolExecutionError::Failed(
+                                    "side-effect replay parameters conflict with the durable claim"
+                                        .into(),
+                                ));
+                            }
+                            context.audit.record(AuditEvent::decision(
+                                "tool.execute",
+                                "side_effect_result_reused",
+                            ));
+                            return duplicate_side_effect_result(&invocation.call, claim);
+                        }
+                    }
                     let created_at_ms = now_ms();
                     let approval = ApprovalRequestRecord {
                         id: ApprovalId::random(),

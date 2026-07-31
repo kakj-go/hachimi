@@ -447,6 +447,14 @@ impl DesktopAppDomainHandler {
         schedule: &ScheduleDefinition,
     ) -> Result<ScheduleAuthorizationScope, AppServerDomainError> {
         validate_schedule_host_grant(schedule)?;
+        crate::schedule_host_grants::validate_enterprise_attachment_scope(schedule)
+            .map_err(|error| AppServerDomainError::new(error.code, error.message))?;
+        crate::schedule_host_grants::validate_schedule_connector_selections(
+            &self.plugins,
+            &schedule.host_grant.connectors,
+        )
+        .await
+        .map_err(|error| AppServerDomainError::new(error.code, error.message))?;
         self.plugins
             .verify_contribution_revisions(&schedule.contribution_revisions)
             .await

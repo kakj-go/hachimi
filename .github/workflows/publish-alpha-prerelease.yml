@@ -1,0 +1,101 @@
+name: Publish Alpha Prerelease
+
+on:
+  workflow_dispatch:
+    inputs:
+      windows_run_id:
+        description: Windows Release Gate run id whose build-candidate job produced the immutable packages
+        required: true
+        type: string
+      release_tag:
+        description: New immutable alpha tag matching the candidate version
+        required: true
+        type: string
+
+permissions:
+  actions: read
+  contents: write
+
+concurrency:
+  group: publish-alpha-${{ inputs.release_tag }}
+  cancel-in-progress: false
+
+jobs:
+  verify-and-publish:
+    runs-on: ubuntu-latest
+    environment: hachimi-release
+    timeout-minutes: 30
+    steps:
+      - name: Resolve the successful candidate build
+        id: candidate
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const runId = Number('${{ inputs.windows_run_id }}');
+            if (!Number.isSafeInteger(runId) || runId <= 0) core.setFailed('candidate_run_id_invalid');
+            const { data: run } = await github.rest.actions.getWorkflowRun({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              run_id: runId,
+            });
+            if (run.name !== 'Windows Release Gate') core.setFailed('candidate_workflow_mismatch');
+            if (run.head_repository?.full_name !== `${context.repo.owner}/${context.repo.repo}`) {
+              core.setFailed('candidate_repository_mismatch');
+            }
+            const jobs = await github.paginate(github.rest.actions.listJobsForWorkflowRun, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              run_id: runId,
+              per_page: 100,
+            });
+            const build = jobs.find((job) => job.name === 'build-candidate');
+            if (!build || build.conclusion !== 'success') core.setFailed('candidate_build_not_successful');
+            core.setOutput('commit_sha', run.head_sha);
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.candidate.outputs.commit_sha }}
+          fetch-depth: 0
+          lfs: true
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24.10.0
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Download immutable candidate
+        uses: actions/download-artifact@v4
+        with:
+          github-token: ${{ github.token }}
+          run-id: ${{ inputs.windows_run_id }}
+          name: hachimi-release-candidate-${{ inputs.windows_run_id }}
+          path: target/release-candidate
+      - name: Verify alpha tag, source, and candidate
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          CANDIDATE_COMMIT: ${{ steps.candidate.outputs.commit_sha }}
+        run: |
+          node scripts/check-clean-worktree.mjs
+          node scripts/release/version-check.mjs --tag "$RELEASE_TAG"
+          node scripts/release/verify-candidate-artifacts.mjs --root target/release-candidate --expected-commit "$CANDIDATE_COMMIT"
+          VERSION="${RELEASE_TAG#v}"
+          [[ "$VERSION" =~ ^0\.3\.0-alpha\.[0-9]+$ ]] || { echo alpha_release_tag_invalid; exit 1; }
+          if git ls-remote --exit-code --tags origin "refs/tags/$RELEASE_TAG" >/dev/null 2>&1; then
+            echo release_tag_already_exists
+            exit 1
+          fi
+          node scripts/release/create-source-summary.mjs target/release-source-summary.json
+      - name: Create immutable alpha prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          CANDIDATE_COMMIT: ${{ steps.candidate.outputs.commit_sha }}
+        run: |
+          gh release create "$RELEASE_TAG" \
+            target/release-candidate/*.exe \
+            target/release-candidate/*.msi \
+            target/release-candidate/*.zip \
+            target/release-candidate/artifact-manifest.json \
+            LICENSE NOTICE.md \
+            target/release-source-summary.json \
+            --target "$CANDIDATE_COMMIT" \
+            --title "Hachimi $RELEASE_TAG" \
+            --notes-file docs/RELEASE_ALPHA_NOTES_TEMPLATE.md \
+            --prerelease

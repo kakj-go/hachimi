@@ -264,7 +264,7 @@ function WindowChrome(props: {
             ]}
             onSelect={(id) => {
               if (id === "settings") props.onNavigate("settings/general");
-              else window.alert(text("Hachimi 0.2.1", "Hachimi 0.2.1"));
+              else window.alert(text("Hachimi 0.3.0-alpha.8", "Hachimi 0.3.0-alpha.8"));
             }}
           >
             {i18n.t("workbench.menu.help")}
@@ -658,6 +658,24 @@ function GeneralSettings(props: {
       </SettingsSection>
       <SettingsSection title={i18n.t("settings.securityBoundary")}>
         <StatusBanner tone="neutral">{i18n.t("settings.securityDescription")}</StatusBanner>
+      </SettingsSection>
+      <SettingsSection title={i18n.t("settings.about.title")}>
+        <SettingsCard class="settings-card settings-card-demo">
+          <SettingsRow label={i18n.t("settings.about.version")}>
+            <Badge>v0.3.0-alpha.8</Badge>
+          </SettingsRow>
+          <SettingsRow
+            label={i18n.t("settings.about.sourceLicense")}
+            description={i18n.t("settings.about.sourceLicenseDescription")}
+          >
+            <Badge>Apache-2.0</Badge>
+          </SettingsRow>
+        </SettingsCard>
+        <StatusBanner tone="warning">
+          <strong>{i18n.t("settings.about.binaryBoundary")}</strong>
+          <span>{i18n.t("settings.about.binaryBoundaryDescription")}</span>
+          <small>{i18n.t("settings.about.notice")}</small>
+        </StatusBanner>
       </SettingsSection>
       <SettingsSection title={i18n.t("settings.data.title")}>
         <SettingsCard class="settings-card settings-card-demo">

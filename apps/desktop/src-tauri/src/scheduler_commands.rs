@@ -879,20 +879,30 @@ async fn launch_scheduled_agent_run(
                     if event == "runtime.extension_drift.needs_attention"
             )
     });
-    let needs_attention = elicitation_needs_attention || runtime_drift_needs_attention;
+    let schedule_grant_needs_attention = has_schedule_host_grant_attention(&run_events, &run.id);
+    let needs_attention = elicitation_needs_attention
+        || runtime_drift_needs_attention
+        || schedule_grant_needs_attention;
     let status = scheduled_completion_status(run.status, timed_out, needs_attention);
     let execution_error_code = result.err().map(|error| error.code);
     Ok(ScheduleRunCompletion {
         status,
         result_summary: summary,
-        error_code: if runtime_drift_needs_attention {
+        error_code: if schedule_grant_needs_attention {
+            Some("schedule_host_grant_needs_attention".into())
+        } else if runtime_drift_needs_attention {
             Some("runtime_extension_drift_needs_attention".into())
         } else if elicitation_needs_attention {
             Some("mcp_elicitation_requires_interaction".into())
         } else {
             execution_error_code
         },
-        error_summary: if runtime_drift_needs_attention {
+        error_summary: if schedule_grant_needs_attention {
+            Some(
+                "a pinned Connector account, action, or contribution revision no longer authorizes the scheduled attachment download"
+                    .into(),
+            )
+        } else if runtime_drift_needs_attention {
             Some(
                 "a pinned Skill, MCP binding, Workspace Host, or Sandbox capability changed while the scheduled Run was active"
                     .into(),
@@ -1021,44 +1031,14 @@ async fn schedule_scope_with_extension_snapshots(
     schedule: &ScheduleDefinition,
 ) -> Result<ScheduleAuthorizationScope, CommandError> {
     validate_schedule_host_grant(schedule)?;
-    for selection in &schedule.host_grant.connectors {
-        let descriptor = state
-            .plugin_host
-            .connector_driver_descriptor(
-                &selection.contribution_revision.plugin_id,
-                &selection.contribution_revision.contribution_id,
-            )
-            .await
-            .map_err(|error| CommandError::operation("schedule_connector_driver_drift", error))?;
-        if descriptor.revision.host_identity_hash
-            != selection
-                .contribution_revision
-                .host_identity_hash
-                .clone()
-                .unwrap_or_default()
-            || descriptor.revision.schema_hash
-                != selection
-                    .contribution_revision
-                    .schema_hash
-                    .clone()
-                    .unwrap_or_default()
-            || descriptor.revision.action_hash
-                != selection
-                    .contribution_revision
-                    .action_hash
-                    .clone()
-                    .unwrap_or_default()
-            || selection
-                .allowed_actions
-                .iter()
-                .any(|action| !descriptor.actions.contains(action))
-        {
-            return Err(CommandError::new(
-                "schedule_connector_action_drift",
-                "Connector Host identity, schema, action revision, or allowed action changed",
-            ));
-        }
-    }
+    crate::schedule_host_grants::validate_enterprise_attachment_scope(schedule)
+        .map_err(|error| CommandError::new(error.code, error.message))?;
+    crate::schedule_host_grants::validate_schedule_connector_selections(
+        &state.plugin_host,
+        &schedule.host_grant.connectors,
+    )
+    .await
+    .map_err(|error| CommandError::new(error.code, error.message))?;
     state
         .plugin_host
         .verify_contribution_revisions(&schedule.contribution_revisions)
@@ -1791,7 +1771,7 @@ fn task_status_from_run(status: RunStatus) -> TaskRunStatus {
     }
 }
 
-fn scheduled_completion_status(
+pub(super) fn scheduled_completion_status(
     run_status: RunStatus,
     timed_out: bool,
     elicitation_needs_attention: bool,
@@ -1803,6 +1783,20 @@ fn scheduled_completion_status(
     } else {
         task_status_from_run(run_status)
     }
+}
+
+pub(super) fn has_schedule_host_grant_attention(
+    events: &[hachimi_protocol::RunEventEnvelope],
+    run_id: &hachimi_protocol::RunId,
+) -> bool {
+    events.iter().any(|event| {
+        event.run_id.as_ref() == Some(run_id)
+            && matches!(
+                &event.payload,
+                hachimi_protocol::RunEventPayload::Generic { event, .. }
+                    if event == crate::schedule_host_grants::SCHEDULE_HOST_GRANT_ATTENTION_EVENT
+            )
+    })
 }
 
 fn needs_attention_completion(error: ScheduleLaunchError) -> ScheduleRunCompletion {

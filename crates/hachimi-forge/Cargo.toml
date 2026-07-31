@@ -15,4 +15,5 @@ thiserror.workspace = true
 url.workspace = true
 
 [dev-dependencies]
+serde.workspace = true
 tokio.workspace = true

@@ -1,7 +1,8 @@
 {
   "name": "@hachimi/desktop-web",
-  "version": "0.2.1",
+  "version": "0.3.0-alpha.8",
   "private": true,
+  "license": "Apache-2.0",
   "type": "module",
   "scripts": {
     "dev": "vite --host 127.0.0.1 --port 1420 --strictPort",

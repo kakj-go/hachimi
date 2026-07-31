@@ -559,6 +559,29 @@ impl DesktopAgentRunPreparer {
             }
             tool_executors.push(authorized_tool(tool, authorization.clone()));
         }
+        if !is_review && matches!(request.run.origin, RunOrigin::Interactive) {
+            let remote_network_grant = crate::git_forge_host::project_remote_network_grant(
+                &workspace_host,
+                cancellation.child_token(),
+            )
+            .await
+            .unwrap_or_default();
+            let mut remote_authorization = authorization.clone();
+            remote_authorization.capability_host = "git-forge-host".into();
+            remote_authorization.capability_grants.network = remote_network_grant.clone();
+            for tool in crate::agent_git_forge_tools::agent_git_forge_tool_executors(
+                crate::agent_git_forge_tools::AgentGitForgeToolContext {
+                    workspace: Arc::clone(&workspace_host),
+                    store: self.store.clone(),
+                    session_id: request.session.id.clone(),
+                    run_id: request.run.id.clone(),
+                    network_grant: remote_network_grant,
+                    mutations_enabled: self.runtime_features.git_remote_mutations,
+                },
+            ) {
+                tool_executors.push(authorized_tool(tool, remote_authorization.clone()));
+            }
+        }
         if !is_review {
             tool_executors.push(authorized_tool(
                 apply_patch_tool(
@@ -618,7 +641,11 @@ impl DesktopAgentRunPreparer {
             .iter()
             .map(|tool| tool.descriptor().name)
             .filter(|name| {
-                name.starts_with("workspace_") || name == "apply_patch" || name == "review_diff"
+                name.starts_with("workspace_")
+                    || name.starts_with("git.")
+                    || name.starts_with("forge.")
+                    || name == "apply_patch"
+                    || name == "review_diff"
             })
             .collect::<Vec<_>>();
         let world_refresher: Arc<dyn StepWorldStateRefresher> =

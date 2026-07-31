@@ -4,6 +4,7 @@
 #[cfg(all(feature = "desktop-e2e", not(debug_assertions)))]
 compile_error!("the desktop-e2e feature is forbidden in release builds");
 mod agent_commands;
+mod agent_git_forge_tools;
 mod agent_host_tools;
 mod agent_runtime_host;
 mod app_domain_handler;
@@ -11,11 +12,14 @@ mod app_shell;
 mod browser_extension_server;
 mod channel_agent_dispatch;
 mod desktop_e2e;
+#[cfg(all(debug_assertions, feature = "desktop-e2e"))]
+mod desktop_e2e_agent_tools;
 mod domain_run_launcher;
 mod extension_commands;
 mod forge_commands;
 mod gateway_process;
 mod gateway_runtime;
+mod git_forge_host;
 mod local_host_commands;
 mod managed_sandbox_runtime;
 mod mcp_commands;
@@ -25,6 +29,7 @@ mod process_commands;
 mod project_git_commands;
 mod review_commands;
 mod sandbox_commands;
+mod schedule_host_grants;
 mod scheduler_commands;
 mod skill_drop;
 mod storage_layout;

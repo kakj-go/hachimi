@@ -29,6 +29,7 @@ hachimi-avatar.workspace = true
 hachimi-browser.workspace = true
 hachimi-capabilities.workspace = true
 hachimi-computer.workspace = true
+hachimi-enterprise.workspace = true
 hachimi-extensions.workspace = true
 hachimi-forge.workspace = true
 hachimi-gateway.workspace = true
@@ -61,4 +62,8 @@ tokio.workspace = true
 tokio-util.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+url.workspace = true
 uuid.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

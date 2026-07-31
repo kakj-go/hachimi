@@ -2,7 +2,7 @@ use std::{fs, io::Read as _, path::Path};
 
 use hachimi_enterprise::{EnterpriseApiClient, EnterpriseApiError, EnterpriseCredential};
 use hachimi_protocol::{
-    ArtifactId, ArtifactKind, ArtifactRecord, AttachmentId, AttachmentRecord,
+    ArtifactId, ArtifactKind, ArtifactRecord, AttachmentId, AttachmentRecord, ConnectorAccountId,
     EnterpriseAttachmentDownloadRequest, EnterpriseAttachmentDownloadResult,
 };
 use serde_json::{Value, json};
@@ -16,6 +16,33 @@ use crate::{ExtensionHostError, PluginHost, now_ms};
 const MAX_ATTACHMENT_BYTES: u64 = 25 * 1024 * 1024;
 
 impl PluginHost {
+    /// Overrides only the enterprise attachment transport while retaining the
+    /// same Plugin, account, revision and credential checks. The supplied
+    /// client is expected to have enforced its own endpoint policy.
+    #[must_use]
+    pub fn with_enterprise_api_client(mut self, client: EnterpriseApiClient) -> Self {
+        self.enterprise_api = client;
+        self
+    }
+
+    /// Resolves an enterprise integration identity to its persisted Connector
+    /// account binding. Callers must still validate the Connector contribution
+    /// revision and allowed action; the model cannot provide this binding.
+    pub async fn enterprise_attachment_connector_account(
+        &self,
+        integration_account_id: &str,
+    ) -> Result<Option<ConnectorAccountId>, ExtensionHostError> {
+        let row = sqlx::query(
+            "SELECT connector_account_id FROM enterprise_integration_accounts WHERE id = ? AND state = 'healthy'",
+        )
+        .bind(integration_account_id)
+        .fetch_optional(self.store.pool())
+        .await?;
+        Ok(row
+            .and_then(|row| row.get::<Option<String>, _>("connector_account_id"))
+            .map(ConnectorAccountId::new))
+    }
+
     pub async fn download_enterprise_attachment(
         &self,
         request: &EnterpriseAttachmentDownloadRequest,
@@ -51,7 +78,8 @@ impl PluginHost {
         if staging.is_file() {
             fs::remove_file(&staging)?;
         }
-        let receipt = EnterpriseApiClient::default()
+        let receipt = self
+            .enterprise_api
             .download_attachment_to(
                 &request.account_id,
                 &credential,

@@ -12,7 +12,7 @@ pub use api::{
 pub use credentials::EnterpriseCredential;
 pub use events::{
     EnterpriseEventAuth, EnterpriseEventError, EnterpriseRawEvent, VerifiedEnterpriseEvent,
-    verify_enterprise_event,
+    verify_enterprise_event, verify_wecom_callback_echo,
 };
 pub use stream::{
     EnterpriseStreamEndpoint, EnterpriseStreamEvent, EnterpriseStreamRuntime,

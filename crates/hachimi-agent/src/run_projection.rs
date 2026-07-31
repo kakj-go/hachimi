@@ -7,11 +7,12 @@ use std::{
 };
 
 use hachimi_protocol::{
-    ArtifactId, ArtifactKind, ArtifactRecord, BehaviorMode, ItemId, ItemPayload, ItemRelations,
-    ItemStatus, ModelEvent, ModelMessage, ModelRole, PlanId, PlanStep, PlanStepId, PlanStepStatus,
-    ProposedPlan, ProposedPlanStatus, RunRecord, RunStatus, RunStepCheckpoint, RunStepCheckpointId,
-    RunUsageSnapshot, SandboxCapabilityReport, SandboxReadiness, ToolExecutionResult,
-    TranscriptItem, TranscriptItemKind, WorkloadKind, WorkloadResolution, WorkloadResolutionSource,
+    ArtifactId, ArtifactKind, ArtifactRecord, BehaviorMode, CapabilityGrantSet, ItemId,
+    ItemPayload, ItemRelations, ItemStatus, ModelEvent, ModelMessage, ModelRole, PlanId, PlanStep,
+    PlanStepId, PlanStepStatus, ProposedPlan, ProposedPlanStatus, RunRecord, RunStatus,
+    RunStepCheckpoint, RunStepCheckpointId, RunUsageSnapshot, SandboxCapabilityReport,
+    SandboxReadiness, ToolExecutionResult, TranscriptItem, TranscriptItemKind, WorkloadKind,
+    WorkloadResolution, WorkloadResolutionSource,
 };
 use hachimi_storage::{AgentStore, AgentStoreError};
 use serde_json::json;
@@ -109,6 +110,7 @@ pub struct RunStepContext {
     pub host_context: Option<String>,
     pub state: StepRuntimeState,
     pub run_tool_allowlist: Option<Vec<String>>,
+    pub capability_grants: Option<CapabilityGrantSet>,
     pub world_refresher: Option<Arc<dyn crate::StepWorldStateRefresher>>,
 }
 
@@ -183,6 +185,7 @@ impl PersistedToolLoop {
                     },
                 ),
                 run_tool_allowlist: None,
+                capability_grants: None,
                 world_refresher: None,
             },
             cancellation,
@@ -281,6 +284,7 @@ impl PersistedToolLoop {
                     run_generation: run.generation,
                     budget: &run.configuration.budget,
                     run_tool_allowlist: step_context.run_tool_allowlist.clone(),
+                    capability_grants: step_context.capability_grants.clone(),
                     request_context: Some(&request_context),
                     world_refresher: step_context.world_refresher.clone(),
                     steering: Some(Arc::new(StoreSteeringSource {

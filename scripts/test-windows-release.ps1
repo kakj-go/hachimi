@@ -1,6 +1,9 @@
 param(
     [switch]$SkipPortable,
+    [switch]$SkipBuild,
     [string]$InstallerPath = "",
+    [string]$MsiPath = "",
+    [string]$PortablePath = "",
     [string]$OtherNtfsRoot = $env:HACHIMI_SANDBOX_OTHER_NTFS_ROOT
 )
 
@@ -33,6 +36,60 @@ function Protect-SummaryText {
     return $protected
 }
 
+function Get-TextSha256 {
+    param([Parameter(Mandatory = $true)][string]$Text)
+    $bytes = [System.Text.Encoding]::UTF8.GetBytes($Text)
+    $sha256 = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        return -join ($sha256.ComputeHash($bytes) | ForEach-Object { $_.ToString("x2") })
+    } finally {
+        $sha256.Dispose()
+    }
+}
+
+function Write-JsonUtf8NoBom {
+    param(
+        [Parameter(Mandatory = $true)][string]$LiteralPath,
+        [Parameter(Mandatory = $true)][object]$Value,
+        [int]$Depth = 8
+    )
+    $json = $Value | ConvertTo-Json -Depth $Depth
+    [IO.File]::WriteAllText($LiteralPath, $json + [Environment]::NewLine, [Text.UTF8Encoding]::new($false))
+}
+
+function Get-SourceRegistryDigests {
+    param([Parameter(Mandatory = $true)][string]$Root)
+    return [ordered]@{
+        openai = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $Root "docs\references\openai\registry.json")).Hash.ToLowerInvariant()
+        forge = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $Root "docs\references\forge\registry.json")).Hash.ToLowerInvariant()
+        enterprise = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $Root "docs\references\enterprise\registry.json")).Hash.ToLowerInvariant()
+    }
+}
+
+function Get-ReleaseArtifactDigests {
+    param(
+        [Parameter(Mandatory = $true)][string]$PrimaryInstaller,
+        [AllowEmptyString()][string]$ConfiguredPaths
+    )
+    $paths = @($PrimaryInstaller)
+    if (-not [string]::IsNullOrWhiteSpace($ConfiguredPaths)) {
+        $paths += $ConfiguredPaths -split [System.IO.Path]::PathSeparator
+    }
+    return @($paths |
+        Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
+        ForEach-Object { [System.IO.Path]::GetFullPath($_) } |
+        Sort-Object -Unique |
+        ForEach-Object {
+            if (-not (Test-Path -LiteralPath $_ -PathType Leaf)) {
+                throw "Release artifact is missing: $_"
+            }
+            [ordered]@{
+                name = [System.IO.Path]::GetFileName($_)
+                sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $_).Hash.ToLowerInvariant()
+            }
+        })
+}
+
 if ($env:OS -ne "Windows_NT") {
     throw "The Windows release suite can only run on Windows."
 }
@@ -55,8 +112,15 @@ $attestationRoot = Join-Path $reportRoot "attestation"
 New-Item -ItemType Directory -Path $attestationRoot -Force | Out-Null
 $summaryPath = Join-Path $reportRoot "summary.json"
 $summary = [ordered]@{
-    schemaVersion = 3
+    schemaVersion = 1
+    gateKind = "windows_elevated"
     status = "running"
+    version = $null
+    commitSha = (& git -C $repoRoot rev-parse HEAD).Trim()
+    artifactSha256 = @()
+    sourceRegistrySha256 = (Get-SourceRegistryDigests -Root $repoRoot)
+    environmentFingerprint = (Get-TextSha256 -Text "$env:RUNNER_NAME|$env:OS|windows_elevated")
+    checks = @()
     startedAtUtc = [DateTimeOffset]::UtcNow.ToString("O")
     completedAtUtc = $null
     elevated = $true
@@ -75,6 +139,8 @@ $summary = [ordered]@{
     desktopE2e = "not_run"
     systemNotificationUiAutomation = "not_run"
     portableRestartAttestation = "not_run"
+    msiPackageLicenses = "not_run"
+    portablePackageLicenses = "not_run"
     failure = $null
 }
 
@@ -82,9 +148,12 @@ Push-Location $repoRoot
 try {
     Invoke-Checked "corepack" @("pnpm", "release:check-clean")
     Invoke-Checked "corepack" @("pnpm", "runtime:prepare")
-    Invoke-Checked "corepack" @("pnpm", "build:installer")
+    if (-not $SkipBuild) {
+        Invoke-Checked "corepack" @("pnpm", "build:installer")
+    }
     $tauriConfig = Get-Content -LiteralPath (Join-Path $repoRoot "apps\desktop\src-tauri\tauri.conf.json") -Raw | ConvertFrom-Json
     $summary.candidateVersion = [string]$tauriConfig.version
+    $summary.version = $summary.candidateVersion
     if ([string]::IsNullOrWhiteSpace($summary.candidateVersion)) {
         throw "Tauri configuration does not declare a candidate version."
     }
@@ -97,10 +166,39 @@ try {
         throw "Candidate NSIS installer is missing."
     }
     $summary.installerSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $InstallerPath).Hash
+    $summary.artifactSha256 = Get-ReleaseArtifactDigests -PrimaryInstaller $InstallerPath -ConfiguredPaths $env:HACHIMI_RELEASE_ARTIFACTS
     @(
         "candidateVersion=$($summary.candidateVersion)",
         "installerSha256=$($summary.installerSha256)"
     ) | Set-Content -LiteralPath (Join-Path $reportRoot "installer-sha256.txt") -Encoding UTF8
+
+    if ([string]::IsNullOrWhiteSpace($MsiPath)) {
+        if (-not [string]::IsNullOrWhiteSpace($env:HACHIMI_RELEASE_ARTIFACTS)) {
+            $MsiPath = $env:HACHIMI_RELEASE_ARTIFACTS -split [System.IO.Path]::PathSeparator |
+                Where-Object { [System.IO.Path]::GetExtension($_) -eq ".msi" } |
+                Select-Object -First 1
+        }
+        if ([string]::IsNullOrWhiteSpace($MsiPath) -and -not $SkipBuild) {
+            $MsiPath = Get-ChildItem -LiteralPath (Join-Path $targetRoot "release\bundle\msi") -Filter "*.msi" -File |
+                Select-Object -First 1 -ExpandProperty FullName
+        }
+    }
+    if ([string]::IsNullOrWhiteSpace($MsiPath)) {
+        throw "Candidate MSI path is required for packaged-license verification."
+    }
+    $MsiPath = [System.IO.Path]::GetFullPath($MsiPath)
+    if (-not (Test-Path -LiteralPath $MsiPath -PathType Leaf)) {
+        throw "Candidate MSI is missing: $MsiPath"
+    }
+    $msiExtractRoot = Join-Path $reportRoot "msi-package"
+    New-Item -ItemType Directory -Path $msiExtractRoot -Force | Out-Null
+    Invoke-Checked "msiexec.exe" @("/a", $MsiPath, "/qn", "TARGETDIR=$msiExtractRoot")
+    Invoke-Checked "powershell.exe" @(
+        "-NoProfile", "-ExecutionPolicy", "Bypass",
+        "-File", (Join-Path $repoRoot "scripts\release\test-package-licenses.ps1"),
+        "-PackageRoot", $msiExtractRoot
+    )
+    $summary.msiPackageLicenses = "passed"
 
     Invoke-Checked "cargo" @(
         "build", "-p", "hachimi-sandbox", "--features", "windows-smoke", "--bins"
@@ -222,8 +320,27 @@ try {
 
     $portableAttested = $false
     if (-not $SkipPortable) {
-        Invoke-Checked "corepack" @("pnpm", "build:portable")
-        $portableRoot = Join-Path $targetRoot "portable\Hachimi"
+        if (-not $SkipBuild) {
+            Invoke-Checked "corepack" @("pnpm", "build:portable")
+            $portableRoot = Join-Path $targetRoot "portable\Hachimi"
+        } else {
+            if ([string]::IsNullOrWhiteSpace($PortablePath)) {
+                throw "-PortablePath is required when -SkipBuild is used without -SkipPortable."
+            }
+            $PortablePath = [System.IO.Path]::GetFullPath($PortablePath)
+            if (-not (Test-Path -LiteralPath $PortablePath -PathType Leaf)) {
+                throw "Candidate portable ZIP is missing: $PortablePath"
+            }
+            $portableExtractRoot = Join-Path $reportRoot "portable-package"
+            Expand-Archive -LiteralPath $PortablePath -DestinationPath $portableExtractRoot -Force
+            $portableRoot = Join-Path $portableExtractRoot "Hachimi"
+        }
+        Invoke-Checked "powershell.exe" @(
+            "-NoProfile", "-ExecutionPolicy", "Bypass",
+            "-File", (Join-Path $repoRoot "scripts\release\test-package-licenses.ps1"),
+            "-PackageRoot", $portableRoot
+        )
+        $summary.portablePackageLicenses = "passed"
         $portableMarker = Join-Path $portableRoot "data\sandbox\windows\setup.json"
         $portableSetup = Join-Path $portableRoot "hachimi-sandbox-setup.exe"
         $portableLauncher = Join-Path $portableRoot "hachimi-sandbox-launcher.exe"
@@ -245,9 +362,15 @@ try {
         $portableAttested = $true
     }
     $summary.portableRestartAttestation = if ($portableAttested) { "passed" } else { "skipped" }
+    $summary.checks = @(
+        [ordered]@{ id = "windows_elevated_release_suite"; status = "passed"; detailsHash = (Get-TextSha256 -Text "windows_elevated_release_suite:passed") },
+        [ordered]@{ id = "portable_restart_attestation"; status = $summary.portableRestartAttestation; detailsHash = (Get-TextSha256 -Text "portable_restart_attestation:$($summary.portableRestartAttestation)") },
+        [ordered]@{ id = "msi_package_licenses"; status = $summary.msiPackageLicenses; detailsHash = (Get-TextSha256 -Text "msi_package_licenses:$($summary.msiPackageLicenses)") },
+        [ordered]@{ id = "portable_package_licenses"; status = $summary.portablePackageLicenses; detailsHash = (Get-TextSha256 -Text "portable_package_licenses:$($summary.portablePackageLicenses)") }
+    )
     $summary.status = "passed"
     $summary.completedAtUtc = [DateTimeOffset]::UtcNow.ToString("O")
-    $summary | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $summaryPath -Encoding UTF8
+    Write-JsonUtf8NoBom -LiteralPath $summaryPath -Value $summary -Depth 8
     @(
         "status=passed",
         "candidateVersion=$($summary.candidateVersion)",
@@ -261,17 +384,24 @@ try {
     $summary.status = "failed"
     $summary.completedAtUtc = [DateTimeOffset]::UtcNow.ToString("O")
     $summary.failure = [ordered]@{
-        type = $_.Exception.GetType().FullName
+        code = "windows_elevated_gate_failed"
         message = Protect-SummaryText -Text $_.Exception.Message -SensitivePaths @(
             $repoRoot,
             $targetRoot,
             $reportRoot,
             $InstallerPath,
+            $MsiPath,
+            $PortablePath,
             $OtherNtfsRoot,
             $env:USERPROFILE
         )
     }
-    $summary | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $summaryPath -Encoding UTF8
+    $summary.checks = @([ordered]@{
+        id = "windows_elevated_release_suite"
+        status = "failed"
+        detailsHash = (Get-TextSha256 -Text $summary.failure.message)
+    })
+    Write-JsonUtf8NoBom -LiteralPath $summaryPath -Value $summary -Depth 8
     @(
         "status=failed",
         "candidateVersion=$($summary.candidateVersion)",

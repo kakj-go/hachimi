@@ -16,9 +16,9 @@ use std::{
 use parking_lot::RwLock;
 
 use hachimi_protocol::{
-    BehaviorMode, EntryProfile, McpToolSelection, ModelMessage, ProviderCapabilities, RunBudget,
-    RunId, RunOrigin, SandboxCapabilityReport, SandboxReadiness, SessionContextBinding, SessionId,
-    SkillActivation, ToolDescriptor, WorkloadResolution,
+    BehaviorMode, CapabilityGrantSet, EntryProfile, McpToolSelection, ModelMessage,
+    ProviderCapabilities, RunBudget, RunId, RunOrigin, SandboxCapabilityReport, SandboxReadiness,
+    SessionContextBinding, SessionId, SkillActivation, ToolDescriptor, WorkloadResolution,
 };
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -209,6 +209,14 @@ pub struct ToolPlan {
     descriptors: Arc<[ToolDescriptor]>,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct ToolPlanConstraints<'a> {
+    pub run_allowlist: Option<&'a [String]>,
+    pub disabled_tool_names: &'a [String],
+    pub capability_grants: Option<&'a CapabilityGrantSet>,
+    pub host_ready: bool,
+}
+
 impl ToolPlan {
     #[must_use]
     pub fn build(
@@ -217,16 +225,23 @@ impl ToolPlan {
         mode: BehaviorMode,
         provider: ProviderCapabilities,
         mut descriptors: Vec<ToolDescriptor>,
-        run_allowlist: Option<&[String]>,
-        disabled_tool_names: &[String],
+        constraints: ToolPlanConstraints<'_>,
     ) -> Self {
+        let fail_closed_for_unknown_host =
+            !constraints.host_ready && constraints.disabled_tool_names.is_empty();
         descriptors.retain(|descriptor| {
-            crate::profile_allows_tool(entry_profile, workload, &descriptor.name)
+            !fail_closed_for_unknown_host
+                && crate::profile_allows_tool(entry_profile, workload, &descriptor.name)
                 && (mode != BehaviorMode::Plan
                     || descriptor.effect == hachimi_protocol::ToolEffect::ReadOnly)
-                && run_allowlist
+                && constraints.capability_grants.is_none_or(|grants| {
+                    hachimi_policy::capability_grant_allows(grants, descriptor.effect)
+                })
+                && constraints
+                    .run_allowlist
                     .is_none_or(|allowlist| allowlist.iter().any(|name| name == &descriptor.name))
-                && !disabled_tool_names
+                && !constraints
+                    .disabled_tool_names
                     .iter()
                     .any(|name| name == &descriptor.name)
         });
@@ -335,6 +350,7 @@ pub struct StepContextInput {
     pub registered_tools: Vec<ToolDescriptor>,
     pub registry_revision: String,
     pub run_tool_allowlist: Option<Vec<String>>,
+    pub capability_grants: Option<CapabilityGrantSet>,
 }
 
 #[derive(Debug, Default)]
@@ -355,8 +371,12 @@ impl StepContextFactory {
             input.behavior_mode,
             input.provider,
             input.registered_tools,
-            input.run_tool_allowlist.as_deref(),
-            &input.world.disabled_tool_names,
+            ToolPlanConstraints {
+                run_allowlist: input.run_tool_allowlist.as_deref(),
+                disabled_tool_names: &input.world.disabled_tool_names,
+                capability_grants: input.capability_grants.as_ref(),
+                host_ready: input.world.host_ready,
+            },
         );
         Arc::new(StepContext {
             session_id: input.session_id,
@@ -390,7 +410,8 @@ fn canonical_hash(value: &impl Serialize) -> String {
 mod tests {
     use super::*;
     use hachimi_protocol::{
-        ScheduleId, TaskRunId, ToolEffect, WorkloadKind, WorkloadResolutionSource,
+        PermissionProfile, ScheduleId, TaskRunId, ToolEffect, WorkloadKind,
+        WorkloadResolutionSource,
     };
 
     fn resolution() -> WorkloadResolution {
@@ -400,6 +421,15 @@ mod tests {
             activated_skill_ids: Vec::new(),
             reason: "test".into(),
             classifier_revision: None,
+        }
+    }
+
+    fn unconstrained_tool_plan() -> ToolPlanConstraints<'static> {
+        ToolPlanConstraints {
+            run_allowlist: None,
+            disabled_tool_names: &[],
+            capability_grants: None,
+            host_ready: true,
         }
     }
 
@@ -432,8 +462,7 @@ mod tests {
                 ..ProviderCapabilities::default()
             },
             descriptors.clone(),
-            None,
-            &[],
+            unconstrained_tool_plan(),
         );
         let second = ToolPlan::build(
             EntryProfile::Workbench,
@@ -444,12 +473,214 @@ mod tests {
                 ..ProviderCapabilities::default()
             },
             descriptors,
-            None,
-            &[],
+            unconstrained_tool_plan(),
         );
         assert_eq!(first.hash(), second.hash());
         assert!(first.allows("workspace_read_file"));
         assert!(!first.allows("workspace_write_file"));
+    }
+
+    #[test]
+    fn multi_agent_tool_plan_is_workbench_only_and_honors_schedule_allowlists() {
+        let descriptors = vec![
+            ToolDescriptor {
+                name: "agent.spawn".into(),
+                description: "spawn".into(),
+                input_schema: serde_json::json!({"type":"object"}),
+                effect: ToolEffect::ExternalSideEffect,
+                parallel_safe: false,
+                required_scopes: vec!["agent.run".into()],
+            },
+            ToolDescriptor {
+                name: "agent.wait".into(),
+                description: "wait".into(),
+                input_schema: serde_json::json!({"type":"object"}),
+                effect: ToolEffect::ReadOnly,
+                parallel_safe: true,
+                required_scopes: vec!["agent.run".into()],
+            },
+        ];
+        let provider = ProviderCapabilities {
+            tool_calls: true,
+            ..ProviderCapabilities::default()
+        };
+        let scheduled = ToolPlan::build(
+            EntryProfile::Workbench,
+            WorkloadKind::General,
+            BehaviorMode::Default,
+            provider,
+            descriptors.clone(),
+            ToolPlanConstraints {
+                run_allowlist: Some(&["agent.wait".into()]),
+                ..unconstrained_tool_plan()
+            },
+        );
+        assert!(scheduled.allows("agent.wait"));
+        assert!(!scheduled.allows("agent.spawn"));
+
+        let plan = ToolPlan::build(
+            EntryProfile::Workbench,
+            WorkloadKind::General,
+            BehaviorMode::Plan,
+            provider,
+            descriptors.clone(),
+            unconstrained_tool_plan(),
+        );
+        assert!(plan.allows("agent.wait"));
+        assert!(!plan.allows("agent.spawn"));
+
+        for entry_profile in [EntryProfile::PetConversation, EntryProfile::DesktopControl] {
+            let denied = ToolPlan::build(
+                entry_profile,
+                WorkloadKind::General,
+                BehaviorMode::Default,
+                provider,
+                descriptors.clone(),
+                unconstrained_tool_plan(),
+            );
+            assert!(denied.descriptors().is_empty());
+        }
+    }
+
+    #[test]
+    fn tool_plan_intersects_profile_mode_feature_grant_allowlist_and_host_readiness() {
+        let descriptors = [
+            ("agent.spawn", ToolEffect::ExternalSideEffect),
+            ("agent.send", ToolEffect::ExternalSideEffect),
+            ("agent.wait", ToolEffect::ReadOnly),
+            ("agent.cancel", ToolEffect::ExternalSideEffect),
+            ("agent.collect", ToolEffect::ReadOnly),
+        ]
+        .into_iter()
+        .map(|(name, effect)| ToolDescriptor {
+            name: name.into(),
+            description: name.into(),
+            input_schema: serde_json::json!({"type":"object"}),
+            effect,
+            parallel_safe: effect == ToolEffect::ReadOnly,
+            required_scopes: vec!["agent.run".into()],
+        })
+        .collect::<Vec<_>>();
+        let provider = ProviderCapabilities {
+            tool_calls: true,
+            ..ProviderCapabilities::default()
+        };
+        let full_grants = hachimi_policy::expand_permission_profile(
+            PermissionProfile::ExternalSandbox,
+            BehaviorMode::Default,
+            SessionId::from("matrix-session"),
+            RunId::from("matrix-run"),
+            "C:\\workspace".into(),
+        );
+        let read_only_grants = hachimi_policy::expand_permission_profile(
+            PermissionProfile::ReadOnly,
+            BehaviorMode::Default,
+            SessionId::from("matrix-session"),
+            RunId::from("matrix-run"),
+            "C:\\workspace".into(),
+        );
+
+        for workload in [
+            WorkloadKind::General,
+            WorkloadKind::Coding,
+            WorkloadKind::Office,
+        ] {
+            let default = ToolPlan::build(
+                EntryProfile::Workbench,
+                workload,
+                BehaviorMode::Default,
+                provider,
+                descriptors.clone(),
+                ToolPlanConstraints {
+                    capability_grants: Some(&full_grants),
+                    ..unconstrained_tool_plan()
+                },
+            );
+            assert_eq!(default.descriptors().len(), 5);
+
+            let plan = ToolPlan::build(
+                EntryProfile::Workbench,
+                workload,
+                BehaviorMode::Plan,
+                provider,
+                descriptors.clone(),
+                ToolPlanConstraints {
+                    capability_grants: Some(&full_grants),
+                    ..unconstrained_tool_plan()
+                },
+            );
+            assert_eq!(
+                plan.descriptors()
+                    .iter()
+                    .map(|descriptor| descriptor.name.as_str())
+                    .collect::<Vec<_>>(),
+                vec!["agent.collect", "agent.wait"]
+            );
+
+            for entry_profile in [EntryProfile::PetConversation, EntryProfile::DesktopControl] {
+                assert!(
+                    ToolPlan::build(
+                        entry_profile,
+                        workload,
+                        BehaviorMode::Default,
+                        provider,
+                        descriptors.clone(),
+                        ToolPlanConstraints {
+                            capability_grants: Some(&full_grants),
+                            ..unconstrained_tool_plan()
+                        },
+                    )
+                    .descriptors()
+                    .is_empty()
+                );
+            }
+        }
+
+        let narrowed = ToolPlan::build(
+            EntryProfile::Workbench,
+            WorkloadKind::General,
+            BehaviorMode::Default,
+            provider,
+            descriptors.clone(),
+            ToolPlanConstraints {
+                run_allowlist: Some(&["agent.spawn".into(), "agent.wait".into()]),
+                capability_grants: Some(&read_only_grants),
+                ..unconstrained_tool_plan()
+            },
+        );
+        assert_eq!(narrowed.descriptors()[0].name, "agent.wait");
+
+        assert!(
+            ToolPlan::build(
+                EntryProfile::Workbench,
+                WorkloadKind::General,
+                BehaviorMode::Default,
+                provider,
+                descriptors.clone(),
+                ToolPlanConstraints {
+                    capability_grants: Some(&full_grants),
+                    host_ready: false,
+                    ..unconstrained_tool_plan()
+                },
+            )
+            .descriptors()
+            .is_empty()
+        );
+        assert!(
+            ToolPlan::build(
+                EntryProfile::Workbench,
+                WorkloadKind::General,
+                BehaviorMode::Default,
+                provider,
+                Vec::new(),
+                ToolPlanConstraints {
+                    capability_grants: Some(&full_grants),
+                    ..unconstrained_tool_plan()
+                },
+            )
+            .descriptors()
+            .is_empty()
+        );
     }
 
     fn equivalent_input(origin: RunOrigin) -> StepContextInput {
@@ -504,6 +735,7 @@ mod tests {
             }],
             registry_revision: "registry-fixture".into(),
             run_tool_allowlist: Some(vec!["request_user_input".into()]),
+            capability_grants: None,
         }
     }
 
