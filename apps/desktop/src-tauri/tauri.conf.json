@@ -57,6 +57,7 @@
       "../../../assets/avatar-default/2639776812528692620/NOTICE.md": "resources/avatar-default/2639776812528692620/NOTICE.md",
       "../../../assets/avatar-motions-v4/": "resources/avatar-motions-v4/",
       "resources/skills/builtin/": "resources/skills/builtin/",
+      "resources/ai-models/THIRD-PARTY-NOTICES.md": "resources/ai-models/THIRD-PARTY-NOTICES.md",
       "resources/ai-models/speech-to-text/": "resources/ai-models/speech-to-text/",
       "resources/ai-models/text-to-speech/": "resources/ai-models/text-to-speech/",
       "managed-git/": "managed-git/",

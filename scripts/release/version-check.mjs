@@ -102,6 +102,7 @@ export function verifyReleaseVersion(root, expectedTag = "") {
   }
   for (const resource of [
     "assets/avatar-default/2639776812528692620/NOTICE.md",
+    "resources/ai-models/THIRD-PARTY-NOTICES.md",
     "resources/ai-models/speech-to-text/",
     "resources/ai-models/text-to-speech/",
   ]) {
