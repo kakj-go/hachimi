@@ -70,6 +70,10 @@ export function verifyReleaseVersion(root, expectedTag = "") {
     if (!existsSync(resolve(root, required)))
       throw new Error(`release_required_file_missing:${required}`);
   }
+  const attributes = readFileSync(resolve(root, ".gitattributes"), "utf8");
+  if (!attributes.includes("* text=auto eol=lf")) {
+    throw new Error("release_cross_platform_line_endings_missing");
+  }
   const notice = readFileSync(resolve(root, "NOTICE.md"), "utf8");
   for (const marker of [
     "Apache License, Version 2.0",
