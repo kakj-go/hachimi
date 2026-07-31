@@ -533,9 +533,20 @@ if (!desktopPdb.startsWith(`${buildTarget}${sep}`)) {
 // large debug binary. The PDB is a disposable E2E build artifact; recreating
 // just this file avoids LNK1318 without cleaning any source or shared target.
 rmSync(desktopPdb, { force: true });
-checked("cargo", ["build", "--offline", "-p", "hachimi-desktop", "--features", "desktop-e2e"], {
-  env: testEnvironment,
-});
+checked(
+  process.execPath,
+  [
+    "scripts/run-with-rust.mjs",
+    "cargo",
+    "build",
+    "--offline",
+    "-p",
+    "hachimi-desktop",
+    "--features",
+    "desktop-e2e",
+  ],
+  { env: testEnvironment },
+);
 
 testEnvironment.HACHIMI_DESKTOP_E2E_APP = resolve(buildTarget, "debug/hachimi-desktop.exe");
 const driverProcess = spawn(driver, ["--native-driver", nativeDriver], {
