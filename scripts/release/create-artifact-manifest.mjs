@@ -9,9 +9,11 @@ import {
   validateCandidateArtifactSet,
   writeEvidence,
 } from "./evidence.mjs";
+import { forwardedCliArguments } from "./cli-args.mjs";
 
 const workspaceRoot = resolve(fileURLToPath(new URL("../..", import.meta.url)));
-const artifactRoot = resolve(workspaceRoot, process.argv[2] ?? "target/release-candidate");
+const [artifactArgument] = forwardedCliArguments(process.argv.slice(2));
+const artifactRoot = resolve(workspaceRoot, artifactArgument ?? "target/release-candidate");
 const version = JSON.parse(readFileSync(resolve(workspaceRoot, "package.json"), "utf8")).version;
 
 function artifactFiles(root) {

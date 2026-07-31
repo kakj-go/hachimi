@@ -3,6 +3,7 @@ import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { collectSourceRegistryDigests, writeEvidence } from "./evidence.mjs";
+import { forwardedCliArguments } from "./cli-args.mjs";
 
 function required(value, code) {
   if (typeof value !== "string" || !value.trim()) throw new Error(code);
@@ -74,7 +75,8 @@ export function buildSourceSummary(workspaceRoot) {
 const isCli = process.argv[1] && fileURLToPath(import.meta.url) === resolve(process.argv[1]);
 if (isCli) {
   const workspaceRoot = resolve(fileURLToPath(new URL("../..", import.meta.url)));
-  const output = resolve(workspaceRoot, process.argv[2] ?? "target/release-source-summary.json");
+  const [outputArgument] = forwardedCliArguments(process.argv.slice(2));
+  const output = resolve(workspaceRoot, outputArgument ?? "target/release-source-summary.json");
   writeEvidence(output, buildSourceSummary(workspaceRoot));
   process.stdout.write(`${output}\n`);
 }

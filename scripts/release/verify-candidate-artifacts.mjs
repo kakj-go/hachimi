@@ -4,12 +4,10 @@ import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { verifyCandidateArtifacts } from "./evidence.mjs";
+import { namedCliArguments } from "./cli-args.mjs";
 
 const workspaceRoot = resolve(fileURLToPath(new URL("../..", import.meta.url)));
-const args = new Map();
-for (let index = 2; index < process.argv.length; index += 2) {
-  args.set(process.argv[index], process.argv[index + 1]);
-}
+const args = namedCliArguments(process.argv.slice(2));
 const candidateRoot = resolve(workspaceRoot, args.get("--root") ?? "target/release-candidate");
 const manifest = JSON.parse(
   readFileSync(resolve(candidateRoot, args.get("--manifest") ?? "artifact-manifest.json"), "utf8"),
