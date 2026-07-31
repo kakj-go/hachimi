@@ -1,5 +1,7 @@
 //! Transport-neutral Session context, Run origin and Scheduler contracts.
 
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 use specta::Type;
 
@@ -54,6 +56,15 @@ pub enum RunOrigin {
         task_run_id: TaskRunId,
         #[specta(type = specta_typescript::Number)]
         scheduled_for_ms: i64,
+        #[serde(default)]
+        event_context: Option<ScheduleEventContext>,
+    },
+    Channel {
+        channel: String,
+        account: String,
+        peer: String,
+        thread: String,
+        message_id: super::ChannelMessageId,
     },
 }
 
@@ -74,6 +85,106 @@ pub enum ScheduleSpec {
         expression: String,
         timezone: String,
     },
+    Event {
+        matcher: ScheduleEventMatcher,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum ScheduleEventSourceKind {
+    Workspace,
+    Plugin,
+    Connector,
+    Channel,
+    Gateway,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ScheduleEventSource {
+    pub kind: ScheduleEventSourceKind,
+    pub principal: String,
+    pub id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ScheduleEventResourceRef {
+    pub kind: String,
+    pub id: String,
+    pub revision: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ScheduleEventMatcher {
+    pub source: ScheduleEventSource,
+    pub event_type: String,
+    pub subject_prefix: Option<String>,
+    pub labels: BTreeMap<String, String>,
+    pub resource: Option<ScheduleEventResourceRef>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ScheduleEventEnvelope {
+    pub event_id: String,
+    pub source: ScheduleEventSource,
+    pub event_type: String,
+    pub subject: Option<String>,
+    pub labels: BTreeMap<String, String>,
+    pub resource: Option<ScheduleEventResourceRef>,
+    #[specta(type = specta_typescript::Number)]
+    pub occurred_at_ms: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ScheduleEventIngressRequest {
+    pub context: MutationContext,
+    pub source_kind: ScheduleEventSourceKind,
+    pub source_id: String,
+    pub event_id: String,
+    pub event_type: String,
+    pub subject: Option<String>,
+    pub labels: BTreeMap<String, String>,
+    pub resource: Option<ScheduleEventResourceRef>,
+    #[specta(type = specta_typescript::Number)]
+    pub occurred_at_ms: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ScheduleEventContext {
+    pub event_id: String,
+    pub source: ScheduleEventSource,
+    pub event_type: String,
+    pub subject: Option<String>,
+    pub labels: BTreeMap<String, String>,
+    pub resource: Option<ScheduleEventResourceRef>,
+    pub fingerprint: String,
+    #[specta(type = specta_typescript::Number)]
+    pub occurred_at_ms: i64,
+    #[specta(type = specta_typescript::Number)]
+    pub received_at_ms: i64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum ScheduleEventReceiptStatus {
+    Accepted,
+    Replayed,
+    Conflict,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ScheduleEventReceipt {
+    pub status: ScheduleEventReceiptStatus,
+    pub event: ScheduleEventContext,
+    pub matched_schedule_ids: Vec<ScheduleId>,
+    pub task_runs: Vec<TaskRunRecord>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
@@ -84,6 +195,44 @@ pub enum ScheduleContextTemplate {
         project_id: ProjectId,
         execution_target: ExecutionTarget,
     },
+    SessionContinuation {
+        session_id: SessionId,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type, Default)]
+#[serde(default, rename_all = "camelCase")]
+pub struct ScheduleStopConditions {
+    pub max_occurrences: Option<u32>,
+    #[specta(type = Option<specta_typescript::Number>)]
+    pub end_at_ms: Option<i64>,
+    pub stop_after_success: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ScheduleConnectorSelection {
+    pub account_id: super::ConnectorAccountId,
+    pub contribution_revision: super::ContributionRevision,
+    pub allowed_actions: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ScheduleBrowserGrant {
+    pub enabled: bool,
+    pub document_origins: Vec<String>,
+    pub resource_origins: Vec<String>,
+    pub capabilities: Vec<super::BrowserCapability>,
+    pub allow_private_network: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ScheduleHostGrant {
+    pub connectors: Vec<ScheduleConnectorSelection>,
+    pub browser: Option<ScheduleBrowserGrant>,
+    pub computer_unattended: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type, Default)]
@@ -188,6 +337,10 @@ pub struct ScheduleDefinition {
     pub tool_allowlist: Vec<String>,
     pub skill_allowlist: Vec<SkillId>,
     pub mcp_tool_allowlist: Vec<McpToolSelection>,
+    #[serde(default)]
+    pub contribution_revisions: Vec<super::ContributionRevision>,
+    #[serde(default)]
+    pub host_grant: ScheduleHostGrant,
     pub permission_config: SchedulePermissionConfig,
     #[specta(type = specta_typescript::Number)]
     pub permission_revision: u64,
@@ -195,6 +348,8 @@ pub struct ScheduleDefinition {
     pub timeout_ms: u64,
     pub misfire_policy: MisfirePolicy,
     pub delivery_policy: DeliveryPolicy,
+    #[serde(default)]
+    pub stop_conditions: ScheduleStopConditions,
     #[specta(type = specta_typescript::Number)]
     pub config_revision: u64,
     pub created_by: String,
@@ -250,6 +405,10 @@ pub struct ScheduleAuthorizationScope {
     pub skill_revisions: Vec<ScheduleSkillSelection>,
     pub mcp_tool_allowlist: Vec<McpToolSelection>,
     pub permission_config: SchedulePermissionConfig,
+    #[serde(default)]
+    pub contribution_revisions: Vec<super::ContributionRevision>,
+    #[serde(default)]
+    pub host_grant: ScheduleHostGrant,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
@@ -363,6 +522,7 @@ pub enum TaskRunTrigger {
     Manual,
     Retry,
     CatchUp,
+    Event,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type, Default)]
@@ -385,6 +545,8 @@ pub struct TaskRunRecord {
     pub trigger: TaskRunTrigger,
     #[specta(type = Option<specta_typescript::Number>)]
     pub scheduled_for_ms: Option<i64>,
+    #[serde(default)]
+    pub event_context: Option<ScheduleEventContext>,
     pub invocation_key: String,
     pub requester_session_id: Option<SessionId>,
     pub execution_session_id: Option<SessionId>,

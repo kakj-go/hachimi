@@ -179,6 +179,125 @@ fn verify_native_runtime(runtime: &Path) {
     }
 }
 
+fn verify_managed_git(root: &Path) {
+    const VERSION: &str = "2.50.1.windows.1";
+    const ARCHIVE_SHA256: &str = "6f672aebe9e488a246efd6875f9197dbc0d9a40100e218acc3877cba2b206c45";
+    let manifest_path = root.join("manifest.json");
+    println!("cargo:rerun-if-changed={}", manifest_path.display());
+    if !manifest_path.is_file() {
+        if std::env::var("PROFILE").as_deref() == Ok("release") {
+            panic!(
+                "pinned Managed Git is missing. Run `corepack pnpm runtime:prepare` before a release build"
+            );
+        }
+        println!(
+            "cargo:warning=pinned Managed Git is absent; Workspace Git is unavailable until `corepack pnpm runtime:prepare` runs"
+        );
+        return;
+    }
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&manifest_path).expect("read Managed Git manifest"))
+            .expect("Managed Git manifest is invalid");
+    assert_eq!(manifest["version"].as_str(), Some(VERSION));
+    assert_eq!(
+        manifest["sourceArchiveSha256"].as_str(),
+        Some(ARCHIVE_SHA256)
+    );
+    let files = manifest["files"]
+        .as_object()
+        .expect("Managed Git manifest has no file hashes");
+    assert!(files.contains_key("cmd/git.exe"));
+    for (relative, expected) in files {
+        let relative_path = Path::new(relative);
+        assert!(
+            !relative_path.as_os_str().is_empty()
+                && !relative_path.components().any(|component| matches!(
+                    component,
+                    Component::ParentDir | Component::RootDir | Component::Prefix(_)
+                )),
+            "invalid Managed Git path: {relative}"
+        );
+        let path = root.join(relative_path);
+        println!("cargo:rerun-if-changed={}", path.display());
+        let metadata = std::fs::symlink_metadata(&path).unwrap_or_else(|error| {
+            panic!("Managed Git file is missing: {}: {error}", path.display())
+        });
+        assert!(metadata.is_file() && !metadata.file_type().is_symlink());
+        assert_eq!(
+            sha256_file(&path),
+            expected.as_str().expect("Managed Git SHA-256 must be text"),
+            "Managed Git SHA-256 mismatch: {}",
+            path.display()
+        );
+    }
+}
+
+fn verify_managed_chromium(root: &Path) {
+    const VERSION: &str = "151.0.7922.47";
+    const ARCHIVE_SHA256: &str = "fc77bb98b550b7da23b14edfa282b59a022e7fdb075ac7625d2a5152ceb22396";
+    let manifest_path = root.join("manifest.json");
+    println!("cargo:rerun-if-changed={}", manifest_path.display());
+    let files: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(&manifest_path).unwrap_or_else(|error| {
+            panic!(
+                "pinned managed Chromium {VERSION} is missing; run scripts/prepare-managed-chromium.ps1: {error}"
+            )
+        }),
+    )
+    .expect("managed Chromium manifest is invalid");
+    let files = files
+        .as_array()
+        .expect("managed Chromium manifest must be an array");
+    assert!(!files.is_empty(), "managed Chromium manifest is empty");
+    let mut has_executable = false;
+    for entry in files {
+        let relative = entry["path"]
+            .as_str()
+            .expect("managed Chromium path must be text");
+        let relative_path = Path::new(relative);
+        assert!(
+            !relative_path.as_os_str().is_empty()
+                && !relative_path.components().any(|component| matches!(
+                    component,
+                    Component::ParentDir | Component::RootDir | Component::Prefix(_)
+                )),
+            "invalid managed Chromium path: {relative}"
+        );
+        has_executable |= relative.eq_ignore_ascii_case("chrome.exe");
+        let path = root.join(relative_path);
+        println!("cargo:rerun-if-changed={}", path.display());
+        let metadata = std::fs::symlink_metadata(&path).unwrap_or_else(|error| {
+            panic!(
+                "managed Chromium file is missing: {}: {error}",
+                path.display()
+            )
+        });
+        assert!(metadata.is_file() && !metadata.file_type().is_symlink());
+        assert_eq!(
+            metadata.len(),
+            entry["size"]
+                .as_u64()
+                .expect("managed Chromium size must be an integer"),
+            "managed Chromium size mismatch: {}",
+            path.display()
+        );
+        assert_eq!(
+            sha256_file(&path),
+            entry["sha256"]
+                .as_str()
+                .expect("managed Chromium SHA-256 must be text"),
+            "managed Chromium SHA-256 mismatch: {}",
+            path.display()
+        );
+    }
+    assert!(
+        has_executable,
+        "managed Chromium manifest has no chrome.exe"
+    );
+    println!("cargo:rustc-env=HACHIMI_MANAGED_CHROMIUM_VERSION={VERSION}");
+    println!("cargo:rustc-env=HACHIMI_MANAGED_CHROMIUM_ARCHIVE_SHA256={ARCHIVE_SHA256}");
+}
+
 fn verify_motion_catalog(root: &Path) {
     let manifest_path = root.join("catalog.json");
     println!("cargo:rerun-if-changed={}", manifest_path.display());
@@ -250,6 +369,36 @@ fn verify_motion_catalog(root: &Path) {
     }
 }
 
+fn register_sandbox_sidecar_hashes() {
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
+        return;
+    }
+    let target = std::env::var("TARGET").expect("Cargo TARGET");
+    for (name, environment) in [
+        ("hachimi-sandbox-setup", "HACHIMI_SANDBOX_SETUP_SHA256"),
+        (
+            "hachimi-sandbox-launcher",
+            "HACHIMI_SANDBOX_LAUNCHER_SHA256",
+        ),
+        ("hachimi-sandbox-canary", "HACHIMI_SANDBOX_CANARY_SHA256"),
+        ("hachimi-sandbox-attest", "HACHIMI_SANDBOX_ATTEST_SHA256"),
+        (
+            "hachimi-workspace-worker",
+            "HACHIMI_WORKSPACE_WORKER_SHA256",
+        ),
+    ] {
+        let path = Path::new("binaries").join(format!("{name}-{target}.exe"));
+        println!("cargo:rerun-if-changed={}", path.display());
+        if !path.is_file() {
+            panic!(
+                "bundled Sandbox sidecar is missing: {}. Run the sidecar preparation script first",
+                path.display()
+            );
+        }
+        println!("cargo:rustc-env={environment}={}", sha256_file(&path));
+    }
+}
+
 fn read_glb_json(path: &Path) -> serde_json::Value {
     let bytes = std::fs::read(path)
         .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
@@ -271,6 +420,7 @@ fn read_glb_json(path: &Path) -> serde_json::Value {
 }
 
 fn main() {
+    println!("cargo:rerun-if-changed=managed-chromium/manifest.json");
     println!(
         "cargo:rerun-if-changed=resources/native/sherpa-onnx-1.13.4-directml/windows-x64/manifest.json"
     );
@@ -288,6 +438,9 @@ fn main() {
         let runtime =
             std::path::Path::new("resources/native/sherpa-onnx-1.13.4-directml/windows-x64");
         verify_native_runtime(runtime);
+        verify_managed_git(Path::new("managed-git"));
+        verify_managed_chromium(Path::new("managed-chromium"));
     }
+    register_sandbox_sidecar_hashes();
     tauri_build::build();
 }

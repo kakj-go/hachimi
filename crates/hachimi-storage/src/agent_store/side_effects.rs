@@ -1,6 +1,6 @@
 use hachimi_protocol::{
-    ApprovalId, ApprovalStatus, ArtifactId, RunId, SideEffectExecutionId,
-    SideEffectExecutionRecord, SideEffectExecutionStatus,
+    ApprovalId, ApprovalStatus, ArtifactId, RunId, RunStepCheckpointId, RunStepPhase,
+    SideEffectExecutionId, SideEffectExecutionRecord, SideEffectExecutionStatus,
 };
 use serde_json::Value;
 use sqlx::Row;
@@ -104,6 +104,13 @@ impl AgentStore {
         .bind(record.updated_at_ms)
         .execute(&mut *transaction)
         .await?;
+        copy_side_effect_checkpoint_tx(
+            &mut transaction,
+            record,
+            RunStepPhase::ToolClaimed,
+            record.created_at_ms,
+        )
+        .await?;
         transaction.commit().await?;
         Ok(SideEffectClaim {
             record: record.clone(),
@@ -175,6 +182,13 @@ impl AgentStore {
             .fetch_one(&mut *transaction)
             .await?;
         let updated = side_effect_from_row(&row)?;
+        copy_side_effect_checkpoint_tx(
+            &mut transaction,
+            &updated,
+            RunStepPhase::ToolDispatched,
+            updated_at_ms,
+        )
+        .await?;
         transaction.commit().await?;
         Ok(updated)
     }
@@ -277,6 +291,46 @@ impl AgentStore {
         transaction.commit().await?;
         Ok(updated)
     }
+}
+
+async fn copy_side_effect_checkpoint_tx(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    record: &SideEffectExecutionRecord,
+    phase: RunStepPhase,
+    created_at_ms: i64,
+) -> Result<(), AgentStoreError> {
+    let source = sqlx::query(
+        "SELECT step_index, tool_name, recovery_policy, parameter_hash, world_revision, provider_revision, revision_snapshot_json FROM run_step_checkpoints WHERE run_id = ? AND run_generation = ? AND tool_call_id = ? ORDER BY step_index DESC, created_at_ms DESC, rowid DESC LIMIT 1",
+    )
+    .bind(record.run_id.as_str())
+    .bind(i64::try_from(record.run_generation).unwrap_or(i64::MAX))
+    .bind(record.tool_call_id.as_str())
+    .fetch_optional(&mut **transaction)
+    .await?;
+    let Some(source) = source else {
+        return Ok(());
+    };
+    sqlx::query(
+        "INSERT OR IGNORE INTO run_step_checkpoints (id, session_id, run_id, run_generation, step_index, phase, tool_call_id, tool_name, side_effect_execution_id, recovery_policy, parameter_hash, world_revision, provider_revision, revision_snapshot_json, created_at_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    )
+    .bind(RunStepCheckpointId::random().as_str())
+    .bind(record.session_id.as_str())
+    .bind(record.run_id.as_str())
+    .bind(i64::try_from(record.run_generation).unwrap_or(i64::MAX))
+    .bind(source.get::<i64, _>("step_index"))
+    .bind(phase.as_str())
+    .bind(record.tool_call_id.as_str())
+    .bind(source.get::<Option<String>, _>("tool_name"))
+    .bind(record.id.as_str())
+    .bind(source.get::<String, _>("recovery_policy"))
+    .bind(source.get::<Option<String>, _>("parameter_hash"))
+    .bind(source.get::<String, _>("world_revision"))
+    .bind(source.get::<String, _>("provider_revision"))
+    .bind(source.get::<String, _>("revision_snapshot_json"))
+    .bind(created_at_ms)
+    .execute(&mut **transaction)
+    .await?;
+    Ok(())
 }
 
 async fn consume_approval(

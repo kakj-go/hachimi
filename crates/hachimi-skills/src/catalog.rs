@@ -63,6 +63,14 @@ pub struct SkillCatalogContext {
 }
 
 impl SkillHost {
+    #[must_use]
+    pub fn catalog_roots(&self) -> Vec<SkillCatalogRoot> {
+        self.catalog_roots
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
     /// Replaces app-owned Built-in/User-extra/System/Admin roots and invalidates
     /// the discovered-root snapshot. Missing roots are allowed and simply scan empty.
     pub fn set_catalog_roots(&self, roots: Vec<SkillCatalogRoot>) -> Result<(), SkillHostError> {

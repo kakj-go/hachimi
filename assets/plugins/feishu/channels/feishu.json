@@ -1,0 +1,5 @@
+{
+  "protocolVersion": 1,
+  "providerId": "feishu",
+  "transport": "builtin_enterprise"
+}

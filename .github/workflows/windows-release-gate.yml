@@ -14,6 +14,40 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  standard-user-release:
+    if: github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
+    runs-on: [self-hosted, windows, x64, hachimi-standard-user]
+    environment: hachimi-standard-user-release
+    timeout-minutes: 180
+    env:
+      HACHIMI_PREVIOUS_INSTALLER: ${{ vars.HACHIMI_PREVIOUS_INSTALLER }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          lfs: true
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24.10.0
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - run: corepack enable
+      - run: corepack prepare pnpm@11.15.1 --activate
+      - run: pnpm install --frozen-lockfile
+      - name: Standard-user install, upgrade, Local Host, and Desktop suite
+        run: pnpm test:windows:standard-user
+      - name: Upload sanitized standard-user evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-standard-user-validation-${{ github.run_id }}
+          path: |
+            target/windows-standard-user-validation/**/summary.json
+            target/windows-standard-user-validation/**/installer-sha256.txt
+            target/windows-standard-user-validation/**/*.sanitized.log
+          if-no-files-found: error
+          retention-days: 90
+
   sandbox-release:
     if: github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
     runs-on: [self-hosted, windows, x64, hachimi-sandbox]
@@ -21,6 +55,8 @@ jobs:
     timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
+        with:
+          lfs: true
       - uses: actions/setup-node@v4
         with:
           node-version: 24.10.0
@@ -37,6 +73,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: windows-release-validation-${{ github.run_id }}
-          path: target/windows-release-validation/**/summary.json
+          path: |
+            target/windows-release-validation/**/summary.json
+            target/windows-release-validation/**/installer-sha256.txt
+            target/windows-release-validation/**/*.sanitized.log
           if-no-files-found: error
-          retention-days: 14
+          retention-days: 90

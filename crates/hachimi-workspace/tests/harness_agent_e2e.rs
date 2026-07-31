@@ -138,11 +138,13 @@ async fn mock_provider_drives_real_worker_and_persists_evidence_across_restart()
         .expect("project");
     let request = WorkbenchTaskStartRequest {
         idempotency_key: "e2e-task".into(),
-        project_id: project.id.clone(),
+        entry_profile: hachimi_protocol::EntryProfile::Workbench,
+        session_id: None,
+        project_id: Some(project.id.clone()),
         prompt: "Update README.md, inspect the diff, and run git diff --check.".into(),
-        execution_target: ExecutionTarget::Local {
+        execution_target: Some(ExecutionTarget::Local {
             project_id: project.id.clone(),
-        },
+        }),
         behavior_mode: BehaviorMode::Default,
         approval_policy: ApprovalPolicy::OnlyWhenNeeded,
         attachment_ids: Vec::new(),
@@ -157,6 +159,7 @@ async fn mock_provider_drives_real_worker_and_persists_evidence_across_restart()
                 max_input_tokens: 128_000,
                 max_output_tokens: 4_096,
                 structured_output_mode: hachimi_protocol::StructuredOutputMode::Disabled,
+                ..LlmSettings::default()
             },
             "test:user",
             &request.idempotency_key,
@@ -164,12 +167,9 @@ async fn mock_provider_drives_real_worker_and_persists_evidence_across_restart()
         )
         .await
         .expect("task");
+    let checkout = snapshot.checkout.as_ref().expect("project checkout");
     store
-        .acquire_checkout_write_lease(
-            &snapshot.checkout.id,
-            &snapshot.run.id,
-            snapshot.run.generation,
-        )
+        .acquire_checkout_write_lease(&checkout.id, &snapshot.run.id, snapshot.run.generation)
         .await
         .expect("lease");
 
@@ -182,8 +182,8 @@ async fn mock_provider_drives_real_worker_and_persists_evidence_across_restart()
     );
     let host = Arc::new(WorkspaceHostClient::new(
         env!("CARGO_BIN_EXE_hachimi-workspace-worker"),
-        &snapshot.checkout.path,
-        snapshot.checkout.id.as_str(),
+        &checkout.path,
+        checkout.id.as_str(),
         snapshot.run.generation,
     ));
     let mut client = ClientContext::for_window(WindowKind::Workbench);
@@ -206,7 +206,7 @@ async fn mock_provider_drives_real_worker_and_persists_evidence_across_restart()
             BehaviorMode::Default,
             snapshot.session.id.clone(),
             snapshot.run.id.clone(),
-            snapshot.checkout.path.clone(),
+            checkout.path.clone(),
         ),
         capability_host: "workspace-worker".into(),
         run_tool_allowlist: None,
@@ -225,7 +225,7 @@ async fn mock_provider_drives_real_worker_and_persists_evidence_across_restart()
         store.clone(),
         snapshot.session.id.clone(),
         snapshot.run.id.clone(),
-        snapshot.checkout.id.clone(),
+        checkout.id.clone(),
     ) {
         registry
             .register(authorized_tool(tool, authorization.clone()))
@@ -245,6 +245,7 @@ async fn mock_provider_drives_real_worker_and_persists_evidence_across_restart()
                     name: None,
                     tool_call_id: None,
                     tool_calls: Vec::new(),
+                    input_images: Vec::new(),
                 },
                 ModelMessage::user(request.prompt.clone()),
             ],
@@ -254,11 +255,7 @@ async fn mock_provider_drives_real_worker_and_persists_evidence_across_restart()
         .await
         .expect("agent run");
     store
-        .release_checkout_write_lease(
-            &snapshot.checkout.id,
-            &snapshot.run.id,
-            snapshot.run.generation,
-        )
+        .release_checkout_write_lease(&checkout.id, &snapshot.run.id, snapshot.run.generation)
         .await
         .expect("release lease");
 

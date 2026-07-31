@@ -1,4 +1,5 @@
 import {
+  CONTROL_PROTOCOL_VERSION,
   commandFailure,
   type ApprovalPolicy,
   type ApprovalRequestRecord,
@@ -9,6 +10,8 @@ import {
   type ProjectRecord,
   type ProposedPlan,
   type RunRecord,
+  type RunRecoveryDecisionAction,
+  type RunRecoverySnapshot,
   type SessionRecord,
   type SkillRecord,
   type UserInputAnswer,
@@ -27,44 +30,29 @@ import {
 } from "./agent-live-items";
 import { useI18n, type AppLocale } from "@hachimi/i18n";
 import { reduceAgentEventWatermark } from "./agent-event-watermark";
+import { ProviderContextPayload } from "./provider-context-payload";
+import { AgentTaskPanel } from "./agent-task-panel";
 import {
   AgentMessage,
   ApprovalCard,
-  Archive,
   Badge,
   Bot,
   Box,
   Button,
-  CalendarClock,
-  Check,
-  ChevronDown,
   Composer,
   ComposerInput,
   Dialog,
-  Dropdown,
-  ExternalLink,
-  FolderOpen,
   GitBranch,
-  GitFork,
-  MessageCircle,
-  MoreHorizontal,
   Palette,
   PanelLeftClose,
   PlanCard,
   Play,
-  Plus,
   PromptCard,
-  Search,
-  SearchField,
-  SelectField,
   Send,
-  Settings,
   ShieldCheck,
-  Sidebar,
   Square,
   TerminalSquare,
   TextField,
-  Trash2,
   Volume2,
 } from "@hachimi/ui";
 import {
@@ -79,6 +67,7 @@ import {
 } from "solid-js";
 
 import { desktopWorkbenchCommandPort, type WorkbenchCommandPort } from "./workbench-command-port";
+import { directUserMutationContext, runMutationContext } from "./mutation-context";
 import { createProjectGitController } from "./project-git-controller";
 import { SandboxReadinessBanner } from "./sandbox-readiness-banner";
 import { ComposerAttachmentList, type ComposerAttachmentPreview } from "./composer-attachments";
@@ -92,465 +81,23 @@ import {
 import { WorkspaceBrowser } from "./workspace-browser";
 import { TaskCenter } from "./task-center";
 import { TerminalPanel } from "./terminal";
+import { UserInputCard } from "./user-input-card";
 import { ReviewPanel } from "./review-panel";
+import { ProjectSidebar, type ProjectMenuAction, type SessionMenuAction } from "./project-sidebar";
 import "./composer-attachments.css";
 import "./composer-popovers.css";
 
-type ProjectMenuAction =
-  | "pin"
-  | "open"
-  | "create_permanent_worktree"
-  | "rename"
-  | "mark_read"
-  | "archive_tasks"
-  | "remove";
-
-function ProjectSidebar(props: {
-  openSettings: () => void;
-  openMotionLab: () => void;
-  motionLabEnabled: boolean;
-  schedulerEnabled: boolean;
-  onNewTask: (projectId?: string) => void;
-  onOpenTasks: () => void;
-  activeView: "agent" | "tasks";
-  projects: ProjectRecord[];
-  sessions: SessionRecord[];
-  selectedProjectId: string | undefined;
-  selectedSessionId: string | undefined;
-  pinnedProjectIds: readonly string[];
-  unreadSessionIds: ReadonlySet<string>;
-  loading: boolean;
-  addingProject: boolean;
-  onAddProject: () => void;
-  onSelectProject: (projectId: string) => void;
-  onSelectSession: (session: SessionRecord) => void;
-  onProjectAction: (project: ProjectRecord, action: ProjectMenuAction) => void;
-}) {
-  const i18n = useI18n();
-  const [search, setSearch] = createSignal("");
-  const [searchOpen, setSearchOpen] = createSignal(false);
-  const [expandedProjectIds, setExpandedProjectIds] = createSignal<string[]>([]);
-  createEffect(() => {
-    const projectIds = props.projects.map((project) => project.id);
-    setExpandedProjectIds((current) => [
-      ...current.filter((id) => projectIds.includes(id)),
-      ...projectIds.filter((id) => !current.includes(id)),
-    ]);
-  });
-  const filteredProjects = createMemo(() => {
-    const query = search().trim().toLocaleLowerCase();
-    if (!query) return props.projects;
-    return props.projects.filter(
-      (project) =>
-        project.displayName.toLocaleLowerCase().includes(query) ||
-        props.sessions.some(
-          (session) =>
-            sessionProjectId(session) === project.id &&
-            session.title.toLocaleLowerCase().includes(query),
-        ),
-    );
-  });
-  const visibleSessions = (projectId: string) => {
-    const query = search().trim().toLocaleLowerCase();
-    return props.sessions.filter(
-      (session) =>
-        !session.archived &&
-        sessionProjectId(session) === projectId &&
-        (!query || session.title.toLocaleLowerCase().includes(query)),
-    );
-  };
-  const toggleProject = (projectId: string) => {
-    props.onSelectProject(projectId);
-    setExpandedProjectIds((current) =>
-      current.includes(projectId)
-        ? current.filter((id) => id !== projectId)
-        : [...current, projectId],
-    );
-  };
-  return (
-    <Sidebar class="project-sidebar">
-      <div class="project-sidebar-brand">
-        <span class="hachimi-mini-mark">H</span>
-        <strong>Hachimi</strong>
-        <Button
-          type="button"
-          aria-label={i18n.t("settings.search")}
-          aria-expanded={searchOpen()}
-          onClick={() => setSearchOpen((value) => !value)}
-        >
-          <Search size={17} />
-        </Button>
-      </div>
-      <Show when={searchOpen()}>
-        <SearchField
-          label={i18n.t("settings.search")}
-          placeholder={i18n.t("settings.search")}
-          value={search()}
-          onInput={(event) => setSearch(event.currentTarget.value)}
-        />
-      </Show>
-      <nav class="project-quick-nav" aria-label={i18n.t("workbench.home")}>
-        <Button
-          type="button"
-          classList={{ active: props.activeView === "agent" }}
-          data-testid="workbench-new-task"
-          onClick={() => props.onNewTask()}
-        >
-          <Plus size={17} /> <span>{i18n.t("workbench.newTask")}</span>
-        </Button>
-        <Show when={props.schedulerEnabled}>
-          <Button
-            type="button"
-            classList={{ active: props.activeView === "tasks" }}
-            data-testid="workbench-task-tab"
-            onClick={() => props.onOpenTasks()}
-          >
-            <CalendarClock size={17} />
-            <span>{i18n.locale() === "zh-CN" ? "任务" : "Tasks"}</span>
-          </Button>
-        </Show>
-        <Show when={props.motionLabEnabled}>
-          <Button type="button" onClick={() => props.openMotionLab()}>
-            <Play size={17} />{" "}
-            <span>{i18n.locale() === "zh-CN" ? "动作库实验室" : "Motion Library Lab"}</span>
-          </Button>
-        </Show>
-      </nav>
-      <div class="project-sidebar-scroll">
-        <section class="project-list-section">
-          <div class="project-list-heading">
-            <h2>{i18n.t("workbench.projects")}</h2>
-            <Button
-              type="button"
-              data-testid="workbench-add-project"
-              aria-label={i18n.t("workbench.addProject")}
-              title={i18n.t("workbench.addProject")}
-              disabled={props.addingProject}
-              onClick={() => props.onAddProject()}
-            >
-              <Plus size={14} />
-            </Button>
-          </div>
-          <Show
-            when={filteredProjects().length > 0}
-            fallback={
-              <p class="project-empty">
-                {props.loading
-                  ? i18n.t("workbench.loadingProjects")
-                  : i18n.t("workbench.noProjects")}
-              </p>
-            }
-          >
-            <For each={filteredProjects()}>
-              {(project) => {
-                const expanded = () => expandedProjectIds().includes(project.id);
-                return (
-                  <>
-                    <div class="project-row-shell">
-                      <Button
-                        type="button"
-                        class="project-row"
-                        classList={{ selected: props.selectedProjectId === project.id }}
-                        aria-expanded={expanded()}
-                        title={project.displayName}
-                        onClick={() => toggleProject(project.id)}
-                      >
-                        <span class="project-row-main">
-                          <FolderOpen size={16} />
-                          <span class="project-row-name">{project.displayName}</span>
-                        </span>
-                        <ChevronDown
-                          size={15}
-                          class="project-chevron"
-                          classList={{ collapsed: !expanded() }}
-                        />
-                      </Button>
-                      <div class="project-row-actions">
-                        <Dropdown
-                          label={
-                            i18n.locale() === "zh-CN"
-                              ? `${project.displayName} 项目操作`
-                              : `${project.displayName} project actions`
-                          }
-                          triggerTestId={`project-more-${project.id}`}
-                          actions={[
-                            {
-                              id: "pin",
-                              label: props.pinnedProjectIds.includes(project.id)
-                                ? i18n.locale() === "zh-CN"
-                                  ? "取消置顶项目"
-                                  : "Unpin project"
-                                : i18n.locale() === "zh-CN"
-                                  ? "置顶项目"
-                                  : "Pin project",
-                              icon: <GitBranch size={16} />,
-                            },
-                            {
-                              id: "open",
-                              label:
-                                i18n.locale() === "zh-CN"
-                                  ? "在资源管理器中打开"
-                                  : "Open in file explorer",
-                              icon: <ExternalLink size={16} />,
-                            },
-                            {
-                              id: "create_permanent_worktree",
-                              label:
-                                i18n.locale() === "zh-CN"
-                                  ? "创建永久工作树"
-                                  : "Create permanent worktree",
-                              icon: <GitFork size={16} />,
-                              disabled: !project.gitRoot,
-                            },
-                            {
-                              id: "rename",
-                              label: i18n.locale() === "zh-CN" ? "重命名项目" : "Rename project",
-                              icon: <MoreHorizontal size={16} />,
-                            },
-                            {
-                              id: "mark_read",
-                              label: i18n.locale() === "zh-CN" ? "全部标为已读" : "Mark all read",
-                              icon: <Check size={16} />,
-                            },
-                            {
-                              id: "archive_tasks",
-                              label: i18n.locale() === "zh-CN" ? "归档任务" : "Archive tasks",
-                              icon: <Archive size={16} />,
-                              disabled: visibleSessions(project.id).length === 0,
-                            },
-                            {
-                              id: "remove",
-                              label: i18n.locale() === "zh-CN" ? "移除" : "Remove",
-                              icon: <Trash2 size={16} />,
-                              danger: true,
-                              separatorBefore: true,
-                            },
-                          ]}
-                          onSelect={(action) =>
-                            props.onProjectAction(project, action as ProjectMenuAction)
-                          }
-                        >
-                          <MoreHorizontal size={16} />
-                        </Dropdown>
-                        <Button
-                          type="button"
-                          class="project-new-task"
-                          data-testid={`project-new-task-${project.id}`}
-                          aria-label={
-                            i18n.locale() === "zh-CN"
-                              ? `在 ${project.displayName} 中新建任务`
-                              : `New task in ${project.displayName}`
-                          }
-                          title={i18n.locale() === "zh-CN" ? "新建任务" : "New task"}
-                          onClick={() => props.onNewTask(project.id)}
-                        >
-                          <Plus size={16} />
-                        </Button>
-                      </div>
-                    </div>
-                    <Show when={expanded()}>
-                      <div class="project-sessions">
-                        <For each={visibleSessions(project.id)}>
-                          {(session) => (
-                            <Button
-                              type="button"
-                              classList={{ selected: props.selectedSessionId === session.id }}
-                              onClick={() => props.onSelectSession(session)}
-                            >
-                              <MessageCircle size={14} />
-                              <span>{session.title}</span>
-                              <Show when={props.unreadSessionIds.has(session.id)}>
-                                <i class="session-unread-dot" aria-label="Unread" />
-                              </Show>
-                            </Button>
-                          )}
-                        </For>
-                        <Show when={visibleSessions(project.id).length === 0}>
-                          <p class="session-empty">{i18n.t("workbench.noSessions")}</p>
-                        </Show>
-                      </div>
-                    </Show>
-                  </>
-                );
-              }}
-            </For>
-          </Show>
-        </section>
-        <Show
-          when={props.sessions.some(
-            (session) => session.context.kind === "general" && !session.archived,
-          )}
-        >
-          <section class="project-list-section">
-            <div class="project-list-heading">
-              <h2>{i18n.locale() === "zh-CN" ? "通用会话" : "General sessions"}</h2>
-            </div>
-            <div class="project-sessions general-sessions">
-              <For
-                each={props.sessions.filter(
-                  (session) => session.context.kind === "general" && !session.archived,
-                )}
-              >
-                {(session) => (
-                  <Button
-                    type="button"
-                    classList={{ selected: props.selectedSessionId === session.id }}
-                    onClick={() => props.onSelectSession(session)}
-                  >
-                    <MessageCircle size={14} />
-                    <span>{session.title}</span>
-                  </Button>
-                )}
-              </For>
-            </div>
-          </section>
-        </Show>
-      </div>
-      <Button
-        type="button"
-        class="sidebar-account"
-        data-testid="workbench-open-settings"
-        aria-label={i18n.t("settings.title")}
-        onClick={() => props.openSettings()}
-      >
-        <span class="account-avatar">M</span>
-        <span>
-          <strong>my_codex</strong>
-          <small>{i18n.t("settings.title")}</small>
-        </span>
-        <Settings size={17} />
-      </Button>
-    </Sidebar>
-  );
-}
-
-function UserInputCard(props: {
-  request: UserInputRequestRecord;
-  resolving: boolean;
-  onResolve: (
-    request: UserInputRequestRecord,
-    answers: UserInputAnswer[],
-    action: UserInputResolutionAction,
-  ) => void;
-}) {
-  const i18n = useI18n();
-  const [answers, setAnswers] = createSignal<Record<string, string>>(
-    untrack(() =>
-      Object.fromEntries(
-        props.request.questions.map((question) => [
-          question.id,
-          question.defaultAnswer ?? question.options[0]?.value ?? "",
-        ]),
-      ),
-    ),
-  );
-  const complete = () =>
-    props.request.questions.every((question) => (answers()[question.id] ?? "").trim().length > 0);
-  return (
-    <article class="user-input-card agent-card approval" data-component="user-input-card">
-      <header>
-        <MessageCircle size={17} />
-        <span>
-          <strong>{i18n.locale() === "zh-CN" ? "需要你的输入" : "Your input is needed"}</strong>
-          <small>
-            {i18n.locale() === "zh-CN"
-              ? "回答只会交给当前运行；密钥类回答不会写入历史"
-              : "Answers go only to the active run; secret answers are never persisted"}
-          </small>
-        </span>
-      </header>
-      <For each={props.request.questions}>
-        {(question) => (
-          <div class="user-input-question">
-            <Show when={question.options.length > 0}>
-              <SelectField
-                label={question.header}
-                description={question.prompt}
-                value={answers()[question.id] ?? ""}
-                options={[
-                  ...question.options.map((option) => ({
-                    value: option.value,
-                    label: option.label,
-                  })),
-                  {
-                    value: "",
-                    label: i18n.locale() === "zh-CN" ? "自由输入…" : "Free-form answer…",
-                  },
-                ]}
-                onChange={(value) =>
-                  setAnswers((current) => ({
-                    ...current,
-                    [question.id]: value,
-                  }))
-                }
-              />
-            </Show>
-            <TextField
-              label={question.options.length > 0 ? question.prompt : question.header}
-              {...(question.options.length > 0 ? {} : { description: question.prompt })}
-              type={question.secret ? "password" : "text"}
-              value={answers()[question.id] ?? ""}
-              placeholder={i18n.locale() === "zh-CN" ? "输入回答" : "Enter an answer"}
-              onInput={(event) =>
-                setAnswers((current) => ({
-                  ...current,
-                  [question.id]: event.currentTarget.value,
-                }))
-              }
-            />
-          </div>
-        )}
-      </For>
-      <footer>
-        <Button
-          size="small"
-          variant="ghost"
-          data-testid="workbench-decline-user-input"
-          disabled={props.resolving}
-          onClick={() => props.onResolve(props.request, [], "decline")}
-        >
-          {i18n.locale() === "zh-CN" ? "拒绝提供" : "Decline"}
-        </Button>
-        <Button
-          size="small"
-          variant="ghost"
-          data-testid="workbench-cancel-user-input"
-          disabled={props.resolving}
-          onClick={() => props.onResolve(props.request, [], "cancel")}
-        >
-          {i18n.locale() === "zh-CN" ? "取消请求" : "Cancel request"}
-        </Button>
-        <Button
-          size="small"
-          variant="primary"
-          data-testid="workbench-submit-user-input"
-          disabled={props.resolving || !complete()}
-          onClick={() =>
-            props.onResolve(
-              props.request,
-              props.request.questions.map((question) => ({
-                questionId: question.id,
-                value: answers()[question.id] ?? "",
-              })),
-              "submit",
-            )
-          }
-        >
-          {i18n.locale() === "zh-CN" ? "提交回答" : "Submit answers"}
-        </Button>
-      </footer>
-    </article>
-  );
-}
-
 function SessionTimeline(props: {
   snapshot: WorkbenchSessionSnapshot;
+  multiAgentEnabled: boolean;
+  recoveries: RunRecoverySnapshot[];
   liveItemDeltas: LiveItemDeltas;
   pendingUserInputs: UserInputRequestRecord[];
   resolvingApprovalId: string | undefined;
   resolvingUserInputId: string | undefined;
   acceptingPlanId: string | undefined;
   cancelling: boolean;
+  resolvingRecoveryId: string | undefined;
   onResolveApproval: (approval: ApprovalRequestRecord, decision: ApprovalStatus) => void;
   onAcceptPlan: (plan: ProposedPlan) => void;
   onResolveUserInput: (
@@ -559,6 +106,7 @@ function SessionTimeline(props: {
     action: UserInputResolutionAction,
   ) => void;
   onCancel: (run: RunRecord) => void;
+  onResolveRecovery: (recovery: RunRecoverySnapshot, action: RunRecoveryDecisionAction) => void;
 }) {
   const i18n = useI18n();
   const latestRun = () => props.snapshot.runs[props.snapshot.runs.length - 1];
@@ -598,6 +146,88 @@ function SessionTimeline(props: {
           )}
         </Show>
       </header>
+      <Show when={props.recoveries.length > 0}>
+        <div class="recovery-stack" data-testid="run-recovery-stack">
+          <For each={props.recoveries}>
+            {(snapshot) => {
+              const recovery = () => snapshot.recovery;
+              const checkpoint = () => snapshot.checkpoint;
+              const resolving = () => props.resolvingRecoveryId === recovery().id;
+              const canResumeSafe = () =>
+                !recovery().sideEffectExecutionId &&
+                (checkpoint()?.recoveryPolicy === "read_only_replayable" ||
+                  checkpoint()?.recoveryPolicy === "idempotent_with_receipt");
+              const canRetry = () =>
+                Boolean(recovery().sideEffectExecutionId) &&
+                checkpoint()?.recoveryPolicy === "idempotent_with_receipt";
+              return (
+                <article class="recovery-card" data-testid={`run-recovery-${recovery().id}`}>
+                  <div class="recovery-card-heading">
+                    <span>
+                      <ShieldCheck size={17} />
+                      <strong>{i18n.t("workbench.recoveryRequired")}</strong>
+                    </span>
+                    <Badge tone={recovery().state === "awaiting_user" ? "warning" : "info"}>
+                      {recovery().state}
+                    </Badge>
+                  </div>
+                  <p>{i18n.t("workbench.recoveryDescription")}</p>
+                  <small>
+                    {recovery().reasonCode} · generation {recovery().interruptedGeneration} →{" "}
+                    {recovery().resumeGeneration}
+                    <Show when={checkpoint()}>
+                      {(value) => ` · ${value().phase} · ${value().recoveryPolicy}`}
+                    </Show>
+                  </small>
+                  <Show when={recovery().sideEffectExecutionId}>
+                    <small class="recovery-risk">{i18n.t("workbench.recoveryIndeterminate")}</small>
+                  </Show>
+                  <footer>
+                    <Button
+                      size="small"
+                      disabled={resolving() || recovery().state === "resuming"}
+                      onClick={() => props.onResolveRecovery(snapshot, "abandon_run")}
+                    >
+                      {i18n.t("workbench.recoveryAbandon")}
+                    </Button>
+                    <Show when={recovery().sideEffectExecutionId}>
+                      <Button
+                        size="small"
+                        disabled={resolving() || recovery().state === "resuming"}
+                        onClick={() =>
+                          props.onResolveRecovery(snapshot, "confirm_effect_succeeded")
+                        }
+                      >
+                        {i18n.t("workbench.recoveryConfirmSucceeded")}
+                      </Button>
+                    </Show>
+                    <Show when={canRetry()}>
+                      <Button
+                        size="small"
+                        variant="primary"
+                        disabled={resolving() || recovery().state === "resuming"}
+                        onClick={() => props.onResolveRecovery(snapshot, "retry_idempotent_effect")}
+                      >
+                        {i18n.t("workbench.recoveryRetry")}
+                      </Button>
+                    </Show>
+                    <Show when={canResumeSafe()}>
+                      <Button
+                        size="small"
+                        variant="primary"
+                        disabled={resolving() || recovery().state === "resuming"}
+                        onClick={() => props.onResolveRecovery(snapshot, "resume_safe_remainder")}
+                      >
+                        {i18n.t("workbench.recoveryResumeSafe")}
+                      </Button>
+                    </Show>
+                  </footer>
+                </article>
+              );
+            }}
+          </For>
+        </div>
+      </Show>
       <Show when={props.snapshot.pendingApprovals.length > 0}>
         <div class="approval-stack">
           <For each={props.snapshot.pendingApprovals}>
@@ -704,6 +334,9 @@ function SessionTimeline(props: {
           </For>
         </div>
       </Show>
+      <Show when={props.multiAgentEnabled}>
+        <AgentTaskPanel tasks={props.snapshot.agentTasks} locale={i18n.locale()} />
+      </Show>
       <Show when={canCancel() && mcpProgress().length > 0}>
         <div class="mcp-progress-stack" aria-label="MCP Tool progress">
           <For each={mcpProgress()}>
@@ -739,14 +372,17 @@ function SessionTimeline(props: {
               author={timelineKindLabel(item.kind, i18n.locale())}
               meta={<time>{new Date(item.createdAtMs).toLocaleTimeString()}</time>}
             >
-              <pre>
-                {timelineItemText(
+              <ProviderContextPayload
+                payload={item.payload}
+                locale={i18n.locale()}
+                focusable={item.kind === "tool_execution"}
+                text={timelineItemText(
                   item.payload,
                   item.status === "in_progress"
                     ? liveItemText(props.liveItemDeltas[item.id])
                     : undefined,
                 )}
-              </pre>
+              />
             </AgentMessage>
           )}
         </For>
@@ -883,6 +519,10 @@ function persistLocalJson(key: string, value: unknown) {
 export function HomePage(props: {
   navigate: (route: WorkbenchRoute) => void;
   motionLabEnabled: boolean;
+  desktopControlEnabled: boolean;
+  runRecoveryEnabled: boolean;
+  multiAgentEnabled: boolean;
+  gitRemoteMutationsEnabled: boolean;
   workspaceToolsEnabled: boolean;
   schedulerEnabled: boolean;
   commandPort?: WorkbenchCommandPort;
@@ -908,6 +548,7 @@ export function HomePage(props: {
   const [selectedSessionId, setSelectedSessionId] = createSignal<string | undefined>(
     readSessionSelection(SELECTED_SESSION_STORAGE_KEY),
   );
+  const [sessionProjectionRevision, setSessionProjectionRevision] = createSignal(0);
   const [draftProjectId, setDraftProjectId] = createSignal<string>();
   const [behaviorMode, setBehaviorMode] = createSignal<BehaviorMode>("default");
   const [approvalPolicy, setApprovalPolicy] = createSignal<ApprovalPolicy>("only_when_needed");
@@ -925,14 +566,19 @@ export function HomePage(props: {
   const [sessionSnapshot, setSessionSnapshot] = createSignal<WorkbenchSessionSnapshot>();
   const [liveItemDeltas, setLiveItemDeltas] = createSignal<Record<string, LiveItemDelta>>({});
   const [pendingUserInputs, setPendingUserInputs] = createSignal<UserInputRequestRecord[]>([]);
+  const [runRecoveries, setRunRecoveries] = createSignal<RunRecoverySnapshot[]>([]);
   const [agentControl, setAgentControl] = createSignal<ControlInitializeResponse>();
   const [resolvingApprovalId, setResolvingApprovalId] = createSignal<string>();
   const [resolvingUserInputId, setResolvingUserInputId] = createSignal<string>();
   const [acceptingPlanId, setAcceptingPlanId] = createSignal<string>();
   const [cancellingRun, setCancellingRun] = createSignal(false);
+  const [resolvingRecoveryId, setResolvingRecoveryId] = createSignal<string>();
   const [projectActionBusy, setProjectActionBusy] = createSignal(false);
+  const [sessionActionBusy, setSessionActionBusy] = createSignal(false);
   const [renameTarget, setRenameTarget] = createSignal<ProjectRecord>();
   const [renameDraft, setRenameDraft] = createSignal("");
+  const [renameSessionTarget, setRenameSessionTarget] = createSignal<SessionRecord>();
+  const [renameSessionDraft, setRenameSessionDraft] = createSignal("");
   const [removeTarget, setRemoveTarget] = createSignal<ProjectRecord>();
   const visibleProjects = createMemo(() => {
     const removed = new Set(removedProjectIds());
@@ -983,6 +629,14 @@ export function HomePage(props: {
     const runs = sessionSnapshot()?.runs;
     return runs?.[runs.length - 1];
   });
+  const activeRun = createMemo(() =>
+    sessionSnapshot()
+      ?.runs.toReversed()
+      .find((run) => !isTerminalRunStatus(run.status)),
+  );
+  const selectedRunRecoveries = createMemo(() =>
+    runRecoveries().filter((value) => value.recovery.sessionId === selectedSessionId()),
+  );
   let attachmentFileInput: HTMLInputElement | undefined;
   let attachmentFolderInput: HTMLInputElement | undefined;
   let composerInput: HTMLTextAreaElement | undefined;
@@ -1040,12 +694,24 @@ export function HomePage(props: {
     }
   }
 
+  async function refreshRunRecoveries() {
+    if (!props.runRecoveryEnabled) {
+      setRunRecoveries([]);
+      return;
+    }
+    try {
+      setRunRecoveries(await commandPort.listRunRecoveries());
+    } catch (error) {
+      setFailure(commandFailure(error).message);
+    }
+  }
+
   onMount(() => {
     let disposed = false;
     void commandPort
       .initializeAgentControl({
-        clientVersion: "hachimi-desktop/0.2.0",
-        protocolVersion: 18,
+        clientVersion: "hachimi-desktop/0.2.1",
+        protocolVersion: CONTROL_PROTOCOL_VERSION,
         supportedFeatures: [
           "session_lifecycle_v2",
           "typed_items",
@@ -1060,6 +726,7 @@ export function HomePage(props: {
       .catch((error) => setFailure(commandFailure(error).message));
     void refreshWorkbench();
     void refreshSkills();
+    void refreshRunRecoveries();
     void (async () => {
       // eslint-disable-next-line solid/reactivity -- the native Skill event invokes this after mount.
       const stop = await commandPort.onSkillsChange(() => void refreshSkills());
@@ -1093,28 +760,35 @@ export function HomePage(props: {
   });
   createEffect(() => {
     const sessionId = selectedSessionId();
+    const agentViewActive = activeView() === "agent";
+    sessionProjectionRevision();
     if (!sessionId) {
       setSessionSnapshot(undefined);
       setLiveItemDeltas({});
       setPendingUserInputs([]);
       return;
     }
+    if (!agentViewActive) return;
     let disposed = false;
     let subscriptionId: string | undefined;
     let lastSequence = 0;
+    let projectionRequestId = 0;
     let stopEvents: (() => void) | undefined;
     const loadProjection = async () => {
+      const requestId = ++projectionRequestId;
       try {
-        const [snapshot, resume] = await Promise.all([
-          commandPort.getWorkbenchSession(sessionId),
-          commandPort.resumeAgentSession({
-            sessionId,
-            metadataOnly: true,
-            transcriptBeforeSequence: null,
-            transcriptLimit: 0,
-          }),
-        ]);
-        if (!disposed && untrack(selectedSessionId) === sessionId) {
+        const resume = await commandPort.resumeAgentSession({
+          sessionId,
+          metadataOnly: true,
+          transcriptBeforeSequence: null,
+          transcriptLimit: 0,
+        });
+        const snapshot = await commandPort.getWorkbenchSession(sessionId);
+        if (
+          requestId === projectionRequestId &&
+          !disposed &&
+          untrack(selectedSessionId) === sessionId
+        ) {
           setSessionSnapshot(snapshot);
           const inProgress = snapshot.transcript.filter((item) => item.status === "in_progress");
           setLiveItemDeltas((current) => {
@@ -1143,6 +817,7 @@ export function HomePage(props: {
       }
     };
     const connect = async () => {
+      // eslint-disable-next-line solid/reactivity -- this external event callback intentionally updates the current Session signals.
       stopEvents = await commandPort.onAgentEvents((batch) => {
         if (
           disposed ||
@@ -1157,6 +832,7 @@ export function HomePage(props: {
         setLiveItemDeltas((current) => reduceLiveItemDeltas(current, unseen.events));
         if (unseen.events.some((event) => event.payload.type !== "item_delta")) {
           void loadProjection();
+          void refreshRunRecoveries();
         }
       });
       if (disposed) {
@@ -1288,6 +964,7 @@ export function HomePage(props: {
     setActiveView("agent");
     setSelectedProjectId(sessionProjectId(session));
     setSelectedSessionId(session.id);
+    setSessionProjectionRevision((revision) => revision + 1);
     setDraftProjectId(undefined);
     setTaskSnapshot(undefined);
     setFailure(undefined);
@@ -1296,8 +973,8 @@ export function HomePage(props: {
 
   function newTask(projectId?: string) {
     setActiveView("agent");
-    const nextProjectId = projectId ?? selectedProjectId();
-    if (nextProjectId) setSelectedProjectId(nextProjectId);
+    const nextProjectId = projectId;
+    setSelectedProjectId(nextProjectId);
     setDraftProjectId(nextProjectId);
     setDraft("");
     clearAttachments();
@@ -1384,6 +1061,95 @@ export function HomePage(props: {
     }
   }
 
+  async function handleSessionAction(session: SessionRecord, action: SessionMenuAction) {
+    setFailure(undefined);
+    if (action === "rename") {
+      setRenameSessionTarget(session);
+      setRenameSessionDraft(session.title);
+      return;
+    }
+    setSessionActionBusy(true);
+    try {
+      if (action === "fork") {
+        const source =
+          selectedSessionId() === session.id && sessionSnapshot()
+            ? sessionSnapshot()!
+            : await commandPort.getWorkbenchSession(session.id);
+        const sourceRun = source.runs.toReversed().find((run) => isTerminalRunStatus(run.status));
+        if (!sourceRun) {
+          throw new Error(
+            i18n.locale() === "zh-CN"
+              ? "该会话还没有可用于 Fork 的终态运行。"
+              : "This session has no terminal run available to fork.",
+          );
+        }
+        const forked = await commandPort.forkAgentSession({
+          context: directUserMutationContext(),
+          sourceSessionId: session.id,
+          sourceRunId: sourceRun.id,
+          title: `${session.title} (fork)`,
+        });
+        setSessions((current) => [forked, ...current.filter((item) => item.id !== forked.id)]);
+        selectSession(forked);
+        setSessionSnapshot(await commandPort.getWorkbenchSession(forked.id));
+        return;
+      }
+      const updated = await commandPort.updateAgentSessionMetadata({
+        context: directUserMutationContext(),
+        sessionId: session.id,
+        title: null,
+        archived: action === "archive" ? true : action === "unarchive" ? false : null,
+        pinned: action === "pin" ? !session.pinned : null,
+      });
+      setSessions((current) =>
+        current.map((candidate) => (candidate.id === updated.id ? updated : candidate)),
+      );
+      if (selectedSessionId() === updated.id) {
+        if (updated.archived) {
+          setSelectedSessionId(undefined);
+          setSessionSnapshot(undefined);
+        } else {
+          setSessionSnapshot((current) => (current ? { ...current, session: updated } : current));
+        }
+      }
+    } catch (error) {
+      setFailure(commandFailure(error).message);
+    } finally {
+      setSessionActionBusy(false);
+    }
+  }
+
+  async function renameSession() {
+    const session = renameSessionTarget();
+    const title = renameSessionDraft().trim();
+    if (!session || !title || title === session.title) {
+      setRenameSessionTarget(undefined);
+      return;
+    }
+    setSessionActionBusy(true);
+    setFailure(undefined);
+    try {
+      const updated = await commandPort.updateAgentSessionMetadata({
+        context: directUserMutationContext(),
+        sessionId: session.id,
+        title,
+        archived: null,
+        pinned: null,
+      });
+      setSessions((current) =>
+        current.map((candidate) => (candidate.id === updated.id ? updated : candidate)),
+      );
+      setSessionSnapshot((current) =>
+        current?.session.id === updated.id ? { ...current, session: updated } : current,
+      );
+      setRenameSessionTarget(undefined);
+    } catch (error) {
+      setFailure(commandFailure(error).message);
+    } finally {
+      setSessionActionBusy(false);
+    }
+  }
+
   async function archiveProjectTasks(project: ProjectRecord) {
     const targets = sessions().filter(
       (session) => sessionProjectId(session) === project.id && !session.archived,
@@ -1395,14 +1161,7 @@ export function HomePage(props: {
       const archived = await Promise.all(
         targets.map((session) =>
           commandPort.updateAgentSessionMetadata({
-            context: {
-              requestId: crypto.randomUUID(),
-              clientId: "window:workbench",
-              protocolVersion: 18,
-              idempotencyKey: crypto.randomUUID(),
-              expectedRunId: null,
-              expectedGeneration: null,
-            },
+            context: directUserMutationContext(),
             sessionId: session.id,
             title: null,
             archived: true,
@@ -1440,34 +1199,60 @@ export function HomePage(props: {
   async function startTask() {
     const project = selectedProject();
     const prompt = draft().trim();
-    if (!project) {
-      setFailure(i18n.t("workbench.projectRequired"));
-      return;
-    }
     if (!prompt) {
       setFailure(i18n.t("workbench.promptRequired"));
       return;
     }
-    if (projectGit.executionKind() === "managed_worktree" && !projectGit.baseRevision()) {
+    const selectedSession = sessionSnapshot();
+    const steeringRun = activeRun();
+    if (
+      !selectedSession &&
+      project &&
+      projectGit.executionKind() === "managed_worktree" &&
+      !projectGit.baseRevision()
+    ) {
       setFailure(i18n.t("workbench.branchRequired"));
       return;
     }
     setSubmitting(true);
     setFailure(undefined);
     try {
-      const projectId = project.id;
+      if (steeringRun) {
+        if (attachments().length > 0 || selectedSkillIds().length > 0) {
+          throw new Error(
+            i18n.locale() === "zh-CN"
+              ? "运行中的会话只接受文本引导；请在新一轮运行中添加附件或 Skills。"
+              : "Active runs accept text steering only; add attachments or Skills in a fresh run.",
+          );
+        }
+        await commandPort.steerAgentRun({
+          context: runMutationContext(steeringRun),
+          runId: steeringRun.id,
+          input: prompt,
+        });
+        setDraft("");
+        if (selectedSessionId()) {
+          setSessionSnapshot(await commandPort.getWorkbenchSession(selectedSessionId()!));
+        }
+        return;
+      }
       const snapshot = await commandPort.startWorkbenchTask({
         idempotencyKey: crypto.randomUUID(),
-        projectId,
+        entryProfile: "workbench",
+        sessionId: selectedSession?.session.id ?? null,
+        projectId: project?.id ?? null,
         prompt,
-        executionTarget:
-          projectGit.executionKind() === "managed_worktree"
+        executionTarget: selectedSession
+          ? null
+          : project && projectGit.executionKind() === "managed_worktree"
             ? {
                 kind: "managed_worktree",
-                project_id: projectId,
+                project_id: project.id,
                 base_revision: projectGit.baseRevision(),
               }
-            : { kind: "local", project_id: projectId },
+            : project
+              ? { kind: "local", project_id: project.id }
+              : null,
         behaviorMode: behaviorMode(),
         approvalPolicy: approvalPolicy(),
         attachmentIds: attachments().flatMap((attachment) =>
@@ -1525,6 +1310,29 @@ export function HomePage(props: {
       setFailure(commandFailure(error).message);
     } finally {
       setResolvingApprovalId(undefined);
+    }
+  }
+
+  async function resolveRecovery(snapshot: RunRecoverySnapshot, action: RunRecoveryDecisionAction) {
+    setResolvingRecoveryId(snapshot.recovery.id);
+    setFailure(undefined);
+    try {
+      await commandPort.resolveRunRecovery({
+        context: runMutationContext({
+          id: snapshot.recovery.runId,
+          generation: snapshot.recovery.interruptedGeneration,
+        }),
+        recoveryId: snapshot.recovery.id,
+        expectedRunId: snapshot.recovery.runId,
+        expectedInterruptedGeneration: snapshot.recovery.interruptedGeneration,
+        action,
+      });
+      await Promise.all([refreshRunRecoveries(), refreshWorkbench()]);
+      setSessionProjectionRevision((value) => value + 1);
+    } catch (error) {
+      setFailure(commandFailure(error).message);
+    } finally {
+      setResolvingRecoveryId(undefined);
     }
   }
 
@@ -1618,7 +1426,9 @@ export function HomePage(props: {
       <ProjectSidebar
         openSettings={() => props.navigate("settings/general")}
         openMotionLab={() => props.navigate("developer/motion-lab")}
+        openDesktopControl={() => props.navigate("desktop-control")}
         motionLabEnabled={props.motionLabEnabled}
+        desktopControlEnabled={props.desktopControlEnabled}
         schedulerEnabled={props.schedulerEnabled}
         onNewTask={newTask}
         onOpenTasks={() => setActiveView("tasks")}
@@ -1635,6 +1445,7 @@ export function HomePage(props: {
         onSelectProject={selectProject}
         onSelectSession={selectSession}
         onProjectAction={(project, action) => void handleProjectAction(project, action)}
+        onSessionAction={(session, action) => void handleSessionAction(session, action)}
       />
       <main class="home-main">
         <div class="home-layout-actions">
@@ -1653,10 +1464,15 @@ export function HomePage(props: {
             projects={visibleProjects()}
             skills={skills()}
             onOpenSession={(sessionId) => {
-              const session = sessions().find((candidate) => candidate.id === sessionId);
-              setActiveView("agent");
-              setSelectedProjectId(session ? sessionProjectId(session) : undefined);
-              setSelectedSessionId(sessionId);
+              void commandPort
+                .getWorkbenchSession(sessionId)
+                .then((snapshot) => {
+                  setSelectedProjectId(sessionProjectId(snapshot.session));
+                  setSelectedSessionId(sessionId);
+                  setSessionSnapshot(snapshot);
+                  setActiveView("agent");
+                })
+                .catch((error) => setFailure(commandFailure(error).message));
             }}
           />
         </Show>
@@ -1693,12 +1509,15 @@ export function HomePage(props: {
               <div class="session-workspace-layout">
                 <SessionTimeline
                   snapshot={snapshot()}
+                  multiAgentEnabled={props.multiAgentEnabled}
+                  recoveries={selectedRunRecoveries()}
                   liveItemDeltas={liveItemDeltas()}
                   pendingUserInputs={pendingUserInputs()}
                   resolvingApprovalId={resolvingApprovalId()}
                   resolvingUserInputId={resolvingUserInputId()}
                   acceptingPlanId={acceptingPlanId()}
                   cancelling={cancellingRun()}
+                  resolvingRecoveryId={resolvingRecoveryId()}
                   onResolveApproval={(approval, decision) =>
                     void resolveApproval(approval, decision)
                   }
@@ -1707,6 +1526,7 @@ export function HomePage(props: {
                   }
                   onAcceptPlan={(plan) => void acceptPlan(plan)}
                   onCancel={(run) => void cancelRun(run)}
+                  onResolveRecovery={(recovery, action) => void resolveRecovery(recovery, action)}
                 />
                 <Show when={snapshot().session.context.kind === "project"}>
                   <div class="session-workspace-tools">
@@ -1721,7 +1541,11 @@ export function HomePage(props: {
                         selectSession(session);
                       }}
                     />
-                    <WorkspaceBrowser snapshot={snapshot()} commandPort={commandPort} />
+                    <WorkspaceBrowser
+                      snapshot={snapshot()}
+                      commandPort={commandPort}
+                      gitRemoteMutationsEnabled={props.gitRemoteMutationsEnabled}
+                    />
                     <TerminalPanel snapshot={snapshot()} commandPort={commandPort} />
                   </div>
                 </Show>
@@ -1841,8 +1665,9 @@ export function HomePage(props: {
                   disabled={
                     submitting() ||
                     !props.workspaceToolsEnabled ||
-                    !selectedProject() ||
-                    (projectGit.executionKind() === "managed_worktree" &&
+                    (!selectedSessionId() &&
+                      Boolean(selectedProject()) &&
+                      projectGit.executionKind() === "managed_worktree" &&
                       !projectGit.baseRevision()) ||
                     !draft().trim()
                   }
@@ -1908,6 +1733,43 @@ export function HomePage(props: {
         </div>
       </Dialog>
       <Dialog
+        open={Boolean(renameSessionTarget())}
+        title={i18n.locale() === "zh-CN" ? "重命名会话" : "Rename session"}
+        description={
+          i18n.locale() === "zh-CN"
+            ? "只更新会话标题，不改变历史、上下文或授权。"
+            : "Only the title changes; history, context, and authority remain unchanged."
+        }
+        onOpenChange={(open) => {
+          if (!open) setRenameSessionTarget(undefined);
+        }}
+      >
+        <div class="dialog-form project-dialog-form">
+          <TextField
+            label={i18n.locale() === "zh-CN" ? "会话标题" : "Session title"}
+            value={renameSessionDraft()}
+            maxLength={200}
+            autofocus
+            onInput={(event) => setRenameSessionDraft(event.currentTarget.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter") void renameSession();
+            }}
+          />
+          <div class="dialog-actions">
+            <Button variant="ghost" onClick={() => setRenameSessionTarget(undefined)}>
+              {i18n.locale() === "zh-CN" ? "取消" : "Cancel"}
+            </Button>
+            <Button
+              variant="primary"
+              disabled={sessionActionBusy() || !renameSessionDraft().trim()}
+              onClick={() => void renameSession()}
+            >
+              {i18n.locale() === "zh-CN" ? "保存" : "Save"}
+            </Button>
+          </div>
+        </div>
+      </Dialog>
+      <Dialog
         open={Boolean(removeTarget())}
         title={i18n.locale() === "zh-CN" ? "移除项目" : "Remove project"}
         description={
@@ -1962,4 +1824,8 @@ function revokeAttachmentPreview(attachment: ComposerAttachmentPreview) {
 
 function sessionProjectId(session: SessionRecord): string | undefined {
   return session.context.kind === "project" ? session.context.project_id : undefined;
+}
+
+function isTerminalRunStatus(status: RunRecord["status"]): boolean {
+  return ["succeeded", "failed", "timed_out", "cancelled", "interrupted", "lost"].includes(status);
 }

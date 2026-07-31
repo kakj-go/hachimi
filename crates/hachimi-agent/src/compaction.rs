@@ -16,10 +16,10 @@ use futures_util::StreamExt;
 use hachimi_protocol::{
     CompactionCheckpoint, CompactionCheckpointId, CompactionImplementation, CompactionLifecycle,
     CompactionPhase, CompactionQuality, CompactionReason, CompactionSummary,
-    CompactionTokenSnapshot, CompactionTrigger, ItemId, ItemPayload, ItemRelations, ItemStatus,
-    ModelCompactionRequest, ModelEvent, ModelFinishReason, ModelMessage, ModelRequest, ModelRole,
-    RunId, RunUsageSnapshot, SessionId, TokenCountSource, TokenUsage, TranscriptItem,
-    TranscriptItemKind,
+    CompactionSummarySource, CompactionTokenSnapshot, CompactionTrigger, ItemId, ItemPayload,
+    ItemRelations, ItemStatus, LlmSettings, ModelCompactionRequest, ModelEvent, ModelFinishReason,
+    ModelMessage, ModelRequest, ModelRole, ProviderAccountId, ProviderEndpointId, RunId,
+    RunUsageSnapshot, SessionId, TokenCountSource, TokenUsage, TranscriptItem, TranscriptItemKind,
 };
 use hachimi_storage::{AgentStore, AgentStoreError};
 use thiserror::Error;
@@ -71,6 +71,15 @@ pub struct SemanticCompactor {
     store: AgentStore,
     model: Arc<dyn ModelRuntime>,
     policy: CompactionPolicy,
+    provider_context: Option<CompactionProviderContext>,
+}
+
+#[derive(Debug, Clone)]
+struct CompactionProviderContext {
+    endpoint_id: Option<ProviderEndpointId>,
+    account_id: Option<ProviderAccountId>,
+    capability_revision: String,
+    remote_configured: bool,
 }
 
 impl std::fmt::Debug for SemanticCompactor {
@@ -89,6 +98,7 @@ impl SemanticCompactor {
             store,
             model,
             policy: CompactionPolicy::default(),
+            provider_context: None,
         }
     }
 
@@ -96,6 +106,26 @@ impl SemanticCompactor {
     pub fn with_policy(mut self, policy: CompactionPolicy) -> Self {
         self.policy = policy;
         self
+    }
+
+    #[must_use]
+    pub fn with_provider_context(mut self, settings: &LlmSettings) -> Self {
+        self.provider_context = Some(CompactionProviderContext {
+            endpoint_id: settings.provider_endpoint_id.clone(),
+            account_id: settings.provider_account_id.clone(),
+            capability_revision: provider_capability_revision(settings, &self.model.capabilities()),
+            remote_configured: settings.remote_compaction
+                && settings.protocol == hachimi_protocol::ProviderProtocolKind::Responses,
+        });
+        self
+    }
+
+    fn remote_compaction_enabled(&self) -> bool {
+        self.model.capabilities().remote_compaction
+            && self
+                .provider_context
+                .as_ref()
+                .is_none_or(|context| context.remote_configured)
     }
 
     pub async fn compact_if_needed(
@@ -159,7 +189,12 @@ impl SemanticCompactor {
             Some(_) => CompactionPhase::PreRun,
             None => CompactionPhase::Standalone,
         };
-        let requested_implementation = if self.model.capabilities().remote_compaction {
+        let requested_implementation = if self.remote_compaction_enabled()
+            || self
+                .provider_context
+                .as_ref()
+                .is_some_and(|context| context.remote_configured)
+        {
             CompactionImplementation::Remote
         } else {
             CompactionImplementation::Local
@@ -174,6 +209,9 @@ impl SemanticCompactor {
             None,
             0,
             Vec::new(),
+            None,
+            summary_source_for(requested_implementation, None),
+            self.provider_context.as_ref(),
             None,
         );
         self.store
@@ -218,6 +256,7 @@ impl SemanticCompactor {
                     0,
                     Vec::new(),
                     Some(code),
+                    None,
                 )
                 .await?;
                 return Err(error);
@@ -238,6 +277,7 @@ impl SemanticCompactor {
                 response.trimmed_history_groups,
                 response.warnings,
                 Some("summary_too_short"),
+                response.fallback_reason,
             )
             .await?;
             return Err(CompactionError::QualityRejected("summary_too_short"));
@@ -255,6 +295,7 @@ impl SemanticCompactor {
                 response.trimmed_history_groups,
                 response.warnings,
                 Some("summary_too_large"),
+                response.fallback_reason,
             )
             .await?;
             return Err(CompactionError::QualityRejected("summary_too_large"));
@@ -300,6 +341,20 @@ impl SemanticCompactor {
                 implementation: response.implementation,
                 token_snapshot: None,
                 trimmed_history_groups: response.trimmed_history_groups,
+                summary_source: response.summary_source,
+                provider_endpoint_id: self
+                    .provider_context
+                    .as_ref()
+                    .and_then(|context| context.endpoint_id.clone()),
+                provider_account_id: self
+                    .provider_context
+                    .as_ref()
+                    .and_then(|context| context.account_id.clone()),
+                capability_revision: self
+                    .provider_context
+                    .as_ref()
+                    .map(|context| context.capability_revision.clone()),
+                fallback_reason: response.fallback_reason.clone(),
             },
             summary: CompactionSummary {
                 semantic_markdown,
@@ -376,6 +431,7 @@ impl SemanticCompactor {
             response.trimmed_history_groups,
             warnings,
             None,
+            response.fallback_reason,
         )
         .await?;
         Ok(Some(checkpoint))
@@ -387,7 +443,23 @@ impl SemanticCompactor {
         source: &str,
         cancellation: CancellationToken,
     ) -> Result<SummaryResponse, CompactionError> {
-        if self.model.capabilities().remote_compaction {
+        if self
+            .provider_context
+            .as_ref()
+            .is_some_and(|context| context.remote_configured)
+            && !self.model.capabilities().remote_compaction
+        {
+            let mut response = self
+                .request_local_summary(previous, source, cancellation)
+                .await?;
+            response.summary_source = CompactionSummarySource::LocalFallback;
+            response.fallback_reason = Some("remote_capability_not_verified".into());
+            response
+                .warnings
+                .push("remote_compaction_capability_not_verified_fell_back_local".into());
+            return Ok(response);
+        }
+        if self.remote_compaction_enabled() {
             match self
                 .request_remote_summary(previous, source, cancellation.child_token())
                 .await
@@ -396,10 +468,12 @@ impl SemanticCompactor {
                 Err(CompactionError::Runtime(ModelRuntimeError::Cancelled)) => {
                     return Err(CompactionError::Runtime(ModelRuntimeError::Cancelled));
                 }
-                Err(_) => {
+                Err(error) => {
                     let mut response = self
                         .request_local_summary(previous, source, cancellation)
                         .await?;
+                    response.summary_source = CompactionSummarySource::LocalFallback;
+                    response.fallback_reason = Some(compaction_error_code(&error).into());
                     response
                         .warnings
                         .push("remote_compaction_failed_fell_back_local".into());
@@ -431,6 +505,7 @@ impl SemanticCompactor {
                     name: None,
                     tool_call_id: None,
                     tool_calls: Vec::new(),
+                    input_images: Vec::new(),
                 },
                 ModelMessage::user(format!(
                     "Earlier accepted checkpoint:\n<previous>\n{previous_summary}\n</previous>\n\nNew transcript segment:\n<transcript>\n{source}\n</transcript>"
@@ -500,6 +575,8 @@ impl SemanticCompactor {
                 implementation: CompactionImplementation::Local,
                 trimmed_history_groups,
                 warnings: Vec::new(),
+                summary_source: CompactionSummarySource::Local,
+                fallback_reason: None,
             });
         }
     }
@@ -562,6 +639,8 @@ impl SemanticCompactor {
                 implementation: CompactionImplementation::Remote,
                 trimmed_history_groups,
                 warnings: Vec::new(),
+                summary_source: CompactionSummarySource::ProviderRemote,
+                fallback_reason: None,
             });
         }
     }
@@ -580,6 +659,7 @@ impl SemanticCompactor {
         trimmed_history_groups: u32,
         warnings: Vec<String>,
         error_code: Option<&str>,
+        fallback_reason: Option<String>,
     ) -> Result<(), CompactionError> {
         let payload = compaction_payload(
             checkpoint_id,
@@ -591,6 +671,9 @@ impl SemanticCompactor {
             trimmed_history_groups,
             warnings,
             error_code.map(str::to_owned),
+            summary_source_for(implementation, fallback_reason.as_deref()),
+            self.provider_context.as_ref(),
+            fallback_reason,
         );
         self.store
             .complete_transcript_item(item_id, status, payload)
@@ -606,6 +689,8 @@ struct SummaryResponse {
     implementation: CompactionImplementation,
     trimmed_history_groups: u32,
     warnings: Vec<String>,
+    summary_source: CompactionSummarySource,
+    fallback_reason: Option<String>,
 }
 
 fn trigger_for_reason(reason: CompactionReason) -> CompactionTrigger {
@@ -627,6 +712,9 @@ fn compaction_payload(
     trimmed_history_groups: u32,
     warnings: Vec<String>,
     error_code: Option<String>,
+    summary_source: CompactionSummarySource,
+    provider_context: Option<&CompactionProviderContext>,
+    fallback_reason: Option<String>,
 ) -> ItemPayload {
     ItemPayload::ContextCompaction {
         checkpoint_id,
@@ -638,7 +726,53 @@ fn compaction_payload(
         trimmed_history_groups,
         warnings,
         error_code,
+        summary_source,
+        provider_endpoint_id: provider_context.and_then(|context| context.endpoint_id.clone()),
+        provider_account_id: provider_context.and_then(|context| context.account_id.clone()),
+        capability_revision: provider_context.map(|context| context.capability_revision.clone()),
+        fallback_reason,
     }
+}
+
+fn summary_source_for(
+    implementation: CompactionImplementation,
+    fallback_reason: Option<&str>,
+) -> CompactionSummarySource {
+    if fallback_reason.is_some() {
+        CompactionSummarySource::LocalFallback
+    } else if implementation == CompactionImplementation::Remote {
+        CompactionSummarySource::ProviderRemote
+    } else {
+        CompactionSummarySource::Local
+    }
+}
+
+fn compaction_error_code(error: &CompactionError) -> &'static str {
+    match error {
+        CompactionError::Runtime(ModelRuntimeError::UnsupportedCapability(_)) => {
+            "remote_capability_drift"
+        }
+        CompactionError::Runtime(ModelRuntimeError::ContextOverflow) => "remote_context_overflow",
+        CompactionError::Runtime(ModelRuntimeError::Cancelled) => "compaction_cancelled",
+        CompactionError::Runtime(_) => "remote_provider_failed",
+        CompactionError::QualityRejected(code) => code,
+        CompactionError::SourceOverflow => "compaction_source_overflow",
+        CompactionError::Store(_) => "compaction_store_failed",
+    }
+}
+
+fn provider_capability_revision(
+    settings: &LlmSettings,
+    capabilities: &hachimi_protocol::ProviderCapabilities,
+) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(serde_json::to_vec(&(settings, capabilities)).unwrap_or_default());
+    hasher
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
 }
 
 fn trim_oldest_source_group(source: &mut String) -> bool {
@@ -815,7 +949,7 @@ fn transcript_text(item: &TranscriptItem) -> Option<String> {
     };
     match &item.payload {
         User { text, .. } | Assistant { text } | Plan { text, .. } => Some(text.clone()),
-        Reasoning { summary } | Review { summary, .. } => Some(summary.clone()),
+        Reasoning { summary, .. } | Review { summary, .. } => Some(summary.clone()),
         ToolExecution {
             result: Some(result),
             ..
@@ -1084,6 +1218,7 @@ mod tests {
                                 name: None,
                                 tool_call_id: None,
                                 tool_calls: Vec::new(),
+                                input_images: Vec::new(),
                             }],
                             usage: TokenUsage {
                                 input_tokens: 100,

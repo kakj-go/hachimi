@@ -395,7 +395,7 @@ async fn production_supervisor_fails_closed_without_stdio_host_sandbox() {
 
 #[cfg(windows)]
 #[tokio::test]
-#[ignore = "requires the elevated Windows sandbox release environment"]
+#[ignore = "requires the standard-user Windows sandbox release environment"]
 async fn production_stdio_mcp_runs_restricted_and_cannot_connect_to_loopback() {
     let marker = std::env::var_os("HACHIMI_SANDBOX_MARKER").expect("sandbox marker env");
     let launcher = std::env::var_os("HACHIMI_SANDBOX_LAUNCHER").expect("launcher env");

@@ -1,4 +1,17 @@
 use super::*;
+use hachimi_agent::{
+    AgentRunCreateRequest, AgentRunFactory, AgentRunPriority, AgentRunRequest, ModelRuntime,
+};
+use hachimi_protocol::{
+    BehaviorMode, EntryProfile, ItemPayload, ItemStatus, ProviderAccountId, ProviderAccountRecord,
+    ProviderCapabilities, ProviderCapabilityProbeId, ProviderEndpointId, ProviderEndpointRecord,
+    ProviderProbeReport, ProviderProbeStatus, ProviderProtocolKind, ProviderRegistrySnapshot,
+    RunBudget, RunOrigin, RunPurpose, RunStatus, SessionContextBinding, SessionPermissionConfig,
+    SessionPermissionConfigRequest, SessionPermissionConfigUpdate, StructuredOutputMode,
+    TranscriptItemKind, WorkloadKind,
+};
+use sha2::{Digest, Sha256};
+use sqlx::Row;
 
 pub(super) fn avatar_source_is_unchanged(
     previous: &InspectedAvatar,
@@ -29,13 +42,105 @@ pub(super) fn get_llm_settings(
     state.llm_view()
 }
 
-pub(super) fn save_llm(
+pub(super) async fn save_llm(
     app: &AppHandle,
     state: &DesktopState,
     input: &LlmSettingsInput,
 ) -> Result<LlmSettingsView, CommandError> {
-    let settings = validate_input(input)
+    let runtime_features = state.control_plane.feature_flags().runtime_features;
+    validate_provider_feature_input(runtime_features, input)?;
+    let mut settings = validate_input(input)
         .map_err(|error| CommandError::operation("invalid_llm_settings", error))?;
+    if !runtime_features.provider_extensions {
+        settings.protocol = ProviderProtocolKind::ChatCompletions;
+        settings.compatibility_profile_id = "openai-strict".into();
+        settings.provider_endpoint_id = None;
+        settings.provider_account_id = None;
+        settings.embedding_model_name.clear();
+        settings.reasoning_summary = false;
+        settings.remote_compaction = false;
+        {
+            let mut app_settings = state.settings.write();
+            let previous = app_settings.llm.clone();
+            app_settings.llm = settings;
+            if let Err(error) = state.settings_store.save(&app_settings) {
+                app_settings.llm = previous;
+                return Err(CommandError::operation("settings_save_failed", error));
+            }
+        }
+        apply_secret_change(&state.api_key_store, input)
+            .map_err(|error| CommandError::operation("secret_store_failed", error))?;
+        let app_settings = state.settings.read().clone();
+        let _ = app.emit("settings-changed", &app_settings);
+        return state.llm_view();
+    }
+    let now = provider_now_ms();
+    let endpoint_id = settings
+        .provider_endpoint_id
+        .clone()
+        .unwrap_or_else(|| ProviderEndpointId::new("default-openai"));
+    let account_id = settings
+        .provider_account_id
+        .clone()
+        .unwrap_or_else(|| ProviderAccountId::new("default-openai"));
+    let existing_endpoint = state
+        .agent_store
+        .get_provider_endpoint(&endpoint_id)
+        .await
+        .map_err(|error| CommandError::operation("provider_endpoint_get_failed", error))?;
+    let endpoint = state
+        .agent_store
+        .upsert_provider_endpoint(
+            &ProviderEndpointRecord {
+                id: endpoint_id.clone(),
+                display_name: "Default OpenAI-compatible endpoint".into(),
+                base_url: settings.base_url.clone(),
+                compatibility_profile_id: settings.compatibility_profile_id.clone(),
+                enabled: true,
+                config_revision: existing_endpoint
+                    .as_ref()
+                    .map_or(1, |record| record.config_revision),
+                created_at_ms: existing_endpoint
+                    .as_ref()
+                    .map_or(now, |record| record.created_at_ms),
+                updated_at_ms: now,
+            },
+            existing_endpoint
+                .as_ref()
+                .map(|record| record.config_revision),
+        )
+        .await
+        .map_err(|error| CommandError::operation("provider_endpoint_save_failed", error))?;
+    let existing_account = state
+        .agent_store
+        .get_provider_account(&account_id)
+        .await
+        .map_err(|error| CommandError::operation("provider_account_get_failed", error))?;
+    let account = state
+        .agent_store
+        .upsert_provider_account(
+            &ProviderAccountRecord {
+                id: account_id.clone(),
+                endpoint_id: endpoint.id.clone(),
+                display_name: "Default account".into(),
+                secret_ref: "credential-manager:llm-api-key".into(),
+                enabled: true,
+                config_revision: existing_account
+                    .as_ref()
+                    .map_or(1, |record| record.config_revision),
+                created_at_ms: existing_account
+                    .as_ref()
+                    .map_or(now, |record| record.created_at_ms),
+                updated_at_ms: now,
+            },
+            existing_account
+                .as_ref()
+                .map(|record| record.config_revision),
+        )
+        .await
+        .map_err(|error| CommandError::operation("provider_account_save_failed", error))?;
+    settings.provider_endpoint_id = Some(endpoint.id);
+    settings.provider_account_id = Some(account.id);
     {
         let mut app_settings = state.settings.write();
         let previous = app_settings.llm.clone();
@@ -53,14 +158,83 @@ pub(super) fn save_llm(
 }
 
 #[tauri::command]
-pub(super) fn save_llm_settings(
+pub(super) async fn save_llm_settings(
     window: WebviewWindow,
     app: AppHandle,
     state: State<'_, DesktopState>,
     input: LlmSettingsInput,
 ) -> Result<LlmSettingsView, CommandError> {
     state.authorize(&window, ControlMethod::LlmWrite)?;
-    save_llm(&app, &state, &input)
+    save_llm(&app, &state, &input).await
+}
+
+#[tauri::command]
+pub(super) async fn get_provider_registry(
+    window: WebviewWindow,
+    state: State<'_, DesktopState>,
+) -> Result<ProviderRegistrySnapshot, CommandError> {
+    state.authorize(&window, ControlMethod::LlmRead)?;
+    if !state
+        .control_plane
+        .feature_flags()
+        .runtime_features
+        .provider_extensions
+    {
+        return Err(CommandError::new("feature_disabled", "provider_extensions"));
+    }
+    let profiles = state
+        .agent_store
+        .list_provider_compatibility_profiles()
+        .await
+        .map_err(|error| CommandError::operation("provider_profiles_list_failed", error))?;
+    let endpoints = state
+        .agent_store
+        .list_provider_endpoints()
+        .await
+        .map_err(|error| CommandError::operation("provider_endpoints_list_failed", error))?;
+    let accounts = state
+        .agent_store
+        .list_provider_accounts(None)
+        .await
+        .map_err(|error| CommandError::operation("provider_accounts_list_failed", error))?;
+    let mut latest_probes = Vec::new();
+    for endpoint in &endpoints {
+        if let Some(probe) = state
+            .agent_store
+            .latest_provider_probe(&endpoint.id)
+            .await
+            .map_err(|error| CommandError::operation("provider_probe_get_failed", error))?
+        {
+            latest_probes.push(probe);
+        }
+    }
+    Ok(ProviderRegistrySnapshot {
+        profiles,
+        endpoints,
+        accounts,
+        latest_probes,
+    })
+}
+
+fn validate_provider_feature_input(
+    features: hachimi_core::RuntimeFeatureSet,
+    input: &LlmSettingsInput,
+) -> Result<(), CommandError> {
+    if !features.provider_extensions
+        && (input.protocol != ProviderProtocolKind::ChatCompletions
+            || !input.embedding_model_name.trim().is_empty()
+            || input.reasoning_summary
+            || input.remote_compaction)
+    {
+        return Err(CommandError::new("feature_disabled", "provider_extensions"));
+    }
+    if !features.provider_remote_context && (input.reasoning_summary || input.remote_compaction) {
+        return Err(CommandError::new(
+            "feature_disabled",
+            "provider_remote_context",
+        ));
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -72,15 +246,68 @@ pub(super) async fn save_and_test_llm_settings(
 ) -> Result<LlmTestResult, CommandError> {
     state.authorize(&window, ControlMethod::LlmWrite)?;
     state.authorize(&window, ControlMethod::LlmTest)?;
-    save_llm(&app, &state, &input)?;
+    save_llm(&app, &state, &input).await?;
     let settings = state.settings.read().llm.clone();
     let secret = state
         .api_key_store
         .get()
         .map_err(|error| CommandError::operation("secret_store_failed", error))?;
-    test_connection(&settings, secret.as_deref())
-        .await
-        .map_err(|error| CommandError::operation("llm_test_failed", error))
+    let tested = test_connection(&settings, secret.as_deref()).await;
+    let capabilities = hachimi_llm::OpenAiCompatibleRuntime::tool_calling(settings.clone(), None)
+        .map(|runtime| runtime.capabilities())
+        .unwrap_or_default();
+    let mut protocols = vec![settings.protocol];
+    if !settings.embedding_model_name.trim().is_empty() {
+        protocols.push(ProviderProtocolKind::Embeddings);
+    }
+    let capability_revision = provider_capability_revision(&settings, &capabilities);
+    if let Some(endpoint_id) = settings.provider_endpoint_id.clone() {
+        let report = ProviderProbeReport {
+            id: ProviderCapabilityProbeId::random(),
+            endpoint_id,
+            account_id: settings.provider_account_id.clone(),
+            status: if tested.is_ok() {
+                ProviderProbeStatus::Succeeded
+            } else {
+                ProviderProbeStatus::Failed
+            },
+            protocols,
+            capabilities,
+            capability_revision,
+            stable_error_code: tested
+                .as_ref()
+                .err()
+                .map(|_| "provider_conformance_failed".into()),
+            probed_at_ms: provider_now_ms(),
+        };
+        state
+            .agent_store
+            .record_provider_probe(&report)
+            .await
+            .map_err(|error| CommandError::operation("provider_probe_save_failed", error))?;
+    }
+    tested.map_err(|error| CommandError::operation("llm_test_failed", error))
+}
+
+fn provider_capability_revision(
+    settings: &hachimi_protocol::LlmSettings,
+    capabilities: &ProviderCapabilities,
+) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(serde_json::to_vec(&(settings, capabilities)).unwrap_or_default());
+    hasher
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+fn provider_now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .min(i64::MAX as u128) as i64
 }
 
 #[tauri::command]
@@ -527,14 +754,145 @@ pub(super) fn profile_supports_pet_voice(profile: &AvatarAdaptationProfile) -> b
     !matches!(profile.lip_sync, LipSyncCapability::None)
 }
 
+fn entry_profile_key(profile: EntryProfile) -> &'static str {
+    match profile {
+        EntryProfile::Workbench => "workbench",
+        EntryProfile::PetConversation => "pet_conversation",
+        EntryProfile::DesktopControl => "desktop_control",
+    }
+}
+
+async fn read_session_permission_config(
+    store: &AgentStore,
+    session_id: Option<&SessionId>,
+    entry_profile: EntryProfile,
+) -> Result<SessionPermissionConfig, CommandError> {
+    if let Some(session_id) = session_id {
+        let session = store
+            .get_session(session_id)
+            .await
+            .map_err(|error| CommandError::operation("session_permission_lookup_failed", error))?
+            .ok_or_else(|| CommandError::new("session_not_found", "Session does not exist"))?;
+        if session.entry_profile != entry_profile {
+            return Err(CommandError::new(
+                "session_permission_profile_mismatch",
+                "Session entry profile does not match the permission request",
+            ));
+        }
+        let scope_key = format!("session:{}", session_id.as_str());
+        if let Some(row) =
+            sqlx::query("SELECT config_json FROM session_permission_configs WHERE scope_key = ?")
+                .bind(scope_key)
+                .fetch_optional(store.pool())
+                .await
+                .map_err(|error| {
+                    CommandError::operation("session_permission_lookup_failed", error)
+                })?
+        {
+            return serde_json::from_str(row.get("config_json")).map_err(|error| {
+                CommandError::operation("session_permission_decode_failed", error)
+            });
+        }
+    }
+    let profile_key = entry_profile_key(entry_profile);
+    let scope_key = format!("profile:{profile_key}");
+    let row = sqlx::query("SELECT config_json FROM session_permission_configs WHERE scope_key = ?")
+        .bind(scope_key)
+        .fetch_optional(store.pool())
+        .await
+        .map_err(|error| CommandError::operation("session_permission_lookup_failed", error))?;
+    row.map(|row| serde_json::from_str(row.get("config_json")))
+        .transpose()
+        .map_err(|error| CommandError::operation("session_permission_decode_failed", error))
+        .map(|value| value.unwrap_or_default())
+}
+
+fn authorize_session_permission(
+    window: &WebviewWindow,
+    state: &DesktopState,
+) -> Result<(), CommandError> {
+    match window.label() {
+        "pet" => {
+            state.authorize(window, ControlMethod::LlmChat)?;
+        }
+        "workbench" => {
+            state.authorize(window, ControlMethod::WorkbenchWindow)?;
+        }
+        _ => {
+            return Err(CommandError::new(
+                "unknown_window",
+                "untrusted permission client",
+            ));
+        }
+    }
+    Ok(())
+}
+
 #[tauri::command]
-pub(super) fn start_pet_turn(
+pub(super) async fn get_session_permission_config(
+    window: WebviewWindow,
+    state: State<'_, DesktopState>,
+    request: SessionPermissionConfigRequest,
+) -> Result<SessionPermissionConfig, CommandError> {
+    authorize_session_permission(&window, &state)?;
+    read_session_permission_config(
+        &state.agent_store,
+        request.session_id.as_ref(),
+        request.entry_profile,
+    )
+    .await
+}
+
+#[tauri::command]
+pub(super) async fn update_session_permission_config(
+    window: WebviewWindow,
+    state: State<'_, DesktopState>,
+    request: SessionPermissionConfigUpdate,
+) -> Result<SessionPermissionConfig, CommandError> {
+    authorize_session_permission(&window, &state)?;
+    if let Some(session_id) = request.session_id.as_ref() {
+        let session = state
+            .agent_store
+            .get_session(session_id)
+            .await
+            .map_err(|error| CommandError::operation("session_permission_lookup_failed", error))?
+            .ok_or_else(|| CommandError::new("session_not_found", "Session does not exist"))?;
+        if session.entry_profile != request.entry_profile {
+            return Err(CommandError::new(
+                "session_permission_profile_mismatch",
+                "Session entry profile does not match the permission update",
+            ));
+        }
+    }
+    let profile = entry_profile_key(request.entry_profile);
+    let scope_key = request.session_id.as_ref().map_or_else(
+        || format!("profile:{profile}"),
+        |session_id| format!("session:{}", session_id.as_str()),
+    );
+    sqlx::query(
+        "INSERT INTO session_permission_configs(scope_key, session_id, entry_profile, config_json, updated_at_ms) VALUES(?, ?, ?, ?, ?) ON CONFLICT(scope_key) DO UPDATE SET config_json = excluded.config_json, updated_at_ms = excluded.updated_at_ms",
+    )
+    .bind(scope_key)
+    .bind(request.session_id.as_ref().map(SessionId::as_str))
+    .bind(profile)
+    .bind(serde_json::to_string(&request.config).map_err(|error| {
+        CommandError::operation("session_permission_encode_failed", error)
+    })?)
+    .bind(i64::try_from(epoch_millis()).unwrap_or(i64::MAX))
+    .execute(state.agent_store.pool())
+    .await
+    .map_err(|error| CommandError::operation("session_permission_store_failed", error))?;
+    Ok(request.config)
+}
+
+#[tauri::command]
+pub(super) async fn start_pet_turn(
     window: WebviewWindow,
     app: AppHandle,
     state: State<'_, DesktopState>,
     request: PetTurnRequest,
 ) -> Result<(), CommandError> {
-    state.authorize(&window, ControlMethod::LlmChat)?;
+    let client = state.authorize(&window, ControlMethod::LlmChat)?;
     require_window(&window, "pet")?;
     let text = request.text.trim().to_owned();
     if text.is_empty() || text.chars().count() > 8_000 {
@@ -544,14 +902,59 @@ pub(super) fn start_pet_turn(
         ));
     }
     let settings = state.settings.read().llm.clone();
-    let secret = state
-        .api_key_store
-        .get()
-        .map_err(|error| CommandError::operation("secret_store_failed", error))?;
     cancel_pet_activity(&app, &state, false);
+    let created_at_ms = i64::try_from(epoch_millis()).unwrap_or(i64::MAX);
+    let existing_session = state
+        .agent_store
+        .latest_session_for_entry_profile(EntryProfile::PetConversation)
+        .await
+        .map_err(|error| CommandError::operation("pet_session_lookup_failed", error))?;
+    let permission_config = read_session_permission_config(
+        &state.agent_store,
+        existing_session.as_ref().map(|session| &session.id),
+        EntryProfile::PetConversation,
+    )
+    .await?;
+    let factory = AgentRunFactory::new(state.agent_store.clone());
+    let create_request = AgentRunCreateRequest {
+        principal: client.client_id.0.clone(),
+        idempotency_key: format!("pet:{}", request.run_id),
+        context: SessionContextBinding::General,
+        origin: RunOrigin::Interactive,
+        title: text.chars().take(80).collect(),
+        prompt: text,
+        attachment_ids: Vec::new(),
+        parent_session_id: None,
+        source_run_id: None,
+        purpose: RunPurpose::Task,
+        model_snapshot: settings.clone(),
+        entry_profile: EntryProfile::PetConversation,
+        workload_override: Some(WorkloadKind::General),
+        behavior_mode: BehaviorMode::Default,
+        execution_target: None,
+        approval_policy: permission_config.approval_policy,
+        permission_profile: permission_config.permission_profile,
+        budget: RunBudget::default(),
+        requested_capabilities: pet_requested_capabilities(&settings),
+        created_at_ms,
+    };
+    let created = match existing_session {
+        Some(session) => factory.create_in_session(create_request, session).await,
+        None => factory.create(create_request).await,
+    }
+    .map_err(|error| CommandError::operation("pet_run_create_failed", error))?;
+    if created.run.status != RunStatus::Queued {
+        return Err(CommandError::new(
+            "pet_run_not_queued",
+            "the idempotent Pet Run is no longer queued",
+        ));
+    }
     let cancellation = CancellationToken::new();
     *state.pet_run.lock() = Some(ActivePetRun {
         run_id: request.run_id.clone(),
+        session_id: created.session.id.clone(),
+        agent_run_id: created.run.id.clone(),
+        run_generation: created.run.generation,
         cancellation: cancellation.clone(),
     });
     app.emit_to(
@@ -559,6 +962,8 @@ pub(super) fn start_pet_turn(
         PET_TURN_EVENT,
         PetTurnEvent::Started {
             run_id: request.run_id.clone(),
+            session_id: created.session.id.clone(),
+            agent_run_id: created.run.id.clone(),
         },
     )?;
     let avatar_supports_lip_sync = state
@@ -569,81 +974,135 @@ pub(super) fn start_pet_turn(
     let voice_streaming =
         avatar_supports_lip_sync && state.voice_runtime.begin_pet_turn(request.run_id.clone());
 
+    let mut capability_grants = hachimi_policy::expand_permission_profile(
+        permission_config.permission_profile,
+        BehaviorMode::Default,
+        created.session.id.clone(),
+        created.run.id.clone(),
+        String::new(),
+    );
+    capability_grants.source = "session_permission_config".into();
+    let executor_request = AgentRunRequest {
+        principal: client.client_id.0,
+        session: created.session.clone(),
+        run: created.run.clone(),
+        priority: AgentRunPriority::Interactive,
+        capability_grants,
+        sandbox_snapshot: state.sandbox_snapshot().report,
+        attachment_ids: Vec::new(),
+        skill_allowlist: Vec::new(),
+        mcp_tool_allowlist: Vec::new(),
+        run_tool_allowlist: None,
+        schedule_host_grant: None,
+        workload_override: Some(WorkloadKind::General),
+        recovery_checkpoint: None,
+        parent_agent_task_id: None,
+        parent_run_id: None,
+        agent_depth: 0,
+    };
     let task_app = app.clone();
-    let run_id = request.run_id;
+    let presentation_run_id = request.run_id;
+    let session_id = created.session.id;
+    let agent_run_id = created.run.id;
+    let run_generation = created.run.generation;
     tauri::async_runtime::spawn(async move {
-        let delta_app = task_app.clone();
-        let delta_run_id = run_id.clone();
-        let result = stream_pet_turn(
-            &settings,
-            secret.as_deref(),
-            &text,
-            &cancellation,
-            move |delta| {
-                if voice_streaming {
-                    delta_app
-                        .state::<DesktopState>()
-                        .voice_runtime
-                        .push_pet_delta(&delta_run_id, delta);
-                } else {
-                    let _ = delta_app.emit_to(
-                        "pet",
-                        PET_TURN_EVENT,
-                        PetTurnEvent::TextDelta {
-                            run_id: delta_run_id.clone(),
-                            delta: delta.to_owned(),
-                        },
-                    );
-                }
-            },
-        )
-        .await;
+        let result = if cancellation.is_cancelled() {
+            Err(hachimi_agent::AgentExecutionError::Preparation(
+                "Pet Run was cancelled before dispatch".into(),
+            ))
+        } else {
+            task_app
+                .state::<DesktopState>()
+                .agent_executor
+                .clone()
+                .execute(executor_request)
+                .await
+        };
         let state = task_app.state::<DesktopState>();
-        let is_current = state
-            .pet_run
-            .lock()
-            .as_ref()
-            .is_some_and(|active| active.run_id == run_id);
+        let is_current = state.pet_run.lock().as_ref().is_some_and(|active| {
+            active.run_id == presentation_run_id
+                && active.agent_run_id == agent_run_id
+                && active.run_generation == run_generation
+        });
         if !is_current {
             return;
         }
         state.pet_run.lock().take();
-        match result {
-            Ok(text) => {
-                let speech_queued = voice_streaming && state.voice_runtime.finish_pet_turn(&run_id);
-                let _ = task_app.emit_to(
-                    "pet",
-                    PET_TURN_EVENT,
-                    PetTurnEvent::Completed {
-                        run_id: run_id.clone(),
-                        text,
-                        speech_queued,
-                    },
-                );
-            }
-            Err(LlmError::Cancelled) => {
-                state.voice_runtime.stop();
-                let _ = task_app.emit_to("pet", PET_TURN_EVENT, PetTurnEvent::Cancelled { run_id });
-            }
-            Err(error) => {
-                state.voice_runtime.stop();
-                let _ = task_app.emit_to(
-                    "pet",
-                    PET_TURN_EVENT,
-                    PetTurnEvent::Failed {
-                        run_id,
-                        code: "llm_request_failed".into(),
-                        message: error.to_string(),
-                    },
-                );
-            }
+        let persisted_run = state
+            .agent_store
+            .get_run(&agent_run_id)
+            .await
+            .ok()
+            .flatten();
+        if result.is_ok()
+            && persisted_run
+                .as_ref()
+                .is_some_and(|run| run.status == RunStatus::Succeeded)
+            && let Some(output) =
+                final_pet_output(&state.agent_store, &session_id, &agent_run_id).await
+        {
+            let speech_queued = if voice_streaming && output.speech_allowed {
+                state
+                    .voice_runtime
+                    .push_pet_delta(&presentation_run_id, &output.text);
+                state.voice_runtime.finish_pet_turn(&presentation_run_id)
+            } else {
+                if voice_streaming {
+                    state.voice_runtime.stop();
+                }
+                false
+            };
+            let _ = task_app.emit_to(
+                "pet",
+                PET_TURN_EVENT,
+                PetTurnEvent::Completed {
+                    run_id: presentation_run_id,
+                    session_id,
+                    agent_run_id,
+                    text: output.text,
+                    speech_queued,
+                },
+            );
+            return;
+        }
+        state.voice_runtime.stop();
+        if cancellation.is_cancelled()
+            || persisted_run.as_ref().is_some_and(|run| {
+                matches!(run.status, RunStatus::Cancelling | RunStatus::Cancelled)
+            })
+        {
+            let _ = task_app.emit_to(
+                "pet",
+                PET_TURN_EVENT,
+                PetTurnEvent::Cancelled {
+                    run_id: presentation_run_id,
+                    session_id,
+                    agent_run_id,
+                },
+            );
+        } else {
+            let message = result.err().map_or_else(
+                || "Agent Run completed without a stable Assistant item".into(),
+                |error| error.to_string(),
+            );
+            let _ = task_app.emit_to(
+                "pet",
+                PET_TURN_EVENT,
+                PetTurnEvent::Failed {
+                    run_id: presentation_run_id,
+                    session_id,
+                    agent_run_id,
+                    code: "agent_run_failed".into(),
+                    message,
+                },
+            );
         }
     });
     Ok(())
 }
 
 #[tauri::command]
-pub(super) fn cancel_pet_turn(
+pub(super) async fn cancel_pet_turn(
     window: WebviewWindow,
     app: AppHandle,
     state: State<'_, DesktopState>,
@@ -652,6 +1111,140 @@ pub(super) fn cancel_pet_turn(
     require_window(&window, "pet")?;
     cancel_pet_activity(&app, &state, true);
     Ok(())
+}
+
+fn pet_requested_capabilities(settings: &hachimi_protocol::LlmSettings) -> ProviderCapabilities {
+    let structured = settings.structured_output_mode != StructuredOutputMode::Disabled;
+    ProviderCapabilities {
+        tool_calls: true,
+        parallel_tool_calls: true,
+        strict_json_schema: structured,
+        output_schema: structured,
+        text_input: true,
+        image_input: true,
+        streaming_usage: true,
+        http_transport: true,
+        context_window: (settings.max_input_tokens > 0)
+            .then_some(u64::from(settings.max_input_tokens)),
+        max_output_tokens: (settings.max_output_tokens > 0)
+            .then_some(u64::from(settings.max_output_tokens)),
+        ..ProviderCapabilities::default()
+    }
+}
+
+struct PetStableOutput {
+    text: String,
+    speech_allowed: bool,
+}
+
+async fn final_pet_output(
+    store: &AgentStore,
+    session_id: &SessionId,
+    run_id: &RunId,
+) -> Option<PetStableOutput> {
+    let transcript = store.list_transcript(session_id).await.ok()?;
+    let contains_secret_input = transcript.iter().any(|item| {
+        item.run_id.as_ref() == Some(run_id) && pet_payload_contains_secret_input(&item.payload)
+    });
+    let text = transcript.into_iter().rev().find_map(|item| {
+        if item.run_id.as_ref() != Some(run_id)
+            || item.kind != TranscriptItemKind::Assistant
+            || item.status != ItemStatus::Completed
+        {
+            return None;
+        }
+        match item.payload {
+            ItemPayload::Assistant { text } => Some(text),
+            _ => None,
+        }
+    })?;
+    Some(PetStableOutput {
+        text,
+        speech_allowed: !contains_secret_input,
+    })
+}
+
+fn pet_payload_contains_secret_input(payload: &ItemPayload) -> bool {
+    matches!(
+        payload,
+        ItemPayload::UserInputRequest { questions, .. }
+            if questions.iter().any(|question| question.secret)
+    )
+}
+
+#[cfg(test)]
+mod pet_output_tests {
+    use super::*;
+
+    fn provider_input(protocol: ProviderProtocolKind) -> LlmSettingsInput {
+        LlmSettingsInput {
+            base_url: "https://api.openai.com/v1".into(),
+            model_name: "gpt-fixture".into(),
+            protocol,
+            compatibility_profile_id: "openai-strict".into(),
+            provider_endpoint_id: None,
+            provider_account_id: None,
+            embedding_model_name: String::new(),
+            reasoning_summary: false,
+            remote_compaction: false,
+            max_input_tokens: 0,
+            max_output_tokens: 0,
+            structured_output_mode: StructuredOutputMode::Auto,
+            api_key: None,
+            clear_api_key: false,
+        }
+    }
+
+    #[test]
+    fn provider_feature_switches_keep_only_legacy_chat_and_gate_remote_context() {
+        let mut features = hachimi_core::RuntimeFeatureSet::all_enabled();
+        features.provider_extensions = false;
+        assert!(
+            validate_provider_feature_input(
+                features,
+                &provider_input(ProviderProtocolKind::ChatCompletions)
+            )
+            .is_ok()
+        );
+        let error = validate_provider_feature_input(
+            features,
+            &provider_input(ProviderProtocolKind::Responses),
+        )
+        .expect_err("responses disabled");
+        assert_eq!(error.code, "feature_disabled");
+        assert_eq!(error.message, "provider_extensions");
+
+        features.provider_extensions = true;
+        features.provider_remote_context = false;
+        let mut remote = provider_input(ProviderProtocolKind::Responses);
+        remote.remote_compaction = true;
+        let error = validate_provider_feature_input(features, &remote)
+            .expect_err("remote context disabled");
+        assert_eq!(error.code, "feature_disabled");
+        assert_eq!(error.message, "provider_remote_context");
+    }
+
+    #[test]
+    fn secret_user_input_disables_pet_speech_presentation() {
+        let payload = ItemPayload::UserInputRequest {
+            request_id: hachimi_protocol::UserInputRequestId::from("secret-input"),
+            questions: vec![hachimi_protocol::UserInputQuestion {
+                id: "secret".into(),
+                header: "Secret".into(),
+                prompt: "Token".into(),
+                options: Vec::new(),
+                secret: true,
+                auto_resolution_ms: None,
+                default_answer: None,
+            }],
+        };
+        assert!(pet_payload_contains_secret_input(&payload));
+        assert!(!pet_payload_contains_secret_input(
+            &ItemPayload::Assistant {
+                text: "safe".into(),
+            }
+        ));
+    }
 }
 
 #[tauri::command]

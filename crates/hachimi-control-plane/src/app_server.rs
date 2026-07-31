@@ -15,6 +15,7 @@
 use std::sync::Arc;
 
 use hachimi_approvals::ApprovalBroker;
+use hachimi_core::WindowKind;
 use hachimi_protocol::{
     ApprovalRequestRecord, ApprovalResolution, ClientContext, ClientId, ControlInitializeRequest,
     ControlInitializeResponse, EventSubscriptionId, EventSubscriptionRequest,
@@ -143,6 +144,11 @@ impl AppServer {
     ) -> Result<AppServerResponse, AppServerError> {
         let method = match &request {
             AppServerRequest::Domain(request) => request.control_method(),
+            AppServerRequest::ResolveApproval(_) | AppServerRequest::ResolveUserInput(_)
+                if context.client.window_kind == WindowKind::Pet =>
+            {
+                hachimi_protocol::ControlMethod::LlmChat
+            }
             _ => hachimi_protocol::ControlMethod::WorkbenchWindow,
         };
         self.authorize(context, method)?;
@@ -260,7 +266,9 @@ mod tests {
         AppServerDomainResponse, DomainFuture, FsAppRequest, FsAppResponse,
     };
     use hachimi_core::{FeatureFlags, WindowKind};
-    use hachimi_protocol::{MutationContext, SessionId, SessionMetadataUpdateRequest};
+    use hachimi_protocol::{
+        ApprovalId, ApprovalStatus, MutationContext, SessionId, SessionMetadataUpdateRequest,
+    };
     use hachimi_storage::AgentStore;
 
     #[tokio::test]
@@ -307,6 +315,46 @@ mod tests {
             .await
             .expect_err("missing session should be rejected");
         assert!(matches!(error, AppServerError::Lifecycle(_)));
+    }
+
+    #[tokio::test]
+    async fn pet_interaction_resolution_uses_the_narrow_llm_chat_scope() {
+        let store = AgentStore::connect_in_memory().await.expect("store");
+        let lifecycle = AgentLifecycleService::new(
+            store,
+            FeatureFlags::all_disabled(),
+            hachimi_protocol::SandboxCapabilityReport {
+                backend: "test".into(),
+                readiness: hachimi_protocol::SandboxReadiness::Unavailable,
+                os_enforced: false,
+                filesystem_enforced: false,
+                process_enforced: false,
+                network_enforced: false,
+                version: None,
+                stable_error_code: None,
+                diagnostics: Vec::new(),
+            },
+        );
+        let server = AppServer::new(Arc::new(ControlPlane::default()), lifecycle);
+        let context = AppServerContext {
+            client: ClientContext::for_window(WindowKind::Pet),
+            principal: "window:pet".into(),
+        };
+        let error = server
+            .dispatch(
+                &context,
+                AppServerRequest::ResolveApproval(ApprovalResolution {
+                    approval_id: ApprovalId::from("approval"),
+                    decision: ApprovalStatus::Approved,
+                    parameter_hash: "parameter".into(),
+                    run_generation: 1,
+                    resolved_by: String::new(),
+                    resolved_at_ms: 1,
+                }),
+            )
+            .await
+            .expect_err("the missing test broker should be reached after authorization");
+        assert!(matches!(error, AppServerError::Unsupported));
     }
 
     #[derive(Debug)]

@@ -167,7 +167,7 @@ fn transcript_text(item: &TranscriptItem) -> Option<String> {
     use hachimi_protocol::ItemPayload;
     match &item.payload {
         ItemPayload::User { text, .. } | ItemPayload::Assistant { text } => Some(text.clone()),
-        ItemPayload::Reasoning { summary } => Some(summary.clone()),
+        ItemPayload::Reasoning { summary, .. } => Some(summary.clone()),
         ItemPayload::Plan { text, .. } => Some(text.clone()),
         ItemPayload::ToolExecution {
             result: Some(result),

@@ -28,24 +28,48 @@ use thiserror::Error;
 static MIGRATOR: Migrator = sqlx::migrate!("./migrations");
 
 mod active_events;
+mod agent_tasks;
+mod audit;
+mod desktop_control;
+#[cfg(test)]
+mod desktop_control_tests;
 mod extensions;
+mod git_forge;
+#[cfg(test)]
+mod git_forge_tests;
 mod lifecycle;
 mod mcp_cache;
+mod migration_safety;
 mod permissions;
+mod plugin_hooks;
 mod process;
+mod project;
+mod provider_registry;
+mod recovery;
 mod review;
 mod row_decode;
 mod run_bundle;
 mod schedule;
+mod schedule_event;
 pub(crate) mod side_effects;
+mod transaction_helpers;
 mod usage;
 mod user_input;
 pub(crate) mod workspace_diff;
 
+pub use agent_tasks::AgentTaskExecutionClaim;
+pub use audit::AuditMetadataRecord;
+pub use desktop_control::DesktopControlActionLedgerInput;
 pub use extensions::{SkillFileIndexRecord, StoredSkillRecord};
+pub use plugin_hooks::{
+    PluginHookEventRecord, PluginHookRuntime, PluginHookRuntimeFuture, PluginHookSubscription,
+};
+pub use recovery::RecoveryToolFence;
 use row_decode::*;
 pub use run_bundle::CreatedAgentRun;
 pub use schedule::{IdempotentMutationClaim, ScheduleInvocationClaim};
+pub use schedule_event::{ScheduleEventIngestClaim, ScheduleEventLaunchClaim};
+use transaction_helpers::*;
 pub use workspace_diff::{ManagedRunDiffFile, RunFileBaselineRecord};
 
 #[derive(Debug, Error)]
@@ -101,6 +125,8 @@ pub enum AgentStoreError {
     ScheduleNotFound(hachimi_protocol::ScheduleId),
     #[error("schedule config revision precondition failed")]
     ScheduleRevisionConflict,
+    #[error("schedule event id was reused with a different fingerprint")]
+    ScheduleEventConflict,
     #[error("idempotency key was already used for another resource")]
     IdempotencyConflict,
     #[error("schedule grant does not exist: {0}")]
@@ -134,17 +160,41 @@ pub enum AgentStoreError {
     CompactionSequenceOutOfRange,
     #[error("MCP server does not exist: {0}")]
     McpServerNotFound(McpServerId),
+    #[error("plugin hook runtime failed closed: {0}")]
+    PluginHook(String),
     #[error("invalid MCP server configuration: {0}")]
     InvalidMcpServerConfiguration(&'static str),
     #[error("Skill does not exist: {0}")]
     SkillNotFound(hachimi_protocol::SkillId),
     #[error("illegal run transition from {from:?} to {to:?}")]
     InvalidRunTransition { from: RunStatus, to: RunStatus },
+    #[error("run recovery does not exist: {0}")]
+    RunRecoveryNotFound(hachimi_protocol::RunRecoveryId),
+    #[error("run recovery decision is stale or not allowed")]
+    InvalidRunRecoveryDecision,
+    #[error("provider compatibility profile does not exist: {0}")]
+    ProviderProfileNotFound(String),
+    #[error("provider endpoint does not exist: {0}")]
+    ProviderEndpointNotFound(hachimi_protocol::ProviderEndpointId),
+    #[error("provider endpoint config revision precondition failed")]
+    ProviderRevisionConflict,
+    #[error("provider account does not exist: {0}")]
+    ProviderAccountNotFound(hachimi_protocol::ProviderAccountId),
+    #[error("agent task does not exist: {0}")]
+    AgentTaskNotFound(hachimi_protocol::AgentTaskId),
+    #[error("agent task lineage, budget, depth, or concurrency limit failed")]
+    AgentTaskLimitExceeded,
+    #[error("illegal agent task state transition")]
+    InvalidAgentTaskTransition,
+    #[error("invalid or stale Forge operation")]
+    InvalidForgeOperation,
     #[error("database path has no usable parent")]
     InvalidPath,
+    #[error("database migration lock remained busy for 30 seconds")]
+    DatabaseMigrationBusy,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RecoveryReport {
     pub interrupted_runs: u64,
     pub lost_tasks: u64,
@@ -154,6 +204,8 @@ pub struct RecoveryReport {
     pub stopped_mcp_servers: u64,
     pub indeterminate_side_effects: u64,
     pub cancelled_side_effect_claims: u64,
+    pub auto_resume_run_ids: Vec<RunId>,
+    pub awaiting_decision_run_ids: Vec<RunId>,
 }
 
 /// Storage-private attachment metadata used by the trusted attachment host.
@@ -169,28 +221,13 @@ pub struct AgentStore {
     pool: SqlitePool,
     managed_artifacts: Arc<ManagedArtifactRoot>,
     active_events: Arc<active_events::ActiveRunEvents>,
+    plugin_hooks: Arc<plugin_hooks::PluginHookRuntimeSlot>,
 }
 
 #[derive(Debug)]
 struct ManagedArtifactRoot {
     path: PathBuf,
     transient: bool,
-}
-
-/// Metadata-only audit row.  Keeping the values together prevents callers
-/// from accidentally omitting the run fencing fields and keeps the storage
-/// API below clippy's argument-count limit.
-#[derive(Debug, Clone)]
-pub struct AuditMetadataRecord {
-    pub principal: String,
-    pub session_id: Option<SessionId>,
-    pub run_id: Option<RunId>,
-    pub run_generation: Option<u64>,
-    pub operation: String,
-    pub target_summary: String,
-    pub decision: String,
-    pub result_code: String,
-    pub created_at_ms: i64,
 }
 
 impl Drop for ManagedArtifactRoot {
@@ -214,27 +251,6 @@ impl Drop for ManagedArtifactRoot {
 }
 
 impl AgentStore {
-    pub async fn append_audit_metadata(
-        &self,
-        record: AuditMetadataRecord,
-    ) -> Result<(), AgentStoreError> {
-        sqlx::query(
-            "INSERT INTO audit_events (principal, session_id, run_id, run_generation, operation, target_summary, decision, result_code, created_at_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        )
-        .bind(record.principal)
-        .bind(record.session_id.as_ref().map(SessionId::as_str))
-        .bind(record.run_id.as_ref().map(RunId::as_str))
-        .bind(record.run_generation.map(|value| i64::try_from(value).unwrap_or(i64::MAX)))
-        .bind(record.operation)
-        .bind(record.target_summary)
-        .bind(record.decision)
-        .bind(record.result_code)
-        .bind(record.created_at_ms)
-        .execute(&self.pool)
-        .await?;
-        Ok(())
-    }
-
     pub async fn connect(path: impl AsRef<Path>) -> Result<Self, AgentStoreError> {
         let path = path.as_ref();
         let parent = path.parent().ok_or(AgentStoreError::InvalidPath)?;
@@ -246,7 +262,13 @@ impl AgentStore {
             .journal_mode(SqliteJournalMode::Wal)
             .synchronous(SqliteSynchronous::Normal)
             .busy_timeout(Duration::from_secs(5));
-        Self::connect_options(options, parent.join("agent-artifacts"), false).await
+        Self::connect_options(
+            options,
+            parent.join("agent-artifacts"),
+            false,
+            Some(path.to_path_buf()),
+        )
+        .await
     }
 
     pub async fn connect_in_memory() -> Result<Self, AgentStoreError> {
@@ -256,13 +278,14 @@ impl AgentStore {
         let root = std::env::temp_dir()
             .join("hachimi-agent-artifacts")
             .join(format!("memory-{}", uuid::Uuid::now_v7()));
-        Self::connect_options(options, root, true).await
+        Self::connect_options(options, root, true, None).await
     }
 
     async fn connect_options(
         options: SqliteConnectOptions,
         managed_artifact_root: PathBuf,
         transient: bool,
+        database_path: Option<PathBuf>,
     ) -> Result<Self, AgentStoreError> {
         // A single connection makes the in-memory and file-backed behavior identical and gives
         // session event sequence allocation deterministic serialization.
@@ -270,7 +293,7 @@ impl AgentStore {
             .max_connections(1)
             .connect_with(options)
             .await?;
-        MIGRATOR.run(&pool).await?;
+        migration_safety::run_migrations(&pool, database_path.as_deref(), &MIGRATOR).await?;
         std::fs::create_dir_all(&managed_artifact_root)?;
         Ok(Self {
             pool,
@@ -279,6 +302,7 @@ impl AgentStore {
                 transient,
             }),
             active_events: Arc::new(active_events::ActiveRunEvents::new()),
+            plugin_hooks: Arc::new(plugin_hooks::PluginHookRuntimeSlot::default()),
         })
     }
 
@@ -287,194 +311,11 @@ impl AgentStore {
         &self.pool
     }
 
-    pub async fn create_project(
-        &self,
-        project: &ProjectRecord,
-    ) -> Result<ProjectRecord, AgentStoreError> {
-        sqlx::query(
-            "INSERT INTO projects (id, display_name, root_path, git_root, trusted, created_at_ms, updated_at_ms) VALUES (?, ?, ?, ?, ?, ?, ?)",
-        )
-        .bind(project.id.as_str())
-        .bind(&project.display_name)
-        .bind(&project.root_path)
-        .bind(&project.git_root)
-        .bind(project.trusted)
-        .bind(project.created_at_ms)
-        .bind(project.updated_at_ms)
-        .execute(&self.pool)
-        .await?;
-        Ok(project.clone())
-    }
-
-    pub async fn list_projects(&self) -> Result<Vec<ProjectRecord>, AgentStoreError> {
-        let rows = sqlx::query("SELECT * FROM projects ORDER BY updated_at_ms DESC, id ASC")
-            .fetch_all(&self.pool)
-            .await?;
-        rows.iter().map(project_from_row).collect()
-    }
-
-    pub async fn get_project(
-        &self,
-        project_id: &hachimi_protocol::ProjectId,
-    ) -> Result<Option<ProjectRecord>, AgentStoreError> {
-        let row = sqlx::query("SELECT * FROM projects WHERE id = ?")
-            .bind(project_id.as_str())
-            .fetch_optional(&self.pool)
-            .await?;
-        row.as_ref().map(project_from_row).transpose()
-    }
-
-    pub async fn update_project_display_name(
-        &self,
-        project_id: &hachimi_protocol::ProjectId,
-        display_name: &str,
-        updated_at_ms: i64,
-    ) -> Result<ProjectRecord, AgentStoreError> {
-        let display_name = display_name.trim();
-        if display_name.is_empty() || display_name.chars().count() > 120 {
-            return Err(AgentStoreError::InvalidPersistedValue {
-                kind: "project display name",
-                value: "display name must contain 1-120 characters".into(),
-            });
-        }
-        let changed =
-            sqlx::query("UPDATE projects SET display_name = ?, updated_at_ms = ? WHERE id = ?")
-                .bind(display_name)
-                .bind(updated_at_ms)
-                .bind(project_id.as_str())
-                .execute(&self.pool)
-                .await?;
-        if changed.rows_affected() != 1 {
-            return Err(AgentStoreError::InvalidPersistedValue {
-                kind: "project id",
-                value: project_id.to_string(),
-            });
-        }
-        self.get_project(project_id)
-            .await?
-            .ok_or_else(|| AgentStoreError::InvalidPersistedValue {
-                kind: "project id",
-                value: project_id.to_string(),
-            })
-    }
-
-    pub async fn update_project_git_root(
-        &self,
-        project_id: &hachimi_protocol::ProjectId,
-        git_root: Option<&str>,
-        updated_at_ms: i64,
-    ) -> Result<ProjectRecord, AgentStoreError> {
-        let changed = sqlx::query(
-            "UPDATE projects SET git_root = ?, updated_at_ms = CASE WHEN git_root IS ? THEN updated_at_ms ELSE ? END WHERE id = ?",
-        )
-        .bind(git_root)
-        .bind(git_root)
-        .bind(updated_at_ms)
-        .bind(project_id.as_str())
-        .execute(&self.pool)
-        .await?;
-        if changed.rows_affected() != 1 {
-            return Err(AgentStoreError::InvalidPersistedValue {
-                kind: "project id",
-                value: project_id.to_string(),
-            });
-        }
-        self.get_project(project_id)
-            .await?
-            .ok_or_else(|| AgentStoreError::InvalidPersistedValue {
-                kind: "project id",
-                value: project_id.to_string(),
-            })
-    }
-
-    pub async fn upsert_attachment(
-        &self,
-        attachment: &AttachmentRecord,
-        managed_path: &Path,
-    ) -> Result<AttachmentRecord, AgentStoreError> {
-        let mut transaction = self.pool.begin().await?;
-        if let Some(row) = sqlx::query("SELECT * FROM attachments WHERE content_hash = ?")
-            .bind(&attachment.content_hash)
-            .fetch_optional(&mut *transaction)
-            .await?
-        {
-            let existing = attachment_from_row(&row)?;
-            transaction.commit().await?;
-            return Ok(existing);
-        }
-        sqlx::query(
-            "INSERT INTO attachments (id, content_hash, original_name, mime_type, byte_size, managed_path, created_at_ms) VALUES (?, ?, ?, ?, ?, ?, ?)",
-        )
-        .bind(attachment.id.as_str())
-        .bind(&attachment.content_hash)
-        .bind(&attachment.original_name)
-        .bind(&attachment.mime_type)
-        .bind(i64::try_from(attachment.byte_size).unwrap_or(i64::MAX))
-        .bind(managed_path.to_string_lossy().as_ref())
-        .bind(attachment.created_at_ms)
-        .execute(&mut *transaction)
-        .await?;
-        transaction.commit().await?;
-        Ok(attachment.clone())
-    }
-
-    pub async fn get_attachment(
-        &self,
-        attachment_id: &AttachmentId,
-    ) -> Result<Option<AttachmentRecord>, AgentStoreError> {
-        let row = sqlx::query("SELECT * FROM attachments WHERE id = ?")
-            .bind(attachment_id.as_str())
-            .fetch_optional(&self.pool)
-            .await?;
-        row.as_ref().map(attachment_from_row).transpose()
-    }
-
-    pub async fn attach_to_run(
-        &self,
-        run_id: &RunId,
-        attachment_ids: &[AttachmentId],
-    ) -> Result<(), AgentStoreError> {
-        let mut transaction = self.pool.begin().await?;
-        for attachment_id in attachment_ids {
-            let exists =
-                sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM attachments WHERE id = ?")
-                    .bind(attachment_id.as_str())
-                    .fetch_one(&mut *transaction)
-                    .await?
-                    > 0;
-            if !exists {
-                return Err(AgentStoreError::AttachmentNotFound(attachment_id.clone()));
-            }
-            sqlx::query(
-                "INSERT OR IGNORE INTO run_attachments (run_id, attachment_id) VALUES (?, ?)",
-            )
-            .bind(run_id.as_str())
-            .bind(attachment_id.as_str())
-            .execute(&mut *transaction)
-            .await?;
-        }
-        transaction.commit().await?;
-        Ok(())
-    }
-
-    pub async fn list_run_managed_attachments(
-        &self,
-        run_id: &RunId,
-    ) -> Result<Vec<ManagedAttachmentRecord>, AgentStoreError> {
-        let rows = sqlx::query(
-            "SELECT attachments.* FROM attachments INNER JOIN run_attachments ON run_attachments.attachment_id = attachments.id WHERE run_attachments.run_id = ? ORDER BY attachments.created_at_ms ASC, attachments.id ASC",
-        )
-        .bind(run_id.as_str())
-        .fetch_all(&self.pool)
-        .await?;
-        rows.iter()
-            .map(|row| {
-                Ok(ManagedAttachmentRecord {
-                    attachment: attachment_from_row(row)?,
-                    managed_path: PathBuf::from(row.get::<String, _>("managed_path")),
-                })
-            })
-            .collect()
+    /// Returns the trusted, process-private root used by Host implementations.
+    /// Paths below this root must never be surfaced to model or WebView callers.
+    #[must_use]
+    pub fn managed_artifact_root(&self) -> &Path {
+        &self.managed_artifacts.path
     }
 
     pub async fn create_proposed_plan(
@@ -1230,7 +1071,7 @@ impl AgentStore {
             return Err(AgentStoreError::CompactionSequenceOutOfRange);
         }
         sqlx::query(
-            "INSERT INTO compaction_checkpoints (id, session_id, covered_through_sequence, summary_json, quality_json, created_at_ms, run_id, previous_checkpoint_id, reason, trigger, phase, implementation, token_snapshot_json, trimmed_history_groups) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO compaction_checkpoints (id, session_id, covered_through_sequence, summary_json, quality_json, created_at_ms, run_id, previous_checkpoint_id, reason, trigger, phase, implementation, token_snapshot_json, trimmed_history_groups, summary_source, provider_endpoint_id, provider_account_id, capability_revision, fallback_reason) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(checkpoint.id.as_str())
         .bind(checkpoint.session_id.as_str())
@@ -1258,6 +1099,23 @@ impl AgentStore {
                 .transpose()?,
         )
         .bind(i64::from(checkpoint.lifecycle.trimmed_history_groups))
+        .bind(enum_to_db(&checkpoint.lifecycle.summary_source)?)
+        .bind(
+            checkpoint
+                .lifecycle
+                .provider_endpoint_id
+                .as_ref()
+                .map(hachimi_protocol::ProviderEndpointId::as_str),
+        )
+        .bind(
+            checkpoint
+                .lifecycle
+                .provider_account_id
+                .as_ref()
+                .map(hachimi_protocol::ProviderAccountId::as_str),
+        )
+        .bind(&checkpoint.lifecycle.capability_revision)
+        .bind(&checkpoint.lifecycle.fallback_reason)
         .execute(&mut *transaction)
         .await?;
         append_event_tx(
@@ -1651,7 +1509,7 @@ impl AgentStore {
         } else {
             resolution.decision
         };
-        sqlx::query(
+        let updated = sqlx::query(
             "UPDATE approval_requests SET status = ?, resolved_by = ?, resolved_at_ms = ? WHERE id = ? AND status = 'pending'",
         )
         .bind(status.as_str())
@@ -1660,6 +1518,9 @@ impl AgentStore {
         .bind(resolution.approval_id.as_str())
         .execute(&mut *transaction)
         .await?;
+        if updated.rows_affected() != 1 {
+            return Err(AgentStoreError::ApprovalNotPending(approval.id));
+        }
         append_event_tx(
             &mut transaction,
             &approval.session_id,
@@ -1719,7 +1580,7 @@ impl AgentStore {
     pub async fn recover_interrupted(&self) -> Result<RecoveryReport, AgentStoreError> {
         let mut transaction = self.pool.begin().await?;
         let active_runs = sqlx::query(
-            "SELECT id, session_id, status AS effective_status FROM runs WHERE status IN ('preparing', 'running', 'waiting_approval', 'waiting_user_input', 'cancelling')",
+            "SELECT id, session_id, generation, status AS effective_status FROM runs WHERE status IN ('preparing', 'running', 'waiting_approval', 'waiting_user_input', 'cancelling')",
         )
         .fetch_all(&mut *transaction)
         .await?;
@@ -1736,7 +1597,7 @@ impl AgentStore {
                     value: row.get("effective_status"),
                 }
             })?;
-            sqlx::query("UPDATE runs SET status = 'interrupted', failure_code = 'executor_lost', updated_at_ms = ? WHERE id = ?")
+            sqlx::query("UPDATE runs SET status = 'recovering', failure_code = 'executor_lost', updated_at_ms = ? WHERE id = ?")
                 .bind(recovered_at_ms)
                 .bind(run_id.as_str())
                 .execute(&mut *transaction)
@@ -1746,7 +1607,7 @@ impl AgentStore {
                 &session_id,
                 Some(&run_id),
                 "run.status_changed",
-                json!({ "from": previous, "to": RunStatus::Interrupted, "failureCode": "executor_lost" }),
+                json!({ "from": previous, "to": RunStatus::Recovering, "failureCode": "executor_lost" }),
                 recovered_at_ms,
             )
             .await?;
@@ -1818,6 +1679,16 @@ impl AgentStore {
         .bind(recovered_at_ms)
         .execute(&mut *transaction)
         .await?;
+        sqlx::query("DELETE FROM browser_site_permissions")
+            .execute(&mut *transaction)
+            .await?;
+        sqlx::query("DELETE FROM browser_network_rules")
+            .execute(&mut *transaction)
+            .await?;
+        sqlx::query("UPDATE browser_permission_requests SET status = 'expired', updated_at_ms = ? WHERE status = 'pending'")
+            .bind(recovered_at_ms)
+            .execute(&mut *transaction)
+            .await?;
         let stopped_mcp_servers = sqlx::query(
             "UPDATE mcp_server_health SET state = 'stopped', server_name = NULL, server_version = NULL, protocol_version = NULL, tool_count = 0, error_code = 'host_restarted', checked_at_ms = ? WHERE state IN ('starting', 'ready')",
         )
@@ -1839,6 +1710,136 @@ impl AgentStore {
         .execute(&mut *transaction)
         .await?
         .rows_affected();
+        let mut auto_resume_run_ids = Vec::new();
+        let mut awaiting_decision_run_ids = Vec::new();
+        for row in &active_runs {
+            let run_id = RunId::new(row.get::<String, _>("id"));
+            let session_id = SessionId::new(row.get::<String, _>("session_id"));
+            let generation = u64::try_from(row.get::<i64, _>("generation")).map_err(|_| {
+                AgentStoreError::InvalidPersistedValue {
+                    kind: "run generation",
+                    value: row.get::<i64, _>("generation").to_string(),
+                }
+            })?;
+            let previous = RunStatus::parse(row.get("effective_status")).ok_or_else(|| {
+                AgentStoreError::InvalidPersistedValue {
+                    kind: "run status",
+                    value: row.get("effective_status"),
+                }
+            })?;
+            let latest_checkpoint = sqlx::query(
+                "SELECT id, side_effect_execution_id, recovery_policy FROM run_step_checkpoints WHERE run_id = ? AND run_generation = ? ORDER BY step_index DESC, created_at_ms DESC, rowid DESC LIMIT 1",
+            )
+            .bind(run_id.as_str())
+            .bind(i64::try_from(generation).unwrap_or(i64::MAX))
+            .fetch_optional(&mut *transaction)
+            .await?;
+            let latest_checkpoint_id = latest_checkpoint
+                .as_ref()
+                .map(|row| row.get::<String, _>("id"));
+            let checkpoint_side_effect_id = latest_checkpoint
+                .as_ref()
+                .and_then(|row| row.get::<Option<String>, _>("side_effect_execution_id"));
+            let indeterminate_side_effect_id = sqlx::query_scalar::<_, String>(
+                "SELECT id FROM side_effect_executions WHERE run_id = ? AND run_generation = ? AND status = 'indeterminate' ORDER BY updated_at_ms DESC LIMIT 1",
+            )
+            .bind(run_id.as_str())
+            .bind(i64::try_from(generation).unwrap_or(i64::MAX))
+            .fetch_optional(&mut *transaction)
+            .await?;
+            let checkpoint_policy = latest_checkpoint
+                .as_ref()
+                .map(|row| row.get::<String, _>("recovery_policy"));
+            let recovery_side_effect_id = indeterminate_side_effect_id
+                .clone()
+                .or(checkpoint_side_effect_id);
+            let recovery_side_effect = if let Some(id) = recovery_side_effect_id.as_deref() {
+                sqlx::query("SELECT status, result_code FROM side_effect_executions WHERE id = ?")
+                    .bind(id)
+                    .fetch_optional(&mut *transaction)
+                    .await?
+            } else {
+                None
+            };
+            let side_effect_proven_safe = recovery_side_effect.as_ref().is_none_or(|effect| {
+                let status = effect.get::<String, _>("status");
+                matches!(status.as_str(), "succeeded" | "failed")
+                    || status == "cancelled"
+                        && effect.get::<Option<String>, _>("result_code").as_deref()
+                            == Some("cancelled_before_dispatch_on_restart")
+            });
+            let eligible = indeterminate_side_effect_id.is_none()
+                && side_effect_proven_safe
+                && !matches!(
+                    previous,
+                    RunStatus::WaitingApproval
+                        | RunStatus::WaitingUserInput
+                        | RunStatus::Cancelling
+                )
+                && checkpoint_policy.as_deref().is_some_and(|policy| {
+                    matches!(policy, "read_only_replayable" | "idempotent_with_receipt")
+                });
+            let recovery_id = hachimi_protocol::RunRecoveryId::random();
+            let state = if eligible {
+                "eligible_auto"
+            } else {
+                "awaiting_user"
+            };
+            let reason_code = if eligible {
+                "safe_checkpoint_auto_resume_eligible"
+            } else if indeterminate_side_effect_id.is_some() {
+                "side_effect_result_indeterminate"
+            } else if latest_checkpoint_id.is_none() {
+                "durable_checkpoint_missing"
+            } else if previous == RunStatus::WaitingApproval {
+                "approval_expired_on_restart"
+            } else if previous == RunStatus::WaitingUserInput {
+                "user_input_interrupted_on_restart"
+            } else if previous == RunStatus::Cancelling {
+                "cancellation_interrupted_on_restart"
+            } else {
+                "checkpoint_not_replayable"
+            };
+            sqlx::query(
+                "INSERT INTO run_recoveries (id, session_id, run_id, previous_status, interrupted_generation, resume_generation, state, reason_code, checkpoint_id, side_effect_execution_id, created_at_ms, updated_at_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            )
+            .bind(recovery_id.as_str())
+            .bind(session_id.as_str())
+            .bind(run_id.as_str())
+            .bind(previous.as_str())
+            .bind(i64::try_from(generation).unwrap_or(i64::MAX))
+            .bind(i64::try_from(generation.saturating_add(1)).unwrap_or(i64::MAX))
+            .bind(state)
+            .bind(reason_code)
+            .bind(latest_checkpoint_id)
+            .bind(recovery_side_effect_id)
+            .bind(recovered_at_ms)
+            .bind(recovered_at_ms)
+            .execute(&mut *transaction)
+            .await?;
+            if !eligible {
+                sqlx::query("UPDATE runs SET status = 'waiting_recovery_decision', updated_at_ms = ? WHERE id = ? AND generation = ? AND status = 'recovering'")
+                    .bind(recovered_at_ms)
+                    .bind(run_id.as_str())
+                    .bind(i64::try_from(generation).unwrap_or(i64::MAX))
+                    .execute(&mut *transaction)
+                    .await?;
+                append_event_tx(
+                    &mut transaction,
+                    &session_id,
+                    Some(&run_id),
+                    "run.status_changed",
+                    json!({ "from": RunStatus::Recovering, "to": RunStatus::WaitingRecoveryDecision, "failureCode": reason_code }),
+                    recovered_at_ms,
+                )
+                .await?;
+            }
+            if eligible {
+                auto_resume_run_ids.push(run_id);
+            } else {
+                awaiting_decision_run_ids.push(run_id);
+            }
+        }
         transaction.commit().await?;
         for row in &in_progress_items {
             let item_id = hachimi_protocol::ItemId::new(row.get::<String, _>("id"));
@@ -1854,137 +1855,73 @@ impl AgentStore {
             stopped_mcp_servers,
             indeterminate_side_effects,
             cancelled_side_effect_claims,
+            auto_resume_run_ids,
+            awaiting_decision_run_ids,
         })
     }
-}
 
-async fn next_sequence_tx(
-    transaction: &mut Transaction<'_, Sqlite>,
-    session_id: &SessionId,
-    updated_at_ms: i64,
-) -> Result<u64, AgentStoreError> {
-    let sequence = sqlx::query_scalar::<_, i64>(
-        "UPDATE sessions SET next_sequence = next_sequence + 1, updated_at_ms = ? WHERE id = ? RETURNING next_sequence - 1",
-    )
-    .bind(updated_at_ms)
-    .bind(session_id.as_str())
-    .fetch_optional(&mut **transaction)
-    .await?
-    .ok_or_else(|| AgentStoreError::SessionNotFound(session_id.clone()))?;
-    Ok(u64::try_from(sequence).unwrap_or_default())
-}
-
-async fn append_event_tx(
-    transaction: &mut Transaction<'_, Sqlite>,
-    session_id: &SessionId,
-    run_id: Option<&RunId>,
-    event: &str,
-    payload: Value,
-    created_at_ms: i64,
-) -> Result<RunEventEnvelope, AgentStoreError> {
-    append_event_typed_tx(
-        transaction,
-        session_id,
-        run_id,
-        event,
-        None,
-        payload,
-        created_at_ms,
-    )
-    .await
-}
-
-async fn append_event_typed_tx(
-    transaction: &mut Transaction<'_, Sqlite>,
-    session_id: &SessionId,
-    run_id: Option<&RunId>,
-    event: &str,
-    typed_payload: Option<RunEventPayload>,
-    payload: Value,
-    created_at_ms: i64,
-) -> Result<RunEventEnvelope, AgentStoreError> {
-    let sequence = next_sequence_tx(transaction, session_id, created_at_ms).await?;
-    let payload = typed_payload.unwrap_or_else(|| RunEventPayload::Generic {
-        event: event.to_owned(),
-        data: payload,
-    });
-    sqlx::query(
-        "INSERT INTO run_events (session_id, sequence, run_id, payload_json, created_at_ms) VALUES (?, ?, ?, ?, ?)",
-    )
-    .bind(session_id.as_str())
-    .bind(i64::try_from(sequence).unwrap_or(i64::MAX))
-    .bind(run_id.map(RunId::as_str))
-    .bind(serde_json::to_string(&payload)?)
-    .bind(created_at_ms)
-    .execute(&mut **transaction)
-    .await?;
-    Ok(RunEventEnvelope {
-        protocol_version: CONTROL_PROTOCOL_VERSION,
-        sequence,
-        session_id: session_id.clone(),
-        run_id: run_id.cloned(),
-        payload,
-        created_at_ms,
-    })
-}
-
-async fn get_run_tx(
-    transaction: &mut Transaction<'_, Sqlite>,
-    run_id: &RunId,
-) -> Result<Option<RunRecord>, AgentStoreError> {
-    let row = sqlx::query("SELECT * FROM runs WHERE id = ?")
-        .bind(run_id.as_str())
-        .fetch_optional(&mut **transaction)
+    pub async fn recover_interrupted_with_run_recovery(
+        &self,
+        run_recovery_enabled: bool,
+    ) -> Result<RecoveryReport, AgentStoreError> {
+        let mut report = self.recover_interrupted().await?;
+        if run_recovery_enabled || report.interrupted_runs == 0 {
+            return Ok(report);
+        }
+        let mut transaction = self.pool.begin().await?;
+        let recoverable = sqlx::query(
+            "SELECT id, session_id, status AS effective_status FROM runs WHERE status IN ('recovering', 'waiting_recovery_decision')",
+        )
+        .fetch_all(&mut *transaction)
         .await?;
-    row.as_ref().map(run_from_row).transpose()
-}
-
-async fn get_run_connection(
-    connection: &mut sqlx::pool::PoolConnection<Sqlite>,
-    run_id: &RunId,
-) -> Result<Option<RunRecord>, AgentStoreError> {
-    let row = sqlx::query("SELECT * FROM runs WHERE id = ?")
-        .bind(run_id.as_str())
-        .fetch_optional(&mut **connection)
+        let updated_at_ms = now_ms();
+        for row in recoverable {
+            let run_id = RunId::new(row.get::<String, _>("id"));
+            let session_id = SessionId::new(row.get::<String, _>("session_id"));
+            let previous = RunStatus::parse(row.get("effective_status")).ok_or_else(|| {
+                AgentStoreError::InvalidPersistedValue {
+                    kind: "run status",
+                    value: row.get("effective_status"),
+                }
+            })?;
+            sqlx::query(
+                "UPDATE runs SET status = 'interrupted', failure_code = 'run_recovery_feature_disabled', updated_at_ms = ? WHERE id = ?",
+            )
+            .bind(updated_at_ms)
+            .bind(run_id.as_str())
+            .execute(&mut *transaction)
+            .await?;
+            append_event_tx(
+                &mut transaction,
+                &session_id,
+                Some(&run_id),
+                "run.status_changed",
+                json!({
+                    "from": previous,
+                    "to": RunStatus::Interrupted,
+                    "failureCode": "run_recovery_feature_disabled"
+                }),
+                updated_at_ms,
+            )
+            .await?;
+        }
+        sqlx::query(
+            "UPDATE run_recoveries SET state = 'failed', reason_code = 'run_recovery_feature_disabled', updated_at_ms = ? WHERE state IN ('eligible_auto', 'awaiting_user')",
+        )
+        .bind(updated_at_ms)
+        .execute(&mut *transaction)
         .await?;
-    row.as_ref().map(run_from_row).transpose()
-}
-
-async fn get_proposed_plan_tx(
-    transaction: &mut Transaction<'_, Sqlite>,
-    plan_id: &PlanId,
-) -> Result<Option<ProposedPlan>, AgentStoreError> {
-    let row = sqlx::query("SELECT * FROM proposed_plans WHERE id = ?")
-        .bind(plan_id.as_str())
-        .fetch_optional(&mut **transaction)
-        .await?;
-    row.as_ref().map(proposed_plan_from_row).transpose()
-}
-
-async fn get_proposed_plan_by_run_tx(
-    transaction: &mut Transaction<'_, Sqlite>,
-    run_id: &RunId,
-) -> Result<Option<ProposedPlan>, AgentStoreError> {
-    let row = sqlx::query("SELECT * FROM proposed_plans WHERE run_id = ?")
-        .bind(run_id.as_str())
-        .fetch_optional(&mut **transaction)
-        .await?;
-    row.as_ref().map(proposed_plan_from_row).transpose()
-}
-
-async fn latest_compaction_checkpoint_tx(
-    transaction: &mut Transaction<'_, Sqlite>,
-    session_id: &SessionId,
-) -> Result<Option<CompactionCheckpoint>, AgentStoreError> {
-    let row = sqlx::query(
-        "SELECT * FROM compaction_checkpoints WHERE session_id = ? ORDER BY covered_through_sequence DESC LIMIT 1",
-    )
-    .bind(session_id.as_str())
-    .fetch_optional(&mut **transaction)
-    .await?;
-    row.as_ref().map(compaction_checkpoint_from_row).transpose()
+        transaction.commit().await?;
+        report.auto_resume_run_ids.clear();
+        report.awaiting_decision_run_ids.clear();
+        Ok(report)
+    }
 }
 
 #[cfg(test)]
 #[path = "agent_store/tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "agent_store/agent_task_tests.rs"]
+mod agent_task_tests;

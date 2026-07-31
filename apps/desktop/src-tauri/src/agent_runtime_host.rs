@@ -11,12 +11,12 @@ use std::{
 use hachimi_agent::{
     AgentExecutionError, AgentInstructionLayer, AgentPreparationFuture, AgentRunPreparer,
     AgentRunRequest, AgentsMdLoader, AuthorizedToolContext, McpToolPolicy, McpToolRuntimeContext,
-    ModelViewLimits, PersistentAuditSink, PreparedAgentRun, StepRuntimeSnapshot, StepRuntimeState,
-    StepWorldState, StepWorldStateRefreshFuture, StepWorldStateRefresher, ToolExecutor,
-    apply_patch_tool, authorized_tool, build_model_view_with_checkpoint,
-    mcp_elicitation_handler_with_store, mcp_resource_tool_executors,
-    mcp_tool_executors_with_gate_and_elicitation, request_user_input_tool, skill_runtime_tools,
-    workspace_tool_executors_with_diff_tracking,
+    ModelViewLimits, MultiAgentCoordinator, PersistentAuditSink, PreparedAgentRun,
+    StepRuntimeSnapshot, StepRuntimeState, StepWorldState, StepWorldStateRefreshFuture,
+    StepWorldStateRefresher, ToolExecutor, apply_patch_tool, authorized_tool,
+    build_model_view_with_checkpoint, mcp_elicitation_handler_with_store,
+    mcp_resource_tool_executors, mcp_tool_executors_with_gate_and_elicitation,
+    request_user_input_tool, skill_runtime_tools, workspace_tool_executors_with_diff_tracking,
 };
 use hachimi_capabilities::mcp_exposed_tool_name;
 use hachimi_control_plane::McpControlService;
@@ -251,18 +251,44 @@ pub(super) struct DesktopAgentRunPreparer {
     skills: hachimi_skills::SkillHost,
     mcp: McpControlService,
     sandbox_backend: Option<Arc<dyn SandboxBackend>>,
+    browser: Arc<hachimi_browser::BrowserHost>,
+    computer: Arc<hachimi_computer::ComputerHost>,
+    plugins: hachimi_extensions::PluginHost,
+    multi_agent: MultiAgentCoordinator,
+    runtime_features: hachimi_core::RuntimeFeatureSet,
+}
+
+pub(super) struct DesktopAgentRunDependencies {
+    pub(super) store: AgentStore,
+    pub(super) workbench: hachimi_workbench::WorkbenchService,
+    pub(super) approvals: hachimi_approvals::PersistentApprovalBroker,
+    pub(super) user_input: PersistentUserInputBroker,
+    pub(super) skills: hachimi_skills::SkillHost,
+    pub(super) mcp: McpControlService,
+    pub(super) sandbox_backend: Option<Arc<dyn SandboxBackend>>,
+    pub(super) browser: Arc<hachimi_browser::BrowserHost>,
+    pub(super) computer: Arc<hachimi_computer::ComputerHost>,
+    pub(super) plugins: hachimi_extensions::PluginHost,
+    pub(super) multi_agent: MultiAgentCoordinator,
+    pub(super) runtime_features: hachimi_core::RuntimeFeatureSet,
 }
 
 impl DesktopAgentRunPreparer {
-    pub(super) fn new(
-        store: AgentStore,
-        workbench: hachimi_workbench::WorkbenchService,
-        approvals: hachimi_approvals::PersistentApprovalBroker,
-        user_input: PersistentUserInputBroker,
-        skills: hachimi_skills::SkillHost,
-        mcp: McpControlService,
-        sandbox_backend: Option<Arc<dyn SandboxBackend>>,
-    ) -> Self {
+    pub(super) fn new(dependencies: DesktopAgentRunDependencies) -> Self {
+        let DesktopAgentRunDependencies {
+            store,
+            workbench,
+            approvals,
+            user_input,
+            skills,
+            mcp,
+            sandbox_backend,
+            browser,
+            computer,
+            plugins,
+            multi_agent,
+            runtime_features,
+        } = dependencies;
         Self {
             store,
             workbench,
@@ -271,6 +297,11 @@ impl DesktopAgentRunPreparer {
             skills,
             mcp,
             sandbox_backend,
+            browser,
+            computer,
+            plugins,
+            multi_agent,
+            runtime_features,
         }
     }
 }
@@ -373,7 +404,10 @@ impl DesktopAgentRunPreparer {
         let (enabled_skills, selected_skills) = if is_review {
             (Vec::new(), Vec::new())
         } else {
-            let selection_prompt = if matches!(request.run.origin, RunOrigin::Scheduled { .. }) {
+            let selection_prompt = if matches!(
+                request.run.origin,
+                RunOrigin::Scheduled { .. } | RunOrigin::Channel { .. }
+            ) {
                 ""
             } else {
                 &prompt
@@ -420,6 +454,19 @@ impl DesktopAgentRunPreparer {
         let mcp_bindings = mcp_runtime_bindings(&mcp_runtimes);
         if !mcp_runtimes.is_empty() {
             client.scopes.insert(Scope::ConnectorsInvoke);
+        }
+        client.scopes.insert(Scope::ConnectorsInvoke);
+        if request.capability_grants.browser.observe {
+            client.scopes.insert(Scope::BrowserObserve);
+        }
+        if browser_control_granted(&request.capability_grants.browser) {
+            client.scopes.insert(Scope::BrowserControl);
+        }
+        if request.capability_grants.computer.observe {
+            client.scopes.insert(Scope::ComputerObserve);
+        }
+        if request.capability_grants.computer.act {
+            client.scopes.insert(Scope::ComputerControl);
         }
         self.store
             .persist_run_security_snapshot(
@@ -615,7 +662,10 @@ impl DesktopAgentRunPreparer {
             .file_system
             .retain(|grant| grant.access == FileSystemAccess::Read);
         request.capability_grants.process = hachimi_protocol::ProcessGrant::default();
-        let selection_prompt = if matches!(request.run.origin, RunOrigin::Scheduled { .. }) {
+        let selection_prompt = if matches!(
+            request.run.origin,
+            RunOrigin::Scheduled { .. } | RunOrigin::Channel { .. }
+        ) {
             ""
         } else {
             &prompt
@@ -667,6 +717,19 @@ impl DesktopAgentRunPreparer {
         client.scopes.extend([Scope::AgentRun, Scope::SkillsUse]);
         if !mcp_runtimes.is_empty() {
             client.scopes.insert(Scope::ConnectorsInvoke);
+        }
+        client.scopes.insert(Scope::ConnectorsInvoke);
+        if request.capability_grants.browser.observe {
+            client.scopes.insert(Scope::BrowserObserve);
+        }
+        if browser_control_granted(&request.capability_grants.browser) {
+            client.scopes.insert(Scope::BrowserControl);
+        }
+        if request.capability_grants.computer.observe {
+            client.scopes.insert(Scope::ComputerObserve);
+        }
+        if request.capability_grants.computer.act {
+            client.scopes.insert(Scope::ComputerControl);
         }
         let authorization = authorization_context(
             &request,
@@ -730,12 +793,34 @@ impl DesktopAgentRunPreparer {
         tool_executors: &mut Vec<Arc<dyn ToolExecutor>>,
         allow_user_input: bool,
     ) -> Result<(), AgentExecutionError> {
+        if self.runtime_features.multi_agent {
+            tool_executors.extend(self.multi_agent.tools_for_parent(request.clone()));
+        }
         if allow_user_input {
             tool_executors.push(request_user_input_tool(
                 Arc::new(self.user_input.clone()),
                 request.session.id.clone(),
                 request.run.id.clone(),
             ));
+        }
+        let mut local_host_authorization = authorization.clone();
+        local_host_authorization.capability_host = "local-host-broker".into();
+        for tool in crate::agent_host_tools::local_host_tool_executors(
+            crate::agent_host_tools::LocalHostToolContext {
+                browser: Arc::clone(&self.browser),
+                computer: Arc::clone(&self.computer),
+                plugins: self.plugins.clone(),
+                store: self.store.clone(),
+                session_id: request.session.id.clone(),
+                run_id: request.run.id.clone(),
+                grants: request.capability_grants.clone(),
+                sandbox: request.sandbox_snapshot.clone(),
+                schedule_host_grant: request.schedule_host_grant.clone(),
+                desktop_control_enabled: self.runtime_features.desktop_control,
+                enterprise_integrations_enabled: self.runtime_features.enterprise_integrations,
+            },
+        ) {
+            tool_executors.push(authorized_tool(tool, local_host_authorization.clone()));
         }
         if !runtime_skills.is_empty() {
             let mut skill_authorization = authorization.clone();
@@ -1015,6 +1100,10 @@ fn service_client(principal: &str) -> ClientContext {
     }
 }
 
+fn browser_control_granted(grant: &hachimi_protocol::BrowserGrant) -> bool {
+    grant.act || grant.upload || grant.download || grant.cookie_storage || grant.cdp
+}
+
 fn system_message(content: String) -> ModelMessage {
     ModelMessage {
         role: ModelRole::System,
@@ -1022,6 +1111,7 @@ fn system_message(content: String) -> ModelMessage {
         name: None,
         tool_call_id: None,
         tool_calls: Vec::new(),
+        input_images: Vec::new(),
     }
 }
 

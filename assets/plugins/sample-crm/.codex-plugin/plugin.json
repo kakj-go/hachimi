@@ -1,0 +1,33 @@
+{
+  "manifestVersion": 1,
+  "id": "sample-crm",
+  "name": "Sample CRM",
+  "version": "1.0.0",
+  "description": "Deterministic local Connector fixture for Hachimi",
+  "contributions": [
+    {
+      "kind": "connector",
+      "id": "sample-crm",
+      "relativePath": "connectors/sample-crm.json",
+      "requiredScopes": ["connectors.invoke"]
+    },
+    {
+      "kind": "hook",
+      "id": "lifecycle",
+      "relativePath": "hooks/lifecycle.json",
+      "requiredScopes": []
+    },
+    {
+      "kind": "asset",
+      "id": "dashboard-assets",
+      "relativePath": "assets",
+      "requiredScopes": []
+    },
+    {
+      "kind": "custom_ui",
+      "id": "dashboard",
+      "relativePath": "ui",
+      "requiredScopes": []
+    }
+  ]
+}

@@ -1,6 +1,6 @@
 import type { GitWorkspaceSnapshot, WorkbenchSessionSnapshot } from "@hachimi/contracts";
 import { I18nProvider } from "@hachimi/i18n";
-import type { JSX } from "solid-js";
+import { For, type JSX } from "solid-js";
 import { render } from "solid-js/web";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -17,6 +17,26 @@ vi.mock("@hachimi/ui", () => {
     Check: Icon,
     GitBranch: Icon,
     RefreshCw: Icon,
+    SelectField: (props: {
+      label: string;
+      value: string;
+      options: readonly { value: string; label: string }[];
+      disabled?: boolean;
+      onChange?: (value: string) => void;
+    }) => (
+      <label>
+        {props.label}
+        <select
+          value={props.value}
+          disabled={props.disabled}
+          onChange={(event) => props.onChange?.(event.currentTarget.value)}
+        >
+          <For each={props.options}>
+            {(option) => <option value={option.value}>{option.label}</option>}
+          </For>
+        </select>
+      </label>
+    ),
     TextField: (props: {
       label: string;
       value: string;
@@ -78,6 +98,7 @@ function workingTree(indexStatus = " ", worktreeStatus = "M"): GitWorkspaceSnaps
 function createPort() {
   const port = {
     getWorkspaceGit: vi.fn(async () => workingTree()),
+    listGitRemotes: vi.fn(async () => []),
     mutateWorkspaceGit: vi
       .fn()
       .mockResolvedValueOnce({ snapshot: workingTree("M", " "), commitSha: null })
@@ -98,6 +119,29 @@ async function settle() {
 afterEach(() => document.body.replaceChildren());
 
 describe("WorkspaceGitPanel", () => {
+  it("hides remote mutations while retaining local Git controls", async () => {
+    const port = createPort();
+    const host = document.createElement("div");
+    document.body.append(host);
+    const dispose = render(
+      () => (
+        <I18nProvider initialLocale="en-US">
+          <WorkspaceGitPanel
+            snapshot={session()}
+            commandPort={port}
+            revision={0}
+            gitRemoteMutationsEnabled={false}
+          />
+        </I18nProvider>
+      ),
+      host,
+    );
+    await settle();
+    expect(host.textContent).toContain("Create local commit");
+    expect(host.textContent).not.toContain("Remote and PR/MR");
+    dispose();
+  });
+
   it("uses fixed typed stage and local commit mutations", async () => {
     const port = createPort();
     const host = document.createElement("div");

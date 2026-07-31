@@ -26,7 +26,7 @@ pub use setup::{
     GitMutationAcl, SandboxSetupMarker, deny_restricted_code_read, deny_restricted_code_write,
     grant_restricted_code_access, install_sandbox_marker, prepare_git_mutation_acl,
     prepare_workspace_acl, restore_git_mutation_acl, revoke_restricted_code_access,
-    trusted_git_executable, uninstall_sandbox,
+    set_managed_git_executable, trusted_git_executable, uninstall_sandbox,
 };
 
 use std::path::Path;
@@ -53,8 +53,10 @@ impl SandboxStatus {
 
     #[must_use]
     pub const fn permits(self, effect: ToolEffect) -> bool {
-        matches!(effect, ToolEffect::ReadOnly | ToolEffect::ComputerObserve)
-            || self.is_os_enforced()
+        matches!(
+            effect,
+            ToolEffect::ReadOnly | ToolEffect::BrowserObserve | ToolEffect::ComputerObserve
+        ) || self.is_os_enforced()
     }
 
     #[must_use]
@@ -97,6 +99,7 @@ struct RuntimeProbePaths {
     launcher: std::path::PathBuf,
     canary: std::path::PathBuf,
     attestation_root: std::path::PathBuf,
+    expected_integrity: Vec<(std::path::PathBuf, String)>,
 }
 
 impl WindowsSandboxReadinessProbe {
@@ -119,7 +122,19 @@ impl WindowsSandboxReadinessProbe {
             launcher: launcher.into(),
             canary: canary.into(),
             attestation_root: attestation_root.into(),
+            expected_integrity: Vec::new(),
         });
+        self
+    }
+
+    #[must_use]
+    pub fn with_runtime_integrity(
+        mut self,
+        expected_integrity: Vec<(std::path::PathBuf, String)>,
+    ) -> Self {
+        if let Some(runtime) = &mut self.runtime {
+            runtime.expected_integrity = expected_integrity;
+        }
         self
     }
 }
@@ -129,11 +144,12 @@ impl SandboxBackend for WindowsSandboxReadinessProbe {
         self.runtime.as_ref().map_or_else(
             || probe_windows_readiness(&self.setup_marker),
             |runtime| {
-                attest_windows_runtime(
+                runtime_attestation::attest_windows_runtime_with_integrity(
                     &self.setup_marker,
                     &runtime.launcher,
                     &runtime.canary,
                     &runtime.attestation_root,
+                    &runtime.expected_integrity,
                 )
             },
         )
@@ -185,7 +201,7 @@ pub fn probe_windows_readiness(setup_marker: &Path) -> SandboxCapabilityReport {
             return report(
                 SandboxReadiness::SetupRequired,
                 Some("setup_marker_missing"),
-                vec!["elevated Windows sandbox setup has not completed".into()],
+                vec!["per-user Windows sandbox setup has not completed".into()],
             );
         }
         Err(_) => {

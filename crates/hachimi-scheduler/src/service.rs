@@ -7,19 +7,22 @@
 use std::{collections::BTreeMap, future::Future, pin::Pin, sync::Arc, time::Duration};
 
 use hachimi_protocol::{
-    ArtifactId, DeliveryPolicy, DeliveryStatus, EntryProfile, MisfirePolicy,
-    ScheduleAuthorizationScope, ScheduleDefinition, ScheduleGrantId, ScheduleGrantRecord,
-    ScheduleGrantStatus, ScheduleHealth, ScheduleId, SchedulePreview, ScheduleSnapshot,
-    ScheduleSpec, TaskRunId, TaskRunRecord, TaskRunStatus, TaskRunTrigger, WorkloadKind,
+    ArtifactId, DeliveryPolicy, DeliveryStatus, EntryProfile, MisfirePolicy, PermissionProfile,
+    ScheduleAuthorizationScope, ScheduleDefinition, ScheduleGrantRecord, ScheduleHealth,
+    ScheduleId, SchedulePreview, ScheduleSnapshot, ScheduleSpec, TaskRunId, TaskRunRecord,
+    TaskRunStatus, TaskRunTrigger, WorkloadKind,
 };
 use hachimi_storage::{AgentStore, AgentStoreError, ScheduleInvocationClaim};
 use parking_lot::Mutex;
-use sha2::{Digest, Sha256};
 use thiserror::Error;
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 
-use crate::{TimeZoneResolver, error_code, occurrences_after, preview_schedule};
+use crate::service_helpers::{
+    apply_stop_conditions, authorization_scope, build_grant, next_occurrence,
+    required_next_occurrence, task_record, tracing_fallback,
+};
+use crate::{TimeZoneResolver, preview_schedule};
 
 const MIN_TASK_TIMEOUT_MS: u64 = 60_000;
 const MAX_TASK_TIMEOUT_MS: u64 = 24 * 60 * 60 * 1_000;
@@ -109,8 +112,8 @@ pub enum SchedulerError {
 
 #[derive(Clone)]
 pub struct SchedulerService {
-    store: AgentStore,
-    clock: Arc<dyn Clock>,
+    pub(crate) store: AgentStore,
+    pub(crate) clock: Arc<dyn Clock>,
     timezone: Arc<dyn TimeZoneResolver>,
     launcher: Arc<dyn ScheduleRunLauncher>,
     notifications: Arc<dyn NotificationAdapter>,
@@ -178,15 +181,16 @@ impl SchedulerService {
         let now = self.clock.now_ms();
         definition.created_at_ms = now;
         definition.updated_at_ms = now;
-        definition.next_run_at_ms = if definition.enabled {
-            Some(required_next_occurrence(
-                self.timezone.as_ref(),
-                &definition.schedule,
-                now,
-            )?)
-        } else {
-            None
-        };
+        definition.next_run_at_ms =
+            if definition.enabled && !matches!(definition.schedule, ScheduleSpec::Event { .. }) {
+                Some(required_next_occurrence(
+                    self.timezone.as_ref(),
+                    &definition.schedule,
+                    now,
+                )?)
+            } else {
+                None
+            };
         let grant = grant_scope
             .map(|scope| build_grant(&definition, principal, now, scope))
             .transpose()?;
@@ -245,15 +249,16 @@ impl SchedulerService {
             definition.health = current.health;
             definition.health_reason = current.health_reason;
         }
-        definition.next_run_at_ms = if definition.enabled {
-            Some(required_next_occurrence(
-                self.timezone.as_ref(),
-                &definition.schedule,
-                self.clock.now_ms(),
-            )?)
-        } else {
-            None
-        };
+        definition.next_run_at_ms =
+            if definition.enabled && !matches!(definition.schedule, ScheduleSpec::Event { .. }) {
+                Some(required_next_occurrence(
+                    self.timezone.as_ref(),
+                    &definition.schedule,
+                    self.clock.now_ms(),
+                )?)
+            } else {
+                None
+            };
         let updated = self
             .store
             .update_schedule(&definition, expected_config_revision)
@@ -274,7 +279,7 @@ impl SchedulerService {
             .await?
             .ok_or_else(|| AgentStoreError::ScheduleNotFound(schedule_id.clone()))?;
         let now = self.clock.now_ms();
-        let next = if enabled {
+        let next = if enabled && !matches!(schedule.schedule, ScheduleSpec::Event { .. }) {
             Some(required_next_occurrence(
                 self.timezone.as_ref(),
                 &schedule.schedule,
@@ -389,6 +394,7 @@ impl SchedulerService {
         }
         let schedule_id = previous
             .schedule_id
+            .clone()
             .ok_or_else(|| SchedulerError::InvalidSchedule("task has no Schedule".into()))?;
         let schedule = self
             .store
@@ -397,7 +403,7 @@ impl SchedulerService {
             .ok_or_else(|| AgentStoreError::ScheduleNotFound(schedule_id.clone()))?;
         let now = self.clock.now_ms();
         let retry_id = TaskRunId::random();
-        let task = task_record(
+        let mut task = task_record(
             &schedule,
             retry_id.clone(),
             TaskRunTrigger::Retry,
@@ -407,6 +413,7 @@ impl SchedulerService {
             None,
             now,
         );
+        task.event_context = previous.event_context.clone();
         let claim = self
             .store
             .claim_schedule_invocation(&schedule.id, schedule.config_revision, &task)
@@ -496,6 +503,22 @@ impl SchedulerService {
         let mut tasks = Vec::with_capacity(due.len());
         for schedule in due {
             let scheduled_for = schedule.next_run_at_ms.unwrap_or(now);
+            let occurrence_count = self.store.count_schedule_task_runs(&schedule.id).await?;
+            let reached_limit = schedule
+                .stop_conditions
+                .max_occurrences
+                .is_some_and(|limit| occurrence_count >= u64::from(limit));
+            let reached_end = schedule
+                .stop_conditions
+                .end_at_ms
+                .is_some_and(|end_at| scheduled_for > end_at);
+            if reached_limit || reached_end {
+                let _ = self
+                    .store
+                    .set_schedule_enabled(&schedule.id, false, schedule.config_revision, None, now)
+                    .await?;
+                continue;
+            }
             let misfired = now.saturating_sub(scheduled_for) > MISFIRE_GRACE_MS;
             let (trigger, status, error) =
                 if misfired && schedule.misfire_policy == MisfirePolicy::Skip {
@@ -533,7 +556,13 @@ impl SchedulerService {
                 .store
                 .claim_schedule_invocation(&schedule.id, schedule.config_revision, &task)
                 .await?;
-            let next = next_occurrence(self.timezone.as_ref(), &schedule.schedule, now)?;
+            let next =
+                next_occurrence(self.timezone.as_ref(), &schedule.schedule, now)?.filter(|next| {
+                    schedule
+                        .stop_conditions
+                        .end_at_ms
+                        .is_none_or(|end_at| *next <= end_at)
+                });
             match schedule.schedule {
                 ScheduleSpec::At { .. } => {
                     let _ = self
@@ -552,6 +581,7 @@ impl SchedulerService {
                         .update_schedule_next_run(&schedule.id, next, now)
                         .await?;
                 }
+                ScheduleSpec::Event { .. } => {}
             }
             tasks.push(claim.task_run.clone());
             self.launch_claim(schedule, claim);
@@ -589,7 +619,11 @@ impl SchedulerService {
         }
     }
 
-    fn launch_claim(&self, schedule: ScheduleDefinition, claim: ScheduleInvocationClaim) {
+    pub(crate) fn launch_claim(
+        &self,
+        schedule: ScheduleDefinition,
+        claim: ScheduleInvocationClaim,
+    ) {
         if !claim.should_launch {
             return;
         }
@@ -604,9 +638,30 @@ impl SchedulerService {
             .insert(claim.task_run.id.clone(), cancellation.clone());
         tokio::spawn(async move {
             let task_id = claim.task_run.id.clone();
-            let completion = launcher
-                .launch(schedule.clone(), claim.task_run, cancellation)
+            let hook_before = store
+                .dispatch_plugin_hook_event(
+                    &hachimi_storage::PluginHookEventRecord {
+                        event: "schedule.before".into(),
+                        session_id: None,
+                        run_id: None,
+                        run_generation: None,
+                        subject: task_id.as_str().into(),
+                        result_code: "started".into(),
+                        created_at_ms: clock.now_ms(),
+                    },
+                    cancellation.child_token(),
+                )
                 .await;
+            let completion = if let Err(error) = hook_before {
+                Err(ScheduleLaunchError {
+                    code: "plugin_schedule_before_hook_failed".into(),
+                    message: error.to_string(),
+                })
+            } else {
+                launcher
+                    .launch(schedule.clone(), claim.task_run, cancellation.clone())
+                    .await
+            };
             let completion = match completion {
                 Ok(completion) => completion,
                 Err(error) => ScheduleRunCompletion {
@@ -618,6 +673,24 @@ impl SchedulerService {
                 },
             };
             let now = clock.now_ms();
+            let _ = store
+                .dispatch_plugin_hook_event(
+                    &hachimi_storage::PluginHookEventRecord {
+                        event: "schedule.after".into(),
+                        session_id: None,
+                        run_id: None,
+                        run_generation: None,
+                        subject: task_id.as_str().into(),
+                        result_code: if completion.status == TaskRunStatus::Succeeded {
+                            "succeeded".into()
+                        } else {
+                            "failed".into()
+                        },
+                        created_at_ms: now,
+                    },
+                    cancellation.child_token(),
+                )
+                .await;
             let current = store.get_task_run(&task_id).await.ok().flatten();
             if current
                 .as_ref()
@@ -667,6 +740,9 @@ impl SchedulerService {
                     now,
                 )
                 .await;
+            if updated.is_ok() {
+                let _ = apply_stop_conditions(&store, &schedule, completion.status, now).await;
+            }
             if schedule.delivery_policy == DeliveryPolicy::TaskTabAndSystemNotification
                 && let Ok(task) = updated
             {
@@ -745,8 +821,137 @@ fn normalize_definition(definition: &mut ScheduleDefinition) {
             ))
     });
     definition.mcp_tool_allowlist.dedup();
+    definition.contribution_revisions.sort_by(|left, right| {
+        (&left.plugin_id, &left.contribution_id, &left.account_id).cmp(&(
+            &right.plugin_id,
+            &right.contribution_id,
+            &right.account_id,
+        ))
+    });
+    definition.contribution_revisions.dedup_by(|left, right| {
+        left.plugin_id == right.plugin_id
+            && left.contribution_id == right.contribution_id
+            && left.account_id == right.account_id
+    });
+    definition
+        .host_grant
+        .connectors
+        .sort_by(|left, right| left.account_id.cmp(&right.account_id));
+    for selection in &mut definition.host_grant.connectors {
+        selection.allowed_actions = selection
+            .allowed_actions
+            .iter()
+            .map(|action| action.trim().to_owned())
+            .filter(|action| !action.is_empty())
+            .collect();
+        selection.allowed_actions.sort();
+        selection.allowed_actions.dedup();
+        definition
+            .tool_allowlist
+            .extend(["connector_list_accounts".into(), "connector_invoke".into()]);
+        definition.permission_config.external_targets.extend(
+            selection
+                .allowed_actions
+                .iter()
+                .map(|action| format!("connector:{}:{action}", selection.account_id)),
+        );
+        if let Some(current) = definition
+            .contribution_revisions
+            .iter_mut()
+            .find(|revision| {
+                revision.plugin_id == selection.contribution_revision.plugin_id
+                    && revision.contribution_id == selection.contribution_revision.contribution_id
+                    && revision.account_id == selection.contribution_revision.account_id
+            })
+        {
+            *current = selection.contribution_revision.clone();
+        } else {
+            definition
+                .contribution_revisions
+                .push(selection.contribution_revision.clone());
+        }
+    }
+    if let Some(browser) = &mut definition.host_grant.browser {
+        browser.document_origins = browser
+            .document_origins
+            .iter()
+            .map(|origin| origin.trim().to_owned())
+            .filter(|origin| !origin.is_empty())
+            .collect();
+        browser.document_origins.sort();
+        browser.document_origins.dedup();
+        browser.resource_origins = browser
+            .resource_origins
+            .iter()
+            .map(|origin| origin.trim().to_owned())
+            .filter(|origin| !origin.is_empty())
+            .collect();
+        browser.resource_origins.sort();
+        browser.resource_origins.dedup();
+        browser.capabilities.sort();
+        browser.capabilities.dedup();
+        if browser.enabled {
+            definition
+                .tool_allowlist
+                .extend(["browser_start".into(), "browser_stop".into()]);
+            if browser
+                .capabilities
+                .contains(&hachimi_protocol::BrowserCapability::Observe)
+            {
+                definition.tool_allowlist.push("browser_observe".into());
+            }
+            if browser
+                .capabilities
+                .iter()
+                .any(|capability| *capability != hachimi_protocol::BrowserCapability::Observe)
+            {
+                definition.tool_allowlist.push("browser_act".into());
+            }
+            definition.permission_config.external_targets.extend(
+                browser
+                    .document_origins
+                    .iter()
+                    .map(|origin| format!("browser:document:{origin}")),
+            );
+            definition.permission_config.external_targets.extend(
+                browser
+                    .resource_origins
+                    .iter()
+                    .map(|origin| format!("browser:resource:{origin}")),
+            );
+        }
+    }
+    if !definition.host_grant.connectors.is_empty()
+        || definition
+            .host_grant
+            .browser
+            .as_ref()
+            .is_some_and(|browser| browser.enabled)
+    {
+        definition.permission_config.permission_profile = PermissionProfile::ExternalSandbox;
+    }
+    definition.tool_allowlist.sort();
+    definition.tool_allowlist.dedup();
+    definition.contribution_revisions.sort_by(|left, right| {
+        (&left.plugin_id, &left.contribution_id, &left.account_id).cmp(&(
+            &right.plugin_id,
+            &right.contribution_id,
+            &right.account_id,
+        ))
+    });
+    definition.contribution_revisions.dedup_by(|left, right| {
+        left.plugin_id == right.plugin_id
+            && left.contribution_id == right.contribution_id
+            && left.account_id == right.account_id
+    });
     definition.permission_config.external_targets.sort();
     definition.permission_config.external_targets.dedup();
+}
+
+/// Canonicalizes all persisted authority-bearing Schedule fields before an
+/// AppServer computes extension snapshots or mutation fingerprints.
+pub fn normalize_schedule_definition(definition: &mut ScheduleDefinition) {
+    normalize_definition(definition);
 }
 
 fn validate_definition(definition: &ScheduleDefinition) -> Result<(), SchedulerError> {
@@ -768,6 +973,68 @@ fn validate_definition(definition: &ScheduleDefinition) -> Result<(), SchedulerE
             "only the Workbench entry profile can be scheduled".into(),
         ));
     }
+    if let ScheduleSpec::Event { matcher } = &definition.schedule {
+        validate_event_identity("source principal", &matcher.source.principal, 256)?;
+        validate_event_identity("source id", &matcher.source.id, 256)?;
+        validate_event_identity("event type", &matcher.event_type, 256)?;
+        if matcher
+            .subject_prefix
+            .as_ref()
+            .is_some_and(|value| value.chars().count() > 512)
+        {
+            return Err(SchedulerError::InvalidSchedule(
+                "event subject prefix must contain at most 512 characters".into(),
+            ));
+        }
+        if matcher.labels.len() > 16 {
+            return Err(SchedulerError::InvalidSchedule(
+                "event matcher supports at most 16 labels".into(),
+            ));
+        }
+        for (key, value) in &matcher.labels {
+            validate_event_identity("event label key", key, 128)?;
+            if value.chars().count() > 256 {
+                return Err(SchedulerError::InvalidSchedule(
+                    "event label values must contain at most 256 characters".into(),
+                ));
+            }
+        }
+        if let Some(resource) = &matcher.resource {
+            validate_event_identity("event resource kind", &resource.kind, 128)?;
+            validate_event_identity("event resource id", &resource.id, 512)?;
+            if resource
+                .revision
+                .as_ref()
+                .is_some_and(|value| value.is_empty() || value.chars().count() > 256)
+            {
+                return Err(SchedulerError::InvalidSchedule(
+                    "event resource revision must contain 1-256 characters".into(),
+                ));
+            }
+        }
+    }
+    if definition.host_grant.computer_unattended {
+        return Err(SchedulerError::InvalidSchedule(
+            "computer_unattended_unsupported".into(),
+        ));
+    }
+    for selection in &definition.host_grant.connectors {
+        if selection.allowed_actions.is_empty()
+            || selection.contribution_revision.account_id.as_ref() != Some(&selection.account_id)
+        {
+            return Err(SchedulerError::InvalidSchedule(
+                "schedule_connector_selection_invalid".into(),
+            ));
+        }
+    }
+    if let Some(browser) = &definition.host_grant.browser
+        && browser.enabled
+        && (browser.document_origins.is_empty() || browser.capabilities.is_empty())
+    {
+        return Err(SchedulerError::InvalidSchedule(
+            "schedule_browser_grant_invalid".into(),
+        ));
+    }
     match (&definition.workload_override, &definition.context_template) {
         (
             Some(WorkloadKind::Coding),
@@ -776,12 +1043,26 @@ fn validate_definition(definition: &ScheduleDefinition) -> Result<(), SchedulerE
                 execution_target,
             },
         ) if execution_target.project_id() == project_id => {}
+        (
+            Some(WorkloadKind::Coding),
+            hachimi_protocol::ScheduleContextTemplate::SessionContinuation { .. },
+        ) => {}
         (Some(WorkloadKind::Coding), _) => {
             return Err(SchedulerError::InvalidSchedule(
                 "coding schedules require a matching Project target".into(),
             ));
         }
         (Some(WorkloadKind::Office | WorkloadKind::General) | None, _) => {}
+    }
+    if definition.stop_conditions.max_occurrences == Some(0)
+        || definition
+            .stop_conditions
+            .end_at_ms
+            .is_some_and(|end_at| end_at <= definition.created_at_ms)
+    {
+        return Err(SchedulerError::InvalidSchedule(
+            "stop conditions must allow at least one future occurrence".into(),
+        ));
     }
     if matches!(
         definition.context_template,
@@ -797,120 +1078,14 @@ fn validate_definition(definition: &ScheduleDefinition) -> Result<(), SchedulerE
     Ok(())
 }
 
-fn authorization_scope(definition: &ScheduleDefinition) -> ScheduleAuthorizationScope {
-    ScheduleAuthorizationScope {
-        entry_profile: definition.entry_profile,
-        workload_override: definition.workload_override,
-        context_template: definition.context_template.clone(),
-        tool_allowlist: definition.tool_allowlist.clone(),
-        skill_allowlist: definition.skill_allowlist.clone(),
-        skill_revisions: Vec::new(),
-        mcp_tool_allowlist: definition.mcp_tool_allowlist.clone(),
-        permission_config: definition.permission_config.clone(),
+fn validate_event_identity(field: &str, value: &str, maximum: usize) -> Result<(), SchedulerError> {
+    let length = value.chars().count();
+    if length == 0 || length > maximum {
+        return Err(SchedulerError::InvalidSchedule(format!(
+            "{field} must contain 1-{maximum} characters"
+        )));
     }
-}
-
-fn build_grant(
-    definition: &ScheduleDefinition,
-    principal: &str,
-    now_ms: i64,
-    scope: ScheduleAuthorizationScope,
-) -> Result<ScheduleGrantRecord, SchedulerError> {
-    if scope.entry_profile != definition.entry_profile
-        || scope.workload_override != definition.workload_override
-        || scope.context_template != definition.context_template
-        || scope.tool_allowlist != definition.tool_allowlist
-        || scope.skill_allowlist != definition.skill_allowlist
-        || scope.mcp_tool_allowlist != definition.mcp_tool_allowlist
-        || scope.permission_config != definition.permission_config
-    {
-        return Err(SchedulerError::InvalidSchedule(
-            "authorization scope does not match the Schedule definition".into(),
-        ));
-    }
-    let bytes = serde_json::to_vec(&scope)?;
-    let scope_hash = Sha256::digest(bytes)
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect::<String>();
-    Ok(ScheduleGrantRecord {
-        id: ScheduleGrantId::random(),
-        schedule_id: definition.id.clone(),
-        permission_revision: definition.permission_revision,
-        scope_hash,
-        scope,
-        status: ScheduleGrantStatus::Active,
-        granted_by: principal.into(),
-        created_at_ms: now_ms,
-        revoked_at_ms: None,
-    })
-}
-
-fn next_occurrence(
-    timezone: &dyn TimeZoneResolver,
-    schedule: &ScheduleSpec,
-    after_ms: i64,
-) -> Result<Option<i64>, SchedulerError> {
-    occurrences_after(timezone, schedule, after_ms, 1)
-        .map(|values| values.into_iter().next())
-        .map_err(|error| {
-            SchedulerError::InvalidSchedule(format!("{}: {error}", error_code(&error)))
-        })
-}
-
-fn required_next_occurrence(
-    timezone: &dyn TimeZoneResolver,
-    schedule: &ScheduleSpec,
-    after_ms: i64,
-) -> Result<i64, SchedulerError> {
-    next_occurrence(timezone, schedule, after_ms)?.ok_or(SchedulerError::NoFutureOccurrence)
-}
-
-#[allow(clippy::too_many_arguments)]
-fn task_record(
-    schedule: &ScheduleDefinition,
-    id: TaskRunId,
-    trigger: TaskRunTrigger,
-    scheduled_for_ms: i64,
-    invocation_key: String,
-    status: TaskRunStatus,
-    error: Option<(String, String)>,
-    now_ms: i64,
-) -> TaskRunRecord {
-    let (error_code, error_summary) = error.unzip();
-    TaskRunRecord {
-        id,
-        schedule_id: Some(schedule.id.clone()),
-        schedule_revision: Some(schedule.config_revision),
-        trigger,
-        scheduled_for_ms: Some(scheduled_for_ms),
-        invocation_key,
-        requester_session_id: None,
-        execution_session_id: None,
-        run_id: None,
-        permission_snapshot_hash: None,
-        status,
-        progress_percent: None,
-        result_summary: None,
-        error_code,
-        error_summary,
-        artifact_ids: Vec::new(),
-        delivery_status: if schedule.delivery_policy == DeliveryPolicy::TaskTabAndSystemNotification
-        {
-            DeliveryStatus::Pending
-        } else {
-            DeliveryStatus::NotRequested
-        },
-        delivery_error_code: None,
-        created_at_ms: now_ms,
-        started_at_ms: None,
-        finished_at_ms: status.is_terminal().then_some(now_ms),
-        updated_at_ms: now_ms,
-    }
-}
-
-fn tracing_fallback(error: &SchedulerError) {
-    eprintln!("Hachimi scheduler tick failed: {error}");
+    Ok(())
 }
 
 #[cfg(test)]
@@ -919,7 +1094,7 @@ mod tests {
 
     use hachimi_protocol::{
         ApprovalPolicy, DeliveryPolicy, MisfirePolicy, PermissionProfile, ScheduleContextTemplate,
-        SchedulePermissionConfig, ScheduleSkillSelection, SkillId,
+        SchedulePermissionConfig, ScheduleSkillSelection, SessionId, SkillId,
     };
 
     use super::*;
@@ -1054,6 +1229,8 @@ mod tests {
             tool_allowlist: vec!["request_user_input".into()],
             skill_allowlist: Vec::new(),
             mcp_tool_allowlist: Vec::new(),
+            contribution_revisions: Vec::new(),
+            host_grant: hachimi_protocol::ScheduleHostGrant::default(),
             permission_config: SchedulePermissionConfig {
                 permission_profile: PermissionProfile::ReadOnly,
                 ..SchedulePermissionConfig::default()
@@ -1062,6 +1239,7 @@ mod tests {
             timeout_ms: 120_000,
             misfire_policy: MisfirePolicy::Skip,
             delivery_policy: DeliveryPolicy::TaskTabOnly,
+            stop_conditions: hachimi_protocol::ScheduleStopConditions::default(),
             config_revision: 99,
             created_by: "ignored".into(),
             next_run_at_ms: None,
@@ -1114,6 +1292,83 @@ mod tests {
                 .expect("snapshot")
                 .active_grant
                 .is_some()
+        );
+    }
+
+    #[tokio::test]
+    async fn host_grants_are_canonical_authority_and_change_permission_revision() {
+        let now = 1_800_000_000_000;
+        let (service, _) = service(now).await;
+        let mut input = definition(now);
+        let account_id = hachimi_protocol::ConnectorAccountId::from("crm-local");
+        input
+            .host_grant
+            .connectors
+            .push(hachimi_protocol::ScheduleConnectorSelection {
+                account_id: account_id.clone(),
+                contribution_revision: hachimi_protocol::ContributionRevision {
+                    plugin_id: hachimi_protocol::PluginId::from("sample-crm"),
+                    contribution_id: "sample-crm".into(),
+                    account_id: Some(account_id.clone()),
+                    content_hash: "content-v1".into(),
+                    host_identity_hash: Some("host-v1".into()),
+                    schema_hash: Some("schema-v1".into()),
+                    action_hash: Some("actions-v1".into()),
+                },
+                allowed_actions: vec!["search".into()],
+            });
+        let created = service
+            .create("user", "host-grant-create", input, true)
+            .await
+            .expect("create");
+        assert_eq!(
+            created.definition.permission_config.permission_profile,
+            PermissionProfile::ExternalSandbox
+        );
+        assert!(
+            created
+                .definition
+                .tool_allowlist
+                .contains(&"connector_invoke".into())
+        );
+        assert!(
+            created
+                .definition
+                .permission_config
+                .external_targets
+                .contains(&format!("connector:{account_id}:search"))
+        );
+        assert_eq!(
+            created.active_grant.as_ref().unwrap().scope.host_grant,
+            created.definition.host_grant
+        );
+
+        let mut updated = created.definition.clone();
+        updated.host_grant.connectors[0]
+            .allowed_actions
+            .push("update".into());
+        let updated = service
+            .update(updated, created.definition.config_revision)
+            .await
+            .expect("update");
+        assert_eq!(updated.permission_revision, 2);
+        assert_eq!(updated.health, ScheduleHealth::NeedsAuthorization);
+    }
+
+    #[tokio::test]
+    async fn unattended_computer_is_stably_rejected() {
+        let now = 1_800_000_000_000;
+        let (service, _) = service(now).await;
+        let mut input = definition(now);
+        input.host_grant.computer_unattended = true;
+        let error = service
+            .create("user", "computer-unattended", input, false)
+            .await
+            .expect_err("computer must be rejected");
+        assert!(
+            error
+                .to_string()
+                .contains("computer_unattended_unsupported")
         );
     }
 
@@ -1261,6 +1516,125 @@ mod tests {
                 .status,
             TaskRunStatus::Succeeded
         );
+    }
+
+    #[tokio::test]
+    async fn successful_and_max_occurrence_stop_conditions_disable_the_schedule() {
+        let now = 1_800_000_000_000;
+        let (service, _) = service(now).await;
+        let mut stop_after_success = definition(now);
+        stop_after_success.id = ScheduleId::from("stop-after-success");
+        stop_after_success.stop_conditions.stop_after_success = true;
+        let success_schedule = service
+            .create("user", "stop-after-success", stop_after_success, true)
+            .await
+            .expect("create")
+            .definition;
+        let success_task = service
+            .run_now(&success_schedule.id)
+            .await
+            .expect("run now");
+        for _ in 0..100 {
+            if service
+                .store
+                .get_task_run(&success_task.id)
+                .await
+                .expect("task")
+                .is_some_and(|task| task.status == TaskRunStatus::Succeeded)
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        for _ in 0..100 {
+            if service
+                .store
+                .get_schedule(&success_schedule.id)
+                .await
+                .expect("schedule")
+                .is_some_and(|schedule| !schedule.enabled)
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            !service
+                .store
+                .get_schedule(&success_schedule.id)
+                .await
+                .expect("schedule")
+                .expect("row")
+                .enabled
+        );
+
+        let mut limited = definition(now);
+        limited.id = ScheduleId::from("max-occurrences");
+        limited.stop_conditions.max_occurrences = Some(2);
+        let limited = service
+            .create("user", "max-occurrences", limited, true)
+            .await
+            .expect("create")
+            .definition;
+        for _ in 0..2 {
+            let task = service.run_now(&limited.id).await.expect("run now");
+            for _ in 0..100 {
+                if service
+                    .store
+                    .get_task_run(&task.id)
+                    .await
+                    .expect("task")
+                    .is_some_and(|task| task.status == TaskRunStatus::Succeeded)
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        }
+        for _ in 0..100 {
+            if service
+                .store
+                .get_schedule(&limited.id)
+                .await
+                .expect("schedule")
+                .is_some_and(|schedule| !schedule.enabled)
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            !service
+                .store
+                .get_schedule(&limited.id)
+                .await
+                .expect("schedule")
+                .expect("row")
+                .enabled
+        );
+    }
+
+    #[test]
+    fn session_continuation_task_ledger_binds_the_requesting_session() {
+        let now = 1_800_000_000_000;
+        let mut schedule = definition(now);
+        let session_id = SessionId::from("continuation-session");
+        schedule.context_template = ScheduleContextTemplate::SessionContinuation {
+            session_id: session_id.clone(),
+        };
+        let task = task_record(
+            &schedule,
+            TaskRunId::from("continuation-task"),
+            TaskRunTrigger::Scheduled,
+            now + 1_000,
+            "continuation:1".into(),
+            TaskRunStatus::Queued,
+            None,
+            now,
+        );
+        assert_eq!(task.requester_session_id, Some(session_id));
+        assert_eq!(task.execution_session_id, None);
+        assert_eq!(task.run_id, None);
     }
 
     #[tokio::test]
@@ -1564,127 +1938,5 @@ mod tests {
         assert_eq!(scheduler_delay_ms(Some(now + 1_000), now), 1_000);
     }
 
-    #[tokio::test]
-    #[ignore = "real SystemClock release soak"]
-    async fn system_clock_at_every_and_six_field_cron_soak_without_duplicate_invocations() {
-        let _short_interval_guard = crate::calendar::enable_release_soak_short_intervals();
-        let store = AgentStore::connect_in_memory().await.expect("store");
-        let launches = Arc::new(AtomicUsize::new(0));
-        let service = Arc::new(SchedulerService::new(
-            store.clone(),
-            Arc::new(SystemClock),
-            Arc::new(BundledIanaTimeZoneResolver),
-            Arc::new(CountingLauncher(Arc::clone(&launches))),
-            Arc::new(NoopNotificationAdapter),
-        ));
-        let now = SystemClock.now_ms();
-
-        let mut at = definition(now);
-        at.id = ScheduleId::from("system-clock-at");
-        at.name = "System clock At".into();
-        at.schedule = ScheduleSpec::At {
-            timestamp_ms: now + 800,
-        };
-        service
-            .create("release-soak", "system-clock-at", at, true)
-            .await
-            .expect("At schedule");
-
-        let mut every = definition(now);
-        every.id = ScheduleId::from("system-clock-every");
-        every.name = "System clock Every".into();
-        every.schedule = ScheduleSpec::Every {
-            interval_ms: 300,
-            anchor_ms: now + 300,
-        };
-        service
-            .create("release-soak", "system-clock-every", every, true)
-            .await
-            .expect("Every schedule");
-
-        let mut cron = definition(now);
-        cron.id = ScheduleId::from("system-clock-cron");
-        cron.name = "System clock Cron".into();
-        cron.schedule = ScheduleSpec::Cron {
-            expression: "*/1 * * * * *".into(),
-            timezone: "UTC".into(),
-        };
-        service
-            .create("release-soak", "system-clock-cron", cron, true)
-            .await
-            .expect("Cron schedule");
-
-        let handle = Arc::clone(&service).start();
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
-        while tokio::time::Instant::now() < deadline {
-            let tasks = store.list_task_runs(None, 500).await.expect("soak tasks");
-            let every_count = tasks
-                .iter()
-                .filter(|task| {
-                    task.schedule_id.as_ref() == Some(&ScheduleId::from("system-clock-every"))
-                })
-                .count();
-            let at_seen = tasks.iter().any(|task| {
-                task.schedule_id.as_ref() == Some(&ScheduleId::from("system-clock-at"))
-            });
-            let cron_seen = tasks.iter().any(|task| {
-                task.schedule_id.as_ref() == Some(&ScheduleId::from("system-clock-cron"))
-            });
-            if every_count >= 20 && at_seen && cron_seen {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        }
-        drop(handle);
-        assert!(
-            launches.load(Ordering::SeqCst) >= 22,
-            "natural timer did not produce the required 20+ occurrence soak"
-        );
-        tokio::time::sleep(Duration::from_millis(100)).await;
-
-        let tasks = store.list_task_runs(None, 500).await.expect("task runs");
-        let keys = tasks
-            .iter()
-            .map(|task| task.invocation_key.clone())
-            .collect::<std::collections::BTreeSet<_>>();
-        assert_eq!(
-            keys.len(),
-            tasks.len(),
-            "an occurrence was invoked more than once"
-        );
-        assert!(tasks.iter().any(|task| {
-            task.schedule_id.as_ref() == Some(&ScheduleId::from("system-clock-at"))
-        }));
-        assert!(tasks.iter().any(|task| {
-            task.schedule_id.as_ref() == Some(&ScheduleId::from("system-clock-cron"))
-        }));
-        let mut every_occurrences = tasks
-            .iter()
-            .filter(|task| {
-                task.schedule_id.as_ref() == Some(&ScheduleId::from("system-clock-every"))
-            })
-            .filter_map(|task| task.scheduled_for_ms)
-            .collect::<Vec<_>>();
-        every_occurrences.sort_unstable();
-        assert!(every_occurrences.len() >= 20);
-        assert!(
-            every_occurrences
-                .windows(2)
-                .all(|pair| pair[1] > pair[0] && (pair[1] - pair[0]) % 300 == 0),
-            "Every occurrences drifted away from their fixed anchor"
-        );
-        assert!(
-            service.active_launches.lock().is_empty(),
-            "completed natural-clock invocations leaked active workers"
-        );
-        let at = store
-            .get_schedule(&ScheduleId::from("system-clock-at"))
-            .await
-            .expect("At schedule")
-            .expect("At row");
-        assert!(
-            !at.enabled,
-            "one-shot At schedule was not disabled after firing"
-        );
-    }
+    include!("service_system_clock_soak_test.rs");
 }

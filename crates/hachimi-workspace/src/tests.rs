@@ -17,6 +17,22 @@ fn request(operation: WorkspaceOperation) -> WorkspaceRequestEnvelope {
     }
 }
 
+#[test]
+fn workspace_root_rejections_have_stable_migration_codes() {
+    assert_eq!(
+        path_security_error(PathSecurityError::UnsupportedRoot).code,
+        WorkspaceErrorCode::UnsupportedWorkspaceRoot
+    );
+    assert_eq!(
+        path_security_error(PathSecurityError::OwnershipMismatch).code,
+        WorkspaceErrorCode::WorkspaceOwnershipMismatch
+    );
+    assert_eq!(
+        path_security_error(PathSecurityError::ProtectedRoot).code,
+        WorkspaceErrorCode::ProtectedWorkspaceRoot
+    );
+}
+
 #[tokio::test]
 async fn reads_replaces_and_rejects_stale_writes() {
     let directory = tempfile::tempdir().expect("directory");
@@ -190,6 +206,7 @@ async fn stale_generation_guard_fails_before_restricted_worker_dispatch() {
             interactive: false,
             allowed_commands: Vec::new(),
         },
+        browser: Default::default(),
         computer: ComputerGrant::default(),
         review_each_command: true,
         expires_at_ms: None,

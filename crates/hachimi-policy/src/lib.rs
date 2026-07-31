@@ -75,6 +75,7 @@ pub fn expand_permission_profile(
     }];
     let mut network = NetworkGrant::default();
     let mut process = ProcessGrant::default();
+    let mut browser = hachimi_protocol::BrowserGrant::default();
     let mut computer = ComputerGrant::default();
     if profile != PermissionProfile::ReadOnly {
         file_system.push(FileSystemGrant {
@@ -86,6 +87,10 @@ pub fn expand_permission_profile(
         process.spawn = true;
         if profile == PermissionProfile::ExternalSandbox {
             network.enabled = true;
+            browser.observe = true;
+            browser.act = true;
+            browser.upload = true;
+            browser.download = true;
             computer.observe = true;
             computer.act = true;
         }
@@ -94,6 +99,11 @@ pub fn expand_permission_profile(
         file_system.retain(|grant| grant.access == FileSystemAccess::Read);
         network = NetworkGrant::default();
         process = ProcessGrant::default();
+        browser.act = false;
+        browser.upload = false;
+        browser.download = false;
+        browser.cookie_storage = false;
+        browser.cdp = false;
         computer.act = false;
     }
     CapabilityGrantSet {
@@ -109,6 +119,7 @@ pub fn expand_permission_profile(
         file_system,
         network,
         process,
+        browser,
         computer,
         review_each_command: true,
         expires_at_ms: None,
@@ -128,6 +139,19 @@ pub fn capability_grant_allows(grants: &CapabilityGrantSet, effect: ToolEffect) 
             .any(|grant| grant.access == FileSystemAccess::Write),
         ToolEffect::Process => grants.process.spawn,
         ToolEffect::ExternalSideEffect => grants.network.enabled,
+        ToolEffect::BrowserObserve => grants.browser.observe,
+        // `browser_act` is the typed dispatcher for navigation as well as
+        // separately granted upload/download/storage/CDP actions. The tool
+        // executor performs the exact variant check; this coarse policy gate
+        // must therefore admit any explicitly granted Browser action without
+        // widening `BrowserGrant::act` to navigation/click/type.
+        ToolEffect::BrowserAct => {
+            grants.browser.act
+                || grants.browser.upload
+                || grants.browser.download
+                || grants.browser.cookie_storage
+                || grants.browser.cdp
+        }
         ToolEffect::ComputerObserve => grants.computer.observe,
         ToolEffect::ComputerAct => grants.computer.act,
     }
@@ -145,7 +169,7 @@ impl PolicyEngine for DefaultPolicy {
         }
         let side_effect = !matches!(
             context.effect,
-            ToolEffect::ReadOnly | ToolEffect::ComputerObserve
+            ToolEffect::ReadOnly | ToolEffect::BrowserObserve | ToolEffect::ComputerObserve
         );
         if context.behavior_mode == BehaviorMode::Plan && side_effect {
             return PolicyDecision::Deny {
@@ -161,14 +185,20 @@ impl PolicyEngine for DefaultPolicy {
             ApprovalPolicy::AlwaysAskSideEffects => side_effect,
             ApprovalPolicy::OnlyWhenNeeded => matches!(
                 context.effect,
-                ToolEffect::Process | ToolEffect::ExternalSideEffect | ToolEffect::ComputerAct
+                ToolEffect::Process
+                    | ToolEffect::ExternalSideEffect
+                    | ToolEffect::BrowserAct
+                    | ToolEffect::ComputerAct
             ),
             ApprovalPolicy::NeverPrompt => false,
         };
         if context.approval_policy == ApprovalPolicy::NeverPrompt
             && matches!(
                 context.effect,
-                ToolEffect::Process | ToolEffect::ExternalSideEffect | ToolEffect::ComputerAct
+                ToolEffect::Process
+                    | ToolEffect::ExternalSideEffect
+                    | ToolEffect::BrowserAct
+                    | ToolEffect::ComputerAct
             )
             && context.schedule_grant_hash.is_none()
         {

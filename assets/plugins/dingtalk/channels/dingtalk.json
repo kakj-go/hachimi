@@ -1,0 +1,5 @@
+{
+  "protocolVersion": 1,
+  "providerId": "dingtalk",
+  "transport": "builtin_enterprise"
+}

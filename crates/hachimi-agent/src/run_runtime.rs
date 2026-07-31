@@ -58,8 +58,10 @@ pub enum AgentRunFactoryError {
     UnexpectedExecutionTarget,
     #[error("Plan mode must use a read-only permission profile")]
     PlanMustBeReadOnly,
-    #[error("desktop-control Runs are disabled")]
-    DesktopControlDisabled,
+    #[error("entry profile is incompatible with the requested Session context")]
+    EntryContextMismatch,
+    #[error("existing Session does not match the continuation request")]
+    ExistingSessionMismatch,
 }
 
 #[derive(Debug, Clone)]
@@ -147,6 +149,76 @@ impl AgentRunFactory {
             )
             .await?)
     }
+
+    /// Creates a fresh Run in an existing Session without restoring any prior
+    /// approval, user-input secret, capability grant, lease, or Host snapshot.
+    pub async fn create_in_session(
+        &self,
+        request: AgentRunCreateRequest,
+        session: SessionRecord,
+    ) -> Result<CreatedAgentRun, AgentRunFactoryError> {
+        validate_create_request(&request)?;
+        if request.context != session.context
+            || request.entry_profile != session.entry_profile
+            || request.parent_session_id.is_some()
+        {
+            return Err(AgentRunFactoryError::ExistingSessionMismatch);
+        }
+        let run_id = RunId::random();
+        let run = RunRecord {
+            id: run_id.clone(),
+            session_id: session.id.clone(),
+            status: RunStatus::Queued,
+            purpose: request.purpose,
+            origin: request.origin,
+            generation: 1,
+            configuration: RunConfiguration {
+                model_snapshot: request.model_snapshot,
+                driver: RunDriverKind::ToolLoop,
+                entry_profile: request.entry_profile,
+                workload_override: request.workload_override,
+                behavior_mode: request.behavior_mode,
+                execution_target: request.execution_target,
+                approval_policy: request.approval_policy,
+                permission_profile: request.permission_profile,
+                budget: request.budget,
+                accepted_plan_id: None,
+                accepted_plan_revision: None,
+            },
+            requested_capabilities: request.requested_capabilities,
+            negotiated_capabilities: ProviderCapabilities::default(),
+            provider_capability_probe: None,
+            capability_degradations: Vec::new(),
+            failure_code: None,
+            created_at_ms: request.created_at_ms,
+            updated_at_ms: request.created_at_ms,
+        };
+        let user_item = TranscriptItem {
+            id: ItemId::random(),
+            session_id: session.id.clone(),
+            run_id: Some(run_id),
+            sequence: 0,
+            kind: TranscriptItemKind::User,
+            status: ItemStatus::Completed,
+            payload: ItemPayload::User {
+                text: request.prompt.trim().to_owned(),
+                attachment_ids: request.attachment_ids.clone(),
+            },
+            relations: ItemRelations::default(),
+            created_at_ms: request.created_at_ms,
+        };
+        Ok(self
+            .store
+            .create_agent_run_in_session_idempotent(
+                &request.principal,
+                &request.idempotency_key,
+                &session,
+                &run,
+                &user_item,
+                &request.attachment_ids,
+            )
+            .await?)
+    }
 }
 
 fn validate_create_request(request: &AgentRunCreateRequest) -> Result<(), AgentRunFactoryError> {
@@ -178,8 +250,20 @@ fn validate_create_request(request: &AgentRunCreateRequest) -> Result<(), AgentR
         (EntryProfile::Workbench, Some(WorkloadKind::Coding), _, _) => {
             return Err(AgentRunFactoryError::CodingProjectRequired);
         }
-        (EntryProfile::DesktopControl, _, _, _) | (EntryProfile::PetConversation, _, _, _) => {
-            return Err(AgentRunFactoryError::DesktopControlDisabled);
+        (
+            EntryProfile::PetConversation | EntryProfile::DesktopControl,
+            Some(WorkloadKind::Coding | WorkloadKind::Office),
+            _,
+            _,
+        )
+        | (
+            EntryProfile::PetConversation | EntryProfile::DesktopControl,
+            _,
+            SessionContextBinding::Project { .. },
+            _,
+        )
+        | (EntryProfile::PetConversation | EntryProfile::DesktopControl, _, _, Some(_)) => {
+            return Err(AgentRunFactoryError::EntryContextMismatch);
         }
         (_, _, SessionContextBinding::General | SessionContextBinding::Avatar { .. }, Some(_)) => {
             return Err(AgentRunFactoryError::UnexpectedExecutionTarget);
@@ -201,6 +285,7 @@ pub struct ActiveAgentRun {
     pub run_id: RunId,
     pub run_generation: u64,
     pub priority: AgentRunPriority,
+    pub parent_run_id: Option<RunId>,
     pub cancellation: CancellationToken,
 }
 
@@ -241,6 +326,7 @@ impl AgentExecutorRegistry {
         &self,
         run: &RunRecord,
         priority: AgentRunPriority,
+        parent_run_id: Option<RunId>,
     ) -> Result<CancellationToken, AgentExecutorRegistryError> {
         let mut active = self.active.lock();
         if active.contains_key(&run.id) {
@@ -254,6 +340,7 @@ impl AgentExecutorRegistry {
                 run_id: run.id.clone(),
                 run_generation: run.generation,
                 priority,
+                parent_run_id,
                 cancellation: cancellation.clone(),
             },
         );
@@ -286,7 +373,23 @@ impl AgentExecutorRegistry {
         }
         active.cancellation.cancel();
         self.lanes.reset(&active.session_id);
+        self.cancel_descendants(run_id);
         Ok(())
+    }
+
+    pub fn cancel_descendants(&self, parent_run_id: &RunId) {
+        let descendants = self
+            .active
+            .lock()
+            .values()
+            .filter(|run| run.parent_run_id.as_ref() == Some(parent_run_id))
+            .cloned()
+            .collect::<Vec<_>>();
+        for child in descendants {
+            child.cancellation.cancel();
+            self.lanes.reset(&child.session_id);
+            self.cancel_descendants(&child.run_id);
+        }
     }
 
     pub fn remove(&self, run_id: &RunId, expected_generation: u64) -> bool {
@@ -350,6 +453,8 @@ pub enum AgentExecutionError {
     Execution(String),
     #[error("session lane generation changed before completion")]
     StaleLaneGeneration,
+    #[error("run recovery context changed: {0}")]
+    RecoveryDrift(&'static str),
 }
 
 #[derive(Debug, Clone)]
@@ -364,7 +469,12 @@ pub struct AgentRunRequest {
     pub skill_allowlist: Vec<SkillId>,
     pub mcp_tool_allowlist: Vec<McpToolSelection>,
     pub run_tool_allowlist: Option<Vec<String>>,
+    pub schedule_host_grant: Option<hachimi_protocol::ScheduleHostGrant>,
     pub workload_override: Option<WorkloadKind>,
+    pub recovery_checkpoint: Option<hachimi_protocol::RunStepCheckpoint>,
+    pub parent_agent_task_id: Option<hachimi_protocol::AgentTaskId>,
+    pub parent_run_id: Option<RunId>,
+    pub agent_depth: u8,
 }
 
 pub struct PreparedAgentRun {
@@ -428,7 +538,8 @@ impl AgentRunExecutor {
     pub async fn execute(&self, request: AgentRunRequest) -> Result<(), AgentExecutionError> {
         validate_agent_run_request(&request)?;
         let run = request.run.clone();
-        self.registry.register(&run, request.priority)?;
+        self.registry
+            .register(&run, request.priority, request.parent_run_id.clone())?;
         let active = self
             .registry
             .get(&run.id)
@@ -442,10 +553,24 @@ impl AgentRunExecutor {
             self.store
                 .assert_run_precondition(&run.id, &run.id, run.generation)
                 .await?;
+            self.store
+                .dispatch_plugin_hook_event(
+                    &hachimi_storage::PluginHookEventRecord {
+                        event: "run.before".into(),
+                        session_id: Some(run.session_id.clone()),
+                        run_id: Some(run.id.clone()),
+                        run_generation: Some(run.generation),
+                        subject: run.id.as_str().into(),
+                        result_code: "started".into(),
+                        created_at_ms: current_time_ms(),
+                    },
+                    active.cancellation.child_token(),
+                )
+                .await?;
             let combined = CancellationToken::new();
             let watcher_stop = CancellationToken::new();
             let watcher = {
-                let external = active.cancellation;
+                let external = active.cancellation.clone();
                 let lane = permit.cancellation();
                 let combined = combined.clone();
                 let stop = watcher_stop.clone();
@@ -466,7 +591,8 @@ impl AgentRunExecutor {
                 let checkpoint = if run.purpose == RunPurpose::Review {
                     None
                 } else {
-                    let compactor = SemanticCompactor::new(self.store.clone(), Arc::clone(&model));
+                    let compactor = SemanticCompactor::new(self.store.clone(), Arc::clone(&model))
+                        .with_provider_context(&run.configuration.model_snapshot);
                     match compactor
                         .compact_if_needed(&run.session_id, Some(&run.id), combined.child_token())
                         .await
@@ -508,13 +634,47 @@ impl AgentRunExecutor {
                         combined.child_token(),
                     )
                     .await?;
+                let tools = Arc::new(
+                    ToolRuntime::from_executors(prepared.tool_executors.clone())
+                        .map_err(|error| AgentExecutionError::Preparation(error.to_string()))?,
+                );
+                if let Some(recovery) = request.recovery_checkpoint.as_ref() {
+                    if recovery.run_id != run.id
+                        || recovery.session_id != run.session_id
+                        || recovery.run_generation.saturating_add(1) != run.generation
+                    {
+                        return Err(AgentExecutionError::RecoveryDrift(
+                            "checkpoint lineage no longer matches the Run",
+                        ));
+                    }
+                    let world = prepared.state.snapshot().world;
+                    let current = hachimi_protocol::RecoveryRevisionSnapshot {
+                        agents_revision: world.agents_revision,
+                        skills_revision: world.skills_revision,
+                        mcp_revision: world.mcp_revision,
+                        plugin_revision: tools.registry().revision().to_owned(),
+                        host_revision: world.host_revision,
+                        provider_revision: runtime_provider_revision(&model.capabilities()),
+                    };
+                    if !recovery_revisions_match(&recovery.revision_snapshot, &current)
+                        || (recovery.revision_snapshot.host_revision.is_empty()
+                            && current.host_revision != recovery.world_revision)
+                    {
+                        return Err(AgentExecutionError::RecoveryDrift(
+                            "Host, Skill, MCP, Plugin, or Sandbox revision changed",
+                        ));
+                    }
+                    if recovery.revision_snapshot.provider_revision.is_empty()
+                        && current.provider_revision != recovery.provider_revision
+                    {
+                        return Err(AgentExecutionError::RecoveryDrift(
+                            "Provider capabilities changed",
+                        ));
+                    }
+                }
                 prepared
                     .state
                     .narrow_sandbox(request.sandbox_snapshot.clone());
-                let tools = Arc::new(
-                    ToolRuntime::from_executors(prepared.tool_executors)
-                        .map_err(|error| AgentExecutionError::Preparation(error.to_string()))?,
-                );
                 TurnRuntime::new(self.store.clone(), model, tools)
                     .execute(
                         run.clone(),
@@ -541,6 +701,28 @@ impl AgentRunExecutor {
             }
         }
         .await;
+        let hook_result = self
+            .store
+            .dispatch_plugin_hook_event(
+                &hachimi_storage::PluginHookEventRecord {
+                    event: "run.after".into(),
+                    session_id: Some(run.session_id.clone()),
+                    run_id: Some(run.id.clone()),
+                    run_generation: Some(run.generation),
+                    subject: run.id.as_str().into(),
+                    result_code: if result.is_ok() {
+                        "succeeded".into()
+                    } else {
+                        "failed".into()
+                    },
+                    created_at_ms: current_time_ms(),
+                },
+                active.cancellation.child_token(),
+            )
+            .await;
+        self.store
+            .finish_run_recovery(&run.id, run.generation, result.is_ok(), current_time_ms())
+            .await?;
         let _ = self
             .store
             .invalidate_run_capability_grants(&run.session_id, &run.id, current_time_ms())
@@ -552,16 +734,36 @@ impl AgentRunExecutor {
                 .await;
         }
         self.registry.remove(&run.id, run.generation);
+        self.registry.cancel_descendants(&run.id);
+        hook_result?;
         result
     }
 }
 
 fn validate_agent_run_request(request: &AgentRunRequest) -> Result<(), AgentExecutionError> {
+    let scheduled_origin = matches!(
+        request.run.origin,
+        hachimi_protocol::RunOrigin::Scheduled { .. }
+    );
     if request.run.session_id != request.session.id
         || request.run.configuration.entry_profile != request.session.entry_profile
         || request.run.configuration.workload_override != request.workload_override
         || request.capability_grants.session_id != request.session.id
         || request.capability_grants.run_id.as_ref() != Some(&request.run.id)
+        || scheduled_origin != request.schedule_host_grant.is_some()
+        || request
+            .recovery_checkpoint
+            .as_ref()
+            .is_some_and(|checkpoint| {
+                checkpoint.run_id != request.run.id
+                    || checkpoint.session_id != request.session.id
+                    || checkpoint.run_generation.saturating_add(1) != request.run.generation
+            })
+        || request.agent_depth > 3
+        || (request.agent_depth == 0
+            && (request.parent_agent_task_id.is_some() || request.parent_run_id.is_some()))
+        || (request.agent_depth > 0
+            && (request.parent_agent_task_id.is_none() || request.parent_run_id.is_none()))
     {
         return Err(AgentExecutionError::Preparation(
             "AgentRunRequest lineage or immutable snapshots do not match".into(),
@@ -589,4 +791,31 @@ fn current_time_ms() -> i64 {
             .as_millis(),
     )
     .unwrap_or(i64::MAX)
+}
+
+fn runtime_provider_revision(capabilities: &ProviderCapabilities) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(serde_json::to_vec(capabilities).unwrap_or_default());
+    hasher
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+fn recovery_revisions_match(
+    expected: &hachimi_protocol::RecoveryRevisionSnapshot,
+    current: &hachimi_protocol::RecoveryRevisionSnapshot,
+) -> bool {
+    [
+        (&expected.agents_revision, &current.agents_revision),
+        (&expected.skills_revision, &current.skills_revision),
+        (&expected.mcp_revision, &current.mcp_revision),
+        (&expected.plugin_revision, &current.plugin_revision),
+        (&expected.host_revision, &current.host_revision),
+        (&expected.provider_revision, &current.provider_revision),
+    ]
+    .into_iter()
+    .all(|(expected, current)| expected.is_empty() || expected == current)
 }

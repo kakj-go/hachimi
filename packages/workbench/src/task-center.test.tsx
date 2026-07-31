@@ -80,6 +80,7 @@ vi.mock("@hachimi/ui", () => {
       <label>
         {props.label as never}
         <input
+          data-testid={props.testId as string | undefined}
           type={(props.type as string | undefined) ?? "text"}
           value={props.value as string}
           onInput={(event) => (props.onInput as ((event: InputEvent) => void) | undefined)?.(event)}
@@ -96,6 +97,77 @@ afterEach(() => {
 });
 
 describe("TaskCenter", () => {
+  it("creates an Event schedule with an exact typed matcher and no future timestamp", async () => {
+    const createSchedule = vi.fn(async (request) => ({
+      definition: request.definition,
+      activeGrant: null,
+      recentRuns: [],
+    }));
+    const port = {
+      listSchedules: vi.fn(async () => []),
+      listTaskRuns: vi.fn(async () => []),
+      searchAgentSessions: vi.fn(async () => ({ items: [], nextCursor: null })),
+      listProjectGitRefs: vi.fn(async () => []),
+      listMcpServers: vi.fn(async () => []),
+      listMcpTools: vi.fn(async () => []),
+      createSchedule,
+    } as unknown as WorkbenchCommandPort;
+    const root = document.createElement("div");
+    document.body.append(root);
+    const dispose = render(
+      () => (
+        <I18nProvider initialLocale="en-US">
+          <TaskCenter
+            commandPort={port}
+            projects={[]}
+            skills={[]}
+            onOpenSession={() => undefined}
+          />
+        </I18nProvider>
+      ),
+      root,
+    );
+
+    await Promise.resolve();
+    (root.querySelector('[data-testid="task-create-toggle"]') as HTMLButtonElement).click();
+    const frequency = root.querySelector('[data-testid="task-frequency"]') as HTMLSelectElement;
+    frequency.value = "event";
+    frequency.dispatchEvent(new Event("change", { bubbles: true }));
+    const setInput = (testId: string, value: string) => {
+      const input = root.querySelector(`[data-testid="${testId}"]`) as HTMLInputElement;
+      input.value = value;
+      input.dispatchEvent(new InputEvent("input", { bubbles: true }));
+    };
+    setInput("task-event-source-principal", "plugin:calendar");
+    setInput("task-event-source-id", "primary-calendar");
+    setInput("task-event-type", "meeting.changed");
+    const prompt = [...root.querySelectorAll("textarea")].at(-1)!;
+    prompt.value = "Summarize the referenced meeting.";
+    prompt.dispatchEvent(new InputEvent("input", { bubbles: true }));
+    (root.querySelector("form") as HTMLFormElement).dispatchEvent(
+      new Event("submit", { bubbles: true, cancelable: true }),
+    );
+
+    await vi.waitFor(() => expect(createSchedule).toHaveBeenCalledTimes(1));
+    const definition = createSchedule.mock.calls[0]![0].definition;
+    expect(definition.schedule).toEqual({
+      kind: "event",
+      matcher: {
+        source: {
+          kind: "workspace",
+          principal: "plugin:calendar",
+          id: "primary-calendar",
+        },
+        eventType: "meeting.changed",
+        subjectPrefix: null,
+        labels: {},
+        resource: null,
+      },
+    });
+    expect(definition.nextRunAtMs).toBeNull();
+    dispose();
+  });
+
   it("creates an authorized General Office prompt schedule", async () => {
     const createSchedule = vi.fn(async (request) => ({
       definition: request.definition,
@@ -105,6 +177,7 @@ describe("TaskCenter", () => {
     const port = {
       listSchedules: vi.fn(async () => []),
       listTaskRuns: vi.fn(async () => []),
+      searchAgentSessions: vi.fn(async () => ({ items: [], nextCursor: null })),
       listProjectGitRefs: vi.fn(async () => []),
       listMcpServers: vi.fn(async () => []),
       listMcpTools: vi.fn(async () => []),
@@ -185,6 +258,7 @@ describe("TaskCenter", () => {
     const port = {
       listSchedules: vi.fn(async () => [schedule]),
       listTaskRuns: vi.fn(async () => []),
+      searchAgentSessions: vi.fn(async () => ({ items: [], nextCursor: null })),
       listProjectGitRefs: vi.fn(async () => []),
       listMcpServers: vi.fn(async () => []),
       listMcpTools: vi.fn(async () => []),
@@ -239,6 +313,7 @@ describe("TaskCenter", () => {
     const port = {
       listSchedules: vi.fn(async () => [schedule]),
       listTaskRuns: vi.fn(async () => []),
+      searchAgentSessions: vi.fn(async () => ({ items: [], nextCursor: null })),
       listProjectGitRefs: vi.fn(async () => []),
       listMcpServers: vi.fn(async () => []),
       listMcpTools: vi.fn(async () => []),
@@ -350,6 +425,7 @@ describe("TaskCenter", () => {
     const port = {
       listSchedules: vi.fn(async () => []),
       listTaskRuns: vi.fn(async () => []),
+      searchAgentSessions: vi.fn(async () => ({ items: [], nextCursor: null })),
       listProjectGitRefs: vi.fn(async () => []),
       listMcpServers: vi.fn(async () => [server]),
       listMcpTools: vi.fn(async () => [...tools]),
@@ -409,6 +485,7 @@ describe("TaskCenter", () => {
     const port = {
       listSchedules: vi.fn(async () => []),
       listTaskRuns: vi.fn(async () => []),
+      searchAgentSessions: vi.fn(async () => ({ items: [], nextCursor: null })),
       listProjectGitRefs: vi.fn(async () => []),
       listMcpServers: vi.fn(async () => []),
       listMcpTools: vi.fn(async () => []),
@@ -483,6 +560,7 @@ describe("TaskCenter", () => {
     const port = {
       listSchedules: vi.fn(async () => [schedule]),
       listTaskRuns: vi.fn(async () => [needsAttention, cancelled]),
+      searchAgentSessions: vi.fn(async () => ({ items: [], nextCursor: null })),
       listProjectGitRefs: vi.fn(async () => []),
       listMcpServers: vi.fn(async () => []),
       listMcpTools: vi.fn(async () => []),

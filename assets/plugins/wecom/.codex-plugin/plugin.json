@@ -1,0 +1,27 @@
+{
+  "manifestVersion": 1,
+  "id": "wecom",
+  "name": "企业微信",
+  "version": "1.0.0",
+  "description": "Hachimi 企业微信 Connector、Channel 与事件源",
+  "contributions": [
+    {
+      "kind": "connector",
+      "id": "wecom",
+      "relativePath": "connectors/wecom.json",
+      "requiredScopes": ["connectors.invoke", "contacts.read", "channel.send"]
+    },
+    {
+      "kind": "event_source",
+      "id": "wecom-events",
+      "relativePath": "events/wecom.json",
+      "requiredScopes": ["channel.receive"]
+    },
+    {
+      "kind": "channel",
+      "id": "wecom-channel",
+      "relativePath": "channels/wecom.json",
+      "requiredScopes": ["channel.receive", "channel.send"]
+    }
+  ]
+}

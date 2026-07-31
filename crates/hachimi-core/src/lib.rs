@@ -38,6 +38,49 @@ impl WindowKind {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type, Default)]
 #[serde(rename_all = "camelCase")]
+pub struct RuntimeFeatureSet {
+    pub run_recovery: bool,
+    pub provider_extensions: bool,
+    pub provider_remote_context: bool,
+    pub multi_agent: bool,
+    pub git_remote_mutations: bool,
+    pub plugin_runtime: bool,
+    pub enterprise_integrations: bool,
+    pub desktop_control: bool,
+}
+
+impl RuntimeFeatureSet {
+    #[must_use]
+    pub const fn all_enabled() -> Self {
+        Self {
+            run_recovery: true,
+            provider_extensions: true,
+            provider_remote_context: true,
+            multi_agent: true,
+            git_remote_mutations: true,
+            plugin_runtime: true,
+            enterprise_integrations: true,
+            desktop_control: true,
+        }
+    }
+
+    #[must_use]
+    pub const fn all_disabled() -> Self {
+        Self {
+            run_recovery: false,
+            provider_extensions: false,
+            provider_remote_context: false,
+            multi_agent: false,
+            git_remote_mutations: false,
+            plugin_runtime: false,
+            enterprise_integrations: false,
+            desktop_control: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type, Default)]
+#[serde(rename_all = "camelCase")]
 pub struct FeatureFlags {
     pub workbench: bool,
     pub motion_lab: bool,
@@ -47,8 +90,11 @@ pub struct FeatureFlags {
     pub computer_control: bool,
     pub remote_tts: bool,
     pub remote_gateway: bool,
+    pub plugin_runtime: bool,
+    pub local_gateway: bool,
     pub mcp_runtime: bool,
     pub scheduler: bool,
+    pub runtime_features: RuntimeFeatureSet,
 }
 
 impl FeatureFlags {
@@ -63,8 +109,11 @@ impl FeatureFlags {
             computer_control: false,
             remote_tts: false,
             remote_gateway: false,
+            plugin_runtime: false,
+            local_gateway: false,
             mcp_runtime: false,
             scheduler: false,
+            runtime_features: RuntimeFeatureSet::all_disabled(),
         }
     }
 
@@ -75,8 +124,18 @@ impl FeatureFlags {
             || self.computer_observe
             || self.computer_control
             || self.remote_gateway
+            || self.plugin_runtime
+            || self.local_gateway
             || self.mcp_runtime
             || self.scheduler
+            || self.runtime_features.run_recovery
+            || self.runtime_features.provider_extensions
+            || self.runtime_features.provider_remote_context
+            || self.runtime_features.multi_agent
+            || self.runtime_features.git_remote_mutations
+            || self.runtime_features.plugin_runtime
+            || self.runtime_features.enterprise_integrations
+            || self.runtime_features.desktop_control
     }
 }
 

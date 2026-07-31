@@ -1,15 +1,22 @@
 import {
   commandFailure,
+  type BrowserCapability,
+  type ConnectorAccount,
+  type ConnectorDriverDescriptor,
   type DeliveryPolicy,
   type GitRefRecord,
   type McpServerView,
   type McpToolSelection,
   type McpToolView,
-  type MutationContext,
   type ProjectGitSnapshot,
   type ProjectRecord,
   type ScheduleDefinition,
+  type ScheduleBrowserGrant,
+  type ScheduleConnectorSelection,
+  type ScheduleEventReceipt,
+  type ScheduleEventSourceKind,
   type ScheduleSpec,
+  type SessionRecord,
   type SkillRecord,
   type TaskRunRecord,
 } from "@hachimi/contracts";
@@ -46,16 +53,32 @@ import {
 } from "solid-js";
 
 import type { WorkbenchCommandPort } from "./workbench-command-port";
+import { directUserMutationContext } from "./mutation-context";
+import { TaskEventForm } from "./task-event-form";
 import "./task-center.css";
 
-type ScheduleFrequency = "once" | "daily" | "weekly" | "cron";
-type ScheduleContext = "general" | "project";
+type ScheduleFrequency = "once" | "daily" | "weekly" | "cron" | "event";
+type ScheduleContext = "general" | "project" | "session_continuation";
 
 type TaskMcpTool = {
   server: McpServerView;
   tool: McpToolView;
   readOnly: boolean;
 };
+
+type TaskConnector = {
+  account: ConnectorAccount;
+  descriptor: ConnectorDriverDescriptor;
+  contentHash: string;
+};
+
+const BROWSER_CAPABILITIES: BrowserCapability[] = [
+  "observe",
+  "act",
+  "download",
+  "cookie_storage",
+  "cdp",
+];
 
 const CORE_READ_TOOLS = [
   "workspace_read_file",
@@ -64,17 +87,6 @@ const CORE_READ_TOOLS = [
   "workspace_git_status",
   "workspace_git_diff",
 ];
-
-function mutationContext(): MutationContext {
-  return {
-    requestId: crypto.randomUUID(),
-    clientId: "window:workbench",
-    protocolVersion: 18,
-    idempotencyKey: crypto.randomUUID(),
-    expectedRunId: null,
-    expectedGeneration: null,
-  };
-}
 
 export function TaskCenter(props: {
   commandPort: WorkbenchCommandPort;
@@ -88,6 +100,7 @@ export function TaskCenter(props: {
   const zh = () => i18n.locale() === "zh-CN";
   const [schedules, setSchedules] = createSignal<ScheduleDefinition[]>([]);
   const [taskRuns, setTaskRuns] = createSignal<TaskRunRecord[]>([]);
+  const [eventReceipts, setEventReceipts] = createSignal<ScheduleEventReceipt[]>([]);
   const [selectedScheduleId, setSelectedScheduleId] = createSignal<string>();
   const [showCreate, setShowCreate] = createSignal(false);
   const [editingScheduleId, setEditingScheduleId] = createSignal<string>();
@@ -100,8 +113,19 @@ export function TaskCenter(props: {
   const [frequency, setFrequency] = createSignal<ScheduleFrequency>("daily");
   const [runAt, setRunAt] = createSignal(defaultDateTime());
   const [cron, setCron] = createSignal("0 9 * * *");
+  const [eventSourceKind, setEventSourceKind] = createSignal<ScheduleEventSourceKind>("workspace");
+  const [eventSourcePrincipal, setEventSourcePrincipal] = createSignal("");
+  const [eventSourceId, setEventSourceId] = createSignal("");
+  const [eventType, setEventType] = createSignal("");
+  const [eventSubjectPrefix, setEventSubjectPrefix] = createSignal("");
+  const [eventLabels, setEventLabels] = createSignal("");
+  const [eventResourceKind, setEventResourceKind] = createSignal("");
+  const [eventResourceId, setEventResourceId] = createSignal("");
+  const [eventResourceRevision, setEventResourceRevision] = createSignal("");
   const [deliveryPolicy, setDeliveryPolicy] = createSignal<DeliveryPolicy>("task_tab_only");
   const [contextKind, setContextKind] = createSignal<ScheduleContext>("general");
+  const [sessions, setSessions] = createSignal<SessionRecord[]>([]);
+  const [sessionId, setSessionId] = createSignal<string>();
   const [profile, setProfile] = createSignal<"" | "office" | "coding">("");
   const [projectId, setProjectId] = createSignal<string>();
   const [executionKind, setExecutionKind] = createSignal<"local" | "managed_worktree">("local");
@@ -113,11 +137,30 @@ export function TaskCenter(props: {
   const [selectedSkillIds, setSelectedSkillIds] = createSignal<string[]>([]);
   const [mcpTools, setMcpTools] = createSignal<TaskMcpTool[]>([]);
   const [selectedMcpTools, setSelectedMcpTools] = createSignal<McpToolSelection[]>([]);
+  const [connectors, setConnectors] = createSignal<TaskConnector[]>([]);
+  const [selectedConnectorActions, setSelectedConnectorActions] = createSignal<
+    Record<string, string[]>
+  >({});
+  const [browserUnattended, setBrowserUnattended] = createSignal(false);
+  const [browserDocumentOrigins, setBrowserDocumentOrigins] = createSignal("");
+  const [browserResourceOrigins, setBrowserResourceOrigins] = createSignal("");
+  const [browserCapabilities, setBrowserCapabilities] = createSignal<BrowserCapability[]>([
+    "observe",
+  ]);
+  const [browserPrivateNetwork, setBrowserPrivateNetwork] = createSignal(false);
+  const [maxOccurrences, setMaxOccurrences] = createSignal("");
+  const [endAt, setEndAt] = createSignal("");
+  const [stopAfterSuccess, setStopAfterSuccess] = createSignal(false);
   const selectedSchedule = createMemo(() =>
     schedules().find((schedule) => schedule.id === selectedScheduleId()),
   );
   const selectedRuns = createMemo(() =>
     taskRuns().filter((task) => task.scheduleId === selectedScheduleId()),
+  );
+  const selectedEvents = createMemo(() =>
+    eventReceipts().filter((receipt) =>
+      receipt.matchedScheduleIds.includes(selectedScheduleId() ?? ""),
+    ),
   );
   const projectGitDescription = createMemo(() => {
     const state = projectGit()?.state;
@@ -129,12 +172,30 @@ export function TaskCenter(props: {
 
   async function refresh() {
     try {
-      const [nextSchedules, nextRuns] = await Promise.all([
+      const [nextSchedules, nextRuns, nextEvents, sessionPage] = await Promise.all([
         props.commandPort.listSchedules(),
         props.commandPort.listTaskRuns(null, 200),
+        Promise.resolve(props.commandPort.listScheduleEventReceipts?.(100) ?? []),
+        props.commandPort.searchAgentSessions({
+          projectId: null,
+          query: null,
+          archived: false,
+          before: null,
+          limit: 200,
+        }),
       ]);
       setSchedules(nextSchedules);
       setTaskRuns(nextRuns);
+      setEventReceipts(nextEvents);
+      const eligibleSessions = sessionPage.items.filter(
+        (session) => session.entryProfile === "workbench",
+      );
+      setSessions(eligibleSessions);
+      setSessionId((current) =>
+        current && eligibleSessions.some((session) => session.id === current)
+          ? current
+          : eligibleSessions[0]?.id,
+      );
       setSelectedScheduleId((current) =>
         current && nextSchedules.some((schedule) => schedule.id === current)
           ? current
@@ -169,9 +230,41 @@ export function TaskCenter(props: {
     setMcpTools(tools.flat());
   }
 
+  async function refreshConnectors() {
+    const [accountsResponse, pluginsResponse] = await Promise.all([
+      commandPort.localHostCommand({ kind: "connector_list_accounts" }),
+      commandPort.localHostCommand({ kind: "plugin_list" }),
+    ]);
+    if (accountsResponse.kind !== "connector_accounts" || pluginsResponse.kind !== "plugins") {
+      throw new Error("local Host returned an unexpected Connector catalog response");
+    }
+    const activeAccounts = accountsResponse.value.filter((account) => account.health === "healthy");
+    const catalog = await Promise.all(
+      activeAccounts.map(async (account) => {
+        const response = await commandPort.localHostCommand({
+          kind: "connector_get_driver_descriptor",
+          plugin_id: account.pluginId,
+          connector_id: account.connectorId,
+        });
+        if (response.kind !== "connector_driver_descriptor") return undefined;
+        const plugin = pluginsResponse.value.find(
+          (value) => value.manifest.id === account.pluginId,
+        );
+        if (!plugin) return undefined;
+        return {
+          account,
+          descriptor: response.value,
+          contentHash: plugin.contentHash,
+        } satisfies TaskConnector;
+      }),
+    );
+    setConnectors(catalog.filter((entry): entry is TaskConnector => Boolean(entry)));
+  }
+
   onMount(() => {
     void refresh();
     void refreshMcpTools().catch((error) => setFailure(commandFailure(error).message));
+    void refreshConnectors().catch((error) => setFailure(commandFailure(error).message));
     // eslint-disable-next-line solid/reactivity -- polling intentionally reads the latest signals.
     const timer = window.setInterval(() => void refresh(), 3_000);
     onCleanup(() => window.clearInterval(timer));
@@ -218,6 +311,15 @@ export function TaskCenter(props: {
     setFrequency("daily");
     setRunAt(defaultDateTime());
     setCron("0 9 * * *");
+    setEventSourceKind("workspace");
+    setEventSourcePrincipal("");
+    setEventSourceId("");
+    setEventType("");
+    setEventSubjectPrefix("");
+    setEventLabels("");
+    setEventResourceKind("");
+    setEventResourceId("");
+    setEventResourceRevision("");
     setDeliveryPolicy("task_tab_only");
     setContextKind("general");
     setProfile("");
@@ -226,6 +328,15 @@ export function TaskCenter(props: {
     setAllowExec(false);
     setSelectedSkillIds([]);
     setSelectedMcpTools([]);
+    setSelectedConnectorActions({});
+    setBrowserUnattended(false);
+    setBrowserDocumentOrigins("");
+    setBrowserResourceOrigins("");
+    setBrowserCapabilities(["observe"]);
+    setBrowserPrivateNetwork(false);
+    setMaxOccurrences("");
+    setEndAt("");
+    setStopAfterSuccess(false);
   }
 
   async function submitSchedule() {
@@ -237,8 +348,55 @@ export function TaskCenter(props: {
       setFailure(zh() ? "请选择项目。" : "Select a project.");
       return;
     }
+    if (contextKind() === "session_continuation" && !sessionId()) {
+      setFailure(zh() ? "请选择要续接的对话。" : "Select a Session to continue.");
+      return;
+    }
     if (executionKind() === "managed_worktree" && !baseRevision()) {
       setFailure(zh() ? "请选择 Worktree 基础分支。" : "Select a Worktree base branch.");
+      return;
+    }
+    if (frequency() === "event") {
+      if (!eventSourcePrincipal().trim() || !eventSourceId().trim() || !eventType().trim()) {
+        setFailure(
+          zh()
+            ? "Event 任务需要来源 Principal、来源 ID 和事件类型。"
+            : "Event tasks require a source principal, source ID, and event type.",
+        );
+        return;
+      }
+      if (Boolean(eventResourceKind().trim()) !== Boolean(eventResourceId().trim())) {
+        setFailure(
+          zh()
+            ? "资源引用必须同时填写类型和 ID。"
+            : "A resource reference requires both kind and ID.",
+        );
+        return;
+      }
+      try {
+        parseEventLabels(eventLabels());
+      } catch (error) {
+        setFailure(error instanceof Error ? error.message : String(error));
+        return;
+      }
+    }
+    const parsedMax = Number.parseInt(maxOccurrences(), 10);
+    if (maxOccurrences().trim() && (!Number.isFinite(parsedMax) || parsedMax < 1)) {
+      setFailure(
+        zh() ? "最大执行次数必须是正整数。" : "Maximum occurrences must be a positive integer.",
+      );
+      return;
+    }
+    if (endAt() && new Date(endAt()).getTime() <= Date.now()) {
+      setFailure(zh() ? "截止时间必须晚于当前时间。" : "End time must be in the future.");
+      return;
+    }
+    if (browserUnattended() && parseOrigins(browserDocumentOrigins()).length === 0) {
+      setFailure(
+        zh()
+          ? "无人值守 Browser 至少需要一个精确的文档 Origin。"
+          : "Unattended Browser requires at least one exact document origin.",
+      );
       return;
     }
     setSubmitting(true);
@@ -248,7 +406,7 @@ export function TaskCenter(props: {
       const snapshot = editing
         ? await updateExistingSchedule(editing, draft)
         : await props.commandPort.createSchedule({
-            context: mutationContext(),
+            context: directUserMutationContext(),
             definition: draft,
             authorize: true,
           });
@@ -277,17 +435,24 @@ export function TaskCenter(props: {
       contextTemplate: draft.contextTemplate,
       toolAllowlist: draft.toolAllowlist,
       skillAllowlist: draft.skillAllowlist,
-      mcpToolAllowlist: current.mcpToolAllowlist,
+      mcpToolAllowlist: draft.mcpToolAllowlist,
+      contributionRevisions: draft.contributionRevisions ?? [],
+      hostGrant: draft.hostGrant ?? {
+        connectors: [],
+        browser: null,
+        computerUnattended: false,
+      },
       permissionConfig: draft.permissionConfig,
       deliveryPolicy: draft.deliveryPolicy,
+      ...(draft.stopConditions ? { stopConditions: draft.stopConditions } : {}),
     };
     const updated = await props.commandPort.updateSchedule({
-      context: mutationContext(),
+      context: directUserMutationContext(),
       definition,
       expectedConfigRevision: current.configRevision,
     });
     if (authorizationScopeChanged(current, updated)) {
-      await props.commandPort.reauthorizeSchedule(mutationContext(), updated.id);
+      await props.commandPort.reauthorizeSchedule(directUserMutationContext(), updated.id);
     }
     return { definition: updated };
   }
@@ -309,6 +474,15 @@ export function TaskCenter(props: {
       const target = schedule.contextTemplate.execution_target;
       setExecutionKind(target.kind);
       setBaseRevision(target.kind === "managed_worktree" ? target.base_revision : "");
+    } else if (schedule.contextTemplate.kind === "session_continuation") {
+      setContextKind("session_continuation");
+      setSessionId(schedule.contextTemplate.session_id);
+      setProfile(
+        schedule.workloadOverride === "coding" || schedule.workloadOverride === "office"
+          ? schedule.workloadOverride
+          : "",
+      );
+      setExecutionKind("local");
     } else {
       setContextKind("general");
       setProfile(
@@ -322,10 +496,42 @@ export function TaskCenter(props: {
     setAllowExec(schedule.permissionConfig.allowExec);
     setSelectedSkillIds([...schedule.skillAllowlist]);
     setSelectedMcpTools([...schedule.mcpToolAllowlist]);
+    setSelectedConnectorActions(
+      Object.fromEntries(
+        (schedule.hostGrant?.connectors ?? []).map((selection) => [
+          selection.accountId,
+          [...selection.allowedActions],
+        ]),
+      ),
+    );
+    const browser = schedule.hostGrant?.browser;
+    setBrowserUnattended(Boolean(browser?.enabled));
+    setBrowserDocumentOrigins(browser?.documentOrigins.join("\n") ?? "");
+    setBrowserResourceOrigins(browser?.resourceOrigins.join("\n") ?? "");
+    setBrowserCapabilities(browser?.capabilities.length ? [...browser.capabilities] : ["observe"]);
+    setBrowserPrivateNetwork(Boolean(browser?.allowPrivateNetwork));
+    setMaxOccurrences(schedule.stopConditions?.maxOccurrences?.toString() ?? "");
+    setEndAt(
+      schedule.stopConditions?.endAtMs ? toLocalDateTime(schedule.stopConditions.endAtMs) : "",
+    );
+    setStopAfterSuccess(schedule.stopConditions?.stopAfterSuccess ?? false);
     setShowCreate(true);
   }
 
   function applyScheduleToForm(schedule: ScheduleSpec) {
+    if (schedule.kind === "event") {
+      setFrequency("event");
+      setEventSourceKind(schedule.matcher.source.kind);
+      setEventSourcePrincipal(schedule.matcher.source.principal);
+      setEventSourceId(schedule.matcher.source.id);
+      setEventType(schedule.matcher.eventType);
+      setEventSubjectPrefix(schedule.matcher.subjectPrefix ?? "");
+      setEventLabels(formatEventLabels(schedule.matcher.labels));
+      setEventResourceKind(schedule.matcher.resource?.kind ?? "");
+      setEventResourceId(schedule.matcher.resource?.id ?? "");
+      setEventResourceRevision(schedule.matcher.resource?.revision ?? "");
+      return;
+    }
     if (schedule.kind === "at") {
       setFrequency("once");
       setRunAt(toLocalDateTime(schedule.timestamp_ms));
@@ -355,6 +561,8 @@ export function TaskCenter(props: {
     const now = Date.now();
     const selectedProjectId = projectId();
     const projectContext = contextKind() === "project" && selectedProjectId;
+    const continuationSessionId =
+      contextKind() === "session_continuation" ? sessionId() : undefined;
     const projectSideEffects = Boolean(projectContext && (allowWrite() || allowExec()));
     const mcpToolAllowlist = [...selectedMcpTools()].sort((left, right) =>
       `${left.serverId}\0${left.toolName}\0${left.schemaHash}\0${left.hostIdentityHash}`.localeCompare(
@@ -371,6 +579,34 @@ export function TaskCenter(props: {
       );
       return !catalog?.readOnly;
     });
+    const connectorSelections = connectors()
+      .map((entry): ScheduleConnectorSelection | undefined => {
+        const allowedActions = selectedConnectorActions()[entry.account.id] ?? [];
+        if (allowedActions.length === 0) return undefined;
+        return {
+          accountId: entry.account.id,
+          contributionRevision: {
+            pluginId: entry.account.pluginId,
+            contributionId: entry.account.connectorId,
+            accountId: entry.account.id,
+            contentHash: entry.contentHash,
+            hostIdentityHash: entry.descriptor.revision.hostIdentityHash,
+            schemaHash: entry.descriptor.revision.schemaHash,
+            actionHash: entry.descriptor.revision.actionHash,
+          },
+          allowedActions: [...allowedActions].sort(),
+        };
+      })
+      .filter((selection): selection is ScheduleConnectorSelection => Boolean(selection));
+    const browserGrant: ScheduleBrowserGrant | null = browserUnattended()
+      ? {
+          enabled: true,
+          documentOrigins: parseOrigins(browserDocumentOrigins()),
+          resourceOrigins: parseOrigins(browserResourceOrigins()),
+          capabilities: [...browserCapabilities()].sort(),
+          allowPrivateNetwork: browserPrivateNetwork(),
+        }
+      : null;
     const toolAllowlist = projectContext
       ? [
           ...CORE_READ_TOOLS,
@@ -399,13 +635,15 @@ export function TaskCenter(props: {
                   }
                 : { kind: "local", project_id: selectedProjectId },
           }
-        : { kind: "general" },
+        : continuationSessionId
+          ? { kind: "session_continuation", session_id: continuationSessionId }
+          : { kind: "general" },
       toolAllowlist,
       skillAllowlist: selectedSkillIds(),
       mcpToolAllowlist,
       permissionConfig: {
         permissionProfile:
-          externalMcpTools.length > 0
+          externalMcpTools.length > 0 || connectorSelections.length > 0 || browserGrant
             ? "external_sandbox"
             : projectSideEffects
               ? "workspace_write"
@@ -417,10 +655,23 @@ export function TaskCenter(props: {
           (selection) => `mcp:${selection.serverId}:${selection.toolName}`,
         ),
       },
+      contributionRevisions: connectorSelections.map((selection) => selection.contributionRevision),
+      hostGrant: {
+        connectors: connectorSelections,
+        browser: browserGrant,
+        computerUnattended: false,
+      },
       permissionRevision: 0,
       timeoutMs: 30 * 60 * 1_000,
       misfirePolicy: "skip",
       deliveryPolicy: deliveryPolicy(),
+      stopConditions: {
+        maxOccurrences: maxOccurrences().trim()
+          ? Math.max(1, Number.parseInt(maxOccurrences(), 10))
+          : null,
+        endAtMs: endAt() ? new Date(endAt()).getTime() : null,
+        stopAfterSuccess: stopAfterSuccess(),
+      },
       configRevision: 0,
       createdBy: "",
       nextRunAtMs: null,
@@ -433,6 +684,29 @@ export function TaskCenter(props: {
 
   function scheduleSpec(): ScheduleSpec {
     const timestamp = new Date(runAt()).getTime();
+    if (frequency() === "event") {
+      const resourceKind = eventResourceKind().trim();
+      return {
+        kind: "event",
+        matcher: {
+          source: {
+            kind: eventSourceKind(),
+            principal: eventSourcePrincipal().trim(),
+            id: eventSourceId().trim(),
+          },
+          eventType: eventType().trim(),
+          subjectPrefix: eventSubjectPrefix().trim() || null,
+          labels: parseEventLabels(eventLabels()),
+          resource: resourceKind
+            ? {
+                kind: resourceKind,
+                id: eventResourceId().trim(),
+                revision: eventResourceRevision().trim() || null,
+              }
+            : null,
+        },
+      };
+    }
     if (frequency() === "once") return { kind: "at", timestamp_ms: timestamp };
     if (frequency() === "cron") {
       return {
@@ -531,6 +805,10 @@ export function TaskCenter(props: {
               options={[
                 { value: "general", label: zh() ? "通用办公" : "General office" },
                 { value: "project", label: zh() ? "项目" : "Project" },
+                {
+                  value: "session_continuation",
+                  label: zh() ? "现有对话续接" : "Existing Session continuation",
+                },
               ]}
               onChange={(value) => setContextKind(value as ScheduleContext)}
             />
@@ -543,31 +821,57 @@ export function TaskCenter(props: {
                 { value: "daily", label: zh() ? "每天" : "Daily" },
                 { value: "weekly", label: zh() ? "每周" : "Weekly" },
                 { value: "cron", label: "Cron" },
+                { value: "event", label: "Event" },
               ]}
               onChange={(value) => setFrequency(value as ScheduleFrequency)}
             />
-            <div>
-              <Show
-                when={frequency() === "cron"}
-                fallback={
+            <Show when={frequency() !== "event"}>
+              <div>
+                <Show
+                  when={frequency() === "cron"}
+                  fallback={
+                    <TextField
+                      label={zh() ? "执行时间" : "Run at"}
+                      testId="task-run-at"
+                      type="datetime-local"
+                      value={runAt()}
+                      onInput={(event) => setRunAt(event.currentTarget.value)}
+                    />
+                  }
+                >
                   <TextField
-                    label={zh() ? "执行时间" : "Run at"}
-                    testId="task-run-at"
-                    type="datetime-local"
-                    value={runAt()}
-                    onInput={(event) => setRunAt(event.currentTarget.value)}
+                    label="Cron"
+                    testId="task-cron"
+                    value={cron()}
+                    onInput={(event) => setCron(event.currentTarget.value)}
                   />
-                }
-              >
-                <TextField
-                  label="Cron"
-                  testId="task-cron"
-                  value={cron()}
-                  onInput={(event) => setCron(event.currentTarget.value)}
-                />
-              </Show>
-            </div>
+                </Show>
+              </div>
+            </Show>
           </div>
+          <Show when={frequency() === "event"}>
+            <TaskEventForm
+              zh={zh()}
+              sourceKind={eventSourceKind()}
+              sourcePrincipal={eventSourcePrincipal()}
+              sourceId={eventSourceId()}
+              eventType={eventType()}
+              subjectPrefix={eventSubjectPrefix()}
+              labels={eventLabels()}
+              resourceKind={eventResourceKind()}
+              resourceId={eventResourceId()}
+              resourceRevision={eventResourceRevision()}
+              onSourceKind={setEventSourceKind}
+              onSourcePrincipal={setEventSourcePrincipal}
+              onSourceId={setEventSourceId}
+              onEventType={setEventType}
+              onSubjectPrefix={setEventSubjectPrefix}
+              onLabels={setEventLabels}
+              onResourceKind={setEventResourceKind}
+              onResourceId={setEventResourceId}
+              onResourceRevision={setEventResourceRevision}
+            />
+          </Show>
           <Show when={contextKind() === "project"}>
             <div class="task-form-grid task-project-options">
               <SelectField
@@ -620,6 +924,35 @@ export function TaskCenter(props: {
               </Show>
             </div>
           </Show>
+          <Show when={contextKind() === "session_continuation"}>
+            <div class="task-form-grid task-project-options">
+              <SelectField
+                label={zh() ? "对话" : "Session"}
+                testId="task-session-continuation"
+                value={sessionId() ?? ""}
+                options={sessions().map((session) => ({
+                  value: session.id,
+                  label: `${session.title} · ${session.id.slice(0, 8)}`,
+                }))}
+                description={
+                  zh()
+                    ? "每次触发都在同一 lane 创建 fresh Run，不恢复旧审批、临时权限或 Host lease。"
+                    : "Each occurrence creates a fresh Run in the same lane without restoring approvals, temporary grants, or Host leases."
+                }
+                onChange={setSessionId}
+              />
+              <SelectField
+                label={zh() ? "工作负载" : "Workload"}
+                value={profile()}
+                options={[
+                  { value: "", label: zh() ? "自动判断" : "Automatic" },
+                  { value: "coding", label: "Coding" },
+                  { value: "office", label: "Office" },
+                ]}
+                onChange={(value) => setProfile(value as "" | "office" | "coding")}
+              />
+            </div>
+          </Show>
           <TextArea
             class="task-prompt-field"
             data-testid="task-prompt"
@@ -661,6 +994,27 @@ export function TaskCenter(props: {
                   : "System notifications contain only the task name and terminal status, never prompts, result text, or paths."
               }
               onChange={(value) => setDeliveryPolicy(value as DeliveryPolicy)}
+            />
+            <div class="task-form-grid task-stop-options">
+              <TextField
+                label={zh() ? "最大执行次数" : "Maximum occurrences"}
+                type="number"
+                value={maxOccurrences()}
+                placeholder={zh() ? "不限" : "Unlimited"}
+                onInput={(event) => setMaxOccurrences(event.currentTarget.value)}
+              />
+              <TextField
+                label={zh() ? "截止时间" : "End at"}
+                type="datetime-local"
+                value={endAt()}
+                onInput={(event) => setEndAt(event.currentTarget.value)}
+              />
+            </div>
+            <Checkbox
+              class="task-check"
+              label={zh() ? "首次成功后停止" : "Stop after first success"}
+              checked={stopAfterSuccess()}
+              onChange={(event) => setStopAfterSuccess(event.currentTarget.checked)}
             />
             <Show when={contextKind() === "project"}>
               <Checkbox
@@ -741,6 +1095,104 @@ export function TaskCenter(props: {
                     );
                   }}
                 </For>
+              </div>
+            </Show>
+            <Show when={connectors().length > 0}>
+              <div class="task-extension-heading">
+                <strong>{zh() ? "Connector" : "Connectors"}</strong>
+                <small>
+                  {zh()
+                    ? "账户、贡献点内容和 Host/Schema/Action revision 会固定到本次授权。"
+                    : "Account, contribution content, and Host/Schema/Action revisions are pinned to this authorization."}
+                </small>
+              </div>
+              <div class="task-connector-list" data-testid="task-connectors">
+                <For each={connectors()}>
+                  {(entry) => (
+                    <div class="task-connector-card">
+                      <strong>{entry.account.displayName}</strong>
+                      <small>
+                        {entry.account.pluginId} / {entry.account.connectorId}
+                      </small>
+                      <div class="task-skill-grid">
+                        <For each={entry.descriptor.actions}>
+                          {(action) => (
+                            <Checkbox
+                              class="task-check"
+                              label={action}
+                              checked={(
+                                selectedConnectorActions()[entry.account.id] ?? []
+                              ).includes(action)}
+                              onChange={(event) =>
+                                setSelectedConnectorActions((current) => {
+                                  const selected = current[entry.account.id] ?? [];
+                                  const next = event.currentTarget.checked
+                                    ? [...new Set([...selected, action])]
+                                    : selected.filter((value) => value !== action);
+                                  return { ...current, [entry.account.id]: next };
+                                })
+                              }
+                            />
+                          )}
+                        </For>
+                      </div>
+                    </div>
+                  )}
+                </For>
+              </div>
+            </Show>
+            <div class="task-extension-heading">
+              <strong>{zh() ? "隔离 Browser（无人值守）" : "Isolated Browser (unattended)"}</strong>
+              <small>
+                {zh()
+                  ? "默认关闭；只支持 isolated profile。Origin 和能力会固定到 ScheduleGrant，Computer 无人值守始终不支持。"
+                  : "Off by default and isolated-profile only. Origins and capabilities are pinned to the ScheduleGrant; unattended Computer remains unsupported."}
+              </small>
+            </div>
+            <Checkbox
+              class="task-check"
+              label={zh() ? "启用无人值守 Browser" : "Enable unattended Browser"}
+              checked={browserUnattended()}
+              onChange={(event) => setBrowserUnattended(event.currentTarget.checked)}
+            />
+            <Show when={browserUnattended()}>
+              <div class="task-browser-grant" data-testid="task-browser-grant">
+                <TextArea
+                  label={zh() ? "文档 Origin（每行一个）" : "Document origins (one per line)"}
+                  value={browserDocumentOrigins()}
+                  onInput={(event) => setBrowserDocumentOrigins(event.currentTarget.value)}
+                  placeholder="https://example.com"
+                />
+                <TextArea
+                  label={zh() ? "资源 Origin（每行一个）" : "Resource origins (one per line)"}
+                  value={browserResourceOrigins()}
+                  onInput={(event) => setBrowserResourceOrigins(event.currentTarget.value)}
+                  placeholder="https://static.example.com"
+                />
+                <div class="task-skill-grid">
+                  <For each={BROWSER_CAPABILITIES}>
+                    {(capability) => (
+                      <Checkbox
+                        class="task-check"
+                        label={capability}
+                        checked={browserCapabilities().includes(capability)}
+                        onChange={(event) =>
+                          setBrowserCapabilities((current) =>
+                            event.currentTarget.checked
+                              ? [...new Set([...current, capability])]
+                              : current.filter((value) => value !== capability),
+                          )
+                        }
+                      />
+                    )}
+                  </For>
+                </div>
+                <Checkbox
+                  class="task-check"
+                  label={zh() ? "允许已列出的私网 Origin" : "Allow listed private-network origins"}
+                  checked={browserPrivateNetwork()}
+                  onChange={(event) => setBrowserPrivateNetwork(event.currentTarget.checked)}
+                />
               </div>
             </Show>
           </div>
@@ -847,7 +1299,7 @@ export function TaskCenter(props: {
                     const current = schedule();
                     void mutate(
                       current.id,
-                      props.commandPort.runScheduleNow(mutationContext(), current.id),
+                      props.commandPort.runScheduleNow(directUserMutationContext(), current.id),
                     );
                   }}
                 >
@@ -862,7 +1314,7 @@ export function TaskCenter(props: {
                     void mutate(
                       current.id,
                       props.commandPort.setScheduleEnabled(
-                        mutationContext(),
+                        directUserMutationContext(),
                         current.id,
                         !current.enabled,
                         current.configRevision,
@@ -888,7 +1340,10 @@ export function TaskCenter(props: {
                       const current = schedule();
                       void mutate(
                         current.id,
-                        props.commandPort.reauthorizeSchedule(mutationContext(), current.id),
+                        props.commandPort.reauthorizeSchedule(
+                          directUserMutationContext(),
+                          current.id,
+                        ),
                       );
                     }}
                   >
@@ -909,13 +1364,47 @@ export function TaskCenter(props: {
                     const current = schedule();
                     void mutate(
                       current.id,
-                      props.commandPort.removeSchedule(mutationContext(), current.id),
+                      props.commandPort.removeSchedule(directUserMutationContext(), current.id),
                     );
                   }}
                 >
                   <Trash2 size={14} /> {zh() ? "删除" : "Delete"}
                 </Button>
               </div>
+              <Show when={schedule().schedule.kind === "event"}>
+                <section class="task-event-history" data-testid="task-event-history">
+                  <h3>{zh() ? "最近事件" : "Recent events"}</h3>
+                  <Show
+                    when={selectedEvents().length > 0}
+                    fallback={
+                      <p class="task-history-empty">
+                        {zh() ? "尚未收到匹配事件" : "No matching events received"}
+                      </p>
+                    }
+                  >
+                    <For each={selectedEvents()}>
+                      {(receipt) => (
+                        <div class="task-event-row">
+                          <Badge tone={eventReceiptTone(receipt.status)}>{receipt.status}</Badge>
+                          <span>
+                            <strong>{receipt.event.eventType}</strong>
+                            <small>
+                              {receipt.event.source.kind} · {receipt.event.source.id}
+                            </small>
+                            <small>
+                              {receipt.event.subject ?? receipt.event.eventId} ·{" "}
+                              {formatTime(receipt.event.receivedAtMs)}
+                            </small>
+                          </span>
+                          <small>
+                            {zh() ? "触发" : "Runs"}: {receipt.taskRuns.length}
+                          </small>
+                        </div>
+                      )}
+                    </For>
+                  </Show>
+                </section>
+              </Show>
               <section class="task-run-history">
                 <h3>{zh() ? "运行历史" : "Run history"}</h3>
                 <Show
@@ -929,6 +1418,14 @@ export function TaskCenter(props: {
                         <span>
                           <strong data-testid="task-run-status">{task.status}</strong>
                           <small>{formatTime(task.createdAtMs)}</small>
+                          <Show when={task.eventContext}>
+                            {(event) => (
+                              <small>
+                                Event · {event().source.kind}/{event().source.id} ·{" "}
+                                {event().eventType}
+                              </small>
+                            )}
+                          </Show>
                           <Show when={task.errorSummary}>
                             <small class="task-run-error">{task.errorSummary}</small>
                           </Show>
@@ -950,7 +1447,10 @@ export function TaskCenter(props: {
                                 const taskId = task.id;
                                 void mutate(
                                   taskId,
-                                  props.commandPort.cancelTaskRun(mutationContext(), taskId),
+                                  props.commandPort.cancelTaskRun(
+                                    directUserMutationContext(),
+                                    taskId,
+                                  ),
                                 );
                               }}
                             >
@@ -966,7 +1466,7 @@ export function TaskCenter(props: {
                                 void mutate(
                                   taskId,
                                   props.commandPort
-                                    .continueTaskInteractively(mutationContext(), taskId)
+                                    .continueTaskInteractively(directUserMutationContext(), taskId)
                                     .then((continuation) => openSession(continuation.session.id)),
                                 );
                               }}
@@ -985,7 +1485,10 @@ export function TaskCenter(props: {
                                 const taskId = task.id;
                                 void mutate(
                                   taskId,
-                                  props.commandPort.retryTaskRun(mutationContext(), taskId),
+                                  props.commandPort.retryTaskRun(
+                                    directUserMutationContext(),
+                                    taskId,
+                                  ),
                                 );
                               }}
                             >
@@ -1034,12 +1537,33 @@ function authorizationScopeChanged(
           `${right.serverId}\0${right.toolName}\0${right.schemaHash}\0${right.hostIdentityHash}`,
         ),
       ),
+      contributionRevisions: [...(schedule.contributionRevisions ?? [])].sort((left, right) =>
+        `${left.pluginId}\0${left.contributionId}\0${left.accountId ?? ""}`.localeCompare(
+          `${right.pluginId}\0${right.contributionId}\0${right.accountId ?? ""}`,
+        ),
+      ),
+      hostGrant: schedule.hostGrant ?? {
+        connectors: [],
+        browser: null,
+        computerUnattended: false,
+      },
       permissionConfig: {
         ...schedule.permissionConfig,
         externalTargets: [...schedule.permissionConfig.externalTargets].sort(),
       },
     });
   return snapshot(current) !== snapshot(updated);
+}
+
+function parseOrigins(value: string): string[] {
+  return [
+    ...new Set(
+      value
+        .split(/[\r\n,]+/)
+        .map((origin) => origin.trim())
+        .filter(Boolean),
+    ),
+  ].sort();
 }
 
 function sameMcpTool(left: McpToolSelection, right: McpToolSelection): boolean {
@@ -1058,9 +1582,50 @@ function formatTime(value: number | null): string {
 }
 
 function scheduleLabel(schedule: ScheduleDefinition, zh: boolean): string {
+  if (schedule.schedule.kind === "event") {
+    if (!schedule.enabled) return zh ? "已停用" : "Disabled";
+    return zh ? "等待匹配事件" : "Waiting for matching event";
+  }
   const next = formatTime(schedule.nextRunAtMs);
   if (!schedule.enabled) return zh ? "已停用" : "Disabled";
   return `${zh ? "下次" : "Next"}: ${next}`;
+}
+
+function eventReceiptTone(
+  status: ScheduleEventReceipt["status"],
+): "neutral" | "success" | "warning" | "danger" {
+  if (status === "accepted") return "success";
+  if (status === "conflict") return "danger";
+  return "warning";
+}
+
+function parseEventLabels(value: string): Record<string, string> {
+  const labels: Record<string, string> = {};
+  const lines = value
+    .split(/[\r\n]+/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+  if (lines.length > 16) throw new Error("Event labels are limited to 16 exact-match entries.");
+  for (const line of lines) {
+    const separator = line.indexOf("=");
+    if (separator <= 0) throw new Error(`Invalid Event label: ${line}`);
+    const key = line.slice(0, separator).trim();
+    const labelValue = line.slice(separator + 1).trim();
+    if (!key || key.length > 128 || labelValue.length > 256) {
+      throw new Error(`Invalid Event label: ${line}`);
+    }
+    labels[key] = labelValue;
+  }
+  return Object.fromEntries(
+    Object.entries(labels).sort(([left], [right]) => left.localeCompare(right)),
+  );
+}
+
+function formatEventLabels(labels: Record<string, string>): string {
+  return Object.entries(labels)
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([key, value]) => `${key}=${value}`)
+    .join("\n");
 }
 
 function contextLabel(
@@ -1069,6 +1634,9 @@ function contextLabel(
   zh: boolean,
 ): string {
   if (schedule.contextTemplate.kind === "general") return zh ? "通用" : "General";
+  if (schedule.contextTemplate.kind === "session_continuation") {
+    return `${zh ? "对话续接" : "Session continuation"}: ${schedule.contextTemplate.session_id}`;
+  }
   const projectId = schedule.contextTemplate.project_id;
   return projects.find((project) => project.id === projectId)?.displayName ?? projectId;
 }

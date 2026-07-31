@@ -32,20 +32,35 @@ import type {
   FsWatchRegistration,
   FsWatchRequest,
   FrontendLogEntry,
+  ForgeChangeMutationRequest,
+  ForgeChangeQueryRequest,
+  ForgeChangeRecord,
+  ForgeCredentialState,
+  ForgeCredentialUpdateRequest,
   GitRefRecord,
   ProjectGitInitialCommitRequest,
   ProjectGitInitialCommitResponse,
   ProjectGitSnapshot,
+  SandboxBootstrapState,
   SandboxRepairRequest,
   SandboxRuntimeSnapshot,
+  SessionPermissionConfig,
+  SessionPermissionConfigRequest,
+  SessionPermissionConfigUpdate,
   GitMutationRequest,
   GitMutationResponse,
+  GitPushRequest,
+  GitPushResponse,
+  GitRemoteListRequest,
+  GitRemoteRecord,
   GitWorkspaceRequest,
   GitWorkspaceSnapshot,
   InteractiveRegionsUpdate,
   LlmSettingsInput,
   LlmSettingsView,
   LlmTestResult,
+  LocalHostCommandRequest,
+  LocalHostCommandResponse,
   McpServerHealthRecord,
   McpServerId,
   McpServerDraft,
@@ -85,6 +100,7 @@ import type {
   ProcessSpawnRequest,
   ProcessTerminateRequest,
   ProcessWriteRequest,
+  ProviderRegistrySnapshot,
   ReviewFinding,
   ReviewFindingUpdateRequest,
   ReviewId,
@@ -93,10 +109,14 @@ import type {
   ReviewStartSnapshot,
   RunRecord,
   RunControlRequest,
+  RunRecoveryDecisionRequest,
+  RunRecoverySnapshot,
   RunSteerRecord,
   RunDiffSnapshot,
   ScheduleCreateRequest,
   ScheduleDefinition,
+  ScheduleEventIngressRequest,
+  ScheduleEventReceipt,
   ScheduleGrantRecord,
   ScheduleId,
   SchedulePreview,
@@ -235,6 +255,9 @@ export const commands = {
   unsubscribeSkills: (subscriptionId: SkillSubscriptionId) =>
     invoke<boolean>("unsubscribe_skills", { subscriptionId }),
   listWorkbenchProjects: () => invoke<ProjectRecord[]>("list_workbench_projects"),
+  listRunRecoveries: () => invoke<RunRecoverySnapshot[]>("list_run_recoveries"),
+  resolveRunRecovery: (request: RunRecoveryDecisionRequest) =>
+    invoke<RunRecoverySnapshot>("resolve_run_recovery", { request }),
   addWorkbenchProject: () => invoke<ProjectRecord | null>("add_workbench_project"),
   manageWorkbenchProject: (
     projectId: ProjectId,
@@ -248,6 +271,10 @@ export const commands = {
     invoke<WorkbenchSessionSnapshot>("get_workbench_session", { sessionId }),
   resolveWorkbenchApproval: (request: ApprovalDecisionRequest) =>
     invoke<ApprovalRequestRecord>("resolve_workbench_approval", { request }),
+  listPendingApprovals: (sessionId: string | null = null) =>
+    invoke<ApprovalRequestRecord[]>("list_pending_approvals", { sessionId }),
+  resolveAgentApproval: (request: ApprovalDecisionRequest) =>
+    invoke<ApprovalRequestRecord>("resolve_agent_approval", { request }),
   acceptWorkbenchPlan: (request: PlanAcceptanceRequest) =>
     invoke<WorkbenchPlanAcceptanceSnapshot>("accept_workbench_plan", { request }),
   listProjectGitRefs: (projectId: ProjectId) =>
@@ -259,9 +286,13 @@ export const commands = {
   createProjectEmptyInitialCommit: (request: ProjectGitInitialCommitRequest) =>
     invoke<ProjectGitInitialCommitResponse>("create_project_empty_initial_commit", { request }),
   getSandboxStatus: () => invoke<SandboxRuntimeSnapshot>("get_sandbox_status"),
+  getSandboxBootstrapState: () => invoke<SandboxBootstrapState>("get_sandbox_bootstrap_state"),
   refreshSandboxStatus: () => invoke<SandboxRuntimeSnapshot>("refresh_sandbox_status"),
+  attestSandbox: () => invoke<SandboxRuntimeSnapshot>("attest_sandbox"),
   repairSandbox: (request: SandboxRepairRequest) =>
     invoke<SandboxRuntimeSnapshot>("repair_sandbox", { request }),
+  localHostCommand: (request: LocalHostCommandRequest) =>
+    invoke<LocalHostCommandResponse>("local_host_command", { request }),
   pinWorkbenchCheckout: (checkoutId: string, pinned: boolean) =>
     invoke<CheckoutRecord>("pin_workbench_checkout", { checkoutId, pinned }),
   cleanupWorkbenchCheckout: (checkoutId: string) =>
@@ -280,6 +311,16 @@ export const commands = {
     invoke<GitWorkspaceSnapshot>("get_workspace_git", { request }),
   mutateWorkspaceGit: (request: GitMutationRequest) =>
     invoke<GitMutationResponse>("mutate_workspace_git", { request }),
+  listGitRemotes: (request: GitRemoteListRequest) =>
+    invoke<GitRemoteRecord[]>("list_git_remotes", { request }),
+  pushGitRemote: (request: GitPushRequest) =>
+    invoke<GitPushResponse>("push_git_remote", { request }),
+  queryForgeChange: (request: ForgeChangeQueryRequest) =>
+    invoke<ForgeChangeRecord>("query_forge_change", { request }),
+  mutateForgeChange: (request: ForgeChangeMutationRequest) =>
+    invoke<ForgeChangeRecord>("mutate_forge_change", { request }),
+  updateForgeCredential: (request: ForgeCredentialUpdateRequest) =>
+    invoke<ForgeCredentialState>("update_forge_credential", { request }),
   watchWorkspaceFiles: (request: FsWatchRequest) =>
     invoke<FsWatchRegistration>("watch_workspace_files", { request }),
   unwatchWorkspaceFiles: (watchId: FsWatchId) =>
@@ -334,6 +375,10 @@ export const commands = {
     invoke<ScheduleGrantRecord | null>("revoke_schedule_grant", { context, scheduleId }),
   runScheduleNow: (context: MutationContext, scheduleId: ScheduleId) =>
     invoke<TaskRunRecord>("run_schedule_now", { context, scheduleId }),
+  ingestScheduleEvent: (request: ScheduleEventIngressRequest) =>
+    invoke<ScheduleEventReceipt>("ingest_schedule_event", { request }),
+  listScheduleEventReceipts: (limit = 100) =>
+    invoke<ScheduleEventReceipt[]>("list_schedule_event_receipts", { limit }),
   getTaskRun: (taskRunId: TaskRunId) => invoke<TaskRunRecord | null>("get_task_run", { taskRunId }),
   listTaskRuns: (scheduleId: ScheduleId | null = null, limit = 100) =>
     invoke<TaskRunRecord[]>("list_task_runs", { scheduleId, limit }),
@@ -374,6 +419,7 @@ export const commands = {
   cancelUserInput: (request: RunControlRequest) =>
     invoke<RunRecord>("cancel_user_input", { request }),
   getLlmSettings: () => invoke<LlmSettingsView>("get_llm_settings"),
+  getProviderRegistry: () => invoke<ProviderRegistrySnapshot>("get_provider_registry"),
   saveLlmSettings: (input: LlmSettingsInput) =>
     invoke<LlmSettingsView>("save_llm_settings", { input }),
   saveAndTestLlmSettings: (input: LlmSettingsInput) =>
@@ -412,6 +458,10 @@ export const commands = {
     invoke<MotionRuntimeAsset | null>("get_motion_runtime_asset", { request: { id } }),
   startPetTurn: (request: PetTurnRequest) => invoke<void>("start_pet_turn", { request }),
   cancelPetTurn: () => invoke<void>("cancel_pet_turn"),
+  getSessionPermissionConfig: (request: SessionPermissionConfigRequest) =>
+    invoke<SessionPermissionConfig>("get_session_permission_config", { request }),
+  updateSessionPermissionConfig: (request: SessionPermissionConfigUpdate) =>
+    invoke<SessionPermissionConfig>("update_session_permission_config", { request }),
   getVoiceRuntimeState: () => invoke<VoiceRuntimeState>("get_voice_runtime_state"),
   getSpeechRecognitionState: () =>
     invoke<SpeechRecognitionRuntimeState>("get_speech_recognition_state"),

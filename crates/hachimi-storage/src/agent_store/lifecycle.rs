@@ -1,8 +1,9 @@
 use hachimi_protocol::{
-    CapabilityDegradation, ItemPayload, ItemRelations, ProviderCapabilities,
-    ProviderCapabilityProbe, RunId, RunStatus, RunSteerRecord, RunSteerStatus, SessionCursor,
-    SessionForkRequest, SessionId, SessionPage, SessionRecord, SessionResumeRequest,
-    SessionResumeSnapshot, SessionSearchRequest,
+    CapabilityDegradation, EntryProfile, ItemId, ItemPayload, ItemRelations, ItemStatus,
+    ProviderCapabilities, ProviderCapabilityProbe, RunId, RunStatus, RunSteerRecord,
+    RunSteerStatus, SessionCursor, SessionForkRequest, SessionId, SessionPage, SessionRecord,
+    SessionResumeRequest, SessionResumeSnapshot, SessionSearchRequest, TranscriptItem,
+    TranscriptItemKind,
 };
 use serde_json::json;
 use sqlx::Row;
@@ -11,10 +12,23 @@ use super::usage::usage_from_row;
 use super::user_input::user_input_from_row;
 use super::{
     AgentStore, AgentStoreError, append_event_tx, approval_from_row, enum_to_db, get_run_tx,
-    run_from_row, session_from_row, transcript_item_from_row,
+    next_sequence_tx, run_from_row, session_from_row, transcript_item_from_row, transcript_kind_db,
 };
 
 impl AgentStore {
+    pub async fn latest_session_for_entry_profile(
+        &self,
+        entry_profile: EntryProfile,
+    ) -> Result<Option<SessionRecord>, AgentStoreError> {
+        let row = sqlx::query(
+            "SELECT * FROM sessions WHERE entry_profile = ? AND archived = 0 ORDER BY updated_at_ms DESC, id ASC LIMIT 1",
+        )
+        .bind(enum_to_db(&entry_profile)?)
+        .fetch_optional(&self.pool)
+        .await?;
+        row.as_ref().map(session_from_row).transpose()
+    }
+
     pub async fn update_run_capabilities(
         &self,
         run_snapshot: &hachimi_protocol::RunRecord,
@@ -245,6 +259,27 @@ impl AgentStore {
             .await?
             .ok_or_else(|| AgentStoreError::SessionNotFound(request.source_session_id.clone()))?;
         let source = session_from_row(&source_row)?;
+        let source_run = get_run_tx(&mut transaction, &request.source_run_id)
+            .await?
+            .ok_or_else(|| AgentStoreError::RunNotFound(request.source_run_id.clone()))?;
+        if source_run.session_id != source.id || !source_run.status.is_terminal() {
+            return Err(AgentStoreError::RunPreconditionFailed);
+        }
+        let boundary = sqlx::query_scalar::<_, Option<i64>>(
+            "SELECT MAX(sequence) FROM transcript_items WHERE session_id = ? AND run_id = ?",
+        )
+        .bind(source.id.as_str())
+        .bind(source_run.id.as_str())
+        .fetch_one(&mut *transaction)
+        .await?
+        .unwrap_or_default();
+        let history_rows = sqlx::query(
+            "SELECT * FROM transcript_items WHERE session_id = ? AND sequence <= ? AND status = 'completed' ORDER BY sequence ASC",
+        )
+        .bind(source.id.as_str())
+        .bind(boundary)
+        .fetch_all(&mut *transaction)
+        .await?;
         let session = SessionRecord {
             id: new_session_id,
             context: source.context,
@@ -253,7 +288,7 @@ impl AgentStore {
             archived: false,
             pinned: false,
             parent_session_id: Some(source.id.clone()),
-            source_run_id: request.source_run_id.clone(),
+            source_run_id: Some(request.source_run_id.clone()),
             created_at_ms,
             updated_at_ms: created_at_ms,
         };
@@ -266,8 +301,72 @@ impl AgentStore {
         .bind(enum_to_db(&session.entry_profile)?)
         .bind(&session.title)
         .bind(request.source_session_id.as_str())
-        .bind(request.source_run_id.as_ref().map(RunId::as_str))
+        .bind(request.source_run_id.as_str())
         .bind(created_at_ms)
+        .bind(created_at_ms)
+        .execute(&mut *transaction)
+        .await?;
+        for row in &history_rows {
+            let source_item = transcript_item_from_row(row, &source.id)?;
+            let Some((kind, payload)) =
+                forkable_history_payload(source_item.kind, source_item.payload)
+            else {
+                continue;
+            };
+            let item = TranscriptItem {
+                id: ItemId::random(),
+                session_id: session.id.clone(),
+                run_id: None,
+                sequence: next_sequence_tx(
+                    &mut transaction,
+                    &session.id,
+                    source_item.created_at_ms,
+                )
+                .await?,
+                kind,
+                status: ItemStatus::Completed,
+                payload,
+                relations: ItemRelations::default(),
+                created_at_ms: source_item.created_at_ms,
+            };
+            sqlx::query(
+                "INSERT INTO transcript_items (id, session_id, run_id, sequence, kind, status, payload_json, relations_json, created_at_ms) VALUES (?, ?, NULL, ?, ?, 'completed', ?, ?, ?)",
+            )
+            .bind(item.id.as_str())
+            .bind(session.id.as_str())
+            .bind(i64::try_from(item.sequence).unwrap_or(i64::MAX))
+            .bind(transcript_kind_db(item.kind))
+            .bind(serde_json::to_string(&item.payload)?)
+            .bind(serde_json::to_string(&item.relations)?)
+            .bind(item.created_at_ms)
+            .execute(&mut *transaction)
+            .await?;
+        }
+        let lineage = TranscriptItem {
+            id: ItemId::random(),
+            session_id: session.id.clone(),
+            run_id: None,
+            sequence: next_sequence_tx(&mut transaction, &session.id, created_at_ms).await?,
+            kind: TranscriptItemKind::SystemContext,
+            status: ItemStatus::Completed,
+            payload: ItemPayload::SystemContext {
+                code: "session_fork_lineage".into(),
+                message: format!(
+                    "Forked from Session {} at terminal Run {}.",
+                    source.id, source_run.id
+                ),
+            },
+            relations: ItemRelations::default(),
+            created_at_ms,
+        };
+        sqlx::query(
+            "INSERT INTO transcript_items (id, session_id, run_id, sequence, kind, status, payload_json, relations_json, created_at_ms) VALUES (?, ?, NULL, ?, 'system_context', 'completed', ?, ?, ?)",
+        )
+        .bind(lineage.id.as_str())
+        .bind(session.id.as_str())
+        .bind(i64::try_from(lineage.sequence).unwrap_or(i64::MAX))
+        .bind(serde_json::to_string(&lineage.payload)?)
+        .bind(serde_json::to_string(&lineage.relations)?)
         .bind(created_at_ms)
         .execute(&mut *transaction)
         .await?;
@@ -279,6 +378,7 @@ impl AgentStore {
             json!({
                 "parentSessionId": request.source_session_id,
                 "sourceRunId": request.source_run_id,
+                "historyBoundary": boundary,
             }),
             created_at_ms,
         )
@@ -378,7 +478,16 @@ impl AgentStore {
         let run = get_run_tx(&mut transaction, run_id)
             .await?
             .ok_or_else(|| AgentStoreError::RunNotFound(run_id.clone()))?;
-        if run.generation != expected_generation || run.status != RunStatus::Running {
+        if run.generation != expected_generation
+            || !matches!(
+                run.status,
+                RunStatus::Queued
+                    | RunStatus::Preparing
+                    | RunStatus::Running
+                    | RunStatus::WaitingApproval
+                    | RunStatus::WaitingUserInput
+            )
+        {
             return Err(AgentStoreError::RunPreconditionFailed);
         }
         let id = hachimi_protocol::ItemId::random();
@@ -492,16 +601,79 @@ impl AgentStore {
     }
 }
 
+fn forkable_history_payload(
+    kind: TranscriptItemKind,
+    payload: ItemPayload,
+) -> Option<(TranscriptItemKind, ItemPayload)> {
+    let payload = match payload {
+        ItemPayload::User { text, .. } => ItemPayload::User {
+            text,
+            attachment_ids: Vec::new(),
+        },
+        ItemPayload::Assistant { .. }
+        | ItemPayload::Reasoning { .. }
+        | ItemPayload::ToolExecution { .. }
+        | ItemPayload::McpCall { .. }
+        | ItemPayload::DynamicToolCall { .. }
+        | ItemPayload::SystemContext { .. } => payload,
+        ItemPayload::FileChange {
+            path, change_kind, ..
+        } => ItemPayload::FileChange {
+            path,
+            change_kind,
+            artifact_id: None,
+        },
+        ItemPayload::ContextCompaction {
+            trigger,
+            phase,
+            implementation,
+            reason,
+            token_snapshot,
+            trimmed_history_groups,
+            warnings,
+            error_code,
+            summary_source,
+            provider_endpoint_id,
+            provider_account_id,
+            capability_revision,
+            fallback_reason,
+            ..
+        } => ItemPayload::ContextCompaction {
+            checkpoint_id: None,
+            trigger,
+            phase,
+            implementation,
+            reason,
+            token_snapshot,
+            trimmed_history_groups,
+            warnings,
+            error_code,
+            summary_source,
+            provider_endpoint_id,
+            provider_account_id,
+            capability_revision,
+            fallback_reason,
+        },
+        ItemPayload::Plan { .. }
+        | ItemPayload::Approval { .. }
+        | ItemPayload::UserInputRequest { .. }
+        | ItemPayload::CommandExecution { .. }
+        | ItemPayload::Review { .. } => return None,
+    };
+    Some((kind, payload))
+}
+
 #[cfg(test)]
 mod tests {
     use hachimi_protocol::{
-        ApprovalPolicy, BehaviorMode, CheckoutId, CheckoutKind, CheckoutRecord, CheckoutStatus,
-        EntryProfile, ExecutionTarget, ItemId, ItemRelations, ItemStatus, LlmSettings,
-        PermissionProfile, ProjectId, ProjectRecord, ProviderCapabilities, RunBudget,
-        RunConfiguration, RunDriverKind, RunEventPayload, RunPurpose, RunUsageSnapshot,
-        SessionResumeRequest, SessionSearchRequest, TokenCountSource, TokenUsage, TranscriptItem,
-        TranscriptItemKind, UserInputAnswer, UserInputQuestion, UserInputRequestId,
-        UserInputRequestRecord, UserInputResolution, UserInputStatus, WorkloadKind,
+        ApprovalPolicy, ArtifactId, BehaviorMode, CheckoutId, CheckoutKind, CheckoutRecord,
+        CheckoutStatus, ClientId, EntryProfile, ExecutionTarget, ItemId, ItemRelations, ItemStatus,
+        LlmSettings, MutationContext, PermissionProfile, ProjectId, ProjectRecord,
+        ProviderCapabilities, RequestId, RunBudget, RunConfiguration, RunDriverKind,
+        RunEventPayload, RunPurpose, RunUsageSnapshot, SessionForkRequest, SessionResumeRequest,
+        SessionSearchRequest, TokenCountSource, TokenUsage, TranscriptItem, TranscriptItemKind,
+        UserInputAnswer, UserInputQuestion, UserInputRequestId, UserInputRequestRecord,
+        UserInputResolution, UserInputStatus, WorkloadKind,
     };
 
     use super::*;
@@ -786,6 +958,126 @@ mod tests {
                 .expect("second drain")
                 .is_empty()
         );
+    }
+
+    #[tokio::test]
+    async fn fork_requires_a_terminal_run_and_copies_only_safe_completed_history() {
+        let (store, session, run) = seed().await;
+        for item in [
+            TranscriptItem {
+                id: ItemId::from("fork-user"),
+                session_id: session.id.clone(),
+                run_id: Some(run.id.clone()),
+                sequence: 0,
+                kind: TranscriptItemKind::User,
+                status: ItemStatus::Completed,
+                payload: ItemPayload::User {
+                    text: "continue this work".into(),
+                    attachment_ids: vec![hachimi_protocol::AttachmentId::from("private-file")],
+                },
+                relations: ItemRelations {
+                    artifact_ids: vec![ArtifactId::from("old-artifact")],
+                    ..ItemRelations::default()
+                },
+                created_at_ms: 1_700_000_000_010,
+            },
+            TranscriptItem {
+                id: ItemId::from("fork-command"),
+                session_id: session.id.clone(),
+                run_id: Some(run.id.clone()),
+                sequence: 0,
+                kind: TranscriptItemKind::CommandExecution,
+                status: ItemStatus::Completed,
+                payload: ItemPayload::CommandExecution {
+                    process_session_id: hachimi_protocol::ProcessSessionId::from("old-process"),
+                    command_summary: "secret command".into(),
+                    status: "exited".into(),
+                },
+                relations: ItemRelations::default(),
+                created_at_ms: 1_700_000_000_011,
+            },
+            TranscriptItem {
+                id: ItemId::from("fork-file"),
+                session_id: session.id.clone(),
+                run_id: Some(run.id.clone()),
+                sequence: 0,
+                kind: TranscriptItemKind::FileChange,
+                status: ItemStatus::Completed,
+                payload: ItemPayload::FileChange {
+                    path: "README.md".into(),
+                    change_kind: "modified".into(),
+                    artifact_id: Some(ArtifactId::from("old-artifact")),
+                },
+                relations: ItemRelations::default(),
+                created_at_ms: 1_700_000_000_012,
+            },
+        ] {
+            store
+                .append_transcript_item(item)
+                .await
+                .expect("history item");
+        }
+        let request = SessionForkRequest {
+            context: MutationContext {
+                request_id: RequestId("fork-request".into()),
+                client_id: ClientId("fork-client".into()),
+                protocol_version: hachimi_protocol::CONTROL_PROTOCOL_VERSION,
+                idempotency_key: "fork-idempotency".into(),
+                expected_run_id: None,
+                expected_generation: None,
+            },
+            source_session_id: session.id.clone(),
+            source_run_id: run.id.clone(),
+            title: "Forked work".into(),
+        };
+        assert!(matches!(
+            store
+                .fork_session_idempotent(
+                    "test",
+                    &request,
+                    SessionId::from("fork-before-terminal"),
+                    1_700_000_000_020,
+                )
+                .await,
+            Err(AgentStoreError::RunPreconditionFailed)
+        ));
+        store
+            .transition_run(&run.id, RunStatus::Succeeded, None)
+            .await
+            .expect("terminal run");
+        let fork = store
+            .fork_session_idempotent(
+                "test",
+                &request,
+                SessionId::from("fork-session"),
+                1_700_000_000_021,
+            )
+            .await
+            .expect("fork");
+        assert_eq!(fork.parent_session_id, Some(session.id));
+        assert_eq!(fork.source_run_id, Some(run.id));
+        let history = store.list_transcript(&fork.id).await.expect("fork history");
+        assert_eq!(history.len(), 3, "user, file change, and lineage only");
+        assert!(history.iter().all(|item| {
+            item.run_id.is_none()
+                && item.status == ItemStatus::Completed
+                && item.relations == ItemRelations::default()
+        }));
+        assert!(matches!(
+            &history[0].payload,
+            ItemPayload::User { attachment_ids, .. } if attachment_ids.is_empty()
+        ));
+        assert!(matches!(
+            &history[1].payload,
+            ItemPayload::FileChange {
+                artifact_id: None,
+                ..
+            }
+        ));
+        assert!(matches!(
+            &history[2].payload,
+            ItemPayload::SystemContext { code, .. } if code == "session_fork_lineage"
+        ));
     }
 
     #[tokio::test]

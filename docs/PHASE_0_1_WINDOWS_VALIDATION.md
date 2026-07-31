@@ -60,6 +60,6 @@
 
 - Storybook 的自动截图已保存；Windows 真实透明桌面的验收截图待人工执行清单时补充。
 - 当前穿透方案使用 30 ms 后台轮询和 `set_ignore_cursor_events`，尚未实测 60 ms 目标；若不稳定，再评估 Windows `WM_NCHITTEST` 优化。
-- 当前没有 OS 级沙箱，程序只报告 `SandboxStatus::Disabled`。
+- Windows OS 沙箱 Runtime、attestation 和 `Disabled`/`Degraded`/`Enforced` fail-closed 状态已经实现；真实 standard-user 与 elevated 证据仍必须分别通过 `pnpm test:windows:standard-user` 和 `pnpm test:windows:release` 取得，不能由本人工 Pet/窗口清单替代。
 - Kobalte ContextMenu 打开时会插入 focus-guard 元素；Playwright 对此禁用了 Axe 的 `aria-required-children` 单项规则，其余选定 WCAG 2 A/AA 规则保持启用。
 - macOS、Linux X11、Wayland 均未进行窗口行为验证。

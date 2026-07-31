@@ -103,7 +103,7 @@
   }
 
   [data-component="field-description"] {
-    color: var(--color-text-faint);
+    color: var(--color-text-muted);
     font-size: var(--font-size-xs);
   }
 
@@ -603,6 +603,19 @@
     color: var(--color-text-base);
     box-shadow: var(--shadow-raised);
     font-size: var(--font-size-xs);
+  }
+
+  [data-component="select"] {
+    min-width: 0;
+    display: grid;
+    gap: var(--space-1);
+  }
+
+  .ui-select-control {
+    width: 100%;
+    min-width: 0;
+    display: grid;
+    gap: var(--space-1);
   }
 
   [data-component="select-trigger"] {

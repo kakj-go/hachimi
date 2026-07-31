@@ -81,7 +81,7 @@ async fn client_reads_through_the_worker_process() {
 
 #[cfg(windows)]
 #[tokio::test]
-#[ignore = "requires the elevated Windows sandbox release environment"]
+#[ignore = "requires the standard-user Windows sandbox release environment"]
 async fn restricted_workspace_worker_executes_a_checkout_bound_write() {
     let marker = std::env::var_os("HACHIMI_SANDBOX_MARKER").expect("sandbox marker env");
     let launcher = std::path::PathBuf::from(
@@ -139,6 +139,7 @@ async fn restricted_workspace_worker_executes_a_checkout_bound_write() {
             interactive: false,
             allowed_commands: vec![worker.to_string_lossy().into_owned()],
         },
+        browser: Default::default(),
         computer: Default::default(),
         review_each_command: false,
         expires_at_ms: None,
@@ -173,7 +174,7 @@ async fn restricted_workspace_worker_executes_a_checkout_bound_write() {
 
 #[cfg(windows)]
 #[tokio::test]
-#[ignore = "requires the elevated Windows sandbox release environment"]
+#[ignore = "requires the standard-user Windows sandbox release environment"]
 async fn restricted_workspace_worker_creates_an_empty_initial_commit_without_touching_index() {
     let marker = std::env::var_os("HACHIMI_SANDBOX_MARKER").expect("sandbox marker env");
     let launcher = std::path::PathBuf::from(
@@ -255,6 +256,7 @@ async fn restricted_workspace_worker_creates_an_empty_initial_commit_without_tou
             interactive: false,
             allowed_commands: vec![worker.to_string_lossy().into_owned()],
         },
+        browser: Default::default(),
         computer: Default::default(),
         review_each_command: false,
         expires_at_ms: None,
@@ -304,7 +306,7 @@ async fn restricted_workspace_worker_creates_an_empty_initial_commit_without_tou
 
 #[cfg(windows)]
 #[tokio::test]
-#[ignore = "requires the elevated Windows sandbox release environment"]
+#[ignore = "requires the standard-user Windows sandbox release environment"]
 async fn restricted_agent_exec_tool_runs_through_policy_and_workspace_sandbox() {
     let marker = std::env::var_os("HACHIMI_SANDBOX_MARKER").expect("sandbox marker env");
     let launcher = std::env::var_os("HACHIMI_SANDBOX_LAUNCHER").expect("launcher env");
@@ -353,6 +355,7 @@ async fn restricted_agent_exec_tool_runs_through_policy_and_workspace_sandbox() 
                 powershell.to_string_lossy().into_owned(),
             ],
         },
+        browser: Default::default(),
         computer: Default::default(),
         review_each_command: false,
         expires_at_ms: None,

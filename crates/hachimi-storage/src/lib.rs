@@ -4,9 +4,12 @@ mod agent_store;
 
 pub use agent_store::side_effects::SideEffectClaim;
 pub use agent_store::{
-    AgentStore, AgentStoreError, AuditMetadataRecord, CreatedAgentRun, IdempotentMutationClaim,
-    ManagedAttachmentRecord, ManagedRunDiffFile, RecoveryReport, RunFileBaselineRecord,
-    ScheduleInvocationClaim, SkillFileIndexRecord, StoredSkillRecord,
+    AgentStore, AgentStoreError, AgentTaskExecutionClaim, AuditMetadataRecord, CreatedAgentRun,
+    DesktopControlActionLedgerInput, IdempotentMutationClaim, ManagedAttachmentRecord,
+    ManagedRunDiffFile, PluginHookEventRecord, PluginHookRuntime, PluginHookRuntimeFuture,
+    PluginHookSubscription, RecoveryReport, RecoveryToolFence, RunFileBaselineRecord,
+    ScheduleEventIngestClaim, ScheduleEventLaunchClaim, ScheduleInvocationClaim,
+    SkillFileIndexRecord, StoredSkillRecord,
 };
 
 use std::{

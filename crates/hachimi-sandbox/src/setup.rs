@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use std::path::Path;
+use std::sync::OnceLock;
+use std::{io::Write, path::Path};
 
+use atomic_write_file::AtomicWriteFile;
 use serde::{Deserialize, Serialize};
 
 use crate::appcontainer::{
@@ -9,6 +11,8 @@ use crate::appcontainer::{
     grant_appcontainer_access, revoke_appcontainer_access,
 };
 use crate::runtime_attestation::SANDBOX_POLICY_VERSION;
+
+static MANAGED_GIT_EXECUTABLE: OnceLock<std::path::PathBuf> = OnceLock::new();
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -67,19 +71,7 @@ pub fn install_sandbox_marker(
             return Err(format!("trusted Git runtime discovery failed: {error}"));
         }
     };
-    if let Some(runtime) = &git_runtime
-        && let Err(error) = grant_restricted_code_access(&runtime.root, false)
-    {
-        let _ = revoke_restricted_code_access(launcher_parent);
-        if profile_created {
-            let _ = AppContainerSid::delete_profile();
-        }
-        return Err(format!("trusted Git runtime ACL setup failed: {error}"));
-    }
-    let mut acl_paths = vec![launcher_parent.to_string_lossy().into_owned()];
-    if let Some(runtime) = &git_runtime {
-        acl_paths.push(runtime.root.to_string_lossy().into_owned());
-    }
+    let acl_paths = vec![launcher_parent.to_string_lossy().into_owned()];
     let marker = SandboxSetupMarker {
         version: SANDBOX_POLICY_VERSION.into(),
         acl_component: true,
@@ -96,11 +88,13 @@ pub fn install_sandbox_marker(
         installed_at_ms: now_ms(),
     };
     let encoded = serde_json::to_vec_pretty(&marker).map_err(|error| error.to_string())?;
-    let temporary = marker_path.with_extension("json.tmp");
-    if let Err(error) =
-        std::fs::write(&temporary, encoded).and_then(|()| std::fs::rename(&temporary, marker_path))
-    {
-        let _ = std::fs::remove_file(&temporary);
+    let marker_commit = (|| {
+        let mut file = AtomicWriteFile::open(marker_path)?;
+        file.write_all(&encoded)?;
+        file.flush()?;
+        file.commit()
+    })();
+    if let Err(error) = marker_commit {
         if profile_created {
             let _ = revoke_restricted_code_access(launcher_parent);
             let _ = AppContainerSid::delete_profile();
@@ -116,62 +110,91 @@ struct TrustedGitRuntime {
     root: std::path::PathBuf,
 }
 
-/// Resolves the Git for Windows command shim from PATH without consulting the
-/// checkout current directory. The installation root is the narrowest stable
-/// tree that also contains the shim's `mingw64` runtime dependencies.
+/// Resolves only the pinned Git executable staged in Hachimi's per-user
+/// managed Runtime. System PATH is deliberately ignored.
 fn trusted_git_runtime() -> Result<Option<TrustedGitRuntime>, String> {
-    let Some(path) = std::env::var_os("PATH") else {
+    let candidate = MANAGED_GIT_EXECUTABLE
+        .get()
+        .cloned()
+        .or_else(|| std::env::var_os("HACHIMI_MANAGED_GIT_EXECUTABLE").map(Into::into));
+    let Some(candidate) = candidate else {
         return Ok(None);
     };
-    for directory in std::env::split_paths(&path) {
-        if directory.as_os_str().is_empty() {
-            continue;
-        }
-        let candidate = directory.join("git.exe");
-        if !candidate.is_file() {
-            continue;
-        }
-        let executable = candidate
-            .canonicalize()
-            .map_err(|error| format!("could not canonicalize {}: {error}", candidate.display()))?;
-        let executable_text = executable.to_string_lossy();
-        let local_path = executable_text
-            .strip_prefix(r"\\?\")
-            .unwrap_or(&executable_text);
-        if local_path.starts_with("UNC\\")
-            || local_path.starts_with("Volume{")
-            || local_path.starts_with(r"\\")
-            || local_path.starts_with(r"\.\")
-        {
-            return Err("UNC Git installations are not supported by the Windows sandbox".into());
-        }
-        let parent = executable
-            .parent()
-            .ok_or_else(|| "git.exe has no parent directory".to_owned())?;
-        let root = if parent
-            .file_name()
-            .and_then(std::ffi::OsStr::to_str)
-            .is_some_and(|name| {
-                name.eq_ignore_ascii_case("cmd") || name.eq_ignore_ascii_case("bin")
-            }) {
-            parent
-                .parent()
-                .ok_or_else(|| "Git command directory has no installation root".to_owned())?
-        } else {
-            parent
-        };
-        let root = root.canonicalize().map_err(|error| {
-            format!(
-                "could not canonicalize Git runtime {}: {error}",
-                root.display()
-            )
-        })?;
-        if root.parent().is_none() {
-            return Err("refusing to grant Git runtime access to a volume root".into());
-        }
-        return Ok(Some(TrustedGitRuntime { executable, root }));
+    if !candidate.is_absolute() || !candidate.is_file() {
+        return Err("managed Git executable is missing".into());
     }
-    Ok(None)
+    let executable = candidate
+        .canonicalize()
+        .map_err(|error| format!("could not canonicalize {}: {error}", candidate.display()))?;
+    let cmd = executable
+        .parent()
+        .filter(|path| {
+            path.file_name()
+                .is_some_and(|name| name.eq_ignore_ascii_case("cmd"))
+        })
+        .ok_or_else(|| "managed Git must use the cmd/git.exe layout".to_owned())?;
+    let root = cmd
+        .parent()
+        .filter(|path| {
+            path.file_name()
+                .is_some_and(|name| name.eq_ignore_ascii_case("managed-git"))
+        })
+        .ok_or_else(|| "Git executable is outside Hachimi managed-git".to_owned())?
+        .canonicalize()
+        .map_err(|error| error.to_string())?;
+    if !root.join("manifest.json").is_file()
+        || !root
+            .parent()
+            .is_some_and(|runtime| runtime.join("runtime-manifest.json").is_file())
+    {
+        return Err("managed Git attestation manifests are missing".into());
+    }
+    Ok(Some(TrustedGitRuntime { executable, root }))
+}
+
+pub fn set_managed_git_executable(path: std::path::PathBuf) -> Result<(), String> {
+    let runtime = validate_managed_git(&path)?;
+    if let Some(existing) = MANAGED_GIT_EXECUTABLE.get() {
+        return if existing == &runtime.executable {
+            Ok(())
+        } else {
+            Err("managed Git executable was already initialized to another Runtime".into())
+        };
+    }
+    MANAGED_GIT_EXECUTABLE
+        .set(runtime.executable)
+        .map_err(|_| "managed Git executable was already initialized".into())
+}
+
+fn validate_managed_git(path: &Path) -> Result<TrustedGitRuntime, String> {
+    let previous = MANAGED_GIT_EXECUTABLE.get().cloned();
+    if previous.as_deref() == Some(path) {
+        return trusted_git_runtime()?.ok_or_else(|| "managed Git is unavailable".into());
+    }
+    let executable = path
+        .canonicalize()
+        .map_err(|error| format!("managed Git canonicalization failed: {error}"))?;
+    let cmd = executable
+        .parent()
+        .ok_or_else(|| "managed Git has no cmd directory".to_owned())?;
+    let root = cmd
+        .parent()
+        .ok_or_else(|| "managed Git has no Runtime root".to_owned())?;
+    if !cmd
+        .file_name()
+        .is_some_and(|name| name.eq_ignore_ascii_case("cmd"))
+        || !root
+            .file_name()
+            .is_some_and(|name| name.eq_ignore_ascii_case("managed-git"))
+        || !root.join("manifest.json").is_file()
+        || !root
+            .parent()
+            .is_some_and(|parent| parent.join("runtime-manifest.json").is_file())
+    {
+        return Err("managed Git path is outside the attested per-user Runtime".into());
+    }
+    let root = root.to_owned();
+    Ok(TrustedGitRuntime { executable, root })
 }
 
 /// Returns the exact Git executable bound during Sandbox setup discovery.
@@ -180,7 +203,7 @@ fn trusted_git_runtime() -> Result<Option<TrustedGitRuntime>, String> {
 pub fn trusted_git_executable() -> Result<std::path::PathBuf, String> {
     trusted_git_runtime()?
         .map(|runtime| runtime.executable)
-        .ok_or_else(|| "git.exe was not found in the host PATH".to_owned())
+        .ok_or_else(|| "pinned Hachimi managed Git runtime is unavailable".to_owned())
 }
 
 pub fn uninstall_sandbox(marker_path: &Path) -> Result<(), String> {
@@ -201,10 +224,7 @@ pub fn uninstall_sandbox(marker_path: &Path) -> Result<(), String> {
     if let Err(error) = AppContainerSid::delete_profile() {
         errors.push(error);
     }
-    for path in [
-        marker_path.to_path_buf(),
-        marker_path.with_extension("json.tmp"),
-    ] {
+    for path in [marker_path.to_path_buf()] {
         match std::fs::remove_file(path) {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -436,7 +456,11 @@ fn git_metadata_dir(
     checkout: &Path,
     revision_argument: &str,
 ) -> Result<Option<std::path::PathBuf>, String> {
-    let output = std::process::Command::new("git")
+    #[cfg(test)]
+    let git = std::path::PathBuf::from("git");
+    #[cfg(not(test))]
+    let git = trusted_git_executable()?;
+    let output = std::process::Command::new(git)
         .args(["-C"])
         .arg(checkout)
         .args(["rev-parse", revision_argument])

@@ -18,6 +18,7 @@ export const config = {
     : [
         resolve("scripts/desktop-e2e/specs/workbench-core.e2e.mjs"),
         resolve("scripts/desktop-e2e/specs/extensions-settings.e2e.mjs"),
+        resolve("scripts/desktop-e2e/specs/local-hosts.e2e.mjs"),
         resolve("scripts/desktop-e2e/specs/task-center.e2e.mjs"),
       ],
   maxInstances: 1,

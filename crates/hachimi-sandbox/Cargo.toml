@@ -9,13 +9,16 @@ publish.workspace = true
 windows-smoke = []
 
 [dependencies]
+atomic-write-file.workspace = true
 hachimi-protocol.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 specta.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
+zeroize.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { workspace = true, features = [

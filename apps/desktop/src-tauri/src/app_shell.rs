@@ -1,5 +1,46 @@
 use super::*;
 
+pub(super) const fn release_feature_enabled(explicitly_disabled: bool) -> bool {
+    !explicitly_disabled
+}
+
+pub(super) fn env_disabled(name: &str) -> bool {
+    matches!(std::env::var(name).as_deref(), Ok("1" | "true" | "TRUE"))
+}
+
+pub(super) const fn release_runtime_feature_set(disabled: RuntimeFeatureSet) -> RuntimeFeatureSet {
+    RuntimeFeatureSet {
+        run_recovery: !disabled.run_recovery,
+        provider_extensions: !disabled.provider_extensions,
+        provider_remote_context: !disabled.provider_remote_context,
+        multi_agent: !disabled.multi_agent,
+        git_remote_mutations: !disabled.git_remote_mutations,
+        plugin_runtime: !disabled.plugin_runtime,
+        enterprise_integrations: !disabled.enterprise_integrations,
+        desktop_control: !disabled.desktop_control,
+    }
+}
+
+pub(super) fn release_agent_feature_flags(
+    workspace_disabled: bool,
+    mcp_disabled: bool,
+    scheduler_disabled: bool,
+) -> FeatureFlags {
+    FeatureFlags {
+        workbench: true,
+        workspace_tools: release_feature_enabled(workspace_disabled),
+        browser_control: true,
+        computer_observe: true,
+        computer_control: true,
+        plugin_runtime: true,
+        local_gateway: true,
+        mcp_runtime: release_feature_enabled(mcp_disabled),
+        scheduler: release_feature_enabled(scheduler_disabled),
+        runtime_features: RuntimeFeatureSet::all_enabled(),
+        ..FeatureFlags::all_disabled()
+    }
+}
+
 pub(super) fn absolute_path(path: PathBuf) -> PathBuf {
     if path.is_absolute() {
         path
@@ -102,12 +143,25 @@ pub(super) fn motion_asset_url(entry_id: &str) -> String {
 pub(super) fn cancel_pet_activity(app: &AppHandle, state: &DesktopState, emit_cancelled: bool) {
     if let Some(active) = state.pet_run.lock().take() {
         active.cancellation.cancel();
+        let _ = state
+            .agent_executor
+            .registry()
+            .cancel(&active.agent_run_id, active.run_generation);
+        let approval_broker = state.approval_broker.clone();
+        let user_input_broker = state.user_input_broker.clone();
+        let authority_run_id = active.agent_run_id.clone();
+        tauri::async_runtime::spawn(async move {
+            let _ = approval_broker.cancel_run(authority_run_id.clone()).await;
+            let _ = user_input_broker.cancel_run(authority_run_id).await;
+        });
         if emit_cancelled {
             let _ = app.emit_to(
                 "pet",
                 PET_TURN_EVENT,
                 PetTurnEvent::Cancelled {
                     run_id: active.run_id,
+                    session_id: active.session_id,
+                    agent_run_id: active.agent_run_id,
                 },
             );
         }
@@ -116,7 +170,10 @@ pub(super) fn cancel_pet_activity(app: &AppHandle, state: &DesktopState, emit_ca
 }
 
 pub(super) fn enter_workbench_mode(app: &AppHandle, state: &DesktopState) {
-    cancel_pet_activity(app, state, true);
+    // Workbench and Pet are two presentations over the same persistent Run.
+    // Switching surfaces must not cancel pending Approval/UserInput or revoke
+    // the Run; only explicit Stop/cancel owns that transition.
+    state.voice_runtime.stop();
     let _ = app.emit_to("pet", "pet:close-composer", ());
     hide_pet(app);
 }

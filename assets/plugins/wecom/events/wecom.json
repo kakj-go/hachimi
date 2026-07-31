@@ -1,0 +1,4 @@
+{
+  "sourceId": "enterprise:wecom",
+  "eventTypes": ["message", "text", "event"]
+}

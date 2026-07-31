@@ -6,7 +6,8 @@
 use std::{collections::BTreeMap, sync::Arc};
 
 use hachimi_protocol::{
-    BehaviorMode, EntryProfile, ModelToolCall, ToolCallId, ToolDescriptor, ToolEffect, WorkloadKind,
+    BehaviorMode, EntryProfile, ModelInputImage, ModelToolCall, ToolCallId, ToolDescriptor,
+    ToolEffect, ToolRecoveryPolicy, WorkloadKind,
 };
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -73,6 +74,8 @@ pub struct ToolResult {
     pub status: ToolResultStatus,
     pub model_content: String,
     pub structured_content: Value,
+    /// Ephemeral inputs for the next model step. Run projection deliberately never persists these.
+    pub model_images: Vec<ModelInputImage>,
 }
 
 impl ToolResult {
@@ -84,7 +87,14 @@ impl ToolResult {
             status: ToolResultStatus::Succeeded,
             model_content: model_content.into(),
             structured_content: content,
+            model_images: Vec::new(),
         }
+    }
+
+    #[must_use]
+    pub fn with_model_images(mut self, images: Vec<ModelInputImage>) -> Self {
+        self.model_images = images;
+        self
     }
 
     #[must_use]
@@ -96,6 +106,7 @@ impl ToolResult {
             status: ToolResultStatus::Failed,
             structured_content: serde_json::json!({ "error": message }),
             model_content: message,
+            model_images: Vec::new(),
         }
     }
 
@@ -108,6 +119,7 @@ impl ToolResult {
             status: ToolResultStatus::Aborted,
             structured_content: serde_json::json!({ "aborted": true, "message": message }),
             model_content: message,
+            model_images: Vec::new(),
         }
     }
 
@@ -120,6 +132,7 @@ impl ToolResult {
             status: ToolResultStatus::Rejected,
             structured_content: serde_json::json!({ "rejected": true, "message": message }),
             model_content: message,
+            model_images: Vec::new(),
         }
     }
 
@@ -132,6 +145,7 @@ impl ToolResult {
             status: ToolResultStatus::TimedOut,
             structured_content: serde_json::json!({ "timedOut": true, "message": message }),
             model_content: message,
+            model_images: Vec::new(),
         }
     }
 }
@@ -152,6 +166,21 @@ pub enum ToolExecutionError {
 
 pub trait ToolExecutor: Send + Sync {
     fn descriptor(&self) -> ToolDescriptor;
+
+    /// Recovery policy is supplied by the trusted executor implementation, not
+    /// by model output or a Plugin/MCP manifest. Mutation tools fail closed.
+    fn recovery_policy(&self) -> ToolRecoveryPolicy {
+        match self.descriptor().effect {
+            ToolEffect::ReadOnly | ToolEffect::BrowserObserve | ToolEffect::ComputerObserve => {
+                ToolRecoveryPolicy::ReadOnlyReplayable
+            }
+            ToolEffect::WorkspaceWrite
+            | ToolEffect::Process
+            | ToolEffect::ExternalSideEffect
+            | ToolEffect::BrowserAct
+            | ToolEffect::ComputerAct => ToolRecoveryPolicy::NonReplayable,
+        }
+    }
 
     fn execute(&self, invocation: ToolInvocation) -> ToolFuture;
 
@@ -213,6 +242,15 @@ impl ToolRegistry {
     #[must_use]
     pub fn executor(&self, name: &str) -> Option<Arc<dyn ToolExecutor>> {
         self.tools.get(name).cloned()
+    }
+
+    #[must_use]
+    pub fn recovery_policy(&self, name: &str) -> ToolRecoveryPolicy {
+        self.tools
+            .get(name)
+            .map_or(ToolRecoveryPolicy::NonReplayable, |tool| {
+                tool.recovery_policy()
+            })
     }
 
     #[must_use]

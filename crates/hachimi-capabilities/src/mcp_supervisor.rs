@@ -518,6 +518,7 @@ impl McpStdioSandboxHost {
                 interactive: true,
                 allowed_commands: vec![executable.to_string_lossy().into_owned()],
             },
+            browser: Default::default(),
             computer: ComputerGrant::default(),
             review_each_command: false,
             expires_at_ms: None,

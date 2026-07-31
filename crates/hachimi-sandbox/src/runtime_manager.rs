@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Adapted from openai/codex codex-rs/windows-sandbox-rs/src/{setup_orchestrator,setup_main_win}.rs
 // @ 4c43465133428898aa84f0bfc02c306ed65fb66a.
-// Modified for Hachimi: refreshable attestation, application-driven UAC repair,
+// Modified for Hachimi: refreshable attestation, per-user repair,
 // stable diagnostics, and fail-closed delegation to the restricted backend.
 
 use std::{
@@ -9,7 +9,10 @@ use std::{
     sync::{Arc, RwLock},
 };
 
-use hachimi_protocol::{SandboxCapabilityReport, SandboxRuntimeSnapshot};
+use hachimi_protocol::{
+    SandboxBootstrapPhase, SandboxBootstrapState, SandboxCapabilityReport, SandboxReadiness,
+    SandboxRuntimeSnapshot,
+};
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
@@ -107,6 +110,39 @@ impl SandboxRuntimeManager {
         }
     }
 
+    #[must_use]
+    pub fn bootstrap_state(&self) -> SandboxBootstrapState {
+        let snapshot = self.snapshot();
+        let marker = std::fs::read(&self.setup_marker)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<crate::SandboxSetupMarker>(&bytes).ok());
+        let phase = if snapshot.repairing {
+            SandboxBootstrapPhase::InstallingProfile
+        } else if SandboxStatus::from_report(&snapshot.report) == SandboxStatus::Enforced {
+            SandboxBootstrapPhase::Ready
+        } else {
+            match snapshot.report.readiness {
+                SandboxReadiness::SetupRequired => SandboxBootstrapPhase::RepairRequired,
+                SandboxReadiness::Unavailable => SandboxBootstrapPhase::Failed,
+                SandboxReadiness::Degraded | SandboxReadiness::Ready => {
+                    SandboxBootstrapPhase::RepairRequired
+                }
+            }
+        };
+        SandboxBootstrapState {
+            phase,
+            runtime_root: self
+                .launcher
+                .parent()
+                .unwrap_or(Path::new(""))
+                .to_string_lossy()
+                .into_owned(),
+            profile_sid: marker.and_then(|marker| marker.app_container_sid),
+            stable_error_code: snapshot.report.stable_error_code.clone(),
+            snapshot,
+        }
+    }
+
     pub async fn refresh(&self) -> SandboxRuntimeSnapshot {
         let probe = self.probe.clone();
         let report = tokio::task::spawn_blocking(move || probe.capability_report())
@@ -163,7 +199,7 @@ impl SandboxRuntimeManager {
         let marker = self.setup_marker.clone();
         let launcher = self.launcher.clone();
         let repair_result =
-            tokio::task::spawn_blocking(move || run_elevated_setup(&helper, &marker, &launcher))
+            tokio::task::spawn_blocking(move || run_per_user_setup(&helper, &marker, &launcher))
                 .await
                 .map_err(|error| SandboxManagerError {
                     code: "sandbox_repair_task_failed",
@@ -237,21 +273,11 @@ impl SandboxBackend for SandboxRuntimeManager {
 }
 
 #[cfg(windows)]
-fn run_elevated_setup(
+fn run_per_user_setup(
     helper: &Path,
     marker: &Path,
     launcher: &Path,
 ) -> Result<(), SandboxManagerError> {
-    use std::mem::size_of;
-    use windows_sys::Win32::{
-        Foundation::{CloseHandle, GetLastError},
-        System::Threading::{GetExitCodeProcess, INFINITE, WaitForSingleObject},
-        UI::{
-            Shell::{SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW, ShellExecuteExW},
-            WindowsAndMessaging::SW_HIDE,
-        },
-    };
-
     if !helper.is_absolute() || !marker.is_absolute() || !launcher.is_absolute() {
         return Err(SandboxManagerError {
             code: "sandbox_repair_path_invalid",
@@ -264,58 +290,38 @@ fn run_elevated_setup(
             message: "sandbox setup helper or launcher is missing".into(),
         });
     }
-    let verb = wide("runas");
-    let file = wide_os(helper.as_os_str());
-    let parameters = wide(&format!(
-        "--marker \"{}\" --launcher \"{}\"",
-        marker.display(),
-        launcher.display()
-    ));
-    let mut info: SHELLEXECUTEINFOW = unsafe { std::mem::zeroed() };
-    info.cbSize = u32::try_from(size_of::<SHELLEXECUTEINFOW>()).unwrap_or(u32::MAX);
-    info.fMask = SEE_MASK_NOCLOSEPROCESS;
-    info.lpVerb = verb.as_ptr();
-    info.lpFile = file.as_ptr();
-    info.lpParameters = parameters.as_ptr();
-    info.nShow = SW_HIDE;
-    let started = unsafe { ShellExecuteExW(&raw mut info) };
-    if started == 0 {
-        let error = unsafe { GetLastError() };
-        return Err(SandboxManagerError {
-            code: elevation_error_code(error),
-            message: format!("Windows elevation failed with error {error}"),
-        });
+    use std::os::windows::process::CommandExt;
+    let mut command = std::process::Command::new(helper);
+    command
+        .arg("--marker")
+        .arg(marker)
+        .arg("--launcher")
+        .arg(launcher)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .creation_flags(0x0800_0000);
+    if let Ok(git) = crate::trusted_git_executable() {
+        command.env("HACHIMI_MANAGED_GIT_EXECUTABLE", git);
     }
-    if info.hProcess.is_null() {
-        return Err(SandboxManagerError {
-            code: "sandbox_repair_process_missing",
-            message: "Windows did not return the elevated setup process".into(),
-        });
-    }
-    unsafe { WaitForSingleObject(info.hProcess, INFINITE) };
-    let mut exit_code = 1_u32;
-    let got_exit = unsafe { GetExitCodeProcess(info.hProcess, &mut exit_code) };
-    unsafe { CloseHandle(info.hProcess) };
-    if got_exit == 0 || exit_code != 0 {
+    let output = command.output().map_err(|error| SandboxManagerError {
+        code: "sandbox_setup_launch_failed",
+        message: error.to_string(),
+    })?;
+    if !output.status.success() {
         return Err(SandboxManagerError {
             code: "sandbox_setup_helper_failed",
-            message: format!("elevated sandbox setup exited with code {exit_code}"),
+            message: String::from_utf8_lossy(&output.stderr)
+                .chars()
+                .take(1_000)
+                .collect(),
         });
     }
     Ok(())
 }
 
-#[cfg(windows)]
-const fn elevation_error_code(error: u32) -> &'static str {
-    if error == windows_sys::Win32::Foundation::ERROR_CANCELLED {
-        "sandbox_elevation_cancelled"
-    } else {
-        "sandbox_elevation_failed"
-    }
-}
-
 #[cfg(not(windows))]
-fn run_elevated_setup(
+fn run_per_user_setup(
     _helper: &Path,
     _marker: &Path,
     _launcher: &Path,
@@ -326,32 +332,9 @@ fn run_elevated_setup(
     })
 }
 
-#[cfg(windows)]
-fn wide(value: &str) -> Vec<u16> {
-    use std::os::windows::ffi::OsStrExt;
-    std::ffi::OsStr::new(value)
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect()
-}
-
-#[cfg(windows)]
-fn wide_os(value: &std::ffi::OsStr) -> Vec<u16> {
-    use std::os::windows::ffi::OsStrExt;
-    value.encode_wide().chain(std::iter::once(0)).collect()
-}
-
 #[cfg(all(test, windows))]
 mod tests {
     use super::*;
-
-    #[test]
-    fn uac_cancellation_has_a_stable_error_code() {
-        assert_eq!(
-            elevation_error_code(windows_sys::Win32::Foundation::ERROR_CANCELLED),
-            "sandbox_elevation_cancelled"
-        );
-    }
 
     #[tokio::test]
     async fn missing_setup_binary_keeps_runtime_fail_closed() {

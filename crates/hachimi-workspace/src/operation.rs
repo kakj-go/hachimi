@@ -13,6 +13,7 @@ pub(crate) fn workspace_operation_effect(
         | WorkspaceOperation::GitCreateEmptyInitialCommit { .. } => {
             hachimi_protocol::ToolEffect::WorkspaceWrite
         }
+        WorkspaceOperation::GitPush { .. } => hachimi_protocol::ToolEffect::ExternalSideEffect,
         WorkspaceOperation::Exec { .. } => hachimi_protocol::ToolEffect::Process,
         WorkspaceOperation::ReadFile { .. }
         | WorkspaceOperation::ListDirectory { .. }
@@ -28,6 +29,7 @@ pub(crate) fn workspace_operation_effect(
         | WorkspaceOperation::GitStatusSnapshot
         | WorkspaceOperation::GitWorkspaceSnapshot { .. }
         | WorkspaceOperation::GitProjectInspect { .. }
+        | WorkspaceOperation::GitRemotes
         | WorkspaceOperation::ReadGitBlob { .. } => hachimi_protocol::ToolEffect::ReadOnly,
     }
 }

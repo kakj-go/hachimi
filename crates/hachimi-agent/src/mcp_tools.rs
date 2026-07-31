@@ -367,6 +367,7 @@ async fn tool_result(
             "structuredContentPresent": result.structured_content.is_some(),
             "mediaReferences": media_references,
         }),
+        model_images: Vec::new(),
     }
 }
 

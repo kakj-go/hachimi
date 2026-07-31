@@ -253,10 +253,14 @@ async function installTauriMocks(
           sequence: 1,
           kind: "user",
           status: "completed",
-          payloadVersion: 1,
-          typedPayload: null,
+          payload: {
+            type: "user",
+            data: {
+              text: "分析并统一前端各组件的颜色、排版、字号和交互状态。",
+              attachment_ids: [],
+            },
+          },
           relations: {},
-          content: { text: "分析并统一前端各组件的颜色、排版、字号和交互状态。" },
           createdAtMs: 1_774_184_400_000,
         },
         {
@@ -266,12 +270,13 @@ async function installTauriMocks(
           sequence: 2,
           kind: "assistant",
           status: "completed",
-          payloadVersion: 1,
-          typedPayload: null,
-          relations: {},
-          content: {
-            text: "已将 Quiet Graphite 令牌、设置行和 Composer 提取为共享实现，正在核对正式页面。",
+          payload: {
+            type: "assistant",
+            data: {
+              text: "已将 Quiet Graphite 令牌、设置行和 Composer 提取为共享实现，正在核对正式页面。",
+            },
           },
+          relations: {},
           createdAtMs: 1_774_184_460_000,
         },
         {
@@ -279,12 +284,26 @@ async function installTauriMocks(
           sessionId: session.id,
           runId: run.id,
           sequence: 3,
-          kind: "tool_result",
+          kind: "tool_execution",
           status: "completed",
-          payloadVersion: 1,
-          typedPayload: null,
+          payload: {
+            type: "tool_execution",
+            data: {
+              tool_call_id: "tool-call-ui-unification",
+              name: "check_component_contracts",
+              arguments: { sourceFiles: 42 },
+              step_revision: 1,
+              tool_plan_hash: "ui-tool-plan",
+              registry_revision: "ui-tool-registry",
+              result: {
+                status: "succeeded",
+                modelContent: "检查组件契约：42 个共享模式通过。",
+                structuredContent: { passed: 42 },
+                stableResultCode: "component_contracts_passed",
+              },
+            },
+          },
           relations: {},
-          content: { text: "检查组件契约：42 个共享模式通过。" },
           createdAtMs: 1_774_184_490_000,
         },
       ];
@@ -317,6 +336,7 @@ async function installTauriMocks(
         pendingApprovals: [approval],
         proposedPlans: [],
         artifacts: [],
+        agentTasks: [],
       };
       let nextCallbackId = 1;
       const callbacks = new Map<number, (data: unknown) => unknown>();
@@ -340,7 +360,7 @@ async function installTauriMocks(
           calls.push({ command, args });
           if (command === "initialize_agent_control") {
             return {
-              protocolVersion: 18,
+              protocolVersion: 29,
               acceptedFeatures: ["workbench", "workspace_tools"],
               sandbox: { osEnforced: true },
             };
@@ -370,6 +390,9 @@ async function installTauriMocks(
               : [];
           }
           if (command === "list_workbench_sessions") return withSessionData ? [session] : [];
+          if (command === "search_agent_sessions") {
+            return { items: withSessionData ? [session] : [], nextCursor: null };
+          }
           if (command === "get_workbench_session") return sessionSnapshot;
           if (command === "resume_agent_session") {
             return {
@@ -435,8 +458,32 @@ async function installTauriMocks(
               generation: 1,
             };
           }
-          if (command === "list_schedules" || command === "list_task_runs") return [];
+          if (
+            command === "list_schedules" ||
+            command === "list_task_runs" ||
+            command === "list_schedule_event_receipts" ||
+            command === "list_run_recoveries" ||
+            command === "list_processes" ||
+            command === "list_reviews"
+          ) {
+            return [];
+          }
+          if (command === "local_host_command") {
+            const request = args.request as { kind?: string };
+            if (request.kind === "connector_list_accounts") {
+              return { kind: "connector_accounts", value: [] };
+            }
+            if (request.kind === "plugin_list") return { kind: "plugins", value: [] };
+          }
           if (command === "list_mcp_servers") return [];
+          if (command === "inspect_project_git" || command === "refresh_project_git") {
+            return {
+              projectId: "project-hachimi",
+              gitRoot: "D:\\workspace\\rust\\hachimi-code",
+              state: { kind: "ready", branch: "main", head: "1234567890abcdef" },
+              observedAtMs: 1,
+            };
+          }
           if (command === "list_project_git_refs") {
             return [
               { name: "main", revision: "1234567890abcdef", remote: false, current: true },
@@ -455,6 +502,7 @@ async function installTauriMocks(
                   {
                     id: "skill-documents",
                     name: "Documents",
+                    qualifiedName: "Documents",
                     description: "创建和编辑文档工件",
                     enabled: true,
                     contentHash: "documents-hash",
@@ -465,6 +513,7 @@ async function installTauriMocks(
                   {
                     id: "skill-pdf",
                     name: "PDF",
+                    qualifiedName: "PDF",
                     description: "读取、创建和验证 PDF 文件",
                     enabled: true,
                     contentHash: "pdf-hash",
@@ -475,6 +524,7 @@ async function installTauriMocks(
                   {
                     id: "skill-spreadsheets",
                     name: "Spreadsheets",
+                    qualifiedName: "Spreadsheets",
                     description: "创建和编辑电子表格",
                     enabled: true,
                     contentHash: "spreadsheets-hash",
@@ -487,7 +537,7 @@ async function installTauriMocks(
           }
           if (command === "get_bootstrap_state") {
             return {
-              protocolVersion: 17,
+              protocolVersion: 29,
               windowKind: "workbench",
               locale: "zh-CN",
               theme: themeMode,
@@ -502,8 +552,20 @@ async function installTauriMocks(
                 computerControl: false,
                 remoteTts: false,
                 remoteGateway: false,
+                pluginRuntime: true,
+                localGateway: true,
                 mcpRuntime: false,
                 scheduler: schedulerEnabled,
+                runtimeFeatures: {
+                  runRecovery: true,
+                  providerExtensions: true,
+                  providerRemoteContext: true,
+                  multiAgent: true,
+                  gitRemoteMutations: true,
+                  pluginRuntime: true,
+                  enterpriseIntegrations: true,
+                  desktopControl: true,
+                },
               },
             };
           }
@@ -1235,7 +1297,7 @@ test("production active Agent session uses the shared workflow and workspace con
   await page.clock.setFixedTime(new Date("2026-07-26T15:00:00.000Z"));
   await installTauriMocks(page, true, false, true);
   await page.goto("http://127.0.0.1:1420/workbench.html?route=home");
-  await page.getByRole("button", { name: "统一前端视觉规范与组件样式" }).click();
+  await page.getByTestId("session-select-session-ui-unification").click();
 
   await expect(page.getByRole("heading", { name: "统一前端视觉规范与组件样式" })).toBeVisible();
   await expect(page.locator('[data-component="agent-message"]')).toHaveCount(2);
@@ -1369,8 +1431,18 @@ test("production menus contain only implemented entries and legacy routes normal
 
   await page.goto("http://127.0.0.1:1420/workbench.html?route=settings/plugins");
   await expect(page.getByRole("heading", { name: "通用", exact: true, level: 1 })).toBeVisible();
-  await expect(page.locator(".settings-nav button")).toHaveCount(8);
-  for (const entry of ["通用", "外观", "语音", "配置", "宠物", "交互", "Skills", "MCP"]) {
+  await expect(page.locator(".settings-nav button")).toHaveCount(9);
+  for (const entry of [
+    "通用",
+    "外观",
+    "语音",
+    "配置",
+    "宠物",
+    "交互",
+    "Skills",
+    "MCP",
+    "本地 Hosts",
+  ]) {
     await expect(page.locator(".settings-nav").getByRole("button", { name: entry })).toBeVisible();
   }
 });

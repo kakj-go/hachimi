@@ -281,6 +281,7 @@ impl ToolExecutor for ReadResourceTool {
                             "binaryItemCount": binary_item_count,
                             "mediaReferences": media_references,
                         }),
+                        model_images: Vec::new(),
                     })
                 }
                 Err(error) => Ok(ToolResult::failed(
@@ -455,6 +456,7 @@ fn success_result(invocation: &ToolInvocation, payload: Value) -> ToolResult {
             "payloadBytes": serialized.len(),
             "truncated": serialized.chars().count() > MAX_MODEL_CONTENT_CHARS,
         }),
+        model_images: Vec::new(),
     }
 }
 
@@ -490,6 +492,11 @@ mod tests {
     use super::*;
     use crate::ToolCall;
 
+    // This fixture uses a real loopback TCP server. Keep its deadline above the
+    // production-fast-path tests so a fully parallel workspace test run cannot
+    // turn host CPU scheduling pressure into a transport failure.
+    const LOOPBACK_TEST_TIMEOUT: Duration = Duration::from_secs(10);
+
     async fn fixture() -> (McpEchoServer, Vec<Arc<dyn ToolExecutor>>) {
         let server = McpEchoServer::start().expect("echo");
         let client = McpHttpClient::connect(
@@ -497,8 +504,8 @@ mod tests {
                 server_id: "visible".into(),
                 url: Url::parse(server.url()).expect("URL"),
                 headers: BTreeMap::new(),
-                startup_timeout: Duration::from_secs(2),
-                request_timeout: Duration::from_secs(2),
+                startup_timeout: LOOPBACK_TEST_TIMEOUT,
+                request_timeout: LOOPBACK_TEST_TIMEOUT,
                 max_message_bytes: 1024 * 1024,
             },
             CancellationToken::new(),
@@ -545,7 +552,12 @@ mod tests {
             ))
             .await
             .expect("execute");
-        assert_eq!(listed.status, ToolResultStatus::Succeeded);
+        assert_eq!(
+            listed.status,
+            ToolResultStatus::Succeeded,
+            "{}",
+            listed.model_content
+        );
         assert!(listed.model_content.contains("hachimi-echo://about"));
 
         let read = tools
@@ -569,7 +581,12 @@ mod tests {
             ))
             .await
             .expect("execute");
-        assert_eq!(visible.status, ToolResultStatus::Succeeded);
+        assert_eq!(
+            visible.status,
+            ToolResultStatus::Succeeded,
+            "{}",
+            visible.model_content
+        );
         assert!(visible.model_content.contains("untrusted data"));
     }
 }

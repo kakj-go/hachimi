@@ -9,9 +9,9 @@ use std::{
 use hachimi_protocol::{
     ArtifactId, ArtifactKind, ArtifactRecord, BehaviorMode, ItemId, ItemPayload, ItemRelations,
     ItemStatus, ModelEvent, ModelMessage, ModelRole, PlanId, PlanStep, PlanStepId, PlanStepStatus,
-    ProposedPlan, ProposedPlanStatus, RunRecord, RunStatus, RunUsageSnapshot,
-    SandboxCapabilityReport, SandboxReadiness, ToolExecutionResult, TranscriptItem,
-    TranscriptItemKind, WorkloadKind, WorkloadResolution, WorkloadResolutionSource,
+    ProposedPlan, ProposedPlanStatus, RunRecord, RunStatus, RunStepCheckpoint, RunStepCheckpointId,
+    RunUsageSnapshot, SandboxCapabilityReport, SandboxReadiness, ToolExecutionResult,
+    TranscriptItem, TranscriptItemKind, WorkloadKind, WorkloadResolution, WorkloadResolutionSource,
 };
 use hachimi_storage::{AgentStore, AgentStoreError};
 use serde_json::json;
@@ -21,9 +21,9 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    LoopEvent, ModelRuntimeError, SteeringFuture, SteeringSource, StepRuntimeState, StepWorldState,
-    ToolLoopDriver, ToolLoopOutcome, ToolLoopRunOptions, ToolResultStatus,
-    negotiate_provider_capabilities,
+    LoopEvent, ModelRuntimeError, RunCheckpointDraft, RunCheckpointFuture, RunCheckpointReporter,
+    SteeringFuture, SteeringSource, StepRuntimeState, StepWorldState, ToolLoopDriver,
+    ToolLoopOutcome, ToolLoopRunOptions, ToolResultStatus, negotiate_provider_capabilities,
 };
 
 #[derive(Clone)]
@@ -42,6 +42,48 @@ impl SteeringSource for StoreSteeringSource {
                 .await
                 .map(|records| records.into_iter().map(|record| record.input).collect())
                 .map_err(|error| ModelRuntimeError::Provider(error.to_string()))
+        })
+    }
+}
+
+#[derive(Clone)]
+struct StoreRunCheckpointReporter {
+    store: AgentStore,
+    session_id: hachimi_protocol::SessionId,
+    run_id: hachimi_protocol::RunId,
+    run_generation: u64,
+}
+
+impl RunCheckpointReporter for StoreRunCheckpointReporter {
+    fn report(&self, draft: RunCheckpointDraft) -> RunCheckpointFuture {
+        let store = self.store.clone();
+        let session_id = self.session_id.clone();
+        let run_id = self.run_id.clone();
+        let run_generation = self.run_generation;
+        Box::pin(async move {
+            let world_revision = draft.revision_snapshot.host_revision.clone();
+            let provider_revision = draft.revision_snapshot.provider_revision.clone();
+            store
+                .record_run_step_checkpoint(&RunStepCheckpoint {
+                    id: RunStepCheckpointId::random(),
+                    session_id,
+                    run_id,
+                    run_generation,
+                    step_index: draft.step_index,
+                    phase: draft.phase,
+                    tool_call_id: draft.tool_call_id,
+                    tool_name: draft.tool_name,
+                    side_effect_execution_id: draft.side_effect_execution_id,
+                    recovery_policy: draft.recovery_policy,
+                    parameter_hash: draft.parameter_hash,
+                    world_revision,
+                    provider_revision,
+                    revision_snapshot: draft.revision_snapshot,
+                    created_at_ms: now_ms(),
+                })
+                .await
+                .map(|_| ())
+                .map_err(|error| error.to_string())
         })
     }
 }
@@ -245,6 +287,12 @@ impl PersistedToolLoop {
                         store: self.store.clone(),
                         run_id: run.id.clone(),
                     })),
+                    checkpoint_reporter: Some(Arc::new(StoreRunCheckpointReporter {
+                        store: self.store.clone(),
+                        session_id: run.session_id.clone(),
+                        run_id: run.id.clone(),
+                        run_generation: run.generation,
+                    })),
                     cancellation: cancellation.clone(),
                 },
                 |event| {
@@ -282,11 +330,7 @@ impl PersistedToolLoop {
                 ItemStatus::Failed
             };
             self.store
-                .complete_transcript_item(
-                    &open.item_id,
-                    status,
-                    ItemPayload::Reasoning { summary: open.text },
-                )
+                .complete_transcript_item(&open.item_id, status, reasoning_payload(&run, open.text))
                 .await?;
         }
         match outcome {
@@ -509,6 +553,23 @@ async fn project_loop_events(
                             },
                         )
                         .await?;
+                    if let Some(checkpoint) = store
+                        .latest_run_step_checkpoint_for_tool(
+                            &run.id,
+                            run.generation,
+                            &result.call_id,
+                        )
+                        .await?
+                    {
+                        store
+                            .record_run_step_checkpoint(&RunStepCheckpoint {
+                                id: RunStepCheckpointId::random(),
+                                phase: hachimi_protocol::RunStepPhase::ProjectionCommitted,
+                                created_at_ms: now_ms(),
+                                ..checkpoint
+                            })
+                            .await?;
+                    }
                 }
             }
             // Codex keeps usage as connection/run state instead of replayable
@@ -560,9 +621,7 @@ async fn project_loop_events(
                             sequence: 0,
                             kind: TranscriptItemKind::Reasoning,
                             status: ItemStatus::InProgress,
-                            payload: ItemPayload::Reasoning {
-                                summary: String::new(),
-                            },
+                            payload: reasoning_payload(&run, String::new()),
                             relations: ItemRelations::default(),
                             created_at_ms: now_ms(),
                         })
@@ -600,9 +659,7 @@ async fn project_loop_events(
                         .complete_transcript_item(
                             &reasoning.item_id,
                             ItemStatus::Completed,
-                            ItemPayload::Reasoning {
-                                summary: reasoning.text,
-                            },
+                            reasoning_payload(&run, reasoning.text),
                         )
                         .await?;
                 }
@@ -638,6 +695,34 @@ fn tool_status(status: ToolResultStatus) -> &'static str {
         ToolResultStatus::Rejected => "rejected",
         ToolResultStatus::Aborted => "aborted",
         ToolResultStatus::TimedOut => "timed_out",
+    }
+}
+
+fn reasoning_payload(run: &RunRecord, summary: String) -> ItemPayload {
+    let mut hasher = Sha256::new();
+    hasher.update(
+        serde_json::to_vec(&(
+            &run.configuration.model_snapshot,
+            run.negotiated_capabilities,
+        ))
+        .unwrap_or_default(),
+    );
+    let capability_revision = hasher
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    ItemPayload::Reasoning {
+        summary,
+        source: hachimi_protocol::ReasoningSummarySource::ProviderPublic,
+        provider_endpoint_id: run
+            .configuration
+            .model_snapshot
+            .provider_endpoint_id
+            .clone(),
+        provider_account_id: run.configuration.model_snapshot.provider_account_id.clone(),
+        protocol: run.configuration.model_snapshot.protocol,
+        capability_revision,
     }
 }
 
@@ -1031,11 +1116,33 @@ mod tests {
                 "containsSecret": true,
                 "redactForPersistence": true,
             }),
+            model_images: Vec::new(),
         };
         let (content, structured) = persisted_tool_result(&result);
         assert!(!content.contains(secret));
         assert!(!structured.to_string().contains(secret));
         assert_eq!(structured["redacted"], true);
+    }
+
+    #[test]
+    fn ephemeral_model_images_are_never_projected_to_persistence() {
+        let marker = "sensitive-image-base64";
+        let result = crate::ToolResult {
+            call_id: hachimi_protocol::ToolCallId::from("computer-call"),
+            tool_name: "computer_observe".into(),
+            status: ToolResultStatus::Succeeded,
+            model_content: "Computer frame attached ephemerally".into(),
+            structured_content: json!({ "frameId": "frame-1" }),
+            model_images: vec![hachimi_protocol::ModelInputImage {
+                media_type: "image/png".into(),
+                data_base64: marker.into(),
+                source_label: "computer frame frame-1".into(),
+            }],
+        };
+        let (content, structured) = persisted_tool_result(&result);
+        assert!(!content.contains(marker));
+        assert!(!structured.to_string().contains(marker));
+        assert_eq!(structured["frameId"], "frame-1");
     }
 
     #[tokio::test]

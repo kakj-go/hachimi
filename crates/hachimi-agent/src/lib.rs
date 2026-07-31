@@ -9,6 +9,7 @@ mod mcp_progress;
 mod mcp_resource_tools;
 mod mcp_tools;
 mod model_view;
+mod multi_agent;
 mod profiles;
 mod review;
 mod review_tools;
@@ -40,6 +41,10 @@ pub use apply_patch::{APPLY_PATCH_TOOL, apply_patch_tool};
 pub use model_view::{
     ModelView, ModelViewLimits, build_model_view, build_model_view_with_checkpoint,
 };
+pub use multi_agent::{
+    AGENT_CANCEL_TOOL, AGENT_COLLECT_TOOL, AGENT_SEND_TOOL, AGENT_SPAWN_TOOL, AGENT_WAIT_TOOL,
+    MultiAgentCoordinator,
+};
 pub use profiles::{
     WorkloadProfileSpec, profile_allows_tool, profile_runtime_context, workload_profile_spec,
 };
@@ -64,7 +69,8 @@ pub use step_context::{
     ToolPlan,
 };
 pub use tool_loop::{
-    LoopEvent, SteeringFuture, SteeringSource, ToolLoopDriver, ToolLoopOutcome, ToolLoopRunOptions,
+    LoopEvent, RunCheckpointDraft, RunCheckpointFuture, RunCheckpointReporter, SteeringFuture,
+    SteeringSource, ToolLoopDriver, ToolLoopOutcome, ToolLoopRunOptions,
 };
 pub use tool_orchestrator::ToolOrchestrator;
 pub use tool_registry::{

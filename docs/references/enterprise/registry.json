@@ -1,0 +1,63 @@
+{
+  "schemaVersion": 1,
+  "licenseBoundary": "Official API documentation used only as a wire-contract and behavior reference; no vendor SDK or documentation text is redistributed beyond the bounded local snapshot.",
+  "references": [
+    {
+      "id": "WECOM-API-20260730",
+      "sourceProduct": "WeCom Open API",
+      "sourceVersion": "snapshot-sha256:f82f0afacd22a5621a60818980a6369ca2d55f0c929a1e266bde4fa7781e3d25",
+      "canonicalUrl": "https://developer.work.weixin.qq.com/document/path/91039",
+      "retrievedAt": "2026-07-30T19:20:00+08:00",
+      "rawPath": "docs/references/enterprise/raw/WECOM-API-20260730.md",
+      "rawSha256": "f82f0afacd22a5621a60818980a6369ca2d55f0c929a1e266bde4fa7781e3d25",
+      "normalizedPath": "docs/references/enterprise/normalized/WECOM-API-20260730.md",
+      "normalizedSha256": "c58b726b1b31b1632b45bc9b020978aa252f6a9742c362b1af26a256a91e5aa1"
+    },
+    {
+      "id": "DINGTALK-API-20260730",
+      "sourceProduct": "DingTalk Open API and Stream mode",
+      "sourceVersion": "snapshot-sha256:e08c771ff456cd5e2eb0d28c45f4f72601bac4f635c4bd981acbd855df04dd1a",
+      "canonicalUrl": "https://open.dingtalk.com/document/orgapp/overview-of-stream-mode",
+      "retrievedAt": "2026-07-30T19:20:00+08:00",
+      "rawPath": "docs/references/enterprise/raw/DINGTALK-API-20260730.md",
+      "rawSha256": "e08c771ff456cd5e2eb0d28c45f4f72601bac4f635c4bd981acbd855df04dd1a",
+      "normalizedPath": "docs/references/enterprise/normalized/DINGTALK-API-20260730.md",
+      "normalizedSha256": "727d844f9a6e0d5a3f07299a6ccfc3faf0cfbde1302be364160308438ea26cf8"
+    },
+    {
+      "id": "FEISHU-API-20260730",
+      "sourceProduct": "Feishu Open Platform API and long connection",
+      "sourceVersion": "snapshot-sha256:e1f0d8de7ca25ecd5e076bab0896a3174515cf03243da287aadf929067dec814",
+      "canonicalUrl": "https://open.feishu.cn/document/server-docs/event-subscription-guide/start-a-local-application",
+      "retrievedAt": "2026-07-30T19:20:00+08:00",
+      "rawPath": "docs/references/enterprise/raw/FEISHU-API-20260730.md",
+      "rawSha256": "e1f0d8de7ca25ecd5e076bab0896a3174515cf03243da287aadf929067dec814",
+      "normalizedPath": "docs/references/enterprise/normalized/FEISHU-API-20260730.md",
+      "normalizedSha256": "1c7ab57b84f71999e5e5b807203f39bf13fd7d05e88d935b5c4c35eb578679f3"
+    },
+    {
+      "id": "DINGTALK-STREAM-SDK-GO-20260731",
+      "sourceProduct": "DingTalk Stream SDK Go",
+      "sourceVersion": "v0.9.1@d1cc841e6013c3f6513a5bb01dfe3219b9c37d17",
+      "canonicalUrl": "https://github.com/open-dingtalk/dingtalk-stream-sdk-go/tree/d1cc841e6013c3f6513a5bb01dfe3219b9c37d17",
+      "license": "MIT",
+      "retrievedAt": "2026-07-31T02:26:41+08:00",
+      "rawPath": "docs/references/enterprise/raw/DINGTALK-STREAM-SDK-GO-20260731.md",
+      "rawSha256": "b7c48964ed5b82d4ab57983d3fae444fc1905e64192bab6d28ba81ce314f473f",
+      "normalizedPath": "docs/references/enterprise/normalized/DINGTALK-STREAM-SDK-GO-20260731.md",
+      "normalizedSha256": "bea158317dadd0c2cdacec69ac433f14e4ce6a003fd9b7fb12b999a56383df0b"
+    },
+    {
+      "id": "FEISHU-SDK-GO-20260731",
+      "sourceProduct": "Feishu Go SDK long connection",
+      "sourceVersion": "v3.9.9@ff207b774541a195f0a98c5bfda1507905e45431",
+      "canonicalUrl": "https://github.com/larksuite/oapi-sdk-go/tree/ff207b774541a195f0a98c5bfda1507905e45431",
+      "license": "MIT",
+      "retrievedAt": "2026-07-31T02:26:41+08:00",
+      "rawPath": "docs/references/enterprise/raw/FEISHU-SDK-GO-20260731.md",
+      "rawSha256": "2c7b084594472407b99e386c72729287f14a6b6d4224ba52a01310d292a6a098",
+      "normalizedPath": "docs/references/enterprise/normalized/FEISHU-SDK-GO-20260731.md",
+      "normalizedSha256": "c295cbd3f84444ec360bbf93159986b664a5e43e6804d22e601864003a3c3e9c"
+    }
+  ]
+}

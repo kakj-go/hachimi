@@ -1,0 +1,20 @@
+{
+  "manifest_version": 3,
+  "name": "Hachimi Browser Host",
+  "version": "0.2.1",
+  "description": "Pairs Chrome tabs explicitly with the local Hachimi Browser Host.",
+  "permissions": [
+    "alarms",
+    "cookies",
+    "debugger",
+    "declarativeNetRequest",
+    "downloads",
+    "scripting",
+    "storage",
+    "tabGroups",
+    "tabs"
+  ],
+  "host_permissions": ["http://127.0.0.1:42372/*", "http://*/*", "https://*/*"],
+  "background": { "service_worker": "service-worker.js", "type": "module" },
+  "action": { "default_popup": "popup.html", "default_title": "Hachimi Browser Host" }
+}

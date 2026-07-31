@@ -2,213 +2,33 @@
 
 mod agent;
 mod control;
+mod provider;
 mod settings;
+mod transport;
 mod voice;
 mod workspace;
 
 pub use control::ControlMethod;
+pub use provider::*;
 
 pub use agent::*;
 pub use settings::*;
+pub use transport::*;
 pub use voice::*;
 pub use workspace::*;
 
 use std::collections::BTreeSet;
 
-use hachimi_core::{FeatureFlags, WindowKind};
+use hachimi_core::{FeatureFlags, RuntimeFeatureSet, WindowKind};
 use serde::{Deserialize, Serialize};
 use specta::Type;
 
-pub const CONTROL_PROTOCOL_VERSION: u32 = 18;
+pub const CONTROL_PROTOCOL_VERSION: u32 = 29;
+pub const PLUGIN_UI_BRIDGE_PROTOCOL_VERSION: u32 = 1;
 pub const SETTINGS_SCHEMA_VERSION: u32 = 8;
 pub const THEME_PROFILE_FORMAT: &str = "hachimi-theme";
 pub const THEME_PROFILE_FORMAT_VERSION: u32 = 1;
 pub const MAX_THEME_PROFILES: usize = 32;
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, Type)]
-pub struct RequestId(pub String);
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, Type)]
-pub struct ClientId(pub String);
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Type)]
-#[serde(rename_all = "camelCase")]
-pub struct ControlRequest<T> {
-    pub protocol_version: u32,
-    pub id: RequestId,
-    pub client_id: ClientId,
-    pub method: String,
-    pub params: T,
-    pub idempotency_key: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Type)]
-#[serde(rename_all = "camelCase")]
-pub struct ControlResponse<T> {
-    pub id: RequestId,
-    pub ok: bool,
-    pub payload: Option<T>,
-    pub error: Option<ControlError>,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Type)]
-#[serde(rename_all = "camelCase")]
-pub struct ControlEvent<T> {
-    pub event: String,
-    pub payload: T,
-    pub seq: u64,
-    pub state_version: Option<u64>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type)]
-#[serde(rename_all = "snake_case")]
-pub enum ControlErrorCode {
-    InvalidProtocolVersion,
-    InvalidRequest,
-    UnknownMethod,
-    PermissionDenied,
-    ApprovalRequired,
-    FeatureDisabled,
-    Conflict,
-    Internal,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Type)]
-#[serde(rename_all = "camelCase")]
-pub struct ControlError {
-    pub code: ControlErrorCode,
-    pub message: String,
-}
-
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, Type,
-)]
-pub enum Scope {
-    #[serde(rename = "pet.interact")]
-    PetInteract,
-    #[serde(rename = "agent.run")]
-    AgentRun,
-    #[serde(rename = "settings.read")]
-    SettingsRead,
-    #[serde(rename = "settings.write")]
-    SettingsWrite,
-    #[serde(rename = "llm.read")]
-    LlmRead,
-    #[serde(rename = "llm.write")]
-    LlmWrite,
-    #[serde(rename = "llm.test")]
-    LlmTest,
-    #[serde(rename = "llm.chat")]
-    LlmChat,
-    #[serde(rename = "avatar.read")]
-    AvatarRead,
-    #[serde(rename = "avatar.manage")]
-    AvatarManage,
-    #[serde(rename = "avatar.runtime")]
-    AvatarRuntime,
-    #[serde(rename = "motion.read")]
-    MotionRead,
-    #[serde(rename = "motion.manage")]
-    MotionManage,
-    #[serde(rename = "motion.runtime")]
-    MotionRuntime,
-    #[serde(rename = "voice.read")]
-    VoiceRead,
-    #[serde(rename = "voice.manage")]
-    VoiceManage,
-    #[serde(rename = "voice.playback")]
-    VoicePlayback,
-    #[serde(rename = "voice.capture")]
-    VoiceCapture,
-    #[serde(rename = "workbench.open")]
-    WorkbenchOpen,
-    #[serde(rename = "workbench.window")]
-    WorkbenchWindow,
-    #[serde(rename = "workspace.read")]
-    WorkspaceRead,
-    #[serde(rename = "workspace.write")]
-    WorkspaceWrite,
-    #[serde(rename = "workspace.exec")]
-    WorkspaceExec,
-    #[serde(rename = "browser.observe")]
-    BrowserObserve,
-    #[serde(rename = "browser.control")]
-    BrowserControl,
-    #[serde(rename = "computer.observe")]
-    ComputerObserve,
-    #[serde(rename = "computer.control")]
-    ComputerControl,
-    #[serde(rename = "connectors.invoke")]
-    ConnectorsInvoke,
-    #[serde(rename = "connectors.manage")]
-    ConnectorsManage,
-    #[serde(rename = "skills.manage")]
-    SkillsManage,
-    #[serde(rename = "skills.use")]
-    SkillsUse,
-    #[serde(rename = "devices.pair")]
-    DevicesPair,
-    #[serde(rename = "admin.policy")]
-    AdminPolicy,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ClientContext {
-    pub client_id: ClientId,
-    pub window_kind: WindowKind,
-    pub scopes: BTreeSet<Scope>,
-}
-
-impl ClientContext {
-    #[must_use]
-    pub fn for_window(window_kind: WindowKind) -> Self {
-        let scopes = match window_kind {
-            WindowKind::Pet => BTreeSet::from([
-                Scope::PetInteract,
-                Scope::WorkbenchOpen,
-                Scope::LlmChat,
-                Scope::AvatarRuntime,
-                Scope::MotionRuntime,
-                Scope::VoicePlayback,
-                Scope::VoiceCapture,
-            ]),
-            WindowKind::Settings => BTreeSet::from([Scope::SettingsRead, Scope::SettingsWrite]),
-            WindowKind::Workbench => BTreeSet::from([
-                Scope::SettingsRead,
-                Scope::SettingsWrite,
-                Scope::LlmRead,
-                Scope::LlmWrite,
-                Scope::LlmTest,
-                Scope::AvatarRead,
-                Scope::AvatarManage,
-                Scope::MotionRead,
-                Scope::MotionManage,
-                Scope::VoiceRead,
-                Scope::VoiceManage,
-                Scope::VoicePlayback,
-                Scope::WorkbenchWindow,
-                Scope::ConnectorsManage,
-                Scope::SkillsManage,
-                Scope::SkillsUse,
-            ]),
-            WindowKind::Service => BTreeSet::new(),
-        };
-        Self {
-            client_id: ClientId(format!("window:{}", window_kind.label())),
-            window_kind,
-            scopes,
-        }
-    }
-
-    #[must_use]
-    pub fn for_internal(principal: &str) -> Self {
-        Self {
-            client_id: ClientId(format!("service:{principal}")),
-            window_kind: WindowKind::Service,
-            scopes: BTreeSet::new(),
-        }
-    }
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type, Default)]
 #[serde(rename_all = "snake_case")]
@@ -739,6 +559,8 @@ pub enum WorkbenchRoute {
     #[serde(rename = "home")]
     #[default]
     Home,
+    #[serde(rename = "desktop-control")]
+    DesktopControl,
     #[serde(rename = "settings/general")]
     SettingsGeneral,
     #[serde(rename = "settings/appearance")]
@@ -755,6 +577,8 @@ pub enum WorkbenchRoute {
     SettingsSkills,
     #[serde(rename = "settings/mcp")]
     SettingsMcp,
+    #[serde(rename = "settings/local-hosts")]
+    SettingsLocalHosts,
     #[serde(rename = "developer/motion-lab")]
     DeveloperMotionLab,
 }
@@ -764,6 +588,7 @@ impl WorkbenchRoute {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Home => "home",
+            Self::DesktopControl => "desktop-control",
             Self::SettingsGeneral => "settings/general",
             Self::SettingsAppearance => "settings/appearance",
             Self::SettingsLlm => "settings/llm",
@@ -772,6 +597,7 @@ impl WorkbenchRoute {
             Self::SettingsVoice => "settings/voice",
             Self::SettingsSkills => "settings/skills",
             Self::SettingsMcp => "settings/mcp",
+            Self::SettingsLocalHosts => "settings/local-hosts",
             Self::DeveloperMotionLab => "developer/motion-lab",
         }
     }
@@ -1460,6 +1286,9 @@ pub fn registered_types() -> specta::Types {
         .register::<AttachmentId>()
         .register::<ApprovalId>()
         .register::<TaskRunId>()
+        .register::<AgentTaskId>()
+        .register::<AgentTaskMessageId>()
+        .register::<ForgeOperationId>()
         .register::<PlanId>()
         .register::<ArtifactId>()
         .register::<CompactionCheckpointId>()
@@ -1476,9 +1305,19 @@ pub fn registered_types() -> specta::Types {
         .register::<FsWatchId>()
         .register::<FsSearchId>()
         .register::<SideEffectExecutionId>()
+        .register::<RunStepCheckpointId>()
+        .register::<RunRecoveryId>()
         .register::<AvatarId>()
         .register::<ScheduleId>()
         .register::<ScheduleGrantId>()
+        .register::<BrowserSessionId>()
+        .register::<BrowserObservationId>()
+        .register::<BrowserPairingId>()
+        .register::<ComputerFrameId>()
+        .register::<PluginId>()
+        .register::<ConnectorAccountId>()
+        .register::<ChannelMessageId>()
+        .register::<ChannelDeliveryId>()
         .register::<SkillActivationId>()
         .register::<ExecutionTarget>()
         .register::<RunDriverKind>()
@@ -1492,6 +1331,9 @@ pub fn registered_types() -> specta::Types {
         .register::<BehaviorMode>()
         .register::<ApprovalPolicy>()
         .register::<PermissionProfile>()
+        .register::<SessionPermissionConfig>()
+        .register::<SessionPermissionConfigRequest>()
+        .register::<SessionPermissionConfigUpdate>()
         .register::<RunBudget>()
         .register::<RunConfiguration>()
         .register::<CheckoutKind>()
@@ -1499,7 +1341,20 @@ pub fn registered_types() -> specta::Types {
         .register::<RunStatus>()
         .register::<TaskRunStatus>()
         .register::<ScheduleSpec>()
+        .register::<ScheduleEventSourceKind>()
+        .register::<ScheduleEventSource>()
+        .register::<ScheduleEventResourceRef>()
+        .register::<ScheduleEventMatcher>()
+        .register::<ScheduleEventEnvelope>()
+        .register::<ScheduleEventIngressRequest>()
+        .register::<ScheduleEventContext>()
+        .register::<ScheduleEventReceiptStatus>()
+        .register::<ScheduleEventReceipt>()
         .register::<ScheduleContextTemplate>()
+        .register::<ScheduleStopConditions>()
+        .register::<ScheduleConnectorSelection>()
+        .register::<ScheduleBrowserGrant>()
+        .register::<ScheduleHostGrant>()
         .register::<MisfirePolicy>()
         .register::<DeliveryPolicy>()
         .register::<ScheduleHealth>()
@@ -1535,6 +1390,8 @@ pub fn registered_types() -> specta::Types {
         .register::<CompactionTrigger>()
         .register::<CompactionPhase>()
         .register::<CompactionImplementation>()
+        .register::<CompactionSummarySource>()
+        .register::<ReasoningSummarySource>()
         .register::<TokenCountSource>()
         .register::<CompactionTokenSnapshot>()
         .register::<CompactionLifecycle>()
@@ -1544,6 +1401,15 @@ pub fn registered_types() -> specta::Types {
         .register::<RunUsageSnapshot>()
         .register::<SideEffectExecutionStatus>()
         .register::<SideEffectExecutionRecord>()
+        .register::<RunStepPhase>()
+        .register::<ToolRecoveryPolicy>()
+        .register::<RunRecoveryState>()
+        .register::<RunRecoveryDecisionAction>()
+        .register::<RecoveryRevisionSnapshot>()
+        .register::<RunStepCheckpoint>()
+        .register::<RunRecoveryRecord>()
+        .register::<RunRecoveryDecisionRequest>()
+        .register::<RunRecoverySnapshot>()
         .register::<FsEntryKind>()
         .register::<FsEntry>()
         .register::<FsListRequest>()
@@ -1589,6 +1455,25 @@ pub fn registered_types() -> specta::Types {
         .register::<SessionRecord>()
         .register::<RunRecord>()
         .register::<TaskRunRecord>()
+        .register::<AgentTaskStatus>()
+        .register::<AgentTaskRecord>()
+        .register::<AgentTaskMessageRecord>()
+        .register::<AgentTaskCollection>()
+        .register::<ForgeKind>()
+        .register::<GitRemoteRecord>()
+        .register::<GitRemoteListRequest>()
+        .register::<GitPushRequest>()
+        .register::<GitPushResponse>()
+        .register::<ForgeRepositoryIdentity>()
+        .register::<ForgeChangeState>()
+        .register::<ForgeChangeRecord>()
+        .register::<ForgeChangeMutation>()
+        .register::<ForgeChangeQueryRequest>()
+        .register::<ForgeChangeMutationRequest>()
+        .register::<ForgeCredentialUpdateRequest>()
+        .register::<ForgeCredentialState>()
+        .register::<ForgeOperationStatus>()
+        .register::<ForgeOperationRecord>()
         .register::<SkillDiagnosticSeverity>()
         .register::<SkillDiagnostic>()
         .register::<SkillEntryKind>()
@@ -1651,6 +1536,7 @@ pub fn registered_types() -> specta::Types {
         .register::<DynamicToolValidationError>()
         .register::<ModelRole>()
         .register::<ModelToolCall>()
+        .register::<ModelInputImage>()
         .register::<ModelMessage>()
         .register::<ModelRequest>()
         .register::<ModelCompactionRequest>()
@@ -1659,6 +1545,18 @@ pub fn registered_types() -> specta::Types {
         .register::<ModelFinishReason>()
         .register::<ModelEvent>()
         .register::<ProviderCapabilities>()
+        .register::<ProviderProtocolKind>()
+        .register::<ProviderCompatibilityProfileKind>()
+        .register::<ProviderCompatibilityProfile>()
+        .register::<ProviderEndpointRecord>()
+        .register::<ProviderAccountRecord>()
+        .register::<ProviderEndpointUpsertRequest>()
+        .register::<ProviderProbeStatus>()
+        .register::<ProviderProbeReport>()
+        .register::<ProviderRegistrySnapshot>()
+        .register::<ProviderEmbeddingRequest>()
+        .register::<ProviderEmbeddingVector>()
+        .register::<ProviderEmbeddingResult>()
         .register::<CapabilityDegradation>()
         .register::<MutationContext>()
         .register::<PermissionGrantScope>()
@@ -1666,12 +1564,104 @@ pub fn registered_types() -> specta::Types {
         .register::<FileSystemGrant>()
         .register::<NetworkGrant>()
         .register::<ProcessGrant>()
+        .register::<BrowserGrant>()
         .register::<ComputerGrant>()
         .register::<CapabilityGrantSet>()
         .register::<SandboxReadiness>()
         .register::<SandboxCapabilityReport>()
         .register::<SandboxRuntimeSnapshot>()
         .register::<SandboxRepairRequest>()
+        .register::<SandboxBootstrapPhase>()
+        .register::<SandboxBootstrapState>()
+        .register::<BrowserProfileKind>()
+        .register::<BrowserCapability>()
+        .register::<BrowserPermissionDecision>()
+        .register::<BrowserNetworkRuleKind>()
+        .register::<BrowserNetworkRule>()
+        .register::<BrowserNetworkPolicy>()
+        .register::<BrowserPermissionRequestStatus>()
+        .register::<BrowserPermissionRequest>()
+        .register::<BrowserPermissionRequiredEvent>()
+        .register::<BrowserSitePermission>()
+        .register::<BrowserPermissionLedgerEntry>()
+        .register::<BrowserSessionStatus>()
+        .register::<BrowserSession>()
+        .register::<BrowserObservation>()
+        .register::<BrowserWaitState>()
+        .register::<BrowserAction>()
+        .register::<BrowserActionRequest>()
+        .register::<BrowserActionResult>()
+        .register::<BrowserPairing>()
+        .register::<BrowserHostSettings>()
+        .register::<ComputerWindowIdentity>()
+        .register::<ComputerFrame>()
+        .register::<ComputerAction>()
+        .register::<ComputerActionRequest>()
+        .register::<ComputerActionResult>()
+        .register::<ComputerAppRule>()
+        .register::<PluginContribution>()
+        .register::<PluginContributionKind>()
+        .register::<PluginHookEvent>()
+        .register::<PluginHookRuntimeKind>()
+        .register::<PluginHookDescriptor>()
+        .register::<PluginHookInvocation>()
+        .register::<PluginHookMetadataEntry>()
+        .register::<PluginHookOutcome>()
+        .register::<PluginUiBridgeMethod>()
+        .register::<PluginContributionSurface>()
+        .register::<PluginUiContext>()
+        .register::<PluginUiBridgeRequest>()
+        .register::<PluginUiBridgeResponse>()
+        .register::<ContributionRuntimeState>()
+        .register::<PluginRevisionStatus>()
+        .register::<PluginLifecycleOperation>()
+        .register::<PluginLifecyclePhase>()
+        .register::<PluginLifecycleJournalStatus>()
+        .register::<PluginRevisionRecord>()
+        .register::<PluginRevisionHead>()
+        .register::<PluginLifecycleJournalRecord>()
+        .register::<InstalledContribution>()
+        .register::<PluginPermissionDiff>()
+        .register::<PluginManifest>()
+        .register::<PluginStatus>()
+        .register::<InstalledPlugin>()
+        .register::<ConnectorHealth>()
+        .register::<ConnectorRevision>()
+        .register::<ConnectorRuntimeKind>()
+        .register::<ConnectorDriverDescriptor>()
+        .register::<ConnectorAccount>()
+        .register::<ConnectorAccountUpsert>()
+        .register::<ConnectorInvocationRequest>()
+        .register::<ConnectorInvocationResult>()
+        .register::<ContributionRevision>()
+        .register::<EnterprisePlatform>()
+        .register::<EnterpriseIngressMode>()
+        .register::<EnterpriseIntegrationState>()
+        .register::<EnterpriseIntegrationAccount>()
+        .register::<EnterpriseEventReceiptStatus>()
+        .register::<EnterpriseEventReceipt>()
+        .register::<EnterpriseAttachmentMetadata>()
+        .register::<EnterpriseMentionKind>()
+        .register::<EnterpriseMention>()
+        .register::<EnterpriseAttachmentDownloadRequest>()
+        .register::<EnterpriseAttachmentDownloadResult>()
+        .register::<EnterprisePluginIdentity>()
+        .register::<ChannelRouteKey>()
+        .register::<ChannelProviderRuntimeKind>()
+        .register::<ChannelProviderManifest>()
+        .register::<ChannelProviderHealthState>()
+        .register::<ChannelProviderHealth>()
+        .register::<ChannelProviderAccount>()
+        .register::<ChannelProviderAccountUpsert>()
+        .register::<ChannelConfigRevision>()
+        .register::<ChannelEnvelope>()
+        .register::<IngressStatus>()
+        .register::<IngressReceipt>()
+        .register::<DeliveryAttemptStatus>()
+        .register::<DeliveryAttempt>()
+        .register::<GatewayHealth>()
+        .register::<LocalHostCommandRequest>()
+        .register::<LocalHostCommandResponse>()
         .register::<ProcessStatus>()
         .register::<ProcessSessionRecord>()
         .register::<ProcessTerminalSize>()
@@ -1810,128 +1800,10 @@ pub fn registered_types() -> specta::Types {
         .register::<InteractiveRegionsUpdate>()
         .register::<WindowPlacementV1>()
         .register::<AppSettings>()
+        .register::<RuntimeFeatureSet>()
         .register::<BootstrapState>()
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn workbench_has_only_settings_and_catalog_scopes() {
-        let scopes = ClientContext::for_window(WindowKind::Workbench).scopes;
-        assert!(scopes.contains(&Scope::LlmTest));
-        assert!(scopes.contains(&Scope::AvatarManage));
-        assert!(scopes.contains(&Scope::VoiceManage));
-        assert!(!scopes.contains(&Scope::VoiceCapture));
-        assert!(!scopes.contains(&Scope::WorkspaceRead));
-        assert!(!scopes.contains(&Scope::WorkspaceExec));
-    }
-
-    #[test]
-    fn only_pet_can_capture_speech() {
-        let pet = ClientContext::for_window(WindowKind::Pet);
-        let workbench = ClientContext::for_window(WindowKind::Workbench);
-        assert!(pet.scopes.contains(&Scope::VoiceCapture));
-        assert!(!workbench.scopes.contains(&Scope::VoiceCapture));
-    }
-
-    #[test]
-    fn scope_deserialization_is_exact() {
-        assert!(serde_json::from_str::<Scope>("\"computer.control\"").is_ok());
-        assert!(serde_json::from_str::<Scope>("\"computer\"").is_err());
-        assert!(serde_json::from_str::<Scope>("\"computer.control.extra\"").is_err());
-    }
-
-    #[test]
-    fn default_settings_are_versioned() {
-        assert_eq!(
-            AppSettings::default().schema_version,
-            SETTINGS_SCHEMA_VERSION
-        );
-    }
-
-    #[test]
-    fn default_appearance_is_valid_and_has_both_schemes() {
-        let appearance = AppearanceConfig::default();
-        assert!(appearance.validate().is_ok());
-        assert_eq!(appearance.preferences.density, UiDensity::Default);
-        assert_eq!(appearance.themes.len(), 18);
-        assert!(appearance.profile("catppuccin-dark").is_some());
-        assert!(appearance.profile("github-light").is_some());
-        assert_eq!(
-            appearance
-                .profile(&appearance.light_theme_id)
-                .unwrap()
-                .scheme,
-            ThemeScheme::Light
-        );
-        assert_eq!(
-            appearance
-                .profile(&appearance.dark_theme_id)
-                .unwrap()
-                .scheme,
-            ThemeScheme::Dark
-        );
-    }
-
-    #[test]
-    fn legacy_appearance_without_density_uses_default_density() {
-        let mut value = serde_json::to_value(AppearanceConfig::default()).unwrap();
-        value["preferences"]
-            .as_object_mut()
-            .unwrap()
-            .remove("density");
-        let appearance: AppearanceConfig = serde_json::from_value(value).unwrap();
-        assert_eq!(appearance.preferences.density, UiDensity::Default);
-    }
-
-    #[test]
-    fn missing_builtins_are_added_without_overwriting_existing_profiles() {
-        let mut appearance = AppearanceConfig::default();
-        appearance
-            .themes
-            .retain(|profile| profile.id.starts_with("codex-"));
-        appearance.themes[0].accent = "#123456".into();
-        assert!(appearance.merge_missing_builtin_profiles());
-        assert_eq!(appearance.themes.len(), 18);
-        assert_eq!(appearance.profile("codex-light").unwrap().accent, "#123456");
-        assert!(!appearance.merge_missing_builtin_profiles());
-    }
-
-    #[test]
-    fn legacy_codex_defaults_upgrade_to_quiet_graphite_without_overwriting_custom_colors() {
-        let mut appearance = AppearanceConfig::default();
-        let light = appearance.profile("codex-light").unwrap().clone();
-        let dark = appearance.profile("codex-dark").unwrap().clone();
-        appearance.themes[0] = ThemeProfile {
-            name: "Codex Light".into(),
-            accent: "#1677D2".into(),
-            background: "#F5F4F7".into(),
-            foreground: "#202126".into(),
-            ..light
-        };
-        appearance.themes[1] = ThemeProfile {
-            name: "Custom dark".into(),
-            accent: "#123456".into(),
-            ..dark
-        };
-        assert!(appearance.merge_missing_builtin_profiles());
-        assert_eq!(
-            appearance.profile("codex-light").unwrap().name,
-            "Quiet Graphite Light"
-        );
-        assert_eq!(appearance.profile("codex-dark").unwrap().accent, "#123456");
-    }
-
-    #[test]
-    fn theme_document_validation_is_strict() {
-        let mut document = ThemeProfileDocument::new(ThemeProfile::codex_dark());
-        assert!(document.validate().is_ok());
-        document.profile.accent = "red".into();
-        assert!(document.validate().is_err());
-        document.profile.accent = "#2EA8FF".into();
-        document.version += 1;
-        assert!(document.validate().is_err());
-    }
-}
+#[path = "protocol_tests.rs"]
+mod tests;

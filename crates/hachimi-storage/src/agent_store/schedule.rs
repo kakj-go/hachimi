@@ -5,9 +5,9 @@
 // Modified for Hachimi: transactional ScheduleGrant snapshots, invocation keys, Session/Run lineage, and SQLite projections.
 
 use hachimi_protocol::{
-    ArtifactId, DeliveryStatus, RunId, ScheduleDefinition, ScheduleGrantId, ScheduleGrantRecord,
-    ScheduleGrantStatus, ScheduleHealth, ScheduleId, ScheduleSnapshot, SessionId, TaskRunId,
-    TaskRunRecord, TaskRunStatus,
+    ArtifactId, DeliveryStatus, RunId, ScheduleDefinition, ScheduleEventContext, ScheduleGrantId,
+    ScheduleGrantRecord, ScheduleGrantStatus, ScheduleHealth, ScheduleId, ScheduleSnapshot,
+    SessionId, TaskRunId, TaskRunRecord, TaskRunStatus, TaskRunTrigger,
 };
 use serde::{Serialize, de::DeserializeOwned};
 use sqlx::{Row, Sqlite, Transaction};
@@ -230,7 +230,7 @@ impl AgentStore {
             return Err(AgentStoreError::ScheduleRevisionConflict);
         }
         let result = sqlx::query(
-            "UPDATE schedule_definitions SET name = ?, enabled = ?, prompt = ?, schedule_json = ?, entry_profile = ?, workload_override = ?, context_template_json = ?, tool_allowlist_json = ?, skill_allowlist_json = ?, mcp_tool_allowlist_json = ?, permission_config_json = ?, permission_revision = ?, timeout_ms = ?, misfire_policy = ?, delivery_policy = ?, config_revision = ?, next_run_at_ms = ?, health = ?, health_reason = ?, updated_at_ms = ? WHERE id = ? AND config_revision = ?",
+            "UPDATE schedule_definitions SET name = ?, enabled = ?, prompt = ?, schedule_json = ?, entry_profile = ?, workload_override = ?, context_template_json = ?, tool_allowlist_json = ?, skill_allowlist_json = ?, mcp_tool_allowlist_json = ?, contribution_revisions_json = ?, host_grant_json = ?, permission_config_json = ?, permission_revision = ?, timeout_ms = ?, misfire_policy = ?, delivery_policy = ?, stop_conditions_json = ?, config_revision = ?, next_run_at_ms = ?, health = ?, health_reason = ?, updated_at_ms = ? WHERE id = ? AND config_revision = ?",
         )
         .bind(&definition.name)
         .bind(definition.enabled)
@@ -248,11 +248,14 @@ impl AgentStore {
         .bind(serde_json::to_string(&definition.tool_allowlist)?)
         .bind(serde_json::to_string(&definition.skill_allowlist)?)
         .bind(serde_json::to_string(&definition.mcp_tool_allowlist)?)
+        .bind(serde_json::to_string(&definition.contribution_revisions)?)
+        .bind(serde_json::to_string(&definition.host_grant)?)
         .bind(serde_json::to_string(&definition.permission_config)?)
         .bind(i64::try_from(definition.permission_revision).unwrap_or(i64::MAX))
         .bind(i64::try_from(definition.timeout_ms).unwrap_or(i64::MAX))
         .bind(enum_to_db(&definition.misfire_policy)?)
         .bind(enum_to_db(&definition.delivery_policy)?)
+        .bind(serde_json::to_string(&definition.stop_conditions)?)
         .bind(i64::try_from(definition.config_revision).unwrap_or(i64::MAX))
         .bind(definition.next_run_at_ms)
         .bind(definition.health.as_str())
@@ -424,82 +427,15 @@ impl AgentStore {
         task: &TaskRunRecord,
     ) -> Result<ScheduleInvocationClaim, AgentStoreError> {
         let mut transaction = self.pool.begin().await?;
-        if let Some(row) = sqlx::query("SELECT * FROM task_runs WHERE invocation_key = ?")
-            .bind(&task.invocation_key)
-            .fetch_optional(&mut *transaction)
-            .await?
-        {
-            let existing = task_run_from_row(&row)?;
-            transaction.commit().await?;
-            return Ok(ScheduleInvocationClaim {
-                // The first claimant owns dispatch. A repeated timer/request observes the
-                // existing ledger row but must never create a second side effect.
-                should_launch: false,
-                task_run: existing,
-            });
-        }
-
-        let schedule = get_schedule_tx(&mut transaction, schedule_id)
-            .await?
-            .ok_or_else(|| AgentStoreError::ScheduleNotFound(schedule_id.clone()))?;
-        if schedule.config_revision != expected_schedule_revision {
-            return Err(AgentStoreError::ScheduleRevisionConflict);
-        }
-        let active_grant = active_schedule_grant_tx(&mut transaction, schedule_id).await?;
-        let active_task = sqlx::query(
-            "SELECT task_runs.* FROM schedule_runtime_state JOIN task_runs ON task_runs.id = schedule_runtime_state.active_task_run_id WHERE schedule_runtime_state.schedule_id = ?",
+        let claim = claim_schedule_invocation_tx(
+            &mut transaction,
+            schedule_id,
+            expected_schedule_revision,
+            task,
         )
-        .bind(schedule_id.as_str())
-        .fetch_optional(&mut *transaction)
-        .await?
-        .as_ref()
-        .map(task_run_from_row)
-        .transpose()?;
-
-        let mut claimed = task.clone();
-        let should_launch = if active_task.is_some_and(|active| !active.status.is_terminal()) {
-            claimed.status = TaskRunStatus::Skipped;
-            claimed.error_code = Some("schedule_overlap_skipped".into());
-            claimed.error_summary = Some("a previous invocation is still active".into());
-            claimed.finished_at_ms = Some(claimed.created_at_ms);
-            false
-        } else if let Some(grant) =
-            active_grant.filter(|grant| grant.permission_revision == schedule.permission_revision)
-        {
-            claimed.permission_snapshot_hash = Some(grant.scope_hash);
-            !claimed.status.is_terminal()
-        } else {
-            claimed.status = TaskRunStatus::NeedsAttention;
-            claimed.error_code = Some("schedule_authorization_required".into());
-            claimed.error_summary =
-                Some("the current permission revision is not authorized".into());
-            claimed.finished_at_ms = Some(claimed.created_at_ms);
-            sqlx::query(
-                "UPDATE schedule_definitions SET health = 'needs_authorization', health_reason = 'schedule_authorization_required', updated_at_ms = ? WHERE id = ?",
-            )
-            .bind(claimed.created_at_ms)
-            .bind(schedule_id.as_str())
-            .execute(&mut *transaction)
-            .await?;
-            false
-        };
-
-        insert_task_run_tx(&mut transaction, &claimed).await?;
-        sqlx::query(
-            "UPDATE schedule_runtime_state SET last_scheduled_for_ms = ?, last_invocation_key = ?, active_task_run_id = ?, timer_generation = timer_generation + 1, updated_at_ms = ? WHERE schedule_id = ?",
-        )
-        .bind(claimed.scheduled_for_ms)
-        .bind(&claimed.invocation_key)
-        .bind(should_launch.then_some(claimed.id.as_str()))
-        .bind(claimed.updated_at_ms)
-        .bind(schedule_id.as_str())
-        .execute(&mut *transaction)
         .await?;
         transaction.commit().await?;
-        Ok(ScheduleInvocationClaim {
-            task_run: claimed,
-            should_launch,
-        })
+        Ok(claim)
     }
 
     pub async fn get_task_run(
@@ -544,11 +480,12 @@ impl AgentStore {
         updated_at_ms: i64,
     ) -> Result<TaskRunRecord, AgentStoreError> {
         let result = sqlx::query(
-            "UPDATE task_runs SET requester_session_id = ?, updated_at_ms = ? WHERE id = ? AND requester_session_id IS NULL",
+            "UPDATE task_runs SET requester_session_id = ?, updated_at_ms = ? WHERE id = ? AND (requester_session_id IS NULL OR requester_session_id = ?)",
         )
         .bind(session_id.as_str())
         .bind(updated_at_ms)
         .bind(task_run_id.as_str())
+        .bind(session_id.as_str())
         .execute(&self.pool)
         .await?;
         if result.rows_affected() != 1 {
@@ -580,6 +517,19 @@ impl AgentStore {
                 .await?
         };
         rows.iter().map(task_run_from_row).collect()
+    }
+
+    pub async fn count_schedule_task_runs(
+        &self,
+        schedule_id: &ScheduleId,
+    ) -> Result<u64, AgentStoreError> {
+        let count = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM task_runs WHERE schedule_id = ? AND status <> 'skipped'",
+        )
+        .bind(schedule_id.as_str())
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(u64::try_from(count).unwrap_or_default())
     }
 
     pub async fn count_schedule_retained_worktrees(
@@ -681,12 +631,90 @@ impl AgentStore {
     }
 }
 
+pub(crate) async fn claim_schedule_invocation_tx(
+    transaction: &mut Transaction<'_, Sqlite>,
+    schedule_id: &ScheduleId,
+    expected_schedule_revision: u64,
+    task: &TaskRunRecord,
+) -> Result<ScheduleInvocationClaim, AgentStoreError> {
+    if let Some(row) = sqlx::query("SELECT * FROM task_runs WHERE invocation_key = ?")
+        .bind(&task.invocation_key)
+        .fetch_optional(&mut **transaction)
+        .await?
+    {
+        return Ok(ScheduleInvocationClaim {
+            should_launch: false,
+            task_run: task_run_from_row(&row)?,
+        });
+    }
+
+    let schedule = get_schedule_tx(transaction, schedule_id)
+        .await?
+        .ok_or_else(|| AgentStoreError::ScheduleNotFound(schedule_id.clone()))?;
+    if schedule.config_revision != expected_schedule_revision {
+        return Err(AgentStoreError::ScheduleRevisionConflict);
+    }
+    let active_grant = active_schedule_grant_tx(transaction, schedule_id).await?;
+    let active_task = sqlx::query(
+        "SELECT task_runs.* FROM schedule_runtime_state JOIN task_runs ON task_runs.id = schedule_runtime_state.active_task_run_id WHERE schedule_runtime_state.schedule_id = ?",
+    )
+    .bind(schedule_id.as_str())
+    .fetch_optional(&mut **transaction)
+    .await?
+    .as_ref()
+    .map(task_run_from_row)
+    .transpose()?;
+
+    let mut claimed = task.clone();
+    let should_launch = if active_task.is_some_and(|active| !active.status.is_terminal()) {
+        claimed.status = TaskRunStatus::Skipped;
+        claimed.error_code = Some("schedule_overlap_skipped".into());
+        claimed.error_summary = Some("a previous invocation is still active".into());
+        claimed.finished_at_ms = Some(claimed.created_at_ms);
+        false
+    } else if let Some(grant) =
+        active_grant.filter(|grant| grant.permission_revision == schedule.permission_revision)
+    {
+        claimed.permission_snapshot_hash = Some(grant.scope_hash);
+        !claimed.status.is_terminal()
+    } else {
+        claimed.status = TaskRunStatus::NeedsAttention;
+        claimed.error_code = Some("schedule_authorization_required".into());
+        claimed.error_summary = Some("the current permission revision is not authorized".into());
+        claimed.finished_at_ms = Some(claimed.created_at_ms);
+        sqlx::query(
+            "UPDATE schedule_definitions SET health = 'needs_authorization', health_reason = 'schedule_authorization_required', updated_at_ms = ? WHERE id = ?",
+        )
+        .bind(claimed.created_at_ms)
+        .bind(schedule_id.as_str())
+        .execute(&mut **transaction)
+        .await?;
+        false
+    };
+
+    insert_task_run_tx(transaction, &claimed).await?;
+    sqlx::query(
+        "UPDATE schedule_runtime_state SET last_scheduled_for_ms = ?, last_invocation_key = ?, active_task_run_id = ?, timer_generation = timer_generation + 1, updated_at_ms = ? WHERE schedule_id = ?",
+    )
+    .bind(claimed.scheduled_for_ms)
+    .bind(&claimed.invocation_key)
+    .bind(should_launch.then_some(claimed.id.as_str()))
+    .bind(claimed.updated_at_ms)
+    .bind(schedule_id.as_str())
+    .execute(&mut **transaction)
+    .await?;
+    Ok(ScheduleInvocationClaim {
+        task_run: claimed,
+        should_launch,
+    })
+}
+
 async fn insert_schedule_tx(
     transaction: &mut Transaction<'_, Sqlite>,
     definition: &ScheduleDefinition,
 ) -> Result<(), AgentStoreError> {
     sqlx::query(
-        "INSERT INTO schedule_definitions (id, name, enabled, prompt, schedule_json, entry_profile, workload_override, context_template_json, tool_allowlist_json, skill_allowlist_json, mcp_tool_allowlist_json, permission_config_json, permission_revision, timeout_ms, misfire_policy, delivery_policy, config_revision, created_by, next_run_at_ms, health, health_reason, created_at_ms, updated_at_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO schedule_definitions (id, name, enabled, prompt, schedule_json, entry_profile, workload_override, context_template_json, tool_allowlist_json, skill_allowlist_json, mcp_tool_allowlist_json, contribution_revisions_json, host_grant_json, permission_config_json, permission_revision, timeout_ms, misfire_policy, delivery_policy, stop_conditions_json, config_revision, created_by, next_run_at_ms, health, health_reason, created_at_ms, updated_at_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(definition.id.as_str())
     .bind(&definition.name)
@@ -705,11 +733,14 @@ async fn insert_schedule_tx(
     .bind(serde_json::to_string(&definition.tool_allowlist)?)
     .bind(serde_json::to_string(&definition.skill_allowlist)?)
     .bind(serde_json::to_string(&definition.mcp_tool_allowlist)?)
+    .bind(serde_json::to_string(&definition.contribution_revisions)?)
+    .bind(serde_json::to_string(&definition.host_grant)?)
     .bind(serde_json::to_string(&definition.permission_config)?)
     .bind(i64::try_from(definition.permission_revision).unwrap_or(i64::MAX))
     .bind(i64::try_from(definition.timeout_ms).unwrap_or(i64::MAX))
     .bind(enum_to_db(&definition.misfire_policy)?)
     .bind(enum_to_db(&definition.delivery_policy)?)
+    .bind(serde_json::to_string(&definition.stop_conditions)?)
     .bind(i64::try_from(definition.config_revision).unwrap_or(i64::MAX))
     .bind(&definition.created_by)
     .bind(definition.next_run_at_ms)
@@ -729,7 +760,7 @@ async fn insert_schedule_tx(
     Ok(())
 }
 
-async fn get_schedule_tx(
+pub(crate) async fn get_schedule_tx(
     transaction: &mut Transaction<'_, Sqlite>,
     schedule_id: &ScheduleId,
 ) -> Result<Option<ScheduleDefinition>, AgentStoreError> {
@@ -740,7 +771,9 @@ async fn get_schedule_tx(
     row.as_ref().map(schedule_from_row).transpose()
 }
 
-fn schedule_from_row(row: &sqlx::sqlite::SqliteRow) -> Result<ScheduleDefinition, AgentStoreError> {
+pub(crate) fn schedule_from_row(
+    row: &sqlx::sqlite::SqliteRow,
+) -> Result<ScheduleDefinition, AgentStoreError> {
     let health_value: String = row.get("health");
     let health = ScheduleHealth::parse(&health_value).ok_or_else(|| {
         AgentStoreError::InvalidPersistedValue {
@@ -763,12 +796,15 @@ fn schedule_from_row(row: &sqlx::sqlite::SqliteRow) -> Result<ScheduleDefinition
         tool_allowlist: serde_json::from_str(row.get("tool_allowlist_json"))?,
         skill_allowlist: serde_json::from_str(row.get("skill_allowlist_json"))?,
         mcp_tool_allowlist: serde_json::from_str(row.get("mcp_tool_allowlist_json"))?,
+        contribution_revisions: serde_json::from_str(row.get("contribution_revisions_json"))?,
+        host_grant: serde_json::from_str(row.get("host_grant_json"))?,
         permission_config: serde_json::from_str(row.get("permission_config_json"))?,
         permission_revision: u64::try_from(row.get::<i64, _>("permission_revision"))
             .unwrap_or_default(),
         timeout_ms: u64::try_from(row.get::<i64, _>("timeout_ms")).unwrap_or_default(),
         misfire_policy: enum_from_db(row.get("misfire_policy"), "misfire policy")?,
         delivery_policy: enum_from_db(row.get("delivery_policy"), "delivery policy")?,
+        stop_conditions: serde_json::from_str(row.get("stop_conditions_json"))?,
         config_revision: u64::try_from(row.get::<i64, _>("config_revision")).unwrap_or_default(),
         created_by: row.get("created_by"),
         next_run_at_ms: row.get("next_run_at_ms"),
@@ -845,18 +881,28 @@ fn schedule_grant_from_row(
     })
 }
 
-async fn insert_task_run_tx(
+pub(crate) async fn insert_task_run_tx(
     transaction: &mut Transaction<'_, Sqlite>,
     task: &TaskRunRecord,
 ) -> Result<(), AgentStoreError> {
     sqlx::query(
-        "INSERT INTO task_runs (id, schedule_id, schedule_revision, trigger, scheduled_for_ms, invocation_key, requester_session_id, execution_session_id, run_id, permission_snapshot_hash, status, progress_percent, result_summary, error_code, error_summary, artifact_ids_json, delivery_status, delivery_error_code, created_at_ms, started_at_ms, finished_at_ms, updated_at_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO task_runs (id, schedule_id, schedule_revision, trigger, scheduled_for_ms, event_context_json, invocation_key, requester_session_id, execution_session_id, run_id, permission_snapshot_hash, status, progress_percent, result_summary, error_code, error_summary, artifact_ids_json, delivery_status, delivery_error_code, created_at_ms, started_at_ms, finished_at_ms, updated_at_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(task.id.as_str())
     .bind(task.schedule_id.as_ref().map(ScheduleId::as_str))
     .bind(task.schedule_revision.map(|value| i64::try_from(value).unwrap_or(i64::MAX)))
-    .bind(enum_to_db(&task.trigger)?)
+    .bind(enum_to_db(if task.trigger == TaskRunTrigger::Event {
+        &TaskRunTrigger::Scheduled
+    } else {
+        &task.trigger
+    })?)
     .bind(task.scheduled_for_ms)
+    .bind(
+        task.event_context
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()?,
+    )
     .bind(&task.invocation_key)
     .bind(task.requester_session_id.as_ref().map(SessionId::as_str))
     .bind(task.execution_session_id.as_ref().map(SessionId::as_str))
@@ -879,7 +925,9 @@ async fn insert_task_run_tx(
     Ok(())
 }
 
-fn task_run_from_row(row: &sqlx::sqlite::SqliteRow) -> Result<TaskRunRecord, AgentStoreError> {
+pub(crate) fn task_run_from_row(
+    row: &sqlx::sqlite::SqliteRow,
+) -> Result<TaskRunRecord, AgentStoreError> {
     let status_value: String = row.get("status");
     let status = TaskRunStatus::parse(&status_value).ok_or_else(|| {
         AgentStoreError::InvalidPersistedValue {
@@ -887,6 +935,11 @@ fn task_run_from_row(row: &sqlx::sqlite::SqliteRow) -> Result<TaskRunRecord, Age
             value: status_value,
         }
     })?;
+    let persisted_trigger: TaskRunTrigger = enum_from_db(row.get("trigger"), "task run trigger")?;
+    let event_context = row
+        .get::<Option<String>, _>("event_context_json")
+        .map(|value| serde_json::from_str::<ScheduleEventContext>(&value))
+        .transpose()?;
     Ok(TaskRunRecord {
         id: TaskRunId::new(row.get::<String, _>("id")),
         schedule_id: row
@@ -895,8 +948,13 @@ fn task_run_from_row(row: &sqlx::sqlite::SqliteRow) -> Result<TaskRunRecord, Age
         schedule_revision: row
             .get::<Option<i64>, _>("schedule_revision")
             .and_then(|value| u64::try_from(value).ok()),
-        trigger: enum_from_db(row.get("trigger"), "task run trigger")?,
+        trigger: if persisted_trigger == TaskRunTrigger::Scheduled && event_context.is_some() {
+            TaskRunTrigger::Event
+        } else {
+            persisted_trigger
+        },
         scheduled_for_ms: row.get("scheduled_for_ms"),
+        event_context,
         invocation_key: row.get("invocation_key"),
         requester_session_id: row
             .get::<Option<String>, _>("requester_session_id")

@@ -18,6 +18,9 @@ mod operation;
 mod patch;
 mod review_diff;
 mod watch;
+mod worker_io;
+
+use worker_io::*;
 
 pub use file_search::{SearchServerCommand, SearchServerRequest, run_search_server};
 pub use patch::{ApplyPatchPlan, WorkspacePatchChange, WorkspacePatchStatus, parse_apply_patch};
@@ -158,6 +161,14 @@ pub enum WorkspaceOperation {
         author_email: String,
         history_limit: u16,
     },
+    GitRemotes,
+    GitPush {
+        remote_name: String,
+        expected_remote_url_hash: String,
+        source_ref: String,
+        target_ref: String,
+        expected_commit_oid: String,
+    },
     ReadGitBlob {
         path: String,
     },
@@ -208,6 +219,12 @@ pub enum WorkspaceOutput {
     },
     GitMutation {
         response: hachimi_protocol::GitMutationResponse,
+    },
+    GitRemotes {
+        remotes: Vec<hachimi_protocol::GitRemoteRecord>,
+    },
+    GitPush {
+        response: hachimi_protocol::GitPushResponse,
     },
     GitBlob {
         blob: GitBlob,
@@ -318,6 +335,9 @@ pub enum WorkspaceErrorCode {
     Unauthorized,
     StaleGeneration,
     PathOutsideCheckout,
+    UnsupportedWorkspaceRoot,
+    WorkspaceOwnershipMismatch,
+    ProtectedWorkspaceRoot,
     NotFound,
     NotText,
     TooLarge,
@@ -1463,6 +1483,23 @@ impl WorkerContext {
                 self.git_create_empty_initial_commit(&author_name, &author_email, history_limit)
                     .await
             }
+            WorkspaceOperation::GitRemotes => self.git_remotes().await,
+            WorkspaceOperation::GitPush {
+                remote_name,
+                expected_remote_url_hash,
+                source_ref,
+                target_ref,
+                expected_commit_oid,
+            } => {
+                self.git_push(
+                    &remote_name,
+                    &expected_remote_url_hash,
+                    &source_ref,
+                    &target_ref,
+                    &expected_commit_oid,
+                )
+                .await
+            }
             WorkspaceOperation::ReadGitBlob { path } => self.read_git_blob(&path).await,
             WorkspaceOperation::Exec {
                 program,
@@ -1708,206 +1745,6 @@ impl WorkerContext {
         resolve_checkout_path(&self.root, relative, PathAccess::Write, true)
             .map_err(path_security_error)
     }
-}
-
-struct SearchState<'a> {
-    root: &'a Path,
-    query: &'a str,
-    folded_query: Option<String>,
-    max_results: usize,
-    visited_files: usize,
-    matches: Vec<SearchMatch>,
-    truncated: bool,
-}
-
-fn search_path(path: &Path, state: &mut SearchState<'_>) -> Result<(), WorkspaceError> {
-    if state.matches.len() >= state.max_results || state.visited_files >= MAX_SEARCHED_FILES {
-        state.truncated = true;
-        return Ok(());
-    }
-    let metadata = std::fs::symlink_metadata(path).map_err(io_error)?;
-    if metadata.file_type().is_symlink() {
-        return Ok(());
-    }
-    if metadata.is_dir() {
-        let mut entries = std::fs::read_dir(path)
-            .map_err(io_error)?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(io_error)?;
-        entries.sort_by_key(std::fs::DirEntry::file_name);
-        for entry in entries {
-            search_path(&entry.path(), state)?;
-            if state.truncated {
-                break;
-            }
-        }
-        return Ok(());
-    }
-    if !metadata.is_file() || metadata.len() > MAX_TEXT_BYTES {
-        return Ok(());
-    }
-    state.visited_files += 1;
-    let mut bytes = Vec::with_capacity(usize::try_from(metadata.len()).unwrap_or_default());
-    std::fs::File::open(path)
-        .map_err(io_error)?
-        .read_to_end(&mut bytes)
-        .map_err(io_error)?;
-    let Ok(content) = String::from_utf8(bytes) else {
-        return Ok(());
-    };
-    for (index, line) in content.lines().enumerate() {
-        let matches = if let Some(query) = &state.folded_query {
-            line.to_lowercase().contains(query)
-        } else {
-            line.contains(state.query)
-        };
-        if matches {
-            state.matches.push(SearchMatch {
-                path: relative_display(state.root, path),
-                line: index + 1,
-                text: bounded(line, 500),
-            });
-            if state.matches.len() >= state.max_results {
-                state.truncated = true;
-                break;
-            }
-        }
-    }
-    Ok(())
-}
-
-fn read_bounded(path: &Path) -> Result<Vec<u8>, WorkspaceError> {
-    let metadata = std::fs::metadata(path).map_err(io_error)?;
-    if !metadata.is_file() {
-        return Err(WorkspaceError::new(
-            WorkspaceErrorCode::NotFound,
-            "workspace path is not a file",
-        ));
-    }
-    if metadata.len() > MAX_TEXT_BYTES {
-        return Err(WorkspaceError::new(
-            WorkspaceErrorCode::TooLarge,
-            "workspace file exceeds the 2 MiB text limit",
-        ));
-    }
-    let mut bytes = Vec::with_capacity(usize::try_from(metadata.len()).unwrap_or_default());
-    std::fs::File::open(path)
-        .map_err(io_error)?
-        .take(MAX_TEXT_BYTES + 1)
-        .read_to_end(&mut bytes)
-        .map_err(io_error)?;
-    if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > MAX_TEXT_BYTES {
-        return Err(WorkspaceError::new(
-            WorkspaceErrorCode::TooLarge,
-            "workspace file exceeds the 2 MiB text limit",
-        ));
-    }
-    Ok(bytes)
-}
-
-fn ensure_content_size(content: &str) -> Result<(), WorkspaceError> {
-    if u64::try_from(content.len()).unwrap_or(u64::MAX) > MAX_TEXT_BYTES {
-        return Err(WorkspaceError::new(
-            WorkspaceErrorCode::TooLarge,
-            "workspace content exceeds the 2 MiB text limit",
-        ));
-    }
-    Ok(())
-}
-
-fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), WorkspaceError> {
-    let mut file = AtomicWriteFile::open(path).map_err(io_error)?;
-    file.write_all(bytes).map_err(io_error)?;
-    file.commit().map_err(io_error)
-}
-
-fn write_output(root: &Path, path: &Path, bytes: &[u8], replacements: usize) -> WorkspaceOutput {
-    WorkspaceOutput::Write {
-        path: relative_display(root, path),
-        sha256: sha256(bytes),
-        byte_size: u64::try_from(bytes.len()).unwrap_or(u64::MAX),
-        replacements,
-    }
-}
-
-fn sha256(bytes: &[u8]) -> String {
-    Sha256::digest(bytes)
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
-}
-
-fn constant_time_eq(left: &str, right: &str) -> bool {
-    if left.len() != right.len() {
-        return false;
-    }
-    left.as_bytes()
-        .iter()
-        .zip(right.as_bytes())
-        .fold(0_u8, |difference, (left, right)| {
-            difference | (left ^ right)
-        })
-        == 0
-}
-
-fn relative_display(root: &Path, path: &Path) -> String {
-    path.strip_prefix(root)
-        .unwrap_or(path)
-        .to_string_lossy()
-        .replace('\\', "/")
-}
-
-fn io_error(error: std::io::Error) -> WorkspaceError {
-    WorkspaceError::new(WorkspaceErrorCode::Io, error.to_string())
-}
-
-fn path_security_error(error: PathSecurityError) -> WorkspaceError {
-    match error {
-        PathSecurityError::NotFound => {
-            WorkspaceError::new(WorkspaceErrorCode::NotFound, error.to_string())
-        }
-        PathSecurityError::Io(error) => io_error(error),
-        PathSecurityError::UnsupportedRoot
-        | PathSecurityError::EscapesCheckout
-        | PathSecurityError::UnsupportedPathForm
-        | PathSecurityError::ReservedDeviceName
-        | PathSecurityError::ReparsePoint
-        | PathSecurityError::HardLink => {
-            WorkspaceError::new(WorkspaceErrorCode::PathOutsideCheckout, error.to_string())
-        }
-    }
-}
-
-fn bounded(value: &str, max_chars: usize) -> String {
-    value.chars().take(max_chars).collect()
-}
-
-fn bounded_bytes(bytes: &[u8]) -> (String, bool) {
-    let truncated = bytes.len() > MAX_PROCESS_OUTPUT_BYTES;
-    let bytes = &bytes[..bytes.len().min(MAX_PROCESS_OUTPUT_BYTES)];
-    (String::from_utf8_lossy(bytes).into_owned(), truncated)
-}
-
-fn copy_process_environment(command: &mut Command) {
-    const ALLOWED: &[&str] = &[
-        "PATH",
-        "PATHEXT",
-        "SYSTEMROOT",
-        "WINDIR",
-        "TEMP",
-        "TMP",
-        "USERPROFILE",
-        "LOCALAPPDATA",
-        "APPDATA",
-        "CARGO_HOME",
-        "RUSTUP_HOME",
-    ];
-    for key in ALLOWED {
-        if let Some(value) = std::env::var_os(key) {
-            command.env(OsStr::new(key), value);
-        }
-    }
-    configure_restricted_git_environment(command);
 }
 
 #[cfg(test)]

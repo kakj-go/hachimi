@@ -185,7 +185,7 @@ async fn duplicate_handle_and_detached_ttl_fail_closed() {
 
 #[cfg(windows)]
 #[tokio::test]
-#[ignore = "requires the elevated Windows sandbox release environment"]
+#[ignore = "requires the standard-user Windows sandbox release environment"]
 async fn terminal_conpty_uses_the_restricted_launcher_and_kills_its_process_tree() {
     let root = tempfile::tempdir().expect("terminal root");
     hachimi_sandbox::grant_restricted_code_access(root.path(), true).expect("terminal root ACL");

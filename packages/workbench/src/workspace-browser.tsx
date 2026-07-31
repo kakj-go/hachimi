@@ -26,6 +26,7 @@ import {
 import { For, Show, createEffect, createMemo, createSignal, onCleanup, untrack } from "solid-js";
 
 import type { WorkbenchCommandPort } from "./workbench-command-port";
+import { runMutationContext } from "./mutation-context";
 import { WorkspaceFileEditor } from "./workspace-file-editor";
 import { WorkspaceGitPanel } from "./workspace-git-panel";
 
@@ -35,6 +36,7 @@ const MAX_EDIT_BYTES = 2 * 1024 * 1024;
 export function WorkspaceBrowser(props: {
   snapshot: WorkbenchSessionSnapshot;
   commandPort: WorkbenchCommandPort;
+  gitRemoteMutationsEnabled?: boolean;
 }) {
   const i18n = useI18n();
   const [tab, setTab] = createSignal<"files" | "search" | "diff" | "git">("files");
@@ -196,14 +198,7 @@ export function WorkspaceBrowser(props: {
     setSaving(true);
     try {
       const response = await props.commandPort.writeWorkspaceFile({
-        context: {
-          requestId: crypto.randomUUID(),
-          clientId: "window:workbench",
-          protocolVersion: 18,
-          idempotencyKey: crypto.randomUUID(),
-          expectedRunId: run.id,
-          expectedGeneration: run.generation,
-        },
+        context: runMutationContext(run),
         sessionId: props.snapshot.session.id,
         checkoutId: currentCheckoutId,
         path,
@@ -610,6 +605,7 @@ export function WorkspaceBrowser(props: {
           snapshot={props.snapshot}
           commandPort={props.commandPort}
           revision={gitRevision()}
+          gitRemoteMutationsEnabled={props.gitRemoteMutationsEnabled !== false}
         />
       </Show>
       <Show when={selectedPath()}>

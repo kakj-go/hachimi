@@ -144,6 +144,7 @@ async fn service_principal_executes_a_background_run_without_a_window_transport(
                 schedule_id: hachimi_protocol::ScheduleId::from("schedule-windowless"),
                 task_run_id: hachimi_protocol::TaskRunId::from("task-windowless"),
                 scheduled_for_ms: 1_800_000_000_000,
+                event_context: None,
             },
             title: "Windowless scheduled Run".into(),
             prompt: "run the scheduled task".into(),
@@ -207,7 +208,12 @@ async fn service_principal_executes_a_background_run_without_a_window_transport(
             skill_allowlist: Vec::new(),
             mcp_tool_allowlist: Vec::new(),
             run_tool_allowlist: Some(Vec::new()),
+            schedule_host_grant: Some(hachimi_protocol::ScheduleHostGrant::default()),
             workload_override: None,
+            recovery_checkpoint: None,
+            parent_agent_task_id: None,
+            parent_run_id: None,
+            agent_depth: 0,
         })
         .await
         .expect("windowless execution");

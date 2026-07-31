@@ -1,6 +1,6 @@
 {
   "name": "hachimi",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "private": true,
   "type": "module",
   "packageManager": "pnpm@11.15.1",
@@ -12,7 +12,7 @@
     "dev": "node scripts/run-with-rust.mjs tauri dev --config apps/desktop/src-tauri/tauri.conf.json",
     "build": "node scripts/run-with-rust.mjs tauri build --debug --no-bundle --config apps/desktop/src-tauri/tauri.conf.json",
     "build:debug": "node scripts/run-with-rust.mjs tauri build --debug --no-bundle --config apps/desktop/src-tauri/tauri.conf.json",
-    "build:installer": "node scripts/run-with-rust.mjs tauri build --bundles msi --config apps/desktop/src-tauri/tauri.conf.json && node scripts/run-with-rust.mjs tauri build --bundles nsis --config apps/desktop/src-tauri/tauri.conf.json",
+    "build:installer": "node scripts/run-with-rust.mjs tauri build --bundles nsis --config apps/desktop/src-tauri/tauri.conf.json",
     "build:portable": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/build-portable.ps1",
     "format": "prettier --write . && node scripts/run-with-rust.mjs cargo fmt --all",
     "format:check": "prettier --check . && node scripts/run-with-rust.mjs cargo fmt --all --check",
@@ -22,6 +22,8 @@
     "test:desktop:e2e": "node scripts/desktop-e2e/run.mjs",
     "test:p0-adversarial": "node scripts/test-p0-adversarial.mjs",
     "test:windows:release": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/test-windows-release.ps1",
+    "test:windows:standard-user": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/test-windows-standard-user.ps1",
+    "release:check-clean": "node scripts/check-clean-worktree.mjs",
     "storybook": "corepack pnpm --filter @hachimi/ui storybook",
     "storybook:build": "corepack pnpm --filter @hachimi/ui storybook:build",
     "test:visual": "corepack pnpm --filter @hachimi/ui test:visual",
@@ -30,9 +32,10 @@
     "architecture:check": "node scripts/check-agent-architecture.mjs",
     "provenance:check": "node scripts/check-harness-provenance.mjs && node scripts/check-agent-architecture.mjs",
     "models:prepare": "node scripts/ensure-speech-models.mjs",
+    "runtime:prepare": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/prepare-managed-git.ps1 && powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/prepare-managed-chromium.ps1",
     "motions:sync": "node scripts/sync-avatar-motions-v4.mjs",
     "motions:check": "node scripts/sync-avatar-motions-v4.mjs --check",
-    "check": "corepack pnpm format:check && corepack pnpm lint && corepack pnpm typecheck && corepack pnpm test && corepack pnpm contracts:check && corepack pnpm provenance:check && corepack pnpm storybook:build && corepack pnpm build",
+    "check": "corepack pnpm format:check && corepack pnpm typecheck && corepack pnpm lint && corepack pnpm test && corepack pnpm contracts:check && corepack pnpm provenance:check && corepack pnpm test:p0-adversarial && corepack pnpm storybook:build && corepack pnpm test:visual && corepack pnpm build && corepack pnpm test:desktop:e2e",
     "tauri": "node scripts/run-with-rust.mjs tauri"
   },
   "devDependencies": {

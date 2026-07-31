@@ -18,6 +18,10 @@ pub struct WindowsFileIdentity {
 pub enum PathSecurityError {
     #[error("checkout root is not a supported local NTFS path")]
     UnsupportedRoot,
+    #[error("checkout root is not owned by the current user")]
+    OwnershipMismatch,
+    #[error("checkout root is inside a protected Windows system directory")]
+    ProtectedRoot,
     #[error("workspace path is absolute or escapes the checkout")]
     EscapesCheckout,
     #[error("workspace path contains an unsupported Windows path form")]
@@ -52,10 +56,115 @@ pub fn validate_checkout_root(root: &Path) -> Result<PathBuf, PathSecurityError>
         ensure_local_drive_path(&canonical)?;
         ensure_ntfs(&canonical)
             .map_err(|error| path_error_context(error, "checkout filesystem validation"))?;
+        ensure_not_protected_system_path(&canonical)?;
         reject_reparse(&canonical)
             .map_err(|error| path_error_context(error, "checkout reparse validation"))?;
+        ensure_owned_by_current_user(&canonical)
+            .map_err(|error| path_error_context(error, "checkout ownership validation"))?;
     }
     Ok(canonical)
+}
+
+#[cfg(windows)]
+fn ensure_not_protected_system_path(path: &Path) -> Result<(), PathSecurityError> {
+    let value = path.to_string_lossy();
+    let value = value.strip_prefix(r"\\?\").unwrap_or(&value);
+    let first = value
+        .split(['\\', '/'])
+        .nth(1)
+        .unwrap_or_default()
+        .trim_end_matches([' ', '.']);
+    if [
+        "Windows",
+        "Program Files",
+        "Program Files (x86)",
+        "ProgramData",
+        "$Recycle.Bin",
+        "System Volume Information",
+    ]
+    .iter()
+    .any(|protected| first.eq_ignore_ascii_case(protected))
+    {
+        return Err(PathSecurityError::ProtectedRoot);
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn ensure_owned_by_current_user(path: &Path) -> Result<(), PathSecurityError> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::{
+        Foundation::{CloseHandle, ERROR_INSUFFICIENT_BUFFER, LocalFree},
+        Security::{
+            Authorization::{GetNamedSecurityInfoW, SE_FILE_OBJECT},
+            EqualSid, GetTokenInformation, OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID,
+            TOKEN_QUERY, TOKEN_USER, TokenUser,
+        },
+        System::Threading::{GetCurrentProcess, OpenProcessToken},
+    };
+
+    let wide = path
+        .as_os_str()
+        .encode_wide()
+        .chain(Some(0))
+        .collect::<Vec<_>>();
+    let mut owner: PSID = std::ptr::null_mut();
+    let mut descriptor: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
+    let status = unsafe {
+        GetNamedSecurityInfoW(
+            wide.as_ptr(),
+            SE_FILE_OBJECT,
+            OWNER_SECURITY_INFORMATION,
+            &mut owner,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            &mut descriptor,
+        )
+    };
+    if status != 0 || owner.is_null() || descriptor.is_null() {
+        return Err(std::io::Error::from_raw_os_error(status as i32).into());
+    }
+    let result = (|| {
+        let mut token = std::ptr::null_mut();
+        if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) } == 0 {
+            return Err(PathSecurityError::Io(std::io::Error::last_os_error()));
+        }
+        let token_result = (|| {
+            let mut required = 0_u32;
+            unsafe {
+                GetTokenInformation(token, TokenUser, std::ptr::null_mut(), 0, &mut required);
+            }
+            if required == 0
+                || std::io::Error::last_os_error().raw_os_error()
+                    != Some(ERROR_INSUFFICIENT_BUFFER as i32)
+            {
+                return Err(PathSecurityError::Io(std::io::Error::last_os_error()));
+            }
+            let mut buffer = vec![0_u8; usize::try_from(required).unwrap_or(usize::MAX)];
+            if unsafe {
+                GetTokenInformation(
+                    token,
+                    TokenUser,
+                    buffer.as_mut_ptr().cast(),
+                    required,
+                    &mut required,
+                )
+            } == 0
+            {
+                return Err(PathSecurityError::Io(std::io::Error::last_os_error()));
+            }
+            let user = unsafe { &*buffer.as_ptr().cast::<TOKEN_USER>() };
+            if unsafe { EqualSid(owner, user.User.Sid) } == 0 {
+                return Err(PathSecurityError::OwnershipMismatch);
+            }
+            Ok(())
+        })();
+        unsafe { CloseHandle(token) };
+        token_result
+    })();
+    unsafe { LocalFree(descriptor) };
+    result
 }
 
 /// Validates a short-lived drive alias created by the trusted Workspace Host
@@ -442,6 +551,15 @@ mod tests {
         assert!(!component_prefix(
             Path::new("/work/root"),
             Path::new("/work/root-escape")
+        ));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn protected_windows_directories_are_rejected_before_acl_changes() {
+        assert!(matches!(
+            validate_checkout_root(Path::new(r"C:\Windows")),
+            Err(PathSecurityError::ProtectedRoot)
         ));
     }
 }

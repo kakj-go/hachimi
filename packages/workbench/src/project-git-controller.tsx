@@ -9,6 +9,7 @@ import { Button, Dialog, TextField } from "@hachimi/ui";
 import { Show, createEffect, createMemo, createSignal, untrack, type Accessor } from "solid-js";
 
 import type { WorkbenchCommandPort } from "./workbench-command-port";
+import { directUserMutationContext } from "./mutation-context";
 
 export function createProjectGitController(options: {
   commandPort: WorkbenchCommandPort;
@@ -81,14 +82,7 @@ export function createProjectGitController(options: {
     options.onFailure(undefined);
     try {
       const response = await options.commandPort.createProjectEmptyInitialCommit({
-        context: {
-          requestId: crypto.randomUUID(),
-          clientId: "window:workbench",
-          protocolVersion: 18,
-          idempotencyKey: crypto.randomUUID(),
-          expectedRunId: null,
-          expectedGeneration: null,
-        },
+        context: directUserMutationContext(),
         projectId: project.id,
         authorName: authorName(),
         authorEmail: authorEmail(),

@@ -123,6 +123,30 @@
   border-bottom: 0;
 }
 
+.workspace-git-remote {
+  display: grid;
+  gap: 7px;
+  padding: 9px 2px;
+  border-bottom: 1px solid var(--color-border-muted);
+}
+
+.workspace-git-remote > button,
+.workspace-git-forge-fields > button {
+  justify-self: start;
+}
+
+.workspace-git-remote small {
+  color: var(--color-text-faint);
+  font-size: var(--font-size-xs);
+}
+
+.workspace-git-forge-fields {
+  display: grid;
+  gap: 7px;
+  padding-top: 7px;
+  border-top: 1px solid var(--color-border-muted);
+}
+
 .workspace-git-commit-row {
   align-items: flex-start;
   padding: 6px 0;

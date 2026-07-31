@@ -19,6 +19,7 @@ use serde_json::{Value, json};
 mod agent_lifecycle;
 mod app_server;
 mod app_server_domain;
+mod app_server_event;
 mod mcp_service;
 
 pub use agent_lifecycle::{AgentLifecycleError, AgentLifecycleService};
@@ -26,6 +27,7 @@ pub use app_server::{
     AppServer, AppServerContext, AppServerError, AppServerRequest, AppServerResponse,
 };
 pub use app_server_domain::*;
+pub use app_server_event::LocalScheduleEvent;
 pub use mcp_service::{
     EmptyMcpSecretResolver, McpControlService, McpControlServiceError, McpReadyRuntime,
     McpSecretResolver, mcp_host_identity_hash,
@@ -58,9 +60,13 @@ impl AuditSink for PersistentControlAuditSink {
                         run_id: None,
                         run_generation: None,
                         operation: event.operation.to_owned(),
-                        target_summary: "control_method".into(),
+                        target_summary: event
+                            .target_summary
+                            .unwrap_or_else(|| "control_method".into()),
                         decision: event.outcome.to_owned(),
-                        result_code: event.outcome.to_owned(),
+                        result_code: event
+                            .result_code
+                            .unwrap_or_else(|| event.outcome.to_owned()),
                         created_at_ms: unix_time_ms(),
                     })
                     .await;

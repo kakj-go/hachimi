@@ -14,7 +14,7 @@ use hachimi_protocol::{
     SideEffectExecutionId, SideEffectExecutionRecord, SideEffectExecutionStatus, ToolEffect,
 };
 use hachimi_sandbox::SandboxStatus;
-use hachimi_storage::AgentStore;
+use hachimi_storage::{AgentStore, RecoveryToolFence};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
@@ -66,9 +66,13 @@ impl AuditSink for PersistentAuditSink {
                         run_id: Some(run_id),
                         run_generation: Some(generation),
                         operation: event.operation.to_owned(),
-                        target_summary: "tool_target_redacted".into(),
+                        target_summary: event
+                            .target_summary
+                            .unwrap_or_else(|| "tool:metadata_only".into()),
                         decision: event.outcome.to_owned(),
-                        result_code: event.outcome.to_owned(),
+                        result_code: event
+                            .result_code
+                            .unwrap_or_else(|| event.outcome.to_owned()),
                         created_at_ms: now_ms(),
                     })
                     .await;
@@ -186,6 +190,50 @@ impl ToolExecutor for AuthorizedTool {
                     "tool call is outside the active capability grant set",
                 ));
             }
+            let side_effect = !matches!(
+                descriptor.effect,
+                ToolEffect::ReadOnly | ToolEffect::BrowserObserve | ToolEffect::ComputerObserve
+            );
+            let parameters = if side_effect {
+                Some(parameter_hash(&invocation.call.arguments)?)
+            } else {
+                None
+            };
+            let mut recovery_idempotency_key = None;
+            if let (Some(store), Some(parameters)) = (&context.run_store, parameters.as_deref()) {
+                match store
+                    .recovery_tool_fence(
+                        &context.run_id,
+                        invocation.run_generation,
+                        &descriptor.name,
+                        parameters,
+                    )
+                    .await
+                    .map_err(|error| {
+                        crate::ToolExecutionError::Failed(format!(
+                            "run recovery fence lookup failed: {error}"
+                        ))
+                    })? {
+                    Some(RecoveryToolFence::ReuseCompleted {
+                        succeeded,
+                        persisted_result,
+                    }) => {
+                        context.audit.record(AuditEvent::decision(
+                            "tool.execute",
+                            "recovery_result_reused",
+                        ));
+                        return Ok(recovered_side_effect_result(
+                            &invocation.call,
+                            succeeded,
+                            persisted_result,
+                        ));
+                    }
+                    Some(RecoveryToolFence::RetryWithIdempotencyKey(key)) => {
+                        recovery_idempotency_key = Some(key);
+                    }
+                    None => {}
+                }
+            }
             let policy_context = PolicyContext {
                 client: &context.client,
                 method: None,
@@ -283,13 +331,11 @@ impl ToolExecutor for AuthorizedTool {
                     "tool side effect denied because no OS-enforced sandbox is active",
                 ));
             }
-            let side_effect = !matches!(
-                descriptor.effect,
-                ToolEffect::ReadOnly | ToolEffect::ComputerObserve
-            );
             let mut execution_id = None;
             if side_effect && let Some(store) = &context.run_store {
-                let parameters = parameter_hash(&invocation.call.arguments)?;
+                let parameters = parameters
+                    .clone()
+                    .expect("side-effect parameter hash must be present");
                 let timestamp = now_ms();
                 let record = SideEffectExecutionRecord {
                     id: SideEffectExecutionId::random(),
@@ -297,10 +343,9 @@ impl ToolExecutor for AuthorizedTool {
                     run_id: context.run_id.clone(),
                     run_generation: invocation.run_generation,
                     tool_call_id: invocation.call.id.clone(),
-                    idempotency_key: format!(
-                        "tool:{}:{}",
-                        invocation.run_generation, invocation.call.id
-                    ),
+                    idempotency_key: recovery_idempotency_key.unwrap_or_else(|| {
+                        format!("tool:{}:{}", invocation.run_generation, invocation.call.id)
+                    }),
                     parameter_hash: parameters,
                     approval_id,
                     host_request_id: None,
@@ -350,6 +395,27 @@ impl ToolExecutor for AuthorizedTool {
             }
             let execution_cancellation = invocation.cancellation.clone();
             let call = invocation.call.clone();
+            if let Some(store) = &context.run_store {
+                store
+                    .dispatch_plugin_hook_event(
+                        &hachimi_storage::PluginHookEventRecord {
+                            event: "tool.before".into(),
+                            session_id: Some(context.session_id.clone()),
+                            run_id: Some(context.run_id.clone()),
+                            run_generation: Some(context.run_generation),
+                            subject: format!("{}:{}", descriptor.name, call.id),
+                            result_code: "started".into(),
+                            created_at_ms: now_ms(),
+                        },
+                        execution_cancellation.child_token(),
+                    )
+                    .await
+                    .map_err(|error| {
+                        crate::ToolExecutionError::Failed(format!(
+                            "plugin tool.before hook failed: {error}"
+                        ))
+                    })?;
+            }
             let result = inner.execute(invocation).await;
             if execution_cancellation.is_cancelled() {
                 if let (Some(store), Some(execution_id)) =
@@ -394,14 +460,49 @@ impl ToolExecutor for AuthorizedTool {
                         ))
                     })?;
             }
-            context.audit.record(AuditEvent::decision(
-                "tool.execute",
-                if result.is_ok() {
-                    "completed"
-                } else {
-                    "failed"
-                },
-            ));
+            if let Some(store) = &context.run_store {
+                store
+                    .dispatch_plugin_hook_event(
+                        &hachimi_storage::PluginHookEventRecord {
+                            event: "tool.after".into(),
+                            session_id: Some(context.session_id.clone()),
+                            run_id: Some(context.run_id.clone()),
+                            run_generation: Some(context.run_generation),
+                            subject: format!("{}:{}", descriptor.name, call.id),
+                            result_code: if result.is_ok() {
+                                "succeeded".into()
+                            } else {
+                                "failed".into()
+                            },
+                            created_at_ms: now_ms(),
+                        },
+                        execution_cancellation.child_token(),
+                    )
+                    .await
+                    .map_err(|error| {
+                        crate::ToolExecutionError::Failed(format!(
+                            "plugin tool.after hook failed: {error}"
+                        ))
+                    })?;
+            }
+            context.audit.record(
+                AuditEvent::decision(
+                    "tool.execute",
+                    if result.is_ok() {
+                        "completed"
+                    } else {
+                        "failed"
+                    },
+                )
+                .with_metadata(
+                    format!("{}:{}", context.capability_host, descriptor.name),
+                    if result.is_ok() {
+                        "completed"
+                    } else {
+                        "failed"
+                    },
+                ),
+            );
             result
         })
     }
@@ -439,6 +540,7 @@ fn duplicate_side_effect_result(
                 },
                 model_content,
                 structured_content,
+                model_images: Vec::new(),
             })
         }
         SideEffectExecutionStatus::Claimed
@@ -451,6 +553,39 @@ fn duplicate_side_effect_result(
                 claim.record.status
             ),
         )),
+    }
+}
+
+fn recovered_side_effect_result(
+    call: &crate::ToolCall,
+    succeeded: bool,
+    persisted_result: Option<Value>,
+) -> ToolResult {
+    let value = persisted_result.unwrap_or_default();
+    let model_content = value
+        .get("modelContent")
+        .and_then(Value::as_str)
+        .unwrap_or(if succeeded {
+            "the external operation was already completed before recovery"
+        } else {
+            "the external operation had already failed before recovery"
+        })
+        .to_owned();
+    let structured_content = value
+        .get("structuredContent")
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!({ "recovered": true, "replayed": false }));
+    ToolResult {
+        call_id: call.id.clone(),
+        tool_name: call.name.clone(),
+        status: if succeeded {
+            crate::ToolResultStatus::Succeeded
+        } else {
+            crate::ToolResultStatus::Failed
+        },
+        model_content,
+        structured_content,
+        model_images: Vec::new(),
     }
 }
 

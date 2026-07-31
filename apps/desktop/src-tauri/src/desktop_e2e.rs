@@ -38,6 +38,64 @@ pub(crate) fn deterministic_e2e_sandbox_report() -> Option<hachimi_protocol::San
 }
 
 #[cfg(all(debug_assertions, feature = "desktop-e2e"))]
+#[derive(Debug, Default)]
+struct DeterministicE2eSandboxBackend;
+
+#[cfg(all(debug_assertions, feature = "desktop-e2e"))]
+impl hachimi_sandbox::SandboxBackend for DeterministicE2eSandboxBackend {
+    fn capability_report(&self) -> hachimi_protocol::SandboxCapabilityReport {
+        deterministic_e2e_sandbox_report().expect("deterministic E2E backend is enabled")
+    }
+
+    fn spawn_restricted(
+        &self,
+        spec: hachimi_sandbox::SandboxLaunchSpec,
+        cancellation: tokio_util::sync::CancellationToken,
+    ) -> hachimi_sandbox::SandboxSpawnFuture<'_> {
+        Box::pin(async move {
+            use tokio::io::AsyncWriteExt;
+
+            let mut command = tokio::process::Command::new(&spec.executable);
+            command
+                .args(&spec.args)
+                .current_dir(&spec.cwd)
+                .env_clear()
+                .envs(spec.environment)
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .kill_on_drop(true);
+            let mut child = command
+                .spawn()
+                .map_err(hachimi_sandbox::SandboxError::Spawn)?;
+            if let Some(input) = spec.stdin
+                && let Some(mut stdin) = child.stdin.take()
+            {
+                stdin
+                    .write_all(&input)
+                    .await
+                    .map_err(hachimi_sandbox::SandboxError::Spawn)?;
+            }
+            Ok(hachimi_sandbox::SandboxedChild::new(
+                child,
+                cancellation,
+                spec.timeout,
+                spec.output_limit,
+            ))
+        })
+    }
+}
+
+#[cfg(all(debug_assertions, feature = "desktop-e2e"))]
+pub(crate) fn deterministic_e2e_sandbox_backend()
+-> Option<std::sync::Arc<dyn hachimi_sandbox::SandboxBackend>> {
+    deterministic_e2e_sandbox_report().map(|_| {
+        std::sync::Arc::new(DeterministicE2eSandboxBackend)
+            as std::sync::Arc<dyn hachimi_sandbox::SandboxBackend>
+    })
+}
+
+#[cfg(all(debug_assertions, feature = "desktop-e2e"))]
 pub(crate) fn deterministic_e2e_provider_enabled() -> bool {
     std::env::var("HACHIMI_DESKTOP_E2E_PROVIDER").as_deref() == Ok("deterministic")
 }
@@ -50,5 +108,11 @@ pub(crate) fn deterministic_e2e_provider_enabled() -> bool {
 #[cfg(not(all(debug_assertions, feature = "desktop-e2e")))]
 pub(crate) fn deterministic_e2e_sandbox_report() -> Option<hachimi_protocol::SandboxCapabilityReport>
 {
+    None
+}
+
+#[cfg(not(all(debug_assertions, feature = "desktop-e2e")))]
+pub(crate) fn deterministic_e2e_sandbox_backend()
+-> Option<std::sync::Arc<dyn hachimi_sandbox::SandboxBackend>> {
     None
 }

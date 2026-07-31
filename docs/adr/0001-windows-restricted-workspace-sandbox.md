@@ -15,9 +15,9 @@ boundary.
 
 1. Windows is the first enforced backend. `ReadOnly` may run with an explicit degraded report;
    workspace writes and process execution fail closed unless the backend is attested.
-2. MSI and NSIS installers provision the sandbox identity and policy marker through a dedicated,
-   elevated setup helper. Debug and portable builds expose the same helper as an explicit
-   administrator action.
+2. NSIS uses per-user installation. On first launch Hachimi atomically stages fixed-hash sidecars
+   and portable Git under the per-user data root, then the current user runs the setup helper
+   without `runas`, UAC, a Windows Service, or system Git changes.
 3. The marker is not an attestation. Startup resolves the installed AppContainer identity and SID,
    verifies the policy version, creates an AppContainer process security context, and runs
    filesystem/process/network canaries before setting `SandboxStatus::Enforced`.
@@ -32,12 +32,15 @@ boundary.
 6. Path authorization uses Windows-native normalization plus final-handle verification. UNC,
    device namespaces, alternate data streams, escaping reparse points, and unsupported volumes are
    rejected for the first release.
-7. `SandboxRuntimeManager` is the live readiness authority. Workbench can refresh status or launch
-   the fixed setup helper through Windows `runas`; a repair immediately narrows all enforcement
-   flags, then reruns full attestation. Workspace mutation, Process spawn, and stdio MCP startup are
-   mutually exclusive with repair, so a check-then-start race cannot retain the old authority.
+7. `SandboxRuntimeManager` is the live readiness authority. Workbench can refresh, attest or repair;
+   repair first restages the packaged Runtime, immediately narrows all enforcement flags, reruns the
+   per-user helper, then proves sidecar/managed-Git SHA-256 and all canaries. Workspace mutation,
+   Process spawn, stdio MCP and broker startup are mutually exclusive with repair.
 8. A Run keeps its creation-time Sandbox snapshot, while every side effect intersects it with the
    current runtime report. Repair can narrow an active Run but cannot upgrade it.
+9. Checkout roots must be current-user-owned local NTFS directories outside protected Windows
+   roots. Ownership mismatch, protected roots, reparse points and unsafe ACL application return
+   stable migration diagnostics; repair never broadens access automatically.
 
 ## Consequences
 
@@ -45,11 +48,8 @@ boundary.
 - `SandboxCapabilityReport` is the only UI source of readiness truth.
 - A setup or canary failure disables write/Exec instead of silently falling back to the desktop
   user token.
-- Real Windows smoke tests require an administrator-capable NTFS runner and remain distinct from
-  deterministic desktop UI tests.
-- The protected administrator gate runs setup/attestation, handle sentinel, Workspace Worker,
-  Agent Exec, MCP stdio, Terminal/ConPTY, Desktop/Toast, SystemClock soak, and portable restart
-  through one `pnpm test:windows:release` entry point; external pull requests cannot run it.
+- The required release path is a standard Windows user clean install/repair/upgrade. Administrator
+  smoke and control of elevated applications are separate later validation and do not block this ADR.
 
 ## Source boundary
 

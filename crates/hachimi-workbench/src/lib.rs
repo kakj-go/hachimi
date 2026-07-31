@@ -44,6 +44,10 @@ pub enum WorkbenchError {
     SessionNotFound(SessionId),
     #[error("coding Workbench requires a Project-bound Session")]
     ProjectContextRequired,
+    #[error("archived Sessions must be restored before they can continue")]
+    SessionArchived,
+    #[error("the selected Session context does not match the requested task context")]
+    SessionContextMismatch,
     #[error("checkout does not exist: {0}")]
     CheckoutNotFound(CheckoutId),
     #[error("execution target belongs to a different project")]
@@ -219,6 +223,7 @@ impl WorkbenchService {
             .collect();
         let proposed_plans = self.store.list_proposed_plans(session_id).await?;
         let artifacts = self.store.list_session_artifacts(session_id).await?;
+        let agent_tasks = self.store.list_agent_tasks_for_session(session_id).await?;
         Ok(WorkbenchSessionSnapshot {
             session,
             runs,
@@ -227,6 +232,7 @@ impl WorkbenchService {
             pending_approvals,
             proposed_plans,
             artifacts,
+            agent_tasks,
         })
     }
 
@@ -329,8 +335,8 @@ impl WorkbenchService {
         Ok(WorkbenchPlanAcceptanceSnapshot {
             plan: accepted_plan,
             task: WorkbenchTaskSnapshot {
-                project,
-                checkout,
+                project: Some(project),
+                checkout: Some(checkout),
                 session,
                 run,
             },
@@ -555,52 +561,167 @@ impl WorkbenchService {
         if prompt.is_empty() || prompt.chars().count() > 32_000 {
             return Err(WorkbenchError::InvalidPrompt);
         }
-        if request.execution_target.project_id() != &request.project_id {
-            return Err(WorkbenchError::ProjectTargetMismatch);
+        if request.entry_profile == EntryProfile::DesktopControl
+            && (request.project_id.is_some() || request.execution_target.is_some())
+        {
+            return Err(WorkbenchError::SessionContextMismatch);
         }
         for attachment_id in &request.attachment_ids {
             if self.store.get_attachment(attachment_id).await?.is_none() {
                 return Err(WorkbenchError::AttachmentNotFound(attachment_id.clone()));
             }
         }
-        let project = self.project(&request.project_id).await?;
-        let checkout = self
-            .prepare_checkout(&request.execution_target, cancellation)
-            .await?;
+        let mut existing_session = None;
+        let (project, checkout, context, execution_target, workload_override) =
+            if let Some(session_id) = &request.session_id {
+                let session = self
+                    .store
+                    .get_session(session_id)
+                    .await?
+                    .ok_or_else(|| WorkbenchError::SessionNotFound(session_id.clone()))?;
+                if session.archived {
+                    return Err(WorkbenchError::SessionArchived);
+                }
+                if session.entry_profile != request.entry_profile {
+                    return Err(WorkbenchError::SessionContextMismatch);
+                }
+                let resolved = match &session.context {
+                    SessionContextBinding::Project {
+                        project_id,
+                        checkout_id,
+                    } => {
+                        if request
+                            .project_id
+                            .as_ref()
+                            .is_some_and(|requested| requested != project_id)
+                        {
+                            return Err(WorkbenchError::SessionContextMismatch);
+                        }
+                        let project = self.project(project_id).await?;
+                        let checkout =
+                            self.store.get_checkout(checkout_id).await?.ok_or_else(|| {
+                                WorkbenchError::CheckoutNotFound(checkout_id.clone())
+                            })?;
+                        let target = match checkout.kind {
+                            CheckoutKind::Local => ExecutionTarget::Local {
+                                project_id: project_id.clone(),
+                            },
+                            CheckoutKind::ManagedWorktree => ExecutionTarget::ManagedWorktree {
+                                project_id: project_id.clone(),
+                                base_revision: checkout.base_revision.clone().unwrap_or_default(),
+                            },
+                        };
+                        if request
+                            .execution_target
+                            .as_ref()
+                            .is_some_and(|requested| requested != &target)
+                        {
+                            return Err(WorkbenchError::SessionContextMismatch);
+                        }
+                        (
+                            Some(project),
+                            Some(checkout),
+                            session.context.clone(),
+                            Some(target),
+                            Some(WorkloadKind::Coding),
+                        )
+                    }
+                    SessionContextBinding::General => {
+                        if request.project_id.is_some() || request.execution_target.is_some() {
+                            return Err(WorkbenchError::SessionContextMismatch);
+                        }
+                        (
+                            None,
+                            None,
+                            SessionContextBinding::General,
+                            None,
+                            Some(WorkloadKind::General),
+                        )
+                    }
+                    SessionContextBinding::Avatar { .. } => {
+                        return Err(WorkbenchError::SessionContextMismatch);
+                    }
+                };
+                existing_session = Some(session);
+                resolved
+            } else if let Some(project_id) = &request.project_id {
+                let target = request
+                    .execution_target
+                    .as_ref()
+                    .ok_or(WorkbenchError::ProjectTargetMismatch)?;
+                if target.project_id() != project_id {
+                    return Err(WorkbenchError::ProjectTargetMismatch);
+                }
+                let project = self.project(project_id).await?;
+                let checkout = self.prepare_checkout(target, cancellation).await?;
+                (
+                    Some(project.clone()),
+                    Some(checkout.clone()),
+                    SessionContextBinding::Project {
+                        project_id: project.id,
+                        checkout_id: checkout.id,
+                    },
+                    Some(target.clone()),
+                    Some(WorkloadKind::Coding),
+                )
+            } else {
+                if request.execution_target.is_some() {
+                    return Err(WorkbenchError::ProjectTargetMismatch);
+                }
+                (
+                    None,
+                    None,
+                    SessionContextBinding::General,
+                    None,
+                    Some(WorkloadKind::General),
+                )
+            };
         let now = now_ms();
         let requested_capabilities = requested_provider_capabilities(&model_snapshot);
-        let created = AgentRunFactory::new(self.store.clone())
-            .create(AgentRunCreateRequest {
-                principal: principal.to_owned(),
-                idempotency_key: idempotency_key.to_owned(),
-                context: SessionContextBinding::Project {
-                    project_id: project.id.clone(),
-                    checkout_id: checkout.id.clone(),
-                },
-                origin: RunOrigin::Interactive,
-                title: prompt.chars().take(80).collect(),
-                prompt: prompt.to_owned(),
-                attachment_ids: request.attachment_ids.clone(),
-                parent_session_id: None,
-                source_run_id: None,
-                purpose: RunPurpose::Task,
-                model_snapshot,
-                entry_profile: EntryProfile::Workbench,
-                workload_override: Some(WorkloadKind::Coding),
-                behavior_mode: request.behavior_mode,
-                execution_target: Some(request.execution_target.clone()),
-                approval_policy: request.approval_policy,
-                permission_profile: if request.behavior_mode == hachimi_protocol::BehaviorMode::Plan
-                {
-                    PermissionProfile::ReadOnly
-                } else {
-                    PermissionProfile::WorkspaceWrite
-                },
-                budget: RunBudget::default(),
-                requested_capabilities,
-                created_at_ms: now,
-            })
-            .await?;
+        let create_request = AgentRunCreateRequest {
+            principal: principal.to_owned(),
+            idempotency_key: idempotency_key.to_owned(),
+            context,
+            origin: RunOrigin::Interactive,
+            title: existing_session.as_ref().map_or_else(
+                || prompt.chars().take(80).collect(),
+                |session| session.title.clone(),
+            ),
+            prompt: prompt.to_owned(),
+            attachment_ids: request.attachment_ids.clone(),
+            parent_session_id: None,
+            source_run_id: None,
+            purpose: RunPurpose::Task,
+            model_snapshot,
+            entry_profile: request.entry_profile,
+            workload_override,
+            behavior_mode: request.behavior_mode,
+            execution_target,
+            approval_policy: request.approval_policy,
+            permission_profile: if request.entry_profile == EntryProfile::DesktopControl {
+                PermissionProfile::ExternalSandbox
+            } else if project.is_none()
+                || request.behavior_mode == hachimi_protocol::BehaviorMode::Plan
+            {
+                PermissionProfile::ReadOnly
+            } else {
+                PermissionProfile::WorkspaceWrite
+            },
+            budget: RunBudget::default(),
+            requested_capabilities,
+            created_at_ms: now,
+        };
+        let factory = AgentRunFactory::new(self.store.clone());
+        let created = if let Some(session) = existing_session {
+            factory.create_in_session(create_request, session).await?
+        } else {
+            factory.create(create_request).await?
+        };
+        if request.entry_profile == EntryProfile::DesktopControl {
+            self.store
+                .upsert_desktop_control_session(&created.session.id, now)
+                .await?;
+        }
         Ok(WorkbenchTaskSnapshot {
             project,
             checkout,
@@ -842,9 +963,11 @@ mod tests {
             .create_task(
                 &WorkbenchTaskStartRequest {
                     idempotency_key: "request-1".into(),
-                    project_id: project.id,
+                    entry_profile: EntryProfile::Workbench,
+                    session_id: None,
+                    project_id: Some(project.id),
                     prompt: "Inspect the project".into(),
-                    execution_target: target,
+                    execution_target: Some(target),
                     behavior_mode: BehaviorMode::Plan,
                     approval_policy: ApprovalPolicy::NeverPrompt,
                     attachment_ids: vec![attachment.id.clone()],
@@ -857,7 +980,10 @@ mod tests {
             )
             .await
             .expect("task");
-        assert_eq!(snapshot.checkout.kind, CheckoutKind::Local);
+        assert_eq!(
+            snapshot.checkout.as_ref().expect("checkout").kind,
+            CheckoutKind::Local
+        );
         assert_eq!(
             snapshot.run.configuration.permission_profile,
             PermissionProfile::ReadOnly
@@ -941,6 +1067,93 @@ mod tests {
             .await
             .expect("idempotent accept");
         assert_eq!(duplicate.task.run.id, accepted.task.run.id);
+    }
+
+    #[tokio::test]
+    async fn general_and_project_sessions_continue_in_place_without_parallel_runs() {
+        let store = AgentStore::connect_in_memory().await.expect("store");
+        let worktrees = tempfile::tempdir().expect("worktrees");
+        let attachments = tempfile::tempdir().expect("attachments");
+        let service = WorkbenchService::new(store, worktrees.path(), attachments.path());
+        let first = service
+            .create_task(
+                &WorkbenchTaskStartRequest {
+                    idempotency_key: "general-1".into(),
+                    entry_profile: EntryProfile::Workbench,
+                    session_id: None,
+                    project_id: None,
+                    prompt: "Start a general conversation".into(),
+                    execution_target: None,
+                    behavior_mode: BehaviorMode::Default,
+                    approval_policy: ApprovalPolicy::OnlyWhenNeeded,
+                    attachment_ids: Vec::new(),
+                    skill_ids: Vec::new(),
+                },
+                LlmSettings::default(),
+                "test-user",
+                "general-1",
+                &CancellationToken::new(),
+            )
+            .await
+            .expect("general task");
+        assert!(first.project.is_none());
+        assert!(first.checkout.is_none());
+        assert_eq!(first.session.context, SessionContextBinding::General);
+
+        let continuation = WorkbenchTaskStartRequest {
+            idempotency_key: "general-2".into(),
+            entry_profile: EntryProfile::Workbench,
+            session_id: Some(first.session.id.clone()),
+            project_id: None,
+            prompt: "Continue in the same session".into(),
+            execution_target: None,
+            behavior_mode: BehaviorMode::Default,
+            approval_policy: ApprovalPolicy::OnlyWhenNeeded,
+            attachment_ids: Vec::new(),
+            skill_ids: Vec::new(),
+        };
+        assert!(matches!(
+            service
+                .create_task(
+                    &continuation,
+                    LlmSettings::default(),
+                    "test-user",
+                    "general-2",
+                    &CancellationToken::new(),
+                )
+                .await,
+            Err(WorkbenchError::Agent(AgentRunFactoryError::Store(
+                AgentStoreError::RunPreconditionFailed
+            )))
+        ));
+        service
+            .store()
+            .transition_run(&first.run.id, RunStatus::Preparing, None)
+            .await
+            .expect("preparing");
+        service
+            .store()
+            .transition_run(&first.run.id, RunStatus::Running, None)
+            .await
+            .expect("running");
+        service
+            .store()
+            .transition_run(&first.run.id, RunStatus::Succeeded, None)
+            .await
+            .expect("succeeded");
+        let next = service
+            .create_task(
+                &continuation,
+                LlmSettings::default(),
+                "test-user",
+                "general-2",
+                &CancellationToken::new(),
+            )
+            .await
+            .expect("continuation");
+        assert_eq!(next.session.id, first.session.id);
+        assert_ne!(next.run.id, first.run.id);
+        assert_eq!(next.run.session_id, first.session.id);
     }
 
     #[tokio::test]

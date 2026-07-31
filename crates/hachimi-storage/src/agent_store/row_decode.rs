@@ -149,6 +149,15 @@ pub(super) fn compaction_checkpoint_from_row(
                 .transpose()?,
             trimmed_history_groups: u32::try_from(row.get::<i64, _>("trimmed_history_groups"))
                 .unwrap_or(u32::MAX),
+            summary_source: enum_from_db(row.get("summary_source"), "compaction summary source")?,
+            provider_endpoint_id: row
+                .get::<Option<String>, _>("provider_endpoint_id")
+                .map(hachimi_protocol::ProviderEndpointId::new),
+            provider_account_id: row
+                .get::<Option<String>, _>("provider_account_id")
+                .map(hachimi_protocol::ProviderAccountId::new),
+            capability_revision: row.get("capability_revision"),
+            fallback_reason: row.get("fallback_reason"),
         },
         summary: serde_json::from_str(row.get("summary_json"))?,
         quality: serde_json::from_str(row.get("quality_json"))?,

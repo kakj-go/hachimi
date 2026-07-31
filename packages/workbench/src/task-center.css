@@ -343,6 +343,67 @@
   cursor: pointer;
 }
 
+.task-connector-list,
+.task-browser-grant {
+  display: grid;
+  gap: 10px;
+}
+
+.task-event-form {
+  display: grid;
+  gap: 14px;
+  margin-top: 14px;
+  padding: 16px;
+  border: 1px solid var(--color-border-muted);
+  border-radius: var(--radius-lg);
+  background: var(--color-bg-subtle);
+}
+
+.task-event-resource {
+  align-items: end;
+}
+
+.task-event-history {
+  display: grid;
+  gap: 10px;
+  padding-top: 14px;
+  border-top: 1px solid var(--color-border-muted);
+}
+
+.task-event-row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: center;
+  padding: 12px;
+  border: 1px solid var(--color-border-muted);
+  border-radius: var(--radius-md);
+}
+
+.task-event-row > span {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+
+.task-connector-card {
+  display: grid;
+  gap: 6px;
+  padding: 12px;
+  border: 1px solid var(--color-border-muted);
+  border-radius: var(--radius-md);
+  background: var(--color-bg-subtle);
+}
+
+.task-connector-card > small {
+  color: var(--color-text-faint);
+  font-size: var(--font-xs);
+}
+
+.task-browser-grant {
+  padding-left: 24px;
+}
+
 .task-empty,
 .task-history-empty {
   color: var(--color-text-faint);

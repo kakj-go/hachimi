@@ -516,6 +516,7 @@ mod tests {
                 schedule_id: ScheduleId::from("schedule"),
                 task_run_id: TaskRunId::from("task"),
                 scheduled_for_ms: 1_800_000_000_000,
+                event_context: None,
             }));
 
         assert_eq!(interactive.context_hash(), scheduled.context_hash());

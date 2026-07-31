@@ -1,6 +1,12 @@
 use serde::{Deserialize, Serialize};
 use specta::Type;
 
+use crate::{ProviderAccountId, ProviderEndpointId, ProviderProtocolKind};
+
+fn default_provider_profile() -> String {
+    "openai-strict".into()
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum StructuredOutputMode {
@@ -32,6 +38,20 @@ pub struct ProviderCapabilityProbe {
 pub struct LlmSettings {
     pub base_url: String,
     pub model_name: String,
+    #[serde(default)]
+    pub protocol: ProviderProtocolKind,
+    #[serde(default = "default_provider_profile")]
+    pub compatibility_profile_id: String,
+    #[serde(default)]
+    pub provider_endpoint_id: Option<ProviderEndpointId>,
+    #[serde(default)]
+    pub provider_account_id: Option<ProviderAccountId>,
+    #[serde(default)]
+    pub embedding_model_name: String,
+    #[serde(default)]
+    pub reasoning_summary: bool,
+    #[serde(default)]
+    pub remote_compaction: bool,
     pub max_input_tokens: u32,
     pub max_output_tokens: u32,
     #[serde(default)]
@@ -43,6 +63,13 @@ impl Default for LlmSettings {
         Self {
             base_url: "http://localhost:11434/v1".into(),
             model_name: "gemma4:e4b".into(),
+            protocol: ProviderProtocolKind::ChatCompletions,
+            compatibility_profile_id: default_provider_profile(),
+            provider_endpoint_id: None,
+            provider_account_id: None,
+            embedding_model_name: String::new(),
+            reasoning_summary: false,
+            remote_compaction: false,
             max_input_tokens: 0,
             max_output_tokens: 0,
             structured_output_mode: StructuredOutputMode::Auto,
@@ -55,6 +82,13 @@ impl Default for LlmSettings {
 pub struct LlmSettingsView {
     pub base_url: String,
     pub model_name: String,
+    pub protocol: ProviderProtocolKind,
+    pub compatibility_profile_id: String,
+    pub provider_endpoint_id: Option<ProviderEndpointId>,
+    pub provider_account_id: Option<ProviderAccountId>,
+    pub embedding_model_name: String,
+    pub reasoning_summary: bool,
+    pub remote_compaction: bool,
     pub max_input_tokens: u32,
     pub max_output_tokens: u32,
     pub structured_output_mode: StructuredOutputMode,
@@ -67,6 +101,13 @@ impl LlmSettingsView {
         Self {
             base_url: settings.base_url.clone(),
             model_name: settings.model_name.clone(),
+            protocol: settings.protocol,
+            compatibility_profile_id: settings.compatibility_profile_id.clone(),
+            provider_endpoint_id: settings.provider_endpoint_id.clone(),
+            provider_account_id: settings.provider_account_id.clone(),
+            embedding_model_name: settings.embedding_model_name.clone(),
+            reasoning_summary: settings.reasoning_summary,
+            remote_compaction: settings.remote_compaction,
             max_input_tokens: settings.max_input_tokens,
             max_output_tokens: settings.max_output_tokens,
             structured_output_mode: settings.structured_output_mode,
@@ -80,6 +121,13 @@ impl LlmSettingsView {
 pub struct LlmSettingsInput {
     pub base_url: String,
     pub model_name: String,
+    pub protocol: ProviderProtocolKind,
+    pub compatibility_profile_id: String,
+    pub provider_endpoint_id: Option<ProviderEndpointId>,
+    pub provider_account_id: Option<ProviderAccountId>,
+    pub embedding_model_name: String,
+    pub reasoning_summary: bool,
+    pub remote_compaction: bool,
     pub max_input_tokens: u32,
     pub max_output_tokens: u32,
     pub structured_output_mode: StructuredOutputMode,

@@ -10,6 +10,9 @@ node_modules/
 **/dist/
 apps/desktop/src-tauri/binaries/*
 !apps/desktop/src-tauri/binaries/.gitkeep
+apps/desktop/src-tauri/managed-git/
+apps/desktop/src-tauri/managed-chromium/
+assets/plugins/sample-crm/bin/*.exe
 **/storybook-static/
 **/test-results/
 **/playwright-report/

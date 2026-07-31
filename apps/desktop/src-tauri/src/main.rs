@@ -4,20 +4,30 @@
 #[cfg(all(feature = "desktop-e2e", not(debug_assertions)))]
 compile_error!("the desktop-e2e feature is forbidden in release builds");
 mod agent_commands;
+mod agent_host_tools;
 mod agent_runtime_host;
 mod app_domain_handler;
 mod app_shell;
+mod browser_extension_server;
+mod channel_agent_dispatch;
 mod desktop_e2e;
 mod domain_run_launcher;
 mod extension_commands;
+mod forge_commands;
+mod gateway_process;
+mod gateway_runtime;
+mod local_host_commands;
+mod managed_sandbox_runtime;
 mod mcp_commands;
 mod media_commands;
+mod plugin_content_protocol;
 mod process_commands;
 mod project_git_commands;
 mod review_commands;
 mod sandbox_commands;
 mod scheduler_commands;
 mod skill_drop;
+mod storage_layout;
 mod workbench_commands;
 mod workspace_commands;
 mod workspace_mutation_commands;
@@ -26,6 +36,8 @@ use agent_commands::*;
 use app_shell::*;
 use desktop_e2e::*;
 use extension_commands::*;
+use forge_commands::*;
+use local_host_commands::*;
 use mcp_commands::*;
 use media_commands::*;
 use process_commands::*;
@@ -45,6 +57,7 @@ use std::{
     },
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
+use storage_layout::*;
 use workbench_commands::*;
 use workspace_commands::*;
 use workspace_mutation_commands::*;
@@ -56,10 +69,9 @@ use hachimi_capabilities::McpEchoServer;
 use hachimi_control_plane::{
     AgentLifecycleService, AppServer, ControlPlane, McpControlService, PersistentControlAuditSink,
 };
-use hachimi_core::{FeatureFlags, WindowKind};
+use hachimi_core::{FeatureFlags, RuntimeFeatureSet, WindowKind};
 use hachimi_llm::{
-    ApiKeyStore, LlmError, SystemApiKeyStore, apply_secret_change, stream_pet_turn,
-    test_connection, validate_input,
+    ApiKeyStore, SystemApiKeyStore, apply_secret_change, test_connection, validate_input,
 };
 use hachimi_motion::{InspectedMotion, MotionCatalog, inspect_motion};
 use hachimi_policy::expand_permission_profile;
@@ -98,7 +110,7 @@ use hachimi_windowing::{
 };
 use hachimi_workbench::WorkbenchService;
 use parking_lot::{Mutex, RwLock};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use specta::Type;
 use tauri::{
     AppHandle, Emitter, LogicalPosition, Manager, PhysicalPosition, Runtime, State, WebviewUrl,
@@ -128,220 +140,12 @@ const MAX_THEME_FILE_BYTES: u64 = 64 * 1024;
 const AVATAR_IMPORT_TOKEN_TTL: Duration = Duration::from_secs(10 * 60);
 const MOTION_IMPORT_TOKEN_TTL: Duration = Duration::from_secs(10 * 60);
 const VOICE_IMPORT_TOKEN_TTL: Duration = Duration::from_secs(10 * 60);
-const APP_IDENTIFIER: &str = "com.hachimi.desktop";
-const PORTABLE_MARKER_FILE: &str = "hachimi.portable";
-const RESET_MARKER_FILE: &str = "hachimi-reset-all-v1.marker";
-const DATA_ROOT_SENTINEL_FILE: &str = ".hachimi-data-root";
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum StorageMode {
-    Debug,
-    Portable,
-    Installed,
-    Override,
-}
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct StorageLayout {
-    root: PathBuf,
-    webview: PathBuf,
-    mode: StorageMode,
-    redirect_webview: bool,
-}
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-struct ResetMarker {
-    version: u32,
-    root: PathBuf,
-    webview: PathBuf,
-}
-impl StorageLayout {
-    fn logs(&self) -> PathBuf {
-        self.root.join("logs")
-    }
-    fn sandbox_setup_marker(&self) -> PathBuf {
-        if self.mode == StorageMode::Installed {
-            std::env::var_os("PROGRAMDATA")
-                .map(PathBuf::from)
-                .unwrap_or_else(|| self.root.clone())
-                .join("Hachimi/sandbox/windows/setup.json")
-        } else {
-            self.root.join("sandbox/windows/setup.json")
-        }
-    }
-}
-fn debug_data_root(executable: &Path) -> Option<PathBuf> {
-    let executable_dir = executable.parent()?;
-    if executable_dir
-        .file_name()
-        .is_some_and(|name| name == "debug")
-    {
-        return executable_dir
-            .parent()
-            .map(|target| target.join("hachimi-data"));
-    }
-    if executable_dir
-        .file_name()
-        .is_some_and(|name| name == "deps")
-    {
-        let debug = executable_dir.parent()?;
-        if debug.file_name().is_some_and(|name| name == "debug") {
-            return debug.parent().map(|target| target.join("hachimi-data"));
-        }
-    }
-    None
-}
-fn resolve_storage_layout() -> StorageLayout {
-    let executable = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("hachimi-desktop"));
-    let executable_dir = executable
-        .parent()
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| PathBuf::from("."));
-
-    if let Some(override_root) = std::env::var_os("HACHIMI_DATA_DIR")
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
-    {
-        let root = absolute_path(override_root);
-        return StorageLayout {
-            webview: root.join("webview"),
-            root,
-            mode: StorageMode::Override,
-            redirect_webview: true,
-        };
-    }
-
-    if executable_dir.join(PORTABLE_MARKER_FILE).is_file() {
-        let root = executable_dir.join("data");
-        return StorageLayout {
-            webview: root.join("webview"),
-            root,
-            mode: StorageMode::Portable,
-            redirect_webview: true,
-        };
-    }
-
-    if cfg!(debug_assertions)
-        && let Some(root) = debug_data_root(&executable)
-    {
-        return StorageLayout {
-            webview: root.join("webview"),
-            root,
-            mode: StorageMode::Debug,
-            redirect_webview: true,
-        };
-    }
-
-    let root = std::env::var_os("APPDATA")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| executable_dir.join("data"))
-        .join(APP_IDENTIFIER);
-    let webview_base = std::env::var_os("LOCALAPPDATA")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| executable_dir.join("data-local"));
-    let webview = webview_base.join(APP_IDENTIFIER).join("EBWebView");
-    StorageLayout {
-        root,
-        webview,
-        mode: StorageMode::Installed,
-        redirect_webview: false,
-    }
-}
-#[cfg(all(debug_assertions, feature = "desktop-e2e"))]
-fn desktop_e2e_path(variable: &str) -> Option<PathBuf> {
-    std::env::var_os(variable)
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
-        .map(absolute_path)
-}
-#[cfg(not(all(debug_assertions, feature = "desktop-e2e")))]
-fn desktop_e2e_path(_variable: &str) -> Option<PathBuf> {
-    None
-}
-fn reset_marker_path() -> PathBuf {
-    std::env::temp_dir().join(RESET_MARKER_FILE)
-}
-fn write_reset_marker(layout: &StorageLayout) -> Result<(), String> {
-    let marker = ResetMarker {
-        version: 1,
-        root: layout.root.clone(),
-        webview: layout.webview.clone(),
-    };
-    let encoded = serde_json::to_vec(&marker)
-        .map_err(|error| format!("failed to serialize reset marker: {error}"))?;
-    std::fs::write(reset_marker_path(), encoded)
-        .map_err(|error| format!("failed to write reset marker: {error}"))
-}
-
-fn remove_reset_directory(path: &Path) -> std::io::Result<()> {
-    match std::fs::remove_dir_all(path) {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(error),
-    }
-}
-fn perform_pending_reset(layout: &StorageLayout) -> Result<(), String> {
-    let marker = reset_marker_path();
-    if !marker.is_file() {
-        return Ok(());
-    }
-
-    let pending: ResetMarker = serde_json::from_slice(
-        &std::fs::read(&marker).map_err(|error| format!("failed to read reset marker: {error}"))?,
-    )
-    .map_err(|error| format!("invalid reset marker: {error}"))?;
-    if pending.version != 1 || pending.root != layout.root || pending.webview != layout.webview {
-        // Keep markers from another installed, portable, or debug storage layout pending.
-        return Ok(());
-    }
-
-    if layout.root.exists() {
-        let sentinel = std::fs::read_to_string(layout.root.join(DATA_ROOT_SENTINEL_FILE))
-            .map_err(|error| format!("refusing to clear unverified data root: {error}"))?;
-        if sentinel.trim() != APP_IDENTIFIER {
-            return Err("refusing to clear a data root not owned by Hachimi".into());
-        }
-        remove_reset_directory(&layout.root)
-            .map_err(|error| format!("failed to clear {}: {error}", layout.root.display()))?;
-    }
-    if !layout.webview.starts_with(&layout.root) {
-        remove_reset_directory(&layout.webview)
-            .map_err(|error| format!("failed to clear {}: {error}", layout.webview.display()))?;
-    }
-    SystemApiKeyStore
-        .clear()
-        .map_err(|error| format!("failed to clear Hachimi credentials: {error}"))?;
-    std::fs::remove_file(&marker)
-        .map_err(|error| format!("failed to consume reset marker: {error}"))?;
-    Ok(())
-}
-
-fn configure_webview_storage(layout: &StorageLayout) {
-    #[cfg(all(debug_assertions, feature = "desktop-e2e"))]
-    {
-        // msedgedriver assigns a profile to every native session. Overriding
-        // it here makes a restarted application write DevToolsActivePort to
-        // the first session's directory while the driver waits in the new
-        // one. The E2E build therefore accepts the driver-owned process-local
-        // WEBVIEW2_USER_DATA_FOLDER. Production and portable builds continue
-        // to use StorageLayout below.
-        let _ = layout;
-    }
-    #[cfg(not(all(debug_assertions, feature = "desktop-e2e")))]
-    {
-        if !layout.redirect_webview {
-            return;
-        }
-        // This runs at the very beginning of main, before Tauri/WebView2 creates
-        // threads or reads its environment. That makes changing the process-local
-        // WebView2 data root safe for Debug and explicit portable runs.
-        unsafe {
-            std::env::set_var("WEBVIEW2_USER_DATA_FOLDER", &layout.webview);
-        }
-    }
-}
-
 #[derive(Debug)]
 struct ActivePetRun {
     run_id: String,
+    session_id: SessionId,
+    agent_run_id: RunId,
+    run_generation: u64,
     cancellation: CancellationToken,
 }
 
@@ -524,6 +328,10 @@ struct DesktopState {
     approval_broker: PersistentApprovalBroker,
     user_input_broker: PersistentUserInputBroker,
     app_server: AppServer,
+    gateway: hachimi_gateway::GatewayHost,
+    plugin_host: hachimi_extensions::PluginHost,
+    plugin_surfaces: plugin_content_protocol::PluginSurfaceRegistry,
+    browser: Arc<hachimi_browser::BrowserHost>,
     sandbox_runtime: Arc<SandboxRuntimeManager>,
     sandbox_activity: SandboxActivityTracker,
     control_plane: Arc<ControlPlane>,
@@ -637,10 +445,11 @@ impl DesktopState {
             .api_key_store
             .is_configured()
             .map_err(|error| CommandError::operation("secret_store_failed", error))?;
-        Ok(LlmSettingsView::from_settings(
-            &self.settings.read().llm,
-            configured,
-        ))
+        let settings = workbench_commands::provider_settings_for_runtime(
+            self.settings.read().llm.clone(),
+            self.control_plane.feature_flags().runtime_features,
+        );
+        Ok(LlmSettingsView::from_settings(&settings, configured))
     }
 }
 
@@ -1119,22 +928,45 @@ fn start_workbench_resize(
     Ok(())
 }
 
-const fn release_feature_enabled(explicitly_disabled: bool) -> bool {
-    !explicitly_disabled
+fn load_or_create_loopback_token(data_root: &Path) -> std::io::Result<String> {
+    let credential = keyring::Entry::new("com.hachimi.channel", "loopback-webhook:local")
+        .map_err(keyring_io_error)?;
+    match credential.get_password() {
+        Ok(token) if (32..=128).contains(&token.len()) => return Ok(token),
+        Ok(_) => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "loopback credential is invalid",
+            ));
+        }
+        Err(keyring::Error::NoEntry) => {}
+        Err(error) => return Err(keyring_io_error(error)),
+    }
+    let gateway_root = data_root.join("gateway");
+    std::fs::create_dir_all(&gateway_root)?;
+    let token_path = gateway_root.join("loopback.token");
+    let token = if token_path.is_file() {
+        let token = std::fs::read_to_string(&token_path)?;
+        let token = token.trim().to_owned();
+        if !(32..=128).contains(&token.len()) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "legacy loopback token is invalid",
+            ));
+        }
+        token
+    } else {
+        Uuid::new_v4().to_string()
+    };
+    credential.set_password(&token).map_err(keyring_io_error)?;
+    if token_path.is_file() {
+        std::fs::remove_file(token_path)?;
+    }
+    Ok(token)
 }
 
-fn release_agent_feature_flags(
-    workspace_disabled: bool,
-    mcp_disabled: bool,
-    scheduler_disabled: bool,
-) -> FeatureFlags {
-    FeatureFlags {
-        workbench: true,
-        workspace_tools: release_feature_enabled(workspace_disabled),
-        mcp_runtime: release_feature_enabled(mcp_disabled),
-        scheduler: release_feature_enabled(scheduler_disabled),
-        ..FeatureFlags::all_disabled()
-    }
+fn keyring_io_error(error: keyring::Error) -> std::io::Error {
+    std::io::Error::other(format!("channel credential storage failed: {error}"))
 }
 
 fn main() {
@@ -1142,6 +974,10 @@ fn main() {
         panic!("{error}");
     }
     let storage_layout = resolve_storage_layout();
+    if std::env::args_os().any(|argument| argument == "--gateway") {
+        gateway_process::run(&storage_layout.root);
+        return;
+    }
     if let Err(error) = perform_pending_reset(&storage_layout) {
         eprintln!("Hachimi reset could not be completed: {error}");
     }
@@ -1248,6 +1084,8 @@ fn main() {
                 ),
             }
         })
+        .register_uri_scheme_protocol("hachimi-plugin-asset", plugin_content_protocol::asset_protocol)
+        .register_uri_scheme_protocol("hachimi-plugin-ui", plugin_content_protocol::ui_protocol)
         .on_webview_event(handle_skill_drag_event)
         .invoke_handler(tauri::generate_handler![
             get_bootstrap_state,
@@ -1306,6 +1144,8 @@ fn main() {
             subscribe_skills,
             unsubscribe_skills,
             list_workbench_projects,
+            list_run_recoveries,
+            resolve_run_recovery,
             add_workbench_project,
             manage_workbench_project,
             import_workbench_attachment,
@@ -1317,8 +1157,15 @@ fn main() {
             inspect_project_git,
             refresh_project_git,
             create_project_empty_initial_commit,
+            list_git_remotes,
+            push_git_remote,
+            query_forge_change,
+            mutate_forge_change,
+            update_forge_credential,
             get_sandbox_status,
+            get_sandbox_bootstrap_state,
             refresh_sandbox_status,
+            attest_sandbox,
             repair_sandbox,
             pin_workbench_checkout,
             cleanup_workbench_checkout,
@@ -1356,11 +1203,14 @@ fn main() {
             reauthorize_schedule,
             revoke_schedule_grant,
             run_schedule_now,
+            ingest_schedule_event,
+            list_schedule_event_receipts,
             get_task_run,
             list_task_runs,
             cancel_task_run,
             retry_task_run,
             continue_task_interactively,
+            local_host_command,
             initialize_agent_control,
             search_agent_sessions,
             resume_agent_session,
@@ -1372,8 +1222,11 @@ fn main() {
             unsubscribe_agent_events,
             list_pending_user_input,
             resolve_user_input,
+            list_pending_approvals,
+            resolve_agent_approval,
             cancel_user_input,
             get_llm_settings,
+            get_provider_registry,
             save_llm_settings,
             save_and_test_llm_settings,
             list_avatar_models,
@@ -1396,6 +1249,8 @@ fn main() {
             reset_motion_bindings,
             reset_motion_binding,
             get_motion_runtime_asset,
+            get_session_permission_config,
+            update_session_permission_config,
             start_pet_turn,
             cancel_pet_turn,
             list_voice_models,
@@ -1430,10 +1285,28 @@ fn main() {
                 tracing::error!(%error, "failed to load settings; using defaults");
                 AppSettings::default()
             });
+            let runtime_features = release_runtime_feature_set(RuntimeFeatureSet {
+                run_recovery: env_disabled("HACHIMI_DISABLE_RUN_RECOVERY"),
+                provider_extensions: env_disabled("HACHIMI_DISABLE_PROVIDER_EXTENSIONS"),
+                provider_remote_context: env_disabled(
+                    "HACHIMI_DISABLE_PROVIDER_REMOTE_CONTEXT",
+                ),
+                multi_agent: env_disabled("HACHIMI_DISABLE_MULTI_AGENT"),
+                git_remote_mutations: env_disabled("HACHIMI_DISABLE_GIT_REMOTE_MUTATIONS"),
+                plugin_runtime: env_disabled("HACHIMI_DISABLE_PLUGIN_RUNTIME"),
+                enterprise_integrations: env_disabled(
+                    "HACHIMI_DISABLE_ENTERPRISE_INTEGRATIONS",
+                ),
+                desktop_control: env_disabled("HACHIMI_DISABLE_DESKTOP_CONTROL"),
+            });
             let agent_store = tauri::async_runtime::block_on(AgentStore::connect(
                 data_dir.join("agent.sqlite3"),
             ))?;
-            let recovery = tauri::async_runtime::block_on(agent_store.recover_interrupted())?;
+            let mut recovery = tauri::async_runtime::block_on(
+                agent_store.recover_interrupted_with_run_recovery(
+                    runtime_features.run_recovery,
+                ),
+            )?;
             if recovery.interrupted_runs > 0
                 || recovery.lost_tasks > 0
                 || recovery.expired_processes > 0
@@ -1453,26 +1326,40 @@ fn main() {
             }
             let approval_broker = PersistentApprovalBroker::new(agent_store.clone());
             let user_input_broker = PersistentUserInputBroker::new(agent_store.clone());
+            let resource_dir = app.path().resource_dir()?;
+            let managed_sandbox = managed_sandbox_runtime::stage(&data_dir, &resource_dir)
+                .map_err(std::io::Error::other)?;
             let sandbox_probe = Arc::new(
                 WindowsSandboxReadinessProbe::new(storage_layout.sandbox_setup_marker())
                     .with_runtime(
-                        sandbox_sidecar_path("hachimi-sandbox-launcher"),
-                        sandbox_sidecar_path("hachimi-sandbox-canary"),
+                        managed_sandbox.launcher.clone(),
+                        managed_sandbox.canary.clone(),
                         data_dir.join("sandbox/windows/attestation"),
-                    ),
+                    )
+                    .with_runtime_integrity(managed_sandbox.expected_integrity.clone()),
             );
             let deterministic_report = deterministic_e2e_sandbox_report();
             let sandbox_runtime = Arc::new(SandboxRuntimeManager::new_with_report(
                 Arc::clone(&sandbox_probe),
-                sandbox_sidecar_path("hachimi-sandbox-setup"),
+                managed_sandbox.setup.clone(),
                 storage_layout.sandbox_setup_marker(),
-                sandbox_sidecar_path("hachimi-sandbox-launcher"),
+                managed_sandbox.launcher.clone(),
                 deterministic_report.clone(),
             ));
+            if deterministic_report.is_none()
+                && SandboxStatus::from_report(&sandbox_runtime.snapshot().report)
+                    != SandboxStatus::Enforced
+                && let Err(error) = tauri::async_runtime::block_on(sandbox_runtime.repair())
+            {
+                tracing::warn!(code = error.code, message = %error.message, "per-user Sandbox bootstrap/repair did not attest");
+            }
             let sandbox_report = sandbox_runtime.snapshot().report;
-            let sandbox_backend: Option<Arc<dyn SandboxBackend>> = deterministic_report
-                .is_none()
-                .then(|| Arc::clone(&sandbox_runtime) as Arc<dyn SandboxBackend>);
+            let sandbox_backend: Option<Arc<dyn SandboxBackend>> =
+                deterministic_e2e_sandbox_backend().or_else(|| {
+                    deterministic_report
+                        .is_none()
+                        .then(|| Arc::clone(&sandbox_runtime) as Arc<dyn SandboxBackend>)
+                });
             tracing::info!(
                 backend = %sandbox_report.backend,
                 readiness = ?sandbox_report.readiness,
@@ -1596,6 +1483,11 @@ fn main() {
                 std::env::var("HACHIMI_DISABLE_MCP_RUNTIME").as_deref() == Ok("1"),
                 std::env::var("HACHIMI_DISABLE_SCHEDULER").as_deref() == Ok("1"),
             );
+            feature_flags.runtime_features = runtime_features;
+            feature_flags.plugin_runtime = feature_flags.runtime_features.plugin_runtime;
+            feature_flags.browser_control &= feature_flags.runtime_features.desktop_control;
+            feature_flags.computer_observe &= feature_flags.runtime_features.desktop_control;
+            feature_flags.computer_control &= feature_flags.runtime_features.desktop_control;
             feature_flags.motion_lab = cfg!(debug_assertions)
                 || settings.developer_mode
                 || std::env::var("HACHIMI_ENABLE_MOTION_LAB").as_deref() == Ok("1");
@@ -1628,21 +1520,117 @@ fn main() {
             {
                 tracing::warn!(%error, "MCP startup reconciliation failed");
             }
-            let agent_preparer = Arc::new(agent_runtime_host::DesktopAgentRunPreparer::new(
+            let browser_executable = std::env::var_os("HACHIMI_MANAGED_CHROMIUM")
+                .map(PathBuf::from)
+                .unwrap_or(app.path().resource_dir()?.join("managed-chromium/chrome.exe"));
+            let managed_browser_broker = Arc::new(hachimi_browser::ManagedChromiumBroker::new(
+                browser_executable,
+                data_dir.join("browser/profiles"),
+                data_dir.join("browser/downloads"),
+            ));
+            let chrome_extension_broker = Arc::new(hachimi_browser::ChromeExtensionBroker::new(
+                data_dir.join("browser/extension-files"),
+            ));
+            let browser = Arc::new(hachimi_browser::BrowserHost::with_broker(
+                Arc::new(hachimi_browser::SystemBrowserClock),
+                Arc::new(hachimi_browser::CompositeBrowserBroker::new(
+                    managed_browser_broker,
+                    chrome_extension_broker.clone(),
+                )),
+            ));
+            if feature_flags.runtime_features.desktop_control {
+                tauri::async_runtime::spawn({
+                    let browser = Arc::clone(&browser);
+                    async move {
+                        if let Err(error) = browser_extension_server::run(
+                            browser,
+                            chrome_extension_broker,
+                        )
+                        .await
+                        {
+                            tracing::warn!(%error, "Chrome extension broker stopped");
+                        }
+                    }
+                });
+            }
+            let computer = Arc::new(hachimi_computer::ComputerHost::new(
+                Arc::new(hachimi_computer::PlatformComputerBroker::new()),
+                Arc::new(hachimi_computer::SystemComputerClock),
+            ));
+            let plugins = hachimi_extensions::PluginHost::new(
                 agent_store.clone(),
-                workbench.clone(),
-                approval_broker.clone(),
-                user_input_broker.clone(),
-                skill_host.clone(),
-                mcp_control.clone(),
-                sandbox_backend.clone(),
+                data_dir.join("plugins"),
+            );
+            if feature_flags.runtime_features.plugin_runtime
+                && let Some(backend) = sandbox_backend.as_ref()
+            {
+                tauri::async_runtime::block_on(
+                    plugins.register_sidecar_drivers(Arc::clone(backend)),
+                )?;
+            }
+            let mut plugin_skill_catalog_roots = skill_host.catalog_roots();
+            if feature_flags.runtime_features.plugin_runtime {
+                for (plugin_id, path) in
+                    tauri::async_runtime::block_on(plugins.enabled_skill_roots())?
+                {
+                    let namespace = app_domain_handler::plugin_skill_namespace(plugin_id.as_str());
+                    plugin_skill_catalog_roots.push(
+                        hachimi_skills::SkillCatalogRoot::new(
+                            path,
+                            hachimi_protocol::SkillScope::System,
+                        )
+                        .with_namespace(namespace),
+                    );
+                }
+            }
+            skill_host.set_catalog_roots(plugin_skill_catalog_roots)?;
+            let multi_agent = hachimi_agent::MultiAgentCoordinator::new(agent_store.clone());
+            let agent_preparer = Arc::new(agent_runtime_host::DesktopAgentRunPreparer::new(
+                agent_runtime_host::DesktopAgentRunDependencies {
+                    store: agent_store.clone(),
+                    workbench: workbench.clone(),
+                    approvals: approval_broker.clone(),
+                    user_input: user_input_broker.clone(),
+                    skills: skill_host.clone(),
+                    mcp: mcp_control.clone(),
+                    sandbox_backend: sandbox_backend.clone(),
+                    browser: Arc::clone(&browser),
+                    computer: Arc::clone(&computer),
+                    plugins: plugins.clone(),
+                    multi_agent: multi_agent.clone(),
+                    runtime_features: feature_flags.runtime_features,
+                },
             ));
             let agent_executor = AgentRunExecutor::new(
                 agent_store.clone(),
                 Arc::new(AgentExecutorRegistry::default()),
-                Arc::new(workbench_commands::DesktopModelRuntimeFactory::new()),
+                Arc::new(workbench_commands::DesktopModelRuntimeFactory::new(
+                    agent_store.clone(),
+                    feature_flags.runtime_features,
+                )),
                 agent_preparer,
             );
+            multi_agent
+                .install_executor(agent_executor.clone())
+                .map_err(|_| "Multi-Agent executor was already installed")?;
+            if runtime_features.multi_agent {
+                let report = tauri::async_runtime::block_on(multi_agent.reconcile_startup())
+                    .map_err(|error| format!("Multi-Agent startup reconciliation failed: {error}"))?;
+                recovery.auto_resume_run_ids.retain(|run_id| {
+                    !report.handled_recovery_run_ids.iter().any(|handled| handled == run_id)
+                });
+                if report.inspected > 0 {
+                    tracing::info!(
+                        inspected = report.inspected,
+                        resumed = report.resumed,
+                        synchronized_terminal = report.synchronized_terminal,
+                        needs_attention = report.needs_attention,
+                        failed = report.failed,
+                        cancelled = report.cancelled,
+                        "reconciled durable Multi-Agent Tasks"
+                    );
+                }
+            }
             let recognition_runtime = speech_recognizer.clone();
             let scheduler = Arc::new(hachimi_scheduler::SchedulerService::new(
                 agent_store.clone(),
@@ -1655,6 +1643,40 @@ fn main() {
             let process_registry = Arc::new(ProcessRegistry::default());
             let workspace_watches = Arc::new(Mutex::new(BTreeMap::new()));
             let workspace_searches = Arc::new(Mutex::new(BTreeMap::new()));
+            let loopback_token = load_or_create_loopback_token(&data_dir)?;
+            let builtins = hachimi_gateway::local_builtin_providers_with_enterprise(
+                agent_store.clone(),
+                &loopback_token,
+                feature_flags.runtime_features.enterprise_integrations,
+            )?;
+            let channel_providers = builtins.registry.clone();
+            if feature_flags.runtime_features.plugin_runtime
+                && let Some(backend) = sandbox_backend.as_ref()
+            {
+                for definition in
+                    tauri::async_runtime::block_on(plugins.enabled_channel_sidecars())?
+                {
+                    let provider = hachimi_gateway::SandboxedStdioChannelProvider::new(
+                        Arc::clone(backend),
+                        definition.manifest,
+                        definition.bundle_root,
+                        definition.executable,
+                        definition.args,
+                    )?;
+                    channel_providers.register(Arc::new(provider))?;
+                }
+            }
+            let gateway = hachimi_gateway::GatewayHost::with_registry(
+                agent_store.clone(),
+                channel_providers,
+            );
+            tauri::async_runtime::block_on(
+                gateway.bootstrap_provider_accounts(&builtins.accounts),
+            )?;
+            tauri::async_runtime::block_on(gateway.reconcile_startup(
+                i64::try_from(epoch_millis()).unwrap_or(i64::MAX),
+            ))?;
+            let plugin_surfaces = plugin_content_protocol::PluginSurfaceRegistry::default();
             let domain_handler = app_domain_handler::DesktopAppDomainHandler::new(
                 app_domain_handler::DesktopAppDomainDependencies {
                     store: agent_store.clone(),
@@ -1670,10 +1692,22 @@ fn main() {
                     ),
                     workspace_watches: Arc::clone(&workspace_watches),
                     workspace_searches: Arc::clone(&workspace_searches),
+                    browser: Arc::clone(&browser),
+                    computer,
+                    plugins: plugins.clone(),
+                    plugin_surfaces: plugin_surfaces.clone(),
+                    gateway: gateway.clone(),
+                    loopback_channel: builtins.loopback,
+                    mock_poll_channel: builtins.mock_poll,
                 },
                 feature_flags,
                 sandbox_activity.clone(),
             );
+            if feature_flags.runtime_features.plugin_runtime {
+                tauri::async_runtime::block_on(domain_handler.reconcile_plugin_startup()).map_err(
+                    |error| std::io::Error::other(format!("{}: {}", error.code, error.message)),
+                )?;
+            }
             let app_server = AppServer::new(Arc::clone(&control_plane), agent_lifecycle)
                 .with_brokers(
                     Arc::new(approval_broker.clone()),
@@ -1707,6 +1741,10 @@ fn main() {
                 approval_broker,
                 user_input_broker,
                 app_server,
+                gateway: gateway.clone(),
+                plugin_host: plugins,
+                plugin_surfaces,
+                browser,
                 sandbox_runtime,
                 sandbox_activity,
                 control_plane,
@@ -1722,7 +1760,13 @@ fn main() {
                 placement_revision: AtomicU64::new(0),
             };
             app.manage(state);
+            schedule_auto_resume_runs(app.handle().clone(), recovery.auto_resume_run_ids);
             start_desktop_scheduler(app.handle(), scheduler, feature_flags.scheduler);
+            gateway_runtime::start_gateway_runtime(
+                app.handle().clone(),
+                feature_flags.local_gateway,
+                loopback_token,
+            );
             start_skill_change_bridge(app.handle().clone(), skill_change_host);
             create_pet_context_menu(app)?;
             let recognition_app = app.handle().clone();

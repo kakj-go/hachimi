@@ -11,6 +11,7 @@ import { Button, Square, TerminalSquare, TextField } from "@hachimi/ui";
 import { Show, createEffect, createSignal, onCleanup, onMount, untrack } from "solid-js";
 
 import type { WorkbenchCommandPort } from "./workbench-command-port";
+import { runMutationContext } from "./mutation-context";
 import "./terminal.css";
 
 function encodeBytes(value: string): string {
@@ -24,17 +25,6 @@ function decodeBytes(value: string, decoder: TextDecoder, stream: boolean): stri
   const binary = atob(value);
   const bytes = Uint8Array.from(binary, (character) => character.charCodeAt(0));
   return decoder.decode(bytes, { stream });
-}
-
-function mutationContext(run: RunRecord) {
-  return {
-    requestId: crypto.randomUUID(),
-    clientId: "window:workbench",
-    protocolVersion: 18,
-    idempotencyKey: crypto.randomUUID(),
-    expectedRunId: run.id,
-    expectedGeneration: run.generation,
-  };
 }
 
 function activeRun(snapshot: WorkbenchSessionSnapshot): RunRecord | undefined {
@@ -164,7 +154,7 @@ export function TerminalPanel(props: {
       previous = key;
       void props.commandPort
         .resizeProcess({
-          context: mutationContext(currentRun),
+          context: runMutationContext(currentRun),
           processSessionId: current.id,
           size,
         })
@@ -192,7 +182,7 @@ export function TerminalPanel(props: {
     setOutputCapped(false);
     try {
       const record = await props.commandPort.spawnProcess({
-        context: mutationContext(currentRun),
+        context: runMutationContext(currentRun),
         sessionId: props.snapshot.session.id,
         checkoutId: currentCheckout,
         command: ["powershell.exe", "-NoLogo", "-NoProfile", "-NonInteractive"],
@@ -222,7 +212,7 @@ export function TerminalPanel(props: {
     setFailure(undefined);
     try {
       await props.commandPort.writeProcessStdin({
-        context: mutationContext(currentRun),
+        context: runMutationContext(currentRun),
         processSessionId: current.id,
         writeId: crypto.randomUUID(),
         deltaBase64: encodeBytes(`${value}\r\n`),
@@ -242,7 +232,7 @@ export function TerminalPanel(props: {
     try {
       setProcess(
         await props.commandPort.terminateProcess({
-          context: mutationContext(currentRun),
+          context: runMutationContext(currentRun),
           processSessionId: current.id,
         }),
       );

@@ -168,7 +168,7 @@ impl AgentStore {
             ),
         };
 
-        sqlx::query(
+        let updated = sqlx::query(
             "UPDATE user_input_requests SET status = ?, resolved_at_ms = ?, resolved_by = ? WHERE id = ? AND status = 'pending'",
         )
         .bind(request_status.as_str())
@@ -177,6 +177,9 @@ impl AgentStore {
         .bind(request.id.as_str())
         .execute(&mut *transaction)
         .await?;
+        if updated.rows_affected() != 1 {
+            return Err(AgentStoreError::UserInputNotPending(request.id));
+        }
         sqlx::query("UPDATE transcript_items SET status = ? WHERE id = ?")
             .bind(item_status.as_str())
             .bind(request.item_id.as_str())

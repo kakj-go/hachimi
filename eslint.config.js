@@ -11,6 +11,7 @@ export default tseslint.config(
       "**/generated.ts",
       "**/target/**",
       "**/target-*/**",
+      "apps/desktop/src-tauri/managed-chromium/**",
     ],
   },
   eslint.configs.recommended,
@@ -27,6 +28,7 @@ export default tseslint.config(
         ...globals.node,
         ...globals.mocha,
         browser: "readonly",
+        window: "readonly",
         $: "readonly",
         $$: "readonly",
         expect: "readonly",
@@ -35,6 +37,14 @@ export default tseslint.config(
   },
   {
     files: ["docs/ui-style-demos/**/*.js"],
+    languageOptions: { globals: globals.browser },
+  },
+  {
+    files: ["assets/browser-extension/**/*.js"],
+    languageOptions: { globals: { ...globals.browser, ...globals.webextensions } },
+  },
+  {
+    files: ["assets/plugins/**/ui/**/*.js"],
     languageOptions: { globals: globals.browser },
   },
   {

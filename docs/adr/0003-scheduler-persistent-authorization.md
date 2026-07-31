@@ -23,7 +23,8 @@ replay is adopted. Any later source adaptation must first use the fixed commit a
 
 1. `SchedulerService` calculates occurrences with an injected clock and launches them through the
    same `AgentRunFactory`, `AgentRunExecutor`, and `AgentExecutorRegistry` used by interactive Runs.
-2. A trigger creates a fresh `TaskRun`, `Session`, `Run`, generation, and transient Run grant.
+2. A `Standalone` trigger creates a fresh `TaskRun`, `Session`, `Run`, generation and transient Run
+   grant. A `SessionContinuation` trigger binds a fresh `TaskRun`/`Run` to an existing Session lane.
    Scheduler state never contains an Agent Tool Loop.
 3. The database is authoritative. A unique invocation key identifies a schedule occurrence. The
    nearest enabled occurrence owns the single wake-up timer; startup reconciliation recomputes it.
@@ -44,6 +45,11 @@ replay is adopted. Any later source adaptation must first use the fixed commit a
    tracked independently from execution success.
 10. Completely exiting the process stops scheduling. Tray/background process lifetime is the
     supported execution lifetime; system wake and OS service installation are deferred.
+11. A continuation may read the Session's persisted compacted context, but it recaptures
+    StepContext, ToolPlan, ScheduleGrant, contribution revisions and Host readiness. It never
+    restores Approval, UserInput secret, temporary Grant, Browser observation, Computer frame,
+    process lease or MCP session. Maximum occurrences, end time, stop-after-success and user disable
+    are deterministic stop conditions; every trigger appends a thread heartbeat Item.
 
 ## Consequences
 

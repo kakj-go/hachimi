@@ -42,7 +42,7 @@ async fn dispatch_review(
         .map_err(|error| review_error("review_app_server_failed", error))?
     {
         hachimi_control_plane::AppServerResponse::Domain(response) => match *response {
-            hachimi_control_plane::AppServerDomainResponse::Review(response) => Ok(response),
+            hachimi_control_plane::AppServerDomainResponse::Review(response) => Ok(*response),
             _ => Err(CommandError::new(
                 "review_app_server_protocol_mismatch",
                 "App Server returned a response for a different domain",
@@ -276,8 +276,8 @@ pub(super) async fn start_review_inner(
             app,
             client,
             WorkbenchTaskSnapshot {
-                project,
-                checkout,
+                project: Some(project),
+                checkout: Some(checkout),
                 session: session.clone(),
                 run: run.clone(),
             },

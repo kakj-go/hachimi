@@ -227,6 +227,15 @@ export const zhCn = {
   "workbench.approvalRequired": "需要审批",
   "workbench.deny": "拒绝",
   "workbench.approveOnce": "仅批准本次",
+  "workbench.recoveryRequired": "需要恢复决策",
+  "workbench.recoveryDescription":
+    "上次进程在此 Run 活动期间退出。Hachimi 只会恢复安全步骤，不会自动重放结果未知的外部操作。",
+  "workbench.recoveryIndeterminate":
+    "外部操作结果未知。请先在目标系统核实，再确认成功或按原幂等键重试。",
+  "workbench.recoveryResumeSafe": "继续安全部分",
+  "workbench.recoveryConfirmSucceeded": "已确认操作成功",
+  "workbench.recoveryRetry": "按原幂等键重试",
+  "workbench.recoveryAbandon": "放弃 Run",
   "workbench.proposedPlanRevision": "建议计划 · 修订 {revision}",
   "workbench.planAcceptCreatesRun": "执行会创建新的默认模式任务，不继承计划模式权限。",
   "workbench.executePlan": "执行计划",
@@ -266,6 +275,21 @@ export const zhCn = {
   "settings.securityDescription":
     "工作台目前只能读写设置、测试 LLM 连接、管理 3D 资源和配置内置语音；没有目录、终端、Git、浏览器或桌面控制权限。",
   "settings.connection": "连接配置",
+  "settings.providerProtocol": "Provider 协议",
+  "settings.providerProtocol.description":
+    "首期仅支持 OpenAI 标准 Chat Completions 与 Responses；Embeddings 通过独立接口调用。",
+  "settings.compatibilityProfile": "兼容档案",
+  "settings.compatibilityProfile.description":
+    "默认严格校验 openai-strict；其他方言必须预先登记并通过探测。",
+  "settings.embeddingModel": "Embedding 模型",
+  "settings.embeddingModel.description":
+    "可选，仅启用 Provider-neutral Embeddings；不会创建 Memory。",
+  "settings.reasoningSummary": "Provider reasoning summary",
+  "settings.reasoningSummary.description":
+    "只展示 Provider 明确标记为公开 summary 的内容，不读取隐藏 reasoning。",
+  "settings.remoteCompaction": "远程压缩",
+  "settings.remoteCompaction.description":
+    "仅 Responses 可启用；失败或能力漂移时回退本地 checkpoint。",
   "settings.responsePreview": "响应预览（最多 512 字符）",
   "settings.resource.invalidName": "请输入 1–64 个字符的唯一名称。",
   "settings.resource.imported": "资源已安全复制到 Hachimi 模型库。",
@@ -594,6 +618,15 @@ export const enUs: Record<MessageKey, string> = {
   "workbench.approvalRequired": "Approval required",
   "workbench.deny": "Deny",
   "workbench.approveOnce": "Approve once",
+  "workbench.recoveryRequired": "Recovery decision required",
+  "workbench.recoveryDescription":
+    "The previous process exited while this Run was active. Hachimi resumes only safe work and never silently replays an external operation with an unknown result.",
+  "workbench.recoveryIndeterminate":
+    "The external result is unknown. Verify the target system before confirming success or retrying with the original idempotency key.",
+  "workbench.recoveryResumeSafe": "Resume safe work",
+  "workbench.recoveryConfirmSucceeded": "Confirm effect succeeded",
+  "workbench.recoveryRetry": "Retry idempotently",
+  "workbench.recoveryAbandon": "Abandon Run",
   "workbench.proposedPlanRevision": "Proposed plan · revision {revision}",
   "workbench.planAcceptCreatesRun":
     "Execution creates a new default-mode run without inheriting Plan-mode authority.",
@@ -635,6 +668,21 @@ export const enUs: Record<MessageKey, string> = {
   "settings.securityDescription":
     "The Workbench can only manage settings, test the LLM connection, manage 3D assets, and configure built-in speech. It has no workspace, terminal, Git, browser, or desktop-control access.",
   "settings.connection": "Connection",
+  "settings.providerProtocol": "Provider protocol",
+  "settings.providerProtocol.description":
+    "The first release supports standard OpenAI Chat Completions and Responses; Embeddings use a separate interface.",
+  "settings.compatibilityProfile": "Compatibility profile",
+  "settings.compatibilityProfile.description":
+    "openai-strict validates the official wire shape; other dialects must be registered and probed.",
+  "settings.embeddingModel": "Embedding model",
+  "settings.embeddingModel.description":
+    "Optional provider-neutral Embeddings capability; it does not create Memory.",
+  "settings.reasoningSummary": "Provider reasoning summary",
+  "settings.reasoningSummary.description":
+    "Displays only content explicitly marked by the Provider as a public summary, never hidden reasoning.",
+  "settings.remoteCompaction": "Remote compaction",
+  "settings.remoteCompaction.description":
+    "Responses only; failures or capability drift fall back to the local checkpoint.",
   "settings.responsePreview": "Response preview (up to 512 characters)",
   "settings.resource.invalidName": "Enter a unique name between 1 and 64 characters.",
   "settings.resource.imported": "The resource was safely copied into the Hachimi catalog.",

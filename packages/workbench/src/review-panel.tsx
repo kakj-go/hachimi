@@ -1,12 +1,10 @@
 import {
   commandFailure,
-  type MutationContext,
   type ReviewDelivery,
   type ReviewFindingStatus,
   type ReviewSeverity,
   type ReviewSnapshot,
   type ReviewTarget,
-  type RunRecord,
   type SessionRecord,
   type WorkbenchSessionSnapshot,
 } from "@hachimi/contracts";
@@ -27,33 +25,12 @@ import {
 import { For, Show, createEffect, createMemo, createSignal, untrack } from "solid-js";
 
 import type { WorkbenchCommandPort } from "./workbench-command-port";
+import { directUserMutationContext, runMutationContext } from "./mutation-context";
 import "./review-panel.css";
 
 type ReviewTargetKind = ReviewTarget["kind"];
 
 const TERMINAL_RUN_STATUSES = new Set(["succeeded", "failed", "cancelled", "interrupted", "lost"]);
-
-function mutationContext(run: RunRecord): MutationContext {
-  return {
-    requestId: crypto.randomUUID(),
-    clientId: "window:workbench",
-    protocolVersion: 18,
-    idempotencyKey: crypto.randomUUID(),
-    expectedRunId: run.id,
-    expectedGeneration: run.generation,
-  };
-}
-
-function findingMutationContext(): MutationContext {
-  return {
-    requestId: crypto.randomUUID(),
-    clientId: "window:workbench",
-    protocolVersion: 18,
-    idempotencyKey: crypto.randomUUID(),
-    expectedRunId: null,
-    expectedGeneration: null,
-  };
-}
 
 function severityTone(severity: ReviewSeverity): "info" | "warning" | "danger" {
   if (severity === "critical" || severity === "error") return "danger";
@@ -159,7 +136,7 @@ export function ReviewPanel(props: {
     setFailure(undefined);
     try {
       const started = await props.commandPort.startReview({
-        context: mutationContext(run),
+        context: runMutationContext(run),
         sessionId: props.snapshot.session.id,
         target,
         delivery: delivery(),
@@ -184,7 +161,7 @@ export function ReviewPanel(props: {
     setFailure(undefined);
     try {
       const finding = await props.commandPort.updateReviewFinding({
-        context: findingMutationContext(),
+        context: directUserMutationContext(),
         reviewId: selected.review.id,
         findingId,
         status,

@@ -14,17 +14,25 @@
 use std::{future::Future, pin::Pin};
 
 use hachimi_protocol::{
-    ControlMethod, DiffReadFileRequest, DiffReadFileResponse, DiffScope, FsFileChunk, FsListPage,
-    FsListRequest, FsReadChunkRequest, FsSearchId, FsSearchSnapshot, FsSearchStartRequest,
-    FsSearchUpdateRequest, FsWatchId, FsWatchRegistration, FsWatchRequest, McpAuthStatusRecord,
-    McpCallSummaryListRequest, McpCallSummaryRecord, McpInventorySnapshot, McpOAuthLoginRequest,
-    McpOAuthLoginResponse, McpPromptGetRequest, McpPromptResult, McpResourceContent,
-    McpResourceReadRequest, McpServerId, MutationContext, ProcessListRequest, ProcessReadRequest,
-    ProcessReadSnapshot, ProcessResizeRequest, ProcessSessionRecord, ProcessSpawnRequest,
-    ProcessTerminateRequest, ProcessWriteRequest, ProjectId, ReviewFinding,
-    ReviewFindingUpdateRequest, ReviewId, ReviewSnapshot, ReviewStartRequest, ReviewStartSnapshot,
-    RunDiffSnapshot, ScheduleCreateRequest, ScheduleDefinition, ScheduleGrantRecord, ScheduleId,
-    SchedulePreview, ScheduleSnapshot, ScheduleSpec, ScheduleUpdateRequest, SessionId,
+    BrowserActionRequest, BrowserActionResult, BrowserCapability, BrowserFileToken,
+    BrowserHostSettings, BrowserImportedDownload, BrowserObservation, BrowserPairing,
+    BrowserPairingId, BrowserPermissionDecision, BrowserProfileKind, BrowserSession,
+    BrowserSessionId, BrowserSitePermission, ChannelEnvelope, ChannelRouteKey,
+    ComputerActionRequest, ComputerActionResult, ComputerAppRule, ComputerFrame,
+    ComputerWindowIdentity, ConnectorAccount, ConnectorAccountId, ConnectorAccountUpsert,
+    ConnectorInvocationRequest, ConnectorInvocationResult, ControlMethod, DeliveryAttempt,
+    DiffReadFileRequest, DiffReadFileResponse, DiffScope, FsFileChunk, FsListPage, FsListRequest,
+    FsReadChunkRequest, FsSearchId, FsSearchSnapshot, FsSearchStartRequest, FsSearchUpdateRequest,
+    FsWatchId, FsWatchRegistration, FsWatchRequest, GatewayHealth, IngressReceipt, InstalledPlugin,
+    McpAuthStatusRecord, McpCallSummaryListRequest, McpCallSummaryRecord, McpInventorySnapshot,
+    McpOAuthLoginRequest, McpOAuthLoginResponse, McpPromptGetRequest, McpPromptResult,
+    McpResourceContent, McpResourceReadRequest, McpServerId, MutationContext, PluginId,
+    ProcessListRequest, ProcessReadRequest, ProcessReadSnapshot, ProcessResizeRequest,
+    ProcessSessionRecord, ProcessSpawnRequest, ProcessTerminateRequest, ProcessWriteRequest,
+    ProjectId, ReviewFinding, ReviewFindingUpdateRequest, ReviewId, ReviewSnapshot,
+    ReviewStartRequest, ReviewStartSnapshot, RunDiffSnapshot, ScheduleCreateRequest,
+    ScheduleDefinition, ScheduleEventIngressRequest, ScheduleEventReceipt, ScheduleGrantRecord,
+    ScheduleId, SchedulePreview, ScheduleSnapshot, ScheduleSpec, ScheduleUpdateRequest, SessionId,
     SkillEntryCreateRequest, SkillEntryRenameRequest, SkillFileSnapshot, SkillFileWriteRequest,
     SkillId, SkillPreviewResource, SkillPreviewResourceRequest, SkillRecord, SkillTreeNode,
     TaskInteractiveContinuation, TaskRunId, TaskRunRecord,
@@ -41,6 +49,12 @@ pub enum AppServerDomainRequest {
     Skills(SkillsAppRequest),
     Schedule(Box<ScheduleAppRequest>),
     Task(TaskAppRequest),
+    Browser(BrowserAppRequest),
+    Computer(ComputerAppRequest),
+    Plugin(PluginAppRequest),
+    Connector(ConnectorAppRequest),
+    Channel(ChannelAppRequest),
+    Gateway(GatewayAppRequest),
 }
 
 impl AppServerDomainRequest {
@@ -48,6 +62,15 @@ impl AppServerDomainRequest {
     pub const fn control_method(&self) -> ControlMethod {
         match self {
             Self::Mcp(_) => ControlMethod::ConnectorsManage,
+            Self::Browser(BrowserAppRequest::Observe { .. }) => ControlMethod::BrowserObserve,
+            Self::Browser(_) => ControlMethod::BrowserControl,
+            Self::Computer(ComputerAppRequest::Observe { .. }) => ControlMethod::ComputerObserve,
+            Self::Computer(_) => ControlMethod::ComputerControl,
+            Self::Plugin(_) => ControlMethod::ConnectorsManage,
+            Self::Connector(ConnectorAppRequest::Invoke(_)) => ControlMethod::ConnectorsInvoke,
+            Self::Connector(_) => ControlMethod::ConnectorsManage,
+            Self::Channel(_) => ControlMethod::ChannelsManage,
+            Self::Gateway(_) => ControlMethod::GatewayManage,
             Self::Skills(_) => ControlMethod::SkillsManage,
             Self::Fs(_)
             | Self::Process(_)
@@ -62,11 +85,242 @@ impl AppServerDomainRequest {
 pub enum AppServerDomainResponse {
     Fs(FsAppResponse),
     Process(ProcessAppResponse),
-    Review(ReviewAppResponse),
+    Review(Box<ReviewAppResponse>),
     Mcp(McpAppResponse),
     Skills(SkillsAppResponse),
-    Schedule(ScheduleAppResponse),
+    Schedule(Box<ScheduleAppResponse>),
     Task(Box<TaskAppResponse>),
+    Browser(BrowserAppResponse),
+    Computer(ComputerAppResponse),
+    Plugin(PluginAppResponse),
+    Connector(ConnectorAppResponse),
+    Channel(ChannelAppResponse),
+    Gateway(GatewayAppResponse),
+}
+
+#[derive(Debug)]
+pub enum BrowserAppRequest {
+    BeginPairing,
+    GetHostSettings,
+    ListPermissions,
+    ListPermissionRequests,
+    SetPreferredProfile(BrowserProfileKind),
+    Start {
+        session_id: SessionId,
+        run_id: hachimi_protocol::RunId,
+        profile_kind: BrowserProfileKind,
+        initial_url: Option<String>,
+        pairing_id: Option<BrowserPairingId>,
+    },
+    GrantSitePermission {
+        context: hachimi_protocol::MutationContext,
+        session_id: SessionId,
+        run_id: hachimi_protocol::RunId,
+        browser_session_id: BrowserSessionId,
+        expected_revision: u64,
+        origin: String,
+        capabilities: Vec<BrowserCapability>,
+        decision: BrowserPermissionDecision,
+        network_kind: hachimi_protocol::BrowserNetworkRuleKind,
+        allow_private_network: bool,
+        expires_at_ms: Option<i64>,
+    },
+    RevokeSitePermission {
+        context: hachimi_protocol::MutationContext,
+        session_id: SessionId,
+        run_id: hachimi_protocol::RunId,
+        browser_session_id: BrowserSessionId,
+        expected_revision: u64,
+        origin: String,
+    },
+    Observe {
+        browser_session_id: BrowserSessionId,
+        run_id: hachimi_protocol::RunId,
+    },
+    Act {
+        run_id: hachimi_protocol::RunId,
+        request: BrowserActionRequest,
+    },
+    StageUpload {
+        browser_session_id: BrowserSessionId,
+        run_id: hachimi_protocol::RunId,
+        source: std::path::PathBuf,
+    },
+    ImportDownload {
+        browser_session_id: BrowserSessionId,
+        run_id: hachimi_protocol::RunId,
+        download_token: String,
+        destination: std::path::PathBuf,
+    },
+    TakeOver {
+        browser_session_id: BrowserSessionId,
+        run_id: hachimi_protocol::RunId,
+    },
+    Stop {
+        browser_session_id: BrowserSessionId,
+        run_id: hachimi_protocol::RunId,
+    },
+}
+
+#[derive(Debug)]
+pub enum BrowserAppResponse {
+    Pairing(BrowserPairing),
+    HostSettings(BrowserHostSettings),
+    Session(BrowserSession),
+    Permission(BrowserSitePermission),
+    Permissions(Vec<hachimi_protocol::BrowserPermissionLedgerEntry>),
+    PermissionRequests(Vec<hachimi_protocol::BrowserPermissionRequest>),
+    PermissionRevoked(bool),
+    Observation(BrowserObservation),
+    Action(BrowserActionResult),
+    FileToken(BrowserFileToken),
+    ImportedDownload(BrowserImportedDownload),
+}
+
+#[derive(Debug)]
+pub enum ComputerAppRequest {
+    ListWindows,
+    ListGlobalAppRules,
+    SetGlobalAppRule(ComputerAppRule),
+    RemoveGlobalAppRule(String),
+    SetAppRule {
+        session_id: SessionId,
+        rule: ComputerAppRule,
+    },
+    Observe {
+        session_id: SessionId,
+        run_id: hachimi_protocol::RunId,
+        window_handle: String,
+    },
+    Act {
+        run_id: hachimi_protocol::RunId,
+        request: ComputerActionRequest,
+    },
+    TakeOver(SessionId),
+}
+
+#[derive(Debug)]
+pub enum ComputerAppResponse {
+    Rule(ComputerAppRule),
+    Rules(Vec<ComputerAppRule>),
+    Windows(Vec<ComputerWindowIdentity>),
+    Removed(bool),
+    Frame(ComputerFrame),
+    Action(ComputerActionResult),
+    TakenOver(u64),
+}
+
+#[derive(Debug)]
+pub enum PluginAppRequest {
+    InstallLocal(std::path::PathBuf),
+    List,
+    ListContributions(Option<PluginId>),
+    GetContributionSurface {
+        plugin_id: PluginId,
+        contribution_id: String,
+    },
+    Get(PluginId),
+    HealthCheck(PluginId),
+    PermissionDiff(PluginId),
+    RevisionHead(PluginId),
+    ListRevisions(PluginId),
+    LifecycleJournal(Option<PluginId>),
+    SetEnabled {
+        plugin_id: PluginId,
+        enabled: bool,
+    },
+    Rollback {
+        plugin_id: PluginId,
+        revision: Option<String>,
+    },
+    Uninstall(PluginId),
+}
+
+#[derive(Debug)]
+pub enum PluginAppResponse {
+    Plugin(InstalledPlugin),
+    OptionalPlugin(Option<InstalledPlugin>),
+    Plugins(Vec<InstalledPlugin>),
+    Contributions(Vec<hachimi_protocol::InstalledContribution>),
+    ContributionSurface(hachimi_protocol::PluginContributionSurface),
+    PermissionDiff(Option<hachimi_protocol::PluginPermissionDiff>),
+    RevisionHead(Option<hachimi_protocol::PluginRevisionHead>),
+    Revisions(Vec<hachimi_protocol::PluginRevisionRecord>),
+    LifecycleJournal(Vec<hachimi_protocol::PluginLifecycleJournalRecord>),
+    Removed(bool),
+}
+
+#[derive(Debug)]
+pub enum ConnectorAppRequest {
+    UpsertAccount(ConnectorAccountUpsert),
+    ListAccounts,
+    GetAccount(ConnectorAccountId),
+    GetDriverDescriptor {
+        plugin_id: hachimi_protocol::PluginId,
+        connector_id: String,
+    },
+    RevokeAccount(ConnectorAccountId),
+    Invoke(ConnectorInvocationRequest),
+}
+
+#[derive(Debug)]
+pub enum ConnectorAppResponse {
+    Account(ConnectorAccount),
+    Accounts(Vec<ConnectorAccount>),
+    OptionalAccount(Option<ConnectorAccount>),
+    DriverDescriptor(hachimi_protocol::ConnectorDriverDescriptor),
+    Invocation(ConnectorInvocationResult),
+}
+
+#[derive(Debug)]
+pub enum ChannelAppRequest {
+    /// Authenticated, already-ledgered ingress dispatched by the Gateway
+    /// supervisor. The Gateway owns transport/claim state; the App Server
+    /// owns Session/Run creation and execution.
+    DispatchIngress {
+        envelope: ChannelEnvelope,
+    },
+    LoopbackReceive {
+        bearer_token: String,
+        envelope: ChannelEnvelope,
+    },
+    MockPollPush(ChannelEnvelope),
+    MockPollSetConnected(bool),
+    MockPollDrain,
+    EnqueueDelivery {
+        route: ChannelRouteKey,
+        idempotency_key: String,
+        text: String,
+    },
+}
+
+#[derive(Debug)]
+pub enum ChannelAppResponse {
+    Ingress(IngressReceipt),
+    Ingresses(Vec<IngressReceipt>),
+    MockPollConnected(bool),
+    Delivery(DeliveryAttempt),
+}
+
+#[derive(Debug)]
+pub enum GatewayAppRequest {
+    Health,
+    ProviderManifests,
+    ProviderHealth,
+    ListProviderAccounts,
+    UpsertProviderAccount(hachimi_protocol::ChannelProviderAccountUpsert),
+    SetStartupEnabled(bool),
+    Reconcile,
+}
+
+#[derive(Debug)]
+pub enum GatewayAppResponse {
+    Health(GatewayHealth),
+    ProviderManifests(Vec<hachimi_protocol::ChannelProviderManifest>),
+    ProviderHealth(Vec<hachimi_protocol::ChannelProviderHealth>),
+    ProviderAccounts(Vec<hachimi_protocol::ChannelProviderAccount>),
+    ProviderAccount(hachimi_protocol::ChannelProviderAccount),
+    Reconciled,
 }
 
 #[derive(Debug)]
@@ -223,6 +477,10 @@ pub enum ScheduleAppRequest {
         context: MutationContext,
         schedule_id: ScheduleId,
     },
+    IngestEvent(ScheduleEventIngressRequest),
+    ListEvents {
+        limit: u32,
+    },
 }
 
 #[derive(Debug)]
@@ -235,6 +493,8 @@ pub enum ScheduleAppResponse {
     Removed(bool),
     Grant(Option<ScheduleGrantRecord>),
     Task(TaskRunRecord),
+    EventReceipt(ScheduleEventReceipt),
+    EventReceipts(Vec<ScheduleEventReceipt>),
 }
 
 #[derive(Debug)]

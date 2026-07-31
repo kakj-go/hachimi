@@ -94,6 +94,39 @@ impl AgentStore {
             .map_err(AgentStoreError::from)
     }
 
+    pub async fn latest_active_capability_grants(
+        &self,
+        run_id: &RunId,
+    ) -> Result<Option<CapabilityGrantSet>, AgentStoreError> {
+        let row = sqlx::query(
+            "SELECT grant_json FROM capability_grants WHERE run_id = ? AND invalidated_at_ms IS NULL AND (expires_at_ms IS NULL OR expires_at_ms > ?) ORDER BY created_at_ms DESC, id DESC LIMIT 1",
+        )
+        .bind(run_id.as_str())
+        .bind(current_time_ms())
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(|row| serde_json::from_str(row.get("grant_json")))
+            .transpose()
+            .map_err(AgentStoreError::from)
+    }
+
+    /// Returns the last trusted Run-scoped grant as a recovery input. Callers must
+    /// issue a fresh grant and re-check expiry; this never reactivates the stored row.
+    pub async fn latest_capability_grants_snapshot(
+        &self,
+        run_id: &RunId,
+    ) -> Result<Option<CapabilityGrantSet>, AgentStoreError> {
+        let row = sqlx::query(
+            "SELECT grant_json FROM capability_grants WHERE run_id = ? ORDER BY created_at_ms DESC, id DESC LIMIT 1",
+        )
+        .bind(run_id.as_str())
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(|row| serde_json::from_str(row.get("grant_json")))
+            .transpose()
+            .map_err(AgentStoreError::from)
+    }
+
     pub async fn invalidate_run_capability_grants(
         &self,
         session_id: &SessionId,
@@ -110,4 +143,14 @@ impl AgentStore {
         .await?;
         Ok(result.rows_affected())
     }
+}
+
+fn current_time_ms() -> i64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .and_then(|duration| i64::try_from(duration.as_millis()).ok())
+        .unwrap_or_default()
 }
