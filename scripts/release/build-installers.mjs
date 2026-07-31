@@ -1,6 +1,6 @@
 import { spawnSync } from "node:child_process";
-import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { readFileSync, rmSync } from "node:fs";
+import { resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const workspaceRoot = resolve(fileURLToPath(new URL("../..", import.meta.url)));
@@ -39,6 +39,14 @@ function buildInstallers() {
     readFileSync(resolve(workspaceRoot, "package.json"), "utf8"),
   ).version;
   const msiVersion = deriveMsiVersion(sourceVersion);
+  const bundleRoot = resolve(workspaceRoot, "target/release/bundle");
+  for (const kind of ["nsis", "msi"]) {
+    const output = resolve(bundleRoot, kind);
+    if (!output.startsWith(`${bundleRoot}${sep}`)) {
+      throw new Error(`release_installer_output_escaped:${output}`);
+    }
+    rmSync(output, { recursive: true, force: true });
+  }
   process.stdout.write(`Building NSIS with source version ${sourceVersion}.\n`);
   runTauri(["build", "--bundles", "nsis", "--config", tauriConfig]);
   process.stdout.write(`Building MSI with numeric prerelease overlay ${msiVersion}.\n`);

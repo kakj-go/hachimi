@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import {
   collectArtifactDigests,
   collectSourceRegistryDigests,
+  validateCandidateArtifactSet,
   writeEvidence,
 } from "./evidence.mjs";
 
@@ -23,7 +24,7 @@ function artifactFiles(root) {
 
 if (!statSync(artifactRoot).isDirectory()) throw new Error("release_artifact_root_missing");
 const artifacts = artifactFiles(artifactRoot);
-if (artifacts.length < 3) throw new Error("release_artifact_set_incomplete");
+validateCandidateArtifactSet(artifacts);
 const manifest = {
   schemaVersion: 1,
   version,

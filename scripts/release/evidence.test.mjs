@@ -322,4 +322,8 @@ test("candidate verifier hashes downloaded files instead of trusting the manifes
     () => verifyCandidateArtifacts(manifest, root, artifacts),
     /release_candidate_file_digest_mismatch/,
   );
+  assert.throws(
+    () => verifyCandidateArtifacts(manifest, root, [...artifacts, artifacts[1]]),
+    /release_candidate_artifact_count_invalid/,
+  );
 });

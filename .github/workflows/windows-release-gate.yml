@@ -50,7 +50,11 @@ jobs:
           pnpm runtime:prepare
           pnpm build:installer
           pnpm build:portable
-          New-Item -ItemType Directory -Path target/release-candidate -Force | Out-Null
+          $targetRoot = [System.IO.Path]::GetFullPath((Join-Path $env:GITHUB_WORKSPACE "target"))
+          $candidateRoot = [System.IO.Path]::GetFullPath((Join-Path $targetRoot "release-candidate"))
+          if (-not $candidateRoot.StartsWith("$targetRoot\", [StringComparison]::OrdinalIgnoreCase)) { throw "candidate_output_escaped" }
+          if ([System.IO.Directory]::Exists($candidateRoot)) { [System.IO.Directory]::Delete($candidateRoot, $true) }
+          New-Item -ItemType Directory -Path $candidateRoot -Force | Out-Null
           Copy-Item target/release/bundle/nsis/*.exe target/release-candidate/
           Copy-Item target/release/bundle/msi/*.msi target/release-candidate/
           Copy-Item target/portable/*.zip target/release-candidate/

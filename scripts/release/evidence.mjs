@@ -384,6 +384,7 @@ export function verifyArtifactManifest(manifest, evidence, options = {}) {
 }
 
 export function verifyCandidateArtifacts(manifest, workspaceRoot, artifactPaths, options = {}) {
+  validateCandidateArtifactSet(artifactPaths);
   if (manifest.schemaVersion !== RELEASE_EVIDENCE_SCHEMA_VERSION) {
     throw new Error("release_artifact_manifest_schema_unsupported");
   }
@@ -414,6 +415,18 @@ export function verifyCandidateArtifacts(manifest, workspaceRoot, artifactPaths,
   }
   if (manifest.unsigned !== true) throw new Error("release_artifact_signature_status_missing");
   return manifest;
+}
+
+export function validateCandidateArtifactSet(artifactPaths) {
+  if (!Array.isArray(artifactPaths) || artifactPaths.length !== 3) {
+    throw new Error("release_candidate_artifact_count_invalid");
+  }
+  for (const extension of [".exe", ".msi", ".zip"]) {
+    const count = artifactPaths.filter((path) => path.toLowerCase().endsWith(extension)).length;
+    if (count !== 1) {
+      throw new Error(`release_candidate_artifact_type_count_invalid:${extension}:${count}`);
+    }
+  }
 }
 
 export function verifyEvidence(root, options = {}) {
