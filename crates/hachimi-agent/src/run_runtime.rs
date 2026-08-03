@@ -1,12 +1,13 @@
 use std::{collections::BTreeMap, future::Future, pin::Pin, sync::Arc};
 
+use futures_util::StreamExt;
 use hachimi_protocol::{
     ApprovalPolicy, AttachmentId, BehaviorMode, CapabilityGrantSet, CompactionCheckpoint,
     EntryProfile, ItemId, ItemPayload, ItemRelations, ItemStatus, LlmSettings, McpToolSelection,
-    ModelMessage, PermissionProfile, ProviderCapabilities, RunBudget, RunConfiguration,
-    RunDriverKind, RunId, RunOrigin, RunPurpose, RunRecord, RunStatus, SandboxCapabilityReport,
-    SessionContextBinding, SessionId, SessionRecord, SkillId, TranscriptItem, TranscriptItemKind,
-    WorkloadKind,
+    ModelEvent, ModelMessage, ModelRequest, ModelRole, PermissionProfile, ProviderCapabilities,
+    RunBudget, RunConfiguration, RunDriverKind, RunId, RunOrigin, RunPurpose, RunRecord, RunStatus,
+    SandboxCapabilityReport, SessionContextBinding, SessionId, SessionRecord, SkillId,
+    TranscriptItem, TranscriptItemKind, WorkloadKind,
 };
 use hachimi_storage::{AgentStore, AgentStoreError, CreatedAgentRun};
 use parking_lot::Mutex;
@@ -483,6 +484,7 @@ pub struct PreparedAgentRun {
     pub host_context: Option<String>,
     pub state: StepRuntimeState,
     pub world_refresher: Option<Arc<dyn crate::StepWorldStateRefresher>>,
+    pub diff_tracker: Option<Arc<crate::RunDiffTracker>>,
 }
 
 pub type AgentPreparationFuture =
@@ -533,6 +535,62 @@ impl AgentRunExecutor {
     #[must_use]
     pub const fn registry(&self) -> &Arc<AgentExecutorRegistry> {
         &self.registry
+    }
+
+    /// Runs a bounded, tool-free helper prompt through the same configured
+    /// provider as the Session. Product surfaces use this only for optional
+    /// suggestions and must retain a deterministic fallback.
+    pub async fn generate_auxiliary_text(
+        &self,
+        configuration: &RunConfiguration,
+        system_prompt: &str,
+        user_prompt: &str,
+        max_output_tokens: u32,
+        cancellation: CancellationToken,
+    ) -> Result<String, ModelRuntimeError> {
+        let model = self.model_factory.create_session(configuration).await?;
+        let request = ModelRequest {
+            messages: vec![
+                ModelMessage {
+                    role: ModelRole::System,
+                    content: system_prompt.into(),
+                    name: None,
+                    tool_call_id: None,
+                    tool_calls: Vec::new(),
+                    input_images: Vec::new(),
+                },
+                ModelMessage::user(user_prompt),
+            ],
+            tools: Vec::new(),
+            parallel_tool_calls: false,
+            max_output_tokens: Some(max_output_tokens.clamp(16, 512)),
+        };
+        let mut stream = model.stream(request, cancellation.child_token());
+        let mut output = String::new();
+        while let Some(event) = tokio::select! {
+            () = cancellation.cancelled() => return Err(ModelRuntimeError::Cancelled),
+            event = stream.next() => event,
+        } {
+            match event? {
+                ModelEvent::AgentMessageDelta { delta, .. } | ModelEvent::TextDelta { delta } => {
+                    output.push_str(&delta)
+                }
+                ModelEvent::Completed { .. } => break,
+                ModelEvent::AgentMessageStarted { .. }
+                | ModelEvent::AgentMessageCompleted { .. }
+                | ModelEvent::ReasoningDelta { .. }
+                | ModelEvent::ToolCallDelta { .. }
+                | ModelEvent::ToolCallCompleted { .. }
+                | ModelEvent::Usage { .. } => {}
+            }
+        }
+        let output = output.trim();
+        if output.is_empty() {
+            return Err(ModelRuntimeError::InvalidStream(
+                "auxiliary model response contained no text".into(),
+            ));
+        }
+        Ok(output.chars().take(1_024).collect())
     }
 
     pub async fn execute(&self, request: AgentRunRequest) -> Result<(), AgentExecutionError> {
@@ -685,6 +743,7 @@ impl AgentRunExecutor {
                             run_tool_allowlist: request.run_tool_allowlist.clone(),
                             capability_grants: Some(request.capability_grants.clone()),
                             world_refresher: prepared.world_refresher,
+                            diff_tracker: prepared.diff_tracker,
                         },
                         combined,
                     )

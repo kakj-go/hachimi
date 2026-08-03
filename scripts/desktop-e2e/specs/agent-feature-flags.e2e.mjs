@@ -46,7 +46,7 @@ describe("Hachimi Agent feature-flag ToolPlan fencing", () => {
 
     await ensureProjectVisible();
     await clickWhenReady('[data-testid^="project-new-task-"]');
-    await waitForDisplayed('[data-testid="workbench-project-task-draft"]');
+    await waitForDisplayed('[data-testid="workbench-composer-input"]');
     await $('[data-testid="workbench-composer-input"]').setValue(
       "[desktop-e2e:agent-feature-flags-disabled-coding] inspect disabled tools",
     );

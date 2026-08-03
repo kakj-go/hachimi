@@ -434,6 +434,60 @@ describe("extension settings pages", () => {
     expect(commandMocks.unsubscribeSkills).toHaveBeenCalledWith("subscription-1");
   });
 
+  it("removes the old editor while a newly created Skill file is still loading", async () => {
+    const mounted = mount(() => <SkillsSettingsPage />);
+    await settle();
+    const nextTree: SkillTreeNode = {
+      ...tree,
+      children: [
+        ...tree.children,
+        {
+          name: "reference.md",
+          relativePath: "reference.md",
+          kind: "file",
+          editorKind: "markdown",
+          sizeBytes: 0,
+          revision: "reference-1",
+          children: [],
+        },
+      ],
+    };
+    commandMocks.createSkillEntry.mockResolvedValue(nextTree);
+    let resolveFile!: (value: SkillFileSnapshot) => void;
+    commandMocks.readSkillFile.mockImplementationOnce(
+      () =>
+        new Promise<SkillFileSnapshot>((resolve) => {
+          resolveFile = resolve;
+        }),
+    );
+    mounted.host
+      .querySelector<HTMLElement>('[data-testid="skill-action-new-file-release-notes"]')
+      ?.click();
+    await settle();
+    const dialog = mounted.host.querySelector<HTMLElement>('[role="dialog"]');
+    const input = dialog?.querySelector<HTMLInputElement>("input");
+    if (input) {
+      input.value = "reference.md";
+      input.dispatchEvent(new InputEvent("input", { bubbles: true }));
+    }
+    [...(dialog?.querySelectorAll("button") ?? [])]
+      .find((button) => button.textContent === "Create")
+      ?.click();
+    await settle();
+    expect(mounted.host.querySelector('[data-testid="skill-markdown-editor"]')).toBeNull();
+
+    resolveFile({
+      ...snapshot,
+      relativePath: "reference.md",
+      content: "",
+      sizeBytes: 0,
+      revision: "reference-1",
+    });
+    await settle();
+    expect(mounted.host.querySelector('[data-testid="skill-markdown-editor"]')).not.toBeNull();
+    mounted.dispose();
+  });
+
   it("exposes tree actions behind an ellipsis and uses the shared rename dialog", async () => {
     const mounted = mount(() => <SkillsSettingsPage />);
     await settle();

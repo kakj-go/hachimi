@@ -301,6 +301,17 @@ pub fn workspace_tool_executors_with_diff_tracking(
     run_id: RunId,
     checkout_id: CheckoutId,
 ) -> Vec<Arc<dyn ToolExecutor>> {
+    workspace_tool_executors_with_diff_tracker(client, store, session_id, run_id, checkout_id).0
+}
+
+#[must_use]
+pub fn workspace_tool_executors_with_diff_tracker(
+    client: Arc<WorkspaceHostClient>,
+    store: AgentStore,
+    session_id: SessionId,
+    run_id: RunId,
+    checkout_id: CheckoutId,
+) -> (Vec<Arc<dyn ToolExecutor>>, Arc<crate::RunDiffTracker>) {
     let tracker = Arc::new(crate::RunDiffTracker::new(
         store,
         Arc::clone(&client),
@@ -308,7 +319,7 @@ pub fn workspace_tool_executors_with_diff_tracking(
         run_id,
         checkout_id,
     ));
-    [
+    let executors = [
         WorkspaceToolKind::ReadFile,
         WorkspaceToolKind::ListDirectory,
         WorkspaceToolKind::SearchText,
@@ -326,7 +337,8 @@ pub fn workspace_tool_executors_with_diff_tracking(
             diff_tracker: Some(Arc::clone(&tracker)),
         }) as Arc<dyn ToolExecutor>
     })
-    .collect()
+    .collect();
+    (executors, tracker)
 }
 
 #[derive(Deserialize)]

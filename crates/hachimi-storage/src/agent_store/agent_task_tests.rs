@@ -1,6 +1,7 @@
 use hachimi_protocol::{
     AgentTaskId, AgentTaskMessageId, AgentTaskMessageRecord, AgentTaskRecord, AgentTaskStatus,
-    EntryProfile, RunBudget, RunId, RunRecord, RunStatus, SessionId, SessionRecord,
+    EntryProfile, ItemId, ItemPayload, ItemRelations, ItemStatus, RunBudget, RunId, RunRecord,
+    RunStatus, SessionId, SessionRecord, TranscriptItem, TranscriptItemKind,
 };
 
 use super::tests::{run, seeded_store};
@@ -344,4 +345,110 @@ async fn agent_task_execution_lease_fences_duplicate_spawn_and_expired_owners() 
             .await
             .expect("release")
     );
+}
+
+#[tokio::test]
+async fn agent_task_transitions_refresh_the_parent_collab_item() {
+    let (store, session) = seeded_store().await;
+    let parent = run(&session, "agent-collab-parent");
+    store
+        .create_run_idempotent("agent-test", "agent-collab-parent", &parent)
+        .await
+        .expect("parent run");
+    let (child_session, child_run) = agent_child_run(&store, &session, &parent, "collab").await;
+    let task = agent_task(
+        "agent-task-collab",
+        "agent-task-collab",
+        &parent.id,
+        None,
+        &session,
+        &parent,
+        &child_session,
+        &child_run,
+        1,
+        1,
+    );
+    store.create_agent_task(&task).await.expect("task");
+
+    let item_id = ItemId::from("collab-item");
+    store
+        .append_transcript_item(TranscriptItem {
+            id: item_id.clone(),
+            session_id: session.id.clone(),
+            run_id: Some(parent.id.clone()),
+            sequence: 0,
+            kind: TranscriptItemKind::CollabToolCall,
+            status: ItemStatus::InProgress,
+            payload: ItemPayload::CollabToolCall {
+                tool_name: "agent.spawn".into(),
+                agent_task_id: None,
+                parent_run_id: parent.id.clone(),
+                child_run_id: None,
+                title: task.title.clone(),
+                status: "running".into(),
+                summary: None,
+                usage: Default::default(),
+            },
+            relations: ItemRelations::default(),
+            created_at_ms: now_ms(),
+        })
+        .await
+        .expect("collab item");
+    store
+        .link_agent_task_transcript_item(&task.id, &item_id)
+        .await
+        .expect("link");
+    store
+        .complete_transcript_item(
+            &item_id,
+            ItemStatus::Completed,
+            ItemPayload::CollabToolCall {
+                tool_name: "agent.spawn".into(),
+                agent_task_id: Some(task.id.clone()),
+                parent_run_id: parent.id.clone(),
+                child_run_id: Some(child_run.id.clone()),
+                title: task.title.clone(),
+                status: "queued".into(),
+                summary: None,
+                usage: Default::default(),
+            },
+        )
+        .await
+        .expect("complete");
+    store
+        .transition_agent_task(
+            &task.id,
+            AgentTaskStatus::Running,
+            Some("working"),
+            None,
+            now_ms(),
+        )
+        .await
+        .expect("running");
+
+    let transcript = store
+        .list_transcript(&session.id)
+        .await
+        .expect("transcript");
+    let item = transcript
+        .iter()
+        .find(|item| item.id == item_id)
+        .expect("updated collab item");
+    assert_eq!(item.relations.agent_task_id.as_ref(), Some(&task.id));
+    assert!(matches!(
+        &item.payload,
+        ItemPayload::CollabToolCall { status, summary, .. }
+            if status == "running" && summary.as_deref() == Some("working")
+    ));
+    assert!(store
+        .list_events(&session.id, 0)
+        .await
+        .expect("events")
+        .iter()
+        .any(|event| matches!(
+            &event.payload,
+            hachimi_protocol::RunEventPayload::ItemCompleted { item }
+                if item.id == item_id
+                    && matches!(&item.payload, ItemPayload::CollabToolCall { status, .. } if status == "running")
+        )));
 }

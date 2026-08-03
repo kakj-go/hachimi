@@ -4,8 +4,8 @@
   "version": "0.3.0-alpha.8",
   "identifier": "com.hachimi.desktop",
   "build": {
-    "beforeDevCommand": "node scripts/prepare-workspace-worker.mjs dev && powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/prepare-managed-git.ps1 && powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/prepare-managed-chromium.ps1 && corepack pnpm --dir apps/desktop/web dev",
-    "beforeBuildCommand": "node scripts/ensure-speech-models.mjs && node scripts/prepare-workspace-worker.mjs both && powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/prepare-managed-git.ps1 && powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/prepare-managed-chromium.ps1 && corepack pnpm --dir apps/desktop/web build",
+    "beforeDevCommand": "node scripts/prepare-workspace-worker.mjs dev && powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/prepare-managed-git.ps1 && powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/build-cef-host.ps1 && corepack pnpm --dir apps/desktop/web dev",
+    "beforeBuildCommand": "node scripts/ensure-speech-models.mjs && node scripts/prepare-workspace-worker.mjs both && powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/prepare-managed-git.ps1 && powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/build-cef-host.ps1 -Release && corepack pnpm --dir apps/desktop/web build",
     "devUrl": "http://localhost:1420/pet.html",
     "frontendDist": "../web/dist"
   },
@@ -61,7 +61,7 @@
       "resources/ai-models/speech-to-text/": "resources/ai-models/speech-to-text/",
       "resources/ai-models/text-to-speech/": "resources/ai-models/text-to-speech/",
       "managed-git/": "managed-git/",
-      "managed-chromium/": "managed-chromium/",
+      "../../../target/cef-bundle/": "cef-runtime/",
       "../../../assets/browser-extension/": "browser-extension/",
       "../../../assets/plugins/sample-crm/": "plugins/sample-crm/",
       "../../../assets/plugins/wecom/": "plugins/wecom/",

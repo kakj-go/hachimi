@@ -7,10 +7,11 @@ use std::{collections::BTreeMap, future::Future, pin::Pin, sync::Arc, time::Dura
 
 use futures_util::{StreamExt, future::join_all};
 use hachimi_protocol::{
-    BehaviorMode, CapabilityGrantSet, EntryProfile, ModelEvent, ModelFinishReason, ModelMessage,
-    ModelRequest, ModelToolCall, RecoveryRevisionSnapshot, RunBudget, RunId, RunOrigin,
-    RunStepPhase, SessionContextBinding, SessionId, SideEffectExecutionId, TokenCountSource,
-    TokenUsage, ToolCallId, ToolRecoveryPolicy, WorkloadKind,
+    AgentMessagePhase, BehaviorMode, CapabilityGrantSet, EntryProfile, ModelEvent,
+    ModelFinishReason, ModelMessage, ModelRequest, ModelToolCall, RecoveryRevisionSnapshot,
+    RunBudget, RunId, RunOrigin, RunStepPhase, SessionContextBinding, SessionId,
+    SideEffectExecutionId, TokenCountSource, TokenUsage, ToolCallId, ToolRecoveryPolicy,
+    WorkloadKind,
 };
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
@@ -259,7 +260,7 @@ impl ToolLoopDriver {
             )
             .await?;
             let mut stream = self.model.stream(request, cancellation.child_token());
-            let mut text = String::new();
+            let mut assistant_messages = Vec::<PendingAssistantMessage>::new();
             let mut completed = false;
             let mut finish_reason = ModelFinishReason::Unknown;
             let mut assembled = BTreeMap::<u32, PendingToolCall>::new();
@@ -276,8 +277,28 @@ impl ToolLoopDriver {
                 };
                 emit(LoopEvent::Model(event.clone()));
                 match event {
-                    ModelEvent::TextDelta { delta } => text.push_str(&delta),
-                    ModelEvent::ReasoningDelta { .. } => {}
+                    ModelEvent::AgentMessageStarted { message_id, phase } => {
+                        let message =
+                            pending_assistant_message(&mut assistant_messages, message_id);
+                        if message.phase == AgentMessagePhase::Unknown {
+                            message.phase = phase;
+                        }
+                    }
+                    ModelEvent::AgentMessageDelta { message_id, delta } => {
+                        pending_assistant_message(&mut assistant_messages, message_id)
+                            .text
+                            .push_str(&delta);
+                    }
+                    ModelEvent::AgentMessageCompleted { .. }
+                    | ModelEvent::ReasoningDelta { .. } => {}
+                    ModelEvent::TextDelta { delta } => {
+                        pending_assistant_message(
+                            &mut assistant_messages,
+                            "legacy-message-0".into(),
+                        )
+                        .text
+                        .push_str(&delta);
+                    }
                     ModelEvent::ToolCallDelta {
                         index,
                         id,
@@ -339,7 +360,15 @@ impl ToolLoopDriver {
                 );
             }
             let calls = completed_calls.into_values().collect::<Vec<_>>();
-            messages.push(ModelMessage::assistant(text.clone(), calls.clone()));
+            let context_text = assistant_messages
+                .iter()
+                .filter_map(|message| {
+                    let text = message.text.trim();
+                    (!text.is_empty()).then_some(text)
+                })
+                .collect::<Vec<_>>()
+                .join("\n\n");
+            messages.push(ModelMessage::assistant(context_text, calls.clone()));
             let (active_context_tokens, count_source) = self.model.count_tokens(&messages);
             let remaining_context_tokens = capabilities.context_window.map_or(0, |window| {
                 window.saturating_sub(active_context_tokens.saturating_add(request_output_budget))
@@ -356,8 +385,22 @@ impl ToolLoopDriver {
                         "provider reported tool calls without returning one".into(),
                     ));
                 }
+                let final_text = assistant_messages
+                    .iter()
+                    .rev()
+                    .find(|message| {
+                        message.phase == AgentMessagePhase::FinalAnswer
+                            && !message.text.trim().is_empty()
+                    })
+                    .or_else(|| {
+                        assistant_messages.iter().rev().find(|message| {
+                            message.phase == AgentMessagePhase::Unknown
+                                && !message.text.trim().is_empty()
+                        })
+                    })
+                    .map_or_else(String::new, |message| message.text.clone());
                 return Ok(ToolLoopOutcome {
-                    final_text: text,
+                    final_text,
                     messages,
                     usage: total_usage,
                     model_requests,
@@ -620,6 +663,28 @@ struct PendingToolCall {
     id: Option<ToolCallId>,
     name: String,
     arguments: String,
+}
+
+#[derive(Debug)]
+struct PendingAssistantMessage {
+    id: String,
+    phase: AgentMessagePhase,
+    text: String,
+}
+
+fn pending_assistant_message(
+    messages: &mut Vec<PendingAssistantMessage>,
+    id: String,
+) -> &mut PendingAssistantMessage {
+    if let Some(index) = messages.iter().position(|message| message.id == id) {
+        return &mut messages[index];
+    }
+    messages.push(PendingAssistantMessage {
+        id,
+        phase: AgentMessagePhase::Unknown,
+        text: String::new(),
+    });
+    messages.last_mut().expect("assistant message was appended")
 }
 
 #[cfg(test)]
@@ -977,6 +1042,87 @@ mod tests {
                 .iter()
                 .any(|event| matches!(event, LoopEvent::ToolCompleted(_)))
         );
+    }
+
+    #[tokio::test]
+    async fn commentary_is_kept_in_context_but_final_text_uses_final_answer() {
+        let model = Arc::new(RecordingScriptedModel {
+            events: Mutex::new(VecDeque::from([
+                vec![
+                    ModelEvent::AgentMessageStarted {
+                        message_id: "commentary-1".into(),
+                        phase: AgentMessagePhase::Commentary,
+                    },
+                    ModelEvent::AgentMessageDelta {
+                        message_id: "commentary-1".into(),
+                        delta: "Inspecting inputs.".into(),
+                    },
+                    ModelEvent::AgentMessageCompleted {
+                        message_id: "commentary-1".into(),
+                    },
+                    ModelEvent::ToolCallCompleted {
+                        call: ModelToolCall {
+                            id: ToolCallId::from("call-commentary"),
+                            name: "echo".into(),
+                            arguments: serde_json::json!({ "value": "hello" }),
+                        },
+                    },
+                    ModelEvent::Completed {
+                        finish_reason: ModelFinishReason::ToolCalls,
+                    },
+                ],
+                vec![
+                    ModelEvent::AgentMessageStarted {
+                        message_id: "commentary-2".into(),
+                        phase: AgentMessagePhase::Commentary,
+                    },
+                    ModelEvent::AgentMessageDelta {
+                        message_id: "commentary-2".into(),
+                        delta: "The tool result is valid.".into(),
+                    },
+                    ModelEvent::AgentMessageCompleted {
+                        message_id: "commentary-2".into(),
+                    },
+                    ModelEvent::AgentMessageStarted {
+                        message_id: "final-1".into(),
+                        phase: AgentMessagePhase::FinalAnswer,
+                    },
+                    ModelEvent::AgentMessageDelta {
+                        message_id: "final-1".into(),
+                        delta: "All done.".into(),
+                    },
+                    ModelEvent::AgentMessageCompleted {
+                        message_id: "final-1".into(),
+                    },
+                    ModelEvent::Completed {
+                        finish_reason: ModelFinishReason::Stop,
+                    },
+                ],
+            ])),
+            requests: Mutex::new(Vec::new()),
+        });
+        let mut registry = ToolRegistry::new();
+        registry.register(Arc::new(EchoTool)).expect("tool");
+        let driver = ToolLoopDriver::new(
+            model.clone(),
+            Arc::new(ToolRuntime::new(Arc::new(registry))),
+        );
+
+        let outcome = driver
+            .run(
+                vec![ModelMessage::user("use echo")],
+                run_options(&RunBudget::default()),
+                |_| {},
+            )
+            .await
+            .expect("loop");
+
+        assert_eq!(outcome.final_text, "All done.");
+        let requests = model.requests.lock().expect("requests");
+        assert!(requests[1].messages.iter().any(|message| {
+            message.role == hachimi_protocol::ModelRole::Assistant
+                && message.content == "Inspecting inputs."
+        }));
     }
 
     #[tokio::test]

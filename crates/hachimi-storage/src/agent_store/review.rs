@@ -159,9 +159,7 @@ impl AgentStore {
                 Some(&review.run_id),
                 "item.completed",
                 Some(RunEventPayload::ItemCompleted {
-                    item_id: item.id,
-                    status: ItemStatus::Completed,
-                    payload: Box::new(item.payload),
+                    item: Box::new(item),
                 }),
                 json!({ "reviewId": review.id, "findingCount": findings.len() }),
                 created_at_ms,

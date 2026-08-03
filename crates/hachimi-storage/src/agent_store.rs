@@ -1,12 +1,3 @@
-//! Dedicated SQLite persistence for Harness Agent state.
-
-use std::{
-    collections::BTreeMap,
-    path::{Path, PathBuf},
-    sync::Arc,
-    time::Duration,
-};
-
 use hachimi_protocol::{
     ApprovalId, ApprovalRequestRecord, ApprovalResolution, ApprovalStatus, ArtifactId,
     ArtifactKind, ArtifactRecord, AttachmentId, AttachmentRecord, CONTROL_PROTOCOL_VERSION,
@@ -14,8 +5,8 @@ use hachimi_protocol::{
     CompactionLifecycle, CompactionReason, ItemPayload, ItemStatus, McpHeaderView,
     McpServerHealthRecord, McpServerHealthState, McpServerId, McpServerRecord, McpServerTransport,
     PlanId, ProjectRecord, ProposedPlan, ProposedPlanStatus, RunEventEnvelope, RunEventPayload,
-    RunId, RunRecord, RunStatus, SessionId, SessionRecord, ToolCallId, TranscriptItem,
-    TranscriptItemKind,
+    RunId, RunRecord, RunStatus, SessionId, SessionRecord, SessionRunActivity, ToolCallId,
+    TranscriptItem, TranscriptItemKind,
 };
 use serde_json::{Value, json};
 use sqlx::{
@@ -23,16 +14,24 @@ use sqlx::{
     migrate::Migrator,
     sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous},
 };
-use thiserror::Error;
-
+use std::{
+    collections::BTreeMap,
+    path::{Path, PathBuf},
+    sync::Arc,
+    time::Duration,
+};
+use tokio::sync::broadcast;
 static MIGRATOR: Migrator = sqlx::migrate!("./migrations");
-
 mod active_events;
 mod agent_tasks;
 mod audit;
+mod browser_permissions;
+mod browser_workspace;
 mod desktop_control;
 #[cfg(test)]
 mod desktop_control_tests;
+mod environment;
+mod error;
 mod extensions;
 mod git_forge;
 #[cfg(test)]
@@ -44,11 +43,13 @@ mod permissions;
 mod plugin_hooks;
 mod process;
 mod project;
+mod project_tools;
 mod provider_registry;
 mod recovery;
 mod review;
 mod row_decode;
 mod run_bundle;
+mod run_summary;
 mod schedule;
 mod schedule_event;
 pub(crate) mod side_effects;
@@ -56,10 +57,15 @@ mod transaction_helpers;
 mod usage;
 mod user_input;
 pub(crate) mod workspace_diff;
-
 pub use agent_tasks::AgentTaskExecutionClaim;
 pub use audit::AuditMetadataRecord;
+pub use browser_workspace::{BrowserDownloadRuntimeUpdate, BrowserTabRuntimeUpdate};
 pub use desktop_control::DesktopControlActionLedgerInput;
+pub use environment::{
+    SessionCheckoutBindingUpdate, SessionEnvironmentState, WorkbenchHandoffJournalRecord,
+    canonical_session_source_url,
+};
+pub use error::AgentStoreError;
 pub use extensions::{SkillFileIndexRecord, StoredSkillRecord};
 pub use plugin_hooks::{
     PluginHookEventRecord, PluginHookRuntime, PluginHookRuntimeFuture, PluginHookSubscription,
@@ -71,128 +77,6 @@ pub use schedule::{IdempotentMutationClaim, ScheduleInvocationClaim};
 pub use schedule_event::{ScheduleEventIngestClaim, ScheduleEventLaunchClaim};
 use transaction_helpers::*;
 pub use workspace_diff::{ManagedRunDiffFile, RunFileBaselineRecord};
-
-#[derive(Debug, Error)]
-pub enum AgentStoreError {
-    #[error("agent storage I/O error: {0}")]
-    Io(#[from] std::io::Error),
-    #[error("agent database error: {0}")]
-    Database(#[from] sqlx::Error),
-    #[error("agent database migration failed: {0}")]
-    Migration(#[from] sqlx::migrate::MigrateError),
-    #[error("agent data serialization error: {0}")]
-    Json(#[from] serde_json::Error),
-    #[error("invalid persisted {kind}: {value}")]
-    InvalidPersistedValue { kind: &'static str, value: String },
-    #[error("run does not exist: {0}")]
-    RunNotFound(RunId),
-    #[error("session does not exist: {0}")]
-    SessionNotFound(SessionId),
-    #[error("checkout does not exist: {0}")]
-    CheckoutNotFound(hachimi_protocol::CheckoutId),
-    #[error("attachment does not exist: {0}")]
-    AttachmentNotFound(AttachmentId),
-    #[error("proposed plan does not exist: {0}")]
-    ProposedPlanNotFound(PlanId),
-    #[error("proposed plan is no longer available for acceptance: {0}")]
-    ProposedPlanNotAcceptable(PlanId),
-    #[error("accepted run does not match the proposed plan session or revision")]
-    ProposedPlanRunMismatch,
-    #[error("checkout {checkout_id} already has a write lease held by run {holder_run_id}")]
-    CheckoutWriteLeaseHeld {
-        checkout_id: hachimi_protocol::CheckoutId,
-        holder_run_id: RunId,
-    },
-    #[error("approval does not exist: {0}")]
-    ApprovalNotFound(ApprovalId),
-    #[error("approval is no longer pending: {0}")]
-    ApprovalNotPending(ApprovalId),
-    #[error("approval resolution does not match the approved parameters or run generation")]
-    StaleApprovalResolution,
-    #[error("approval decision must be approved, denied, or cancelled")]
-    InvalidApprovalDecision,
-    #[error("user input request does not exist: {0}")]
-    UserInputNotFound(hachimi_protocol::UserInputRequestId),
-    #[error("user input request is no longer pending: {0}")]
-    UserInputNotPending(hachimi_protocol::UserInputRequestId),
-    #[error("user input resolution does not match the active run generation")]
-    StaleUserInputResolution,
-    #[error("user input answer is invalid: {0}")]
-    InvalidUserInputAnswer(&'static str),
-    #[error("active run precondition failed")]
-    RunPreconditionFailed,
-    #[error("schedule does not exist: {0}")]
-    ScheduleNotFound(hachimi_protocol::ScheduleId),
-    #[error("schedule config revision precondition failed")]
-    ScheduleRevisionConflict,
-    #[error("schedule event id was reused with a different fingerprint")]
-    ScheduleEventConflict,
-    #[error("idempotency key was already used for another resource")]
-    IdempotencyConflict,
-    #[error("schedule grant does not exist: {0}")]
-    ScheduleGrantNotFound(hachimi_protocol::ScheduleGrantId),
-    #[error("task run does not exist: {0}")]
-    TaskRunNotFound(hachimi_protocol::TaskRunId),
-    #[error("review does not exist: {0}")]
-    ReviewNotFound(hachimi_protocol::ReviewId),
-    #[error("review finding does not exist: {0}")]
-    ReviewFindingNotFound(hachimi_protocol::ReviewFindingId),
-    #[error("illegal task run state transition")]
-    InvalidTaskRunTransition,
-    #[error("side-effect idempotency key was reused with different parameters")]
-    SideEffectIdempotencyConflict,
-    #[error("side-effect execution does not exist: {0}")]
-    SideEffectNotFound(hachimi_protocol::SideEffectExecutionId),
-    #[error("illegal side-effect transition from {from:?} to {to:?}")]
-    InvalidSideEffectTransition {
-        from: hachimi_protocol::SideEffectExecutionStatus,
-        to: hachimi_protocol::SideEffectExecutionStatus,
-    },
-    #[error("side-effect approval is missing, stale, or already consumed")]
-    SideEffectApprovalInvalid,
-    #[error("compaction checkpoint quality was not accepted")]
-    CompactionQualityRejected,
-    #[error("compaction checkpoint does not advance the persisted session coverage")]
-    CompactionSequenceNotAdvanced,
-    #[error("compaction checkpoint predecessor does not match the latest persisted checkpoint")]
-    CompactionPredecessorMismatch,
-    #[error("compaction checkpoint covers transcript sequence that does not exist")]
-    CompactionSequenceOutOfRange,
-    #[error("MCP server does not exist: {0}")]
-    McpServerNotFound(McpServerId),
-    #[error("plugin hook runtime failed closed: {0}")]
-    PluginHook(String),
-    #[error("invalid MCP server configuration: {0}")]
-    InvalidMcpServerConfiguration(&'static str),
-    #[error("Skill does not exist: {0}")]
-    SkillNotFound(hachimi_protocol::SkillId),
-    #[error("illegal run transition from {from:?} to {to:?}")]
-    InvalidRunTransition { from: RunStatus, to: RunStatus },
-    #[error("run recovery does not exist: {0}")]
-    RunRecoveryNotFound(hachimi_protocol::RunRecoveryId),
-    #[error("run recovery decision is stale or not allowed")]
-    InvalidRunRecoveryDecision,
-    #[error("provider compatibility profile does not exist: {0}")]
-    ProviderProfileNotFound(String),
-    #[error("provider endpoint does not exist: {0}")]
-    ProviderEndpointNotFound(hachimi_protocol::ProviderEndpointId),
-    #[error("provider endpoint config revision precondition failed")]
-    ProviderRevisionConflict,
-    #[error("provider account does not exist: {0}")]
-    ProviderAccountNotFound(hachimi_protocol::ProviderAccountId),
-    #[error("agent task does not exist: {0}")]
-    AgentTaskNotFound(hachimi_protocol::AgentTaskId),
-    #[error("agent task lineage, budget, depth, or concurrency limit failed")]
-    AgentTaskLimitExceeded,
-    #[error("illegal agent task state transition")]
-    InvalidAgentTaskTransition,
-    #[error("invalid or stale Forge operation")]
-    InvalidForgeOperation,
-    #[error("database path has no usable parent")]
-    InvalidPath,
-    #[error("database migration lock remained busy for 30 seconds")]
-    DatabaseMigrationBusy,
-}
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RecoveryReport {
@@ -208,8 +92,7 @@ pub struct RecoveryReport {
     pub awaiting_decision_run_ids: Vec<RunId>,
 }
 
-/// Storage-private attachment metadata used by the trusted attachment host.
-/// The managed path is deliberately not part of the public protocol DTO.
+/// Storage-private attachment metadata; its managed path is excluded from public DTOs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ManagedAttachmentRecord {
     pub attachment: AttachmentRecord,
@@ -222,6 +105,7 @@ pub struct AgentStore {
     managed_artifacts: Arc<ManagedArtifactRoot>,
     active_events: Arc<active_events::ActiveRunEvents>,
     plugin_hooks: Arc<plugin_hooks::PluginHookRuntimeSlot>,
+    run_activity: Arc<broadcast::Sender<SessionRunActivity>>,
 }
 
 #[derive(Debug)]
@@ -287,14 +171,14 @@ impl AgentStore {
         transient: bool,
         database_path: Option<PathBuf>,
     ) -> Result<Self, AgentStoreError> {
-        // A single connection makes the in-memory and file-backed behavior identical and gives
-        // session event sequence allocation deterministic serialization.
+        // One connection keeps event sequence allocation deterministic in every storage mode.
         let pool = SqlitePoolOptions::new()
             .max_connections(1)
             .connect_with(options)
             .await?;
         migration_safety::run_migrations(&pool, database_path.as_deref(), &MIGRATOR).await?;
         std::fs::create_dir_all(&managed_artifact_root)?;
+        let (run_activity, _) = broadcast::channel(256);
         Ok(Self {
             pool,
             managed_artifacts: Arc::new(ManagedArtifactRoot {
@@ -303,12 +187,18 @@ impl AgentStore {
             }),
             active_events: Arc::new(active_events::ActiveRunEvents::new()),
             plugin_hooks: Arc::new(plugin_hooks::PluginHookRuntimeSlot::default()),
+            run_activity: Arc::new(run_activity),
         })
     }
 
     #[must_use]
     pub const fn pool(&self) -> &SqlitePool {
         &self.pool
+    }
+
+    #[must_use]
+    pub fn subscribe_run_activity(&self) -> broadcast::Receiver<SessionRunActivity> {
+        self.run_activity.subscribe()
     }
 
     /// Returns the trusted, process-private root used by Host implementations.
@@ -386,6 +276,48 @@ impl AgentStore {
             .fetch_optional(&self.pool)
             .await?;
         row.as_ref().map(proposed_plan_from_row).transpose()
+    }
+
+    pub async fn update_execution_plan(
+        &self,
+        plan_id: &PlanId,
+        execution_run_id: &RunId,
+        explanation: Option<&str>,
+        steps: &[hachimi_protocol::PlanStep],
+    ) -> Result<ProposedPlan, AgentStoreError> {
+        let mut transaction = self.pool.begin().await?;
+        let mut plan = get_proposed_plan_tx(&mut transaction, plan_id)
+            .await?
+            .ok_or_else(|| AgentStoreError::ProposedPlanNotFound(plan_id.clone()))?;
+        if plan.status != ProposedPlanStatus::Accepted
+            || plan.accepted_run_id.as_ref() != Some(execution_run_id)
+        {
+            return Err(AgentStoreError::ProposedPlanRunMismatch);
+        }
+        plan.steps = steps.to_vec();
+        sqlx::query("UPDATE proposed_plans SET steps_json = ? WHERE id = ?")
+            .bind(serde_json::to_string(&plan.steps)?)
+            .bind(plan_id.as_str())
+            .execute(&mut *transaction)
+            .await?;
+        append_event_typed_tx(
+            &mut transaction,
+            &plan.session_id,
+            Some(execution_run_id),
+            "plan.updated",
+            Some(RunEventPayload::PlanUpdated {
+                plan_id: plan.id.clone(),
+                explanation: explanation.map(str::to_owned),
+                steps: plan.steps.clone(),
+            }),
+            json!({ "planId": plan.id, "stepCount": plan.steps.len() }),
+            now_ms(),
+        )
+        .await?;
+        transaction.commit().await?;
+        self.bump_session_environment_revision(&plan.session_id)
+            .await?;
+        Ok(plan)
     }
 
     pub async fn list_proposed_plans(
@@ -704,13 +636,13 @@ impl AgentStore {
     ) -> Result<Vec<SessionRecord>, AgentStoreError> {
         let rows = if let Some(project_id) = project_id {
             sqlx::query(
-                "SELECT * FROM sessions WHERE context_kind = 'project' AND json_extract(context_json, '$.project_id') = ? ORDER BY updated_at_ms DESC, id ASC",
+                "SELECT * FROM sessions WHERE context_kind = 'project' AND json_extract(context_json, '$.project_id') = ? AND NOT EXISTS (SELECT 1 FROM project_tool_contexts tools WHERE tools.session_id = sessions.id) ORDER BY updated_at_ms DESC, id ASC",
             )
             .bind(project_id.as_str())
             .fetch_all(&self.pool)
             .await?
         } else {
-            sqlx::query("SELECT * FROM sessions ORDER BY updated_at_ms DESC, id ASC")
+            sqlx::query("SELECT * FROM sessions WHERE NOT EXISTS (SELECT 1 FROM project_tool_contexts tools WHERE tools.session_id = sessions.id) ORDER BY updated_at_ms DESC, id ASC")
                 .fetch_all(&self.pool)
                 .await?
         };
@@ -787,6 +719,11 @@ impl AgentStore {
         .execute(&mut *transaction)
         .await?;
         transaction.commit().await?;
+        let _ = self.run_activity.send(SessionRunActivity {
+            id: run.id.clone(),
+            status: run.status,
+            updated_at_ms: run.updated_at_ms,
+        });
         Ok(run.clone())
     }
 
@@ -849,6 +786,23 @@ impl AgentStore {
             .await?
             .ok_or_else(|| AgentStoreError::RunNotFound(run_id.clone()))?;
         transaction.commit().await?;
+        let _ = self.run_activity.send(SessionRunActivity {
+            id: updated.id.clone(),
+            status: updated.status,
+            updated_at_ms: updated.updated_at_ms,
+        });
+        if next.is_terminal()
+            && let Err(error) = self.finalize_run_summary(run_id, next, updated_at_ms).await
+        {
+            let _ = self
+                .append_event(
+                    &current.session_id,
+                    Some(run_id),
+                    "run.summary_failed",
+                    json!({ "message": error.to_string() }),
+                )
+                .await;
+        }
         Ok(updated)
     }
 
@@ -950,8 +904,7 @@ impl AgentStore {
                 item.run_id.as_ref(),
                 "item.started",
                 Some(RunEventPayload::ItemStarted {
-                    item_id: item.id.clone(),
-                    kind: item.kind,
+                    item: Box::new(item.clone()),
                 }),
                 json!({ "itemId": item.id, "kind": item.kind }),
                 item.created_at_ms,
@@ -994,25 +947,23 @@ impl AgentStore {
         .bind(item_id.as_str())
         .execute(&mut *transaction)
         .await?;
+        let row = sqlx::query("SELECT * FROM transcript_items WHERE id = ?")
+            .bind(item_id.as_str())
+            .fetch_one(&mut *transaction)
+            .await?;
+        let item = transcript_item_from_row(&row, &session_id)?;
         append_event_typed_tx(
             &mut transaction,
             &session_id,
             run_id.as_ref(),
             "item.completed",
             Some(RunEventPayload::ItemCompleted {
-                item_id: item_id.clone(),
-                status,
-                payload: Box::new(payload),
+                item: Box::new(item.clone()),
             }),
             json!({ "itemId": item_id, "status": status }),
             now_ms(),
         )
         .await?;
-        let row = sqlx::query("SELECT * FROM transcript_items WHERE id = ?")
-            .bind(item_id.as_str())
-            .fetch_one(&mut *transaction)
-            .await?;
-        let item = transcript_item_from_row(&row, &session_id)?;
         transaction.commit().await?;
         self.active_events.complete_item(&session_id, item_id);
         Ok(item)
@@ -1642,7 +1593,7 @@ impl AgentStore {
         .await?
         .rows_affected();
         let in_progress_items = sqlx::query(
-            "SELECT id, session_id, run_id, payload_json FROM transcript_items WHERE status = 'in_progress' ORDER BY sequence ASC",
+            "SELECT * FROM transcript_items WHERE status = 'in_progress' ORDER BY sequence ASC",
         )
         .fetch_all(&mut *transaction)
         .await?;
@@ -1650,7 +1601,7 @@ impl AgentStore {
             let item_id = hachimi_protocol::ItemId::new(row.get::<String, _>("id"));
             let session_id = SessionId::new(row.get::<String, _>("session_id"));
             let run_id = row.get::<Option<String>, _>("run_id").map(RunId::new);
-            let payload: ItemPayload = serde_json::from_str(row.get("payload_json"))?;
+            let mut item = transcript_item_from_row(row, &session_id)?;
             sqlx::query("UPDATE transcript_items SET status = 'interrupted' WHERE id = ?")
                 .bind(item_id.as_str())
                 .execute(&mut *transaction)
@@ -1661,9 +1612,10 @@ impl AgentStore {
                 run_id.as_ref(),
                 "item.completed",
                 Some(RunEventPayload::ItemCompleted {
-                    item_id,
-                    status: ItemStatus::Interrupted,
-                    payload: Box::new(payload),
+                    item: {
+                        item.status = ItemStatus::Interrupted;
+                        Box::new(item)
+                    },
                 }),
                 json!({ "status": ItemStatus::Interrupted }),
                 recovered_at_ms,
@@ -1919,9 +1871,14 @@ impl AgentStore {
 }
 
 #[cfg(test)]
-#[path = "agent_store/tests.rs"]
-mod tests;
-
-#[cfg(test)]
 #[path = "agent_store/agent_task_tests.rs"]
 mod agent_task_tests;
+#[cfg(test)]
+#[path = "agent_store/browser_workspace_tests.rs"]
+mod browser_workspace_tests;
+#[cfg(test)]
+#[path = "agent_store/idempotency_tests.rs"]
+mod idempotency_tests;
+#[cfg(test)]
+#[path = "agent_store/tests.rs"]
+mod tests;

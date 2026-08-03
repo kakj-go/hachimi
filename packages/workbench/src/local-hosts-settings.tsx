@@ -7,6 +7,9 @@ import {
   type BrowserHostSettings,
   type BrowserPermissionLedgerEntry,
   type BrowserPermissionRequest,
+  type BrowserPermissionDecision,
+  type EmbeddedBrowserPermissionRequest,
+  type EmbeddedBrowserSitePermission,
   type ChannelProviderHealth,
   type ChannelProviderAccount,
   type ChannelProviderManifest,
@@ -42,6 +45,7 @@ import {
 } from "@hachimi/ui";
 import { For, Show, createMemo, createSignal, onCleanup, onMount, untrack } from "solid-js";
 
+import { BrowserSettingsSection } from "./browser-settings";
 import { runtimeFeatureVisibility } from "./runtime-feature-visibility";
 
 type BusyAction = "load" | "sandbox" | "plugin" | "gateway" | "pairing" | "channel" | "computer";
@@ -107,6 +111,12 @@ export function LocalHostsSettingsPage(props: { featureFlags: FeatureFlags }) {
   );
   const [browserPermissionRequests, setBrowserPermissionRequests] = createSignal<
     BrowserPermissionRequest[]
+  >([]);
+  const [embeddedPermissionRequests, setEmbeddedPermissionRequests] = createSignal<
+    EmbeddedBrowserPermissionRequest[]
+  >([]);
+  const [embeddedSitePermissions, setEmbeddedSitePermissions] = createSignal<
+    EmbeddedBrowserSitePermission[]
   >([]);
   const [computerWindows, setComputerWindows] = createSignal<ComputerWindowIdentity[]>([]);
   const [computerRules, setComputerRules] = createSignal<ComputerAppRule[]>([]);
@@ -272,6 +282,12 @@ export function LocalHostsSettingsPage(props: { featureFlags: FeatureFlags }) {
                 setBrowserPermissionRequests(response.value);
               }
             }),
+          commands
+            .listEmbeddedBrowserPermissionRequests(null)
+            .then((value) => void setEmbeddedPermissionRequests(value)),
+          commands
+            .listEmbeddedBrowserSitePermissions()
+            .then((value) => void setEmbeddedSitePermissions(value)),
         );
       }
       await Promise.all(tasks);
@@ -754,14 +770,35 @@ export function LocalHostsSettingsPage(props: { featureFlags: FeatureFlags }) {
   }
 
   async function refreshBrowserPermissions() {
-    const [permissions, requests] = await Promise.all([
+    const [permissions, requests, embeddedRequests, embeddedPermissions] = await Promise.all([
       commands.localHostCommand({ kind: "browser_list_permissions" }),
       commands.localHostCommand({ kind: "browser_list_permission_requests" }),
+      commands.listEmbeddedBrowserPermissionRequests(null),
+      commands.listEmbeddedBrowserSitePermissions(),
     ]);
     if (permissions.kind === "browser_permissions") setBrowserPermissions(permissions.value);
     if (requests.kind === "browser_permission_requests") {
       setBrowserPermissionRequests(requests.value);
     }
+    setEmbeddedPermissionRequests(embeddedRequests);
+    setEmbeddedSitePermissions(embeddedPermissions);
+  }
+
+  async function resolveEmbeddedPermission(
+    request: EmbeddedBrowserPermissionRequest,
+    decision: BrowserPermissionDecision,
+  ) {
+    await run("pairing", async () => {
+      await commands.resolveEmbeddedBrowserPermission({ requestId: request.id, decision });
+      await refreshBrowserPermissions();
+    });
+  }
+
+  async function revokeEmbeddedPermission(permission: EmbeddedBrowserSitePermission) {
+    await run("pairing", async () => {
+      await commands.revokeEmbeddedBrowserSitePermission(permission.id);
+      await refreshBrowserPermissions();
+    });
   }
 
   async function resolveBrowserPermission(request: BrowserPermissionRequest, allow: boolean) {
@@ -1130,14 +1167,16 @@ export function LocalHostsSettingsPage(props: { featureFlags: FeatureFlags }) {
         </SettingsCard>
       </SettingsSection>
 
+      <BrowserSettingsSection featureFlags={props.featureFlags} />
+
       <SettingsSection title={zh() ? "Browser 与 Computer" : "Browser and Computer"}>
         <SettingsCard>
           <SettingsRow
-            label={zh() ? "隔离 Browser" : "Isolated Browser"}
+            label={zh() ? "Browser Agent Router" : "Browser Agent router"}
             description={
               zh()
-                ? "由当前 Run 创建独立 Profile；站点和动作按 origin 授权。"
-                : "A Run owns an isolated profile; site capabilities are granted per origin."
+                ? "统一路由到内置 CEF 或已配对的外置 Chrome。"
+                : "Routes automation to embedded CEF or paired external Chrome."
             }
           >
             <Badge tone={props.featureFlags.browserControl ? "success" : "warning"}>
@@ -1197,6 +1236,71 @@ export function LocalHostsSettingsPage(props: { featureFlags: FeatureFlags }) {
               onChange={(enabled) => void updateBrowserPreference(enabled)}
             />
           </SettingsRow>
+          <For
+            each={embeddedPermissionRequests().filter((request) => request.status === "pending")}
+          >
+            {(request) => (
+              <SettingsRow
+                label={`${zh() ? "内置浏览器待授权" : "Embedded browser request"}: ${request.origin}`}
+                description={
+                  request.privateNetwork
+                    ? zh()
+                      ? "Agent 请求访问本机或私有网络"
+                      : "Agent requests localhost or private network access"
+                    : `${request.capabilities.join(", ")} · Run ${request.ownerRunId}`
+                }
+              >
+                <div class="local-hosts-actions">
+                  <Button
+                    size="small"
+                    disabled={Boolean(busy())}
+                    onClick={() => void resolveEmbeddedPermission(request, "allow_once")}
+                  >
+                    {zh() ? "允许一次" : "Allow once"}
+                  </Button>
+                  <Button
+                    size="small"
+                    disabled={Boolean(busy())}
+                    onClick={() => void resolveEmbeddedPermission(request, "allow_session")}
+                  >
+                    {zh() ? "本会话允许" : "Allow session"}
+                  </Button>
+                  <Button
+                    size="small"
+                    disabled={Boolean(busy())}
+                    onClick={() => void resolveEmbeddedPermission(request, "allow_persisted")}
+                  >
+                    {zh() ? "始终允许" : "Always allow"}
+                  </Button>
+                  <Button
+                    size="small"
+                    variant="danger"
+                    disabled={Boolean(busy())}
+                    onClick={() => void resolveEmbeddedPermission(request, "deny")}
+                  >
+                    {zh() ? "拒绝" : "Deny"}
+                  </Button>
+                </div>
+              </SettingsRow>
+            )}
+          </For>
+          <For each={embeddedSitePermissions()}>
+            {(permission) => (
+              <SettingsRow
+                label={permission.origin}
+                description={`${zh() ? "内置浏览器 Agent 权限" : "Embedded Agent permission"} · ${permission.scope}${permission.allowPrivateNetwork ? " · private" : ""}`}
+              >
+                <Button
+                  size="small"
+                  variant="danger"
+                  disabled={Boolean(busy())}
+                  onClick={() => void revokeEmbeddedPermission(permission)}
+                >
+                  {zh() ? "撤销" : "Revoke"}
+                </Button>
+              </SettingsRow>
+            )}
+          </For>
           <For each={browserPermissionRequests().filter((request) => request.status === "pending")}>
             {(request) => (
               <SettingsRow

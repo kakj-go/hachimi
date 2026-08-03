@@ -295,14 +295,17 @@ pub fn revoke_restricted_code_access(path: &Path) -> Result<(), String> {
 }
 
 fn run_icacls(path: &Path, arguments: &[&str]) -> Result<std::process::ExitStatus, String> {
-    let mut child = std::process::Command::new("icacls.exe")
-        .arg(path)
-        .args(arguments)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .map_err(|error| error.to_string())?;
+    let mut child = hachimi_process_policy::std_command(
+        "icacls.exe",
+        hachimi_process_policy::ProcessPolicy::HiddenCaptured,
+    )
+    .arg(path)
+    .args(arguments)
+    .stdin(std::process::Stdio::null())
+    .stdout(std::process::Stdio::null())
+    .stderr(std::process::Stdio::null())
+    .spawn()
+    .map_err(|error| error.to_string())?;
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
     loop {
         if let Some(status) = child.try_wait().map_err(|error| error.to_string())? {
@@ -460,13 +463,16 @@ fn git_metadata_dir(
     let git = std::path::PathBuf::from("git");
     #[cfg(not(test))]
     let git = trusted_git_executable()?;
-    let output = std::process::Command::new(git)
-        .args(["-C"])
-        .arg(checkout)
-        .args(["rev-parse", revision_argument])
-        .env("GIT_OPTIONAL_LOCKS", "0")
-        .output()
-        .map_err(|error| error.to_string())?;
+    let output = hachimi_process_policy::std_command(
+        git,
+        hachimi_process_policy::ProcessPolicy::HiddenCaptured,
+    )
+    .args(["-C"])
+    .arg(checkout)
+    .args(["rev-parse", revision_argument])
+    .env("GIT_OPTIONAL_LOCKS", "0")
+    .output()
+    .map_err(|error| error.to_string())?;
     if !output.status.success() {
         return Ok(None);
     }
@@ -570,12 +576,15 @@ mod tests {
     }
 
     fn run_git(cwd: &std::path::Path, arguments: &[&str]) {
-        let output = std::process::Command::new("git")
-            .args(arguments)
-            .current_dir(cwd)
-            .env("GIT_OPTIONAL_LOCKS", "0")
-            .output()
-            .expect("git invocation");
+        let output = hachimi_process_policy::std_command(
+            "git",
+            hachimi_process_policy::ProcessPolicy::HiddenCaptured,
+        )
+        .args(arguments)
+        .current_dir(cwd)
+        .env("GIT_OPTIONAL_LOCKS", "0")
+        .output()
+        .expect("git invocation");
         assert!(
             output.status.success(),
             "git {arguments:?} failed: {}",

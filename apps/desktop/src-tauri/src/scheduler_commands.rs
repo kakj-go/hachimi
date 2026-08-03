@@ -1016,9 +1016,8 @@ async fn validate_definition_extensions(
         .is_some_and(|browser| browser.enabled)
     {
         state
-            .browser
-            .attest_unattended()
-            .await
+            .embedded_browser
+            .attest()
             .map_err(|error| CommandError::operation("schedule_browser_host_not_ready", error))?;
     }
     schedule_scope_with_extension_snapshots(state, schedule)
@@ -1712,7 +1711,7 @@ async fn latest_assistant_summary(
                 return None;
             }
             match item.payload {
-                ItemPayload::Assistant { text } => Some(text.chars().take(2_000).collect()),
+                ItemPayload::Assistant { text, .. } => Some(text.chars().take(2_000).collect()),
                 _ => None,
             }
         })

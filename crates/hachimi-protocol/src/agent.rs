@@ -431,6 +431,14 @@ pub struct UserInputAnswer {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
+pub struct UserInputDisplayAnswer {
+    pub question_id: String,
+    pub value: Option<String>,
+    pub secret_provided: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
 pub struct UserInputRequestRecord {
     pub id: UserInputRequestId,
     pub session_id: SessionId,
@@ -439,6 +447,8 @@ pub struct UserInputRequestRecord {
     pub run_generation: u64,
     pub item_id: ItemId,
     pub questions: Vec<UserInputQuestion>,
+    #[serde(default)]
+    pub display_answers: Vec<UserInputDisplayAnswer>,
     pub status: UserInputStatus,
     #[specta(type = Option<specta_typescript::Number>)]
     pub expires_at_ms: Option<i64>,
@@ -530,6 +540,7 @@ pub struct PlanStep {
 #[serde(default, rename_all = "camelCase")]
 pub struct ItemRelations {
     pub tool_call_id: Option<ToolCallId>,
+    pub agent_task_id: Option<AgentTaskId>,
     pub approval_id: Option<ApprovalId>,
     pub user_input_request_id: Option<UserInputRequestId>,
     pub process_session_id: Option<ProcessSessionId>,
@@ -551,9 +562,19 @@ pub enum TranscriptItemKind {
     FileChange,
     McpCall,
     DynamicToolCall,
+    CollabToolCall,
     ContextCompaction,
     Review,
     SystemContext,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentMessagePhase {
+    Commentary,
+    FinalAnswer,
+    #[default]
+    Unknown,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Type)]
@@ -565,6 +586,8 @@ pub enum ItemPayload {
     },
     Assistant {
         text: String,
+        #[serde(default)]
+        phase: AgentMessagePhase,
     },
     Reasoning {
         summary: String,
@@ -599,11 +622,20 @@ pub enum ItemPayload {
     UserInputRequest {
         request_id: UserInputRequestId,
         questions: Vec<UserInputQuestion>,
+        #[serde(default)]
+        display_answers: Vec<UserInputDisplayAnswer>,
     },
     CommandExecution {
         process_session_id: ProcessSessionId,
         command_summary: String,
+        command: String,
+        cwd: Option<String>,
         status: String,
+        aggregated_output: String,
+        exit_code: Option<i32>,
+        #[specta(type = Option<specta_typescript::Number>)]
+        duration_ms: Option<u64>,
+        output_artifact_id: Option<ArtifactId>,
     },
     FileChange {
         path: String,
@@ -614,11 +646,31 @@ pub enum ItemPayload {
         server_id: McpServerId,
         tool_name: String,
         status: String,
+        #[specta(type = specta_typescript::Unknown)]
+        arguments: Value,
+        #[specta(type = Option<specta_typescript::Unknown>)]
+        result: Option<Value>,
+        error: Option<String>,
     },
     DynamicToolCall {
         namespace: String,
         name: String,
         status: String,
+        #[specta(type = specta_typescript::Unknown)]
+        arguments: Value,
+        #[specta(type = Option<specta_typescript::Unknown>)]
+        result: Option<Value>,
+        error: Option<String>,
+    },
+    CollabToolCall {
+        tool_name: String,
+        agent_task_id: Option<AgentTaskId>,
+        parent_run_id: RunId,
+        child_run_id: Option<RunId>,
+        title: String,
+        status: String,
+        summary: Option<String>,
+        usage: TokenUsage,
     },
     ContextCompaction {
         checkpoint_id: Option<CompactionCheckpointId>,
@@ -674,6 +726,13 @@ pub struct TranscriptItem {
     pub relations: ItemRelations,
     #[specta(type = specta_typescript::Number)]
     pub created_at_ms: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(tag = "type", content = "data", rename_all = "snake_case")]
+pub enum ItemDeltaPayload {
+    Text { text: String },
+    CommandOutput { stream: String, text: String },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type, Default)]
@@ -858,24 +917,25 @@ pub struct SideEffectExecutionRecord {
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
 pub enum RunEventPayload {
     ItemStarted {
-        item_id: ItemId,
-        kind: TranscriptItemKind,
+        item: Box<TranscriptItem>,
     },
     ItemDelta {
         item_id: ItemId,
-        delta: String,
+        delta: ItemDeltaPayload,
     },
     ItemCompleted {
-        item_id: ItemId,
-        status: ItemStatus,
-        payload: Box<ItemPayload>,
+        item: Box<TranscriptItem>,
     },
     PlanUpdated {
         plan_id: PlanId,
+        explanation: Option<String>,
         steps: Vec<PlanStep>,
     },
     DiffUpdated {
-        artifact_id: ArtifactId,
+        artifact_id: Option<ArtifactId>,
+        changed_files: u32,
+        additions: u32,
+        deletions: u32,
     },
     UserInputRequested {
         request_id: UserInputRequestId,
@@ -1537,6 +1597,20 @@ pub enum ModelFinishReason {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Type)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ModelEvent {
+    AgentMessageStarted {
+        message_id: String,
+        phase: AgentMessagePhase,
+    },
+    AgentMessageDelta {
+        message_id: String,
+        delta: String,
+    },
+    AgentMessageCompleted {
+        message_id: String,
+    },
+    /// Compatibility input for providers and fixtures that do not expose
+    /// message Item boundaries. The Agent runtime normalizes it to one
+    /// request-scoped message with an inferred phase.
     TextDelta {
         delta: String,
     },

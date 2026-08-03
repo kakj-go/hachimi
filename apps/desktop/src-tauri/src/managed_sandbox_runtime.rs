@@ -78,10 +78,23 @@ pub(super) fn stage(
             expected,
         )?;
     }
-    let managed_git = stage_managed_git(
-        &resource_root.join("managed-git"),
-        &root.join("managed-git"),
-    )?;
+    let mut managed_git_candidates = vec![
+        resource_root.join("managed-git"),
+        resource_root.join("resources/managed-git"),
+    ];
+    if cfg!(debug_assertions) {
+        managed_git_candidates.push(Path::new(env!("CARGO_MANIFEST_DIR")).join("managed-git"));
+    }
+    let managed_git_source = managed_git_candidates
+        .into_iter()
+        .find(|candidate| candidate.join("manifest.json").is_file())
+        .ok_or_else(|| {
+            format!(
+                "managed Git manifest is missing from packaged resources: {}",
+                resource_root.display()
+            )
+        })?;
+    let managed_git = stage_managed_git(&managed_git_source, &root.join("managed-git"))?;
     let runtime = ManagedSandboxRuntime {
         setup: root.join(executable_name("hachimi-sandbox-setup")),
         launcher: root.join(executable_name("hachimi-sandbox-launcher")),

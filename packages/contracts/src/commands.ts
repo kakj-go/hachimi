@@ -4,11 +4,24 @@ import type {
   ApprovalDecisionRequest,
   ApprovalRequestRecord,
   AttachmentRecord,
+  AttachmentId,
   AvatarCatalogSnapshot,
   AvatarImportCommitRequest,
   AvatarImportInspection,
   AvatarRuntimeAsset,
   BootstrapState,
+  BrowserDownloadSnapshot,
+  BrowserDownloadActionRequest,
+  BrowserHistoryEntry,
+  ClearEmbeddedBrowserDataRequest,
+  EmbeddedBrowserSettings,
+  EmbeddedBrowserSettingsUpdate,
+  BrowserSurfaceLayoutRequest,
+  BrowserWorkspace,
+  BrowserWorkspaceMutationRequest,
+  EmbeddedBrowserPermissionRequest,
+  EmbeddedBrowserPermissionResolutionRequest,
+  EmbeddedBrowserSitePermission,
   CheckoutRecord,
   ControlInitializeRequest,
   ControlInitializeResponse,
@@ -90,6 +103,7 @@ import type {
   PetContextMenuRequest,
   PetTurnRequest,
   PlanAcceptanceRequest,
+  PlanRevisionRequest,
   ProjectId,
   ProjectRecord,
   ProcessListRequest,
@@ -154,7 +168,14 @@ import type {
   UserInputRequestRecord,
   UserInputResolution,
   WorkbenchRoute,
+  WorkbenchEnvironmentSnapshot,
+  WorkbenchHandoffRequest,
+  WorkbenchHandoffResponse,
   WorkbenchPlanAcceptanceSnapshot,
+  WorkbenchGitRequest,
+  WorkbenchGitResponse,
+  WorkbenchAttachmentPreview,
+  WorkbenchSessionListItem,
   WorkbenchSessionSnapshot,
   WorkbenchTaskSnapshot,
   WorkbenchTaskStartRequest,
@@ -255,6 +276,8 @@ export const commands = {
   unsubscribeSkills: (subscriptionId: SkillSubscriptionId) =>
     invoke<boolean>("unsubscribe_skills", { subscriptionId }),
   listWorkbenchProjects: () => invoke<ProjectRecord[]>("list_workbench_projects"),
+  getWorkbenchProjectToolContext: (projectId: ProjectId) =>
+    invoke<WorkbenchSessionSnapshot>("get_workbench_project_tool_context", { projectId }),
   listRunRecoveries: () => invoke<RunRecoverySnapshot[]>("list_run_recoveries"),
   resolveRunRecovery: (request: RunRecoveryDecisionRequest) =>
     invoke<RunRecoverySnapshot>("resolve_run_recovery", { request }),
@@ -265,10 +288,46 @@ export const commands = {
     value: string | null = null,
   ) => invoke<ProjectRecord>("manage_workbench_project", { projectId, action, value }),
   importWorkbenchAttachment: () => invoke<AttachmentRecord | null>("import_workbench_attachment"),
+  readWorkbenchAttachment: (attachmentId: AttachmentId) =>
+    invoke<WorkbenchAttachmentPreview>("read_workbench_attachment", { attachmentId }),
   listWorkbenchSessions: (projectId: ProjectId | null = null) =>
-    invoke<SessionRecord[]>("list_workbench_sessions", { projectId }),
+    invoke<WorkbenchSessionListItem[]>("list_workbench_sessions", { projectId }),
   getWorkbenchSession: (sessionId: string) =>
     invoke<WorkbenchSessionSnapshot>("get_workbench_session", { sessionId }),
+  getWorkbenchEnvironment: (sessionId: string) =>
+    invoke<WorkbenchEnvironmentSnapshot>("get_workbench_environment", { sessionId }),
+  openBrowserWorkspace: (sessionId: string, initialUrl: string | null = null) =>
+    invoke<BrowserWorkspace>("open_browser_workspace", { sessionId, initialUrl }),
+  mutateBrowserWorkspace: (request: BrowserWorkspaceMutationRequest) =>
+    invoke<BrowserWorkspace>("mutate_browser_workspace", { request }),
+  updateBrowserSurfaceLayout: (request: BrowserSurfaceLayoutRequest) =>
+    invoke<void>("update_browser_surface_layout", { request }),
+  getBrowserHistory: (query: string, limit = 12) =>
+    invoke<BrowserHistoryEntry[]>("get_browser_history", { query, limit }),
+  getEmbeddedBrowserSettings: () =>
+    invoke<EmbeddedBrowserSettings>("get_embedded_browser_settings"),
+  chooseBrowserDownloadDirectory: () => invoke<string | null>("choose_browser_download_directory"),
+  updateEmbeddedBrowserSettings: (update: EmbeddedBrowserSettingsUpdate) =>
+    invoke<EmbeddedBrowserSettings>("update_embedded_browser_settings", { update }),
+  clearEmbeddedBrowserData: (request: ClearEmbeddedBrowserDataRequest) =>
+    invoke<boolean>("clear_embedded_browser_data", { request }),
+  getBrowserDownloads: (workspaceId: string, limit = 50) =>
+    invoke<BrowserDownloadSnapshot[]>("get_browser_downloads", { workspaceId, limit }),
+  manageBrowserDownload: (request: BrowserDownloadActionRequest) =>
+    invoke<BrowserDownloadSnapshot>("manage_browser_download", { request }),
+  listEmbeddedBrowserPermissionRequests: (sessionId: string | null = null) =>
+    invoke<EmbeddedBrowserPermissionRequest[]>("list_embedded_browser_permission_requests", {
+      sessionId,
+    }),
+  listEmbeddedBrowserSitePermissions: () =>
+    invoke<EmbeddedBrowserSitePermission[]>("list_embedded_browser_site_permissions"),
+  resolveEmbeddedBrowserPermission: (request: EmbeddedBrowserPermissionResolutionRequest) =>
+    invoke<EmbeddedBrowserPermissionRequest>("resolve_embedded_browser_permission", { request }),
+  revokeEmbeddedBrowserSitePermission: (permissionId: string) =>
+    invoke<boolean>("revoke_embedded_browser_site_permission", { permissionId }),
+  openSystemBrowser: (address: string) => invoke<void>("open_system_browser", { address }),
+  handoffWorkbenchSession: (request: WorkbenchHandoffRequest) =>
+    invoke<WorkbenchHandoffResponse>("handoff_workbench_session", { request }),
   resolveWorkbenchApproval: (request: ApprovalDecisionRequest) =>
     invoke<ApprovalRequestRecord>("resolve_workbench_approval", { request }),
   listPendingApprovals: (sessionId: string | null = null) =>
@@ -277,6 +336,10 @@ export const commands = {
     invoke<ApprovalRequestRecord>("resolve_agent_approval", { request }),
   acceptWorkbenchPlan: (request: PlanAcceptanceRequest) =>
     invoke<WorkbenchPlanAcceptanceSnapshot>("accept_workbench_plan", { request }),
+  reviseWorkbenchPlan: (request: PlanRevisionRequest) =>
+    invoke<WorkbenchTaskSnapshot>("revise_workbench_plan", { request }),
+  executeWorkbenchGit: (request: WorkbenchGitRequest) =>
+    invoke<WorkbenchGitResponse>("execute_workbench_git", { request }),
   listProjectGitRefs: (projectId: ProjectId) =>
     invoke<GitRefRecord[]>("list_project_git_refs", { projectId }),
   inspectProjectGit: (projectId: ProjectId) =>

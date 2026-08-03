@@ -1,5 +1,6 @@
 use std::{path::Path, process::Command, sync::Arc};
 
+use hachimi_process_policy::ProcessPolicy;
 use hachimi_protocol::{ComputerAction, ComputerWindowIdentity};
 use parking_lot::Mutex;
 use sha2::{Digest, Sha256};
@@ -320,10 +321,14 @@ pub(super) fn perform_action(
             unsafe { PostMessageW(Some(hwnd), WM_CLOSE, WPARAM(0), LPARAM(0)) }
                 .map_err(|error| broker(format!("close_window:{error}")))
         }
-        ComputerAction::LaunchApp { app_id } => Command::new(app_id)
-            .spawn()
-            .map(|_| ())
-            .map_err(|error| broker(format!("launch_app:{error}"))),
+        ComputerAction::LaunchApp { app_id } => {
+            let mut command = Command::new(app_id);
+            ProcessPolicy::VisibleApplication.apply_std(&mut command);
+            command
+                .spawn()
+                .map(|_| ())
+                .map_err(|error| broker(format!("launch_app:{error}")))
+        }
     }
 }
 

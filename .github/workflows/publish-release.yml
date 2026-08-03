@@ -1,0 +1,138 @@
+name: Publish Verified RC or GA
+
+on:
+  workflow_dispatch:
+    inputs:
+      windows_run_id:
+        description: Windows Release Gate run id containing the immutable candidate and two Windows summaries
+        required: true
+        type: string
+      external_staging_run_id:
+        description: External Staging Gate run id containing OpenAI, Forge, and enterprise summaries
+        required: true
+        type: string
+      release_tag:
+        description: New immutable release tag matching the checked-out version
+        required: true
+        type: string
+      release_channel:
+        description: Verified release maturity
+        required: true
+        type: choice
+        options: [rc, ga]
+
+permissions:
+  actions: read
+  contents: write
+
+concurrency:
+  group: publish-${{ inputs.release_tag }}
+  cancel-in-progress: false
+
+jobs:
+  verify-and-publish:
+    runs-on: ubuntu-latest
+    environment: hachimi-release
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          lfs: true
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24.10.0
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Verify source runs and immutable commit identity
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const windows = await github.rest.actions.getWorkflowRun({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              run_id: Number('${{ inputs.windows_run_id }}'),
+            });
+            const staging = await github.rest.actions.getWorkflowRun({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              run_id: Number('${{ inputs.external_staging_run_id }}'),
+            });
+            if (windows.data.name !== 'Windows Release Gate') core.setFailed('windows_workflow_mismatch');
+            if (staging.data.name !== 'External Staging Gate') core.setFailed('staging_workflow_mismatch');
+            if (windows.data.conclusion !== 'success') core.setFailed('windows_workflow_not_successful');
+            if (staging.data.conclusion !== 'success') core.setFailed('staging_workflow_not_successful');
+            if (windows.data.head_sha !== staging.data.head_sha) core.setFailed('release_run_commit_mismatch');
+            if (windows.data.head_sha !== context.sha) core.setFailed('release_checkout_commit_mismatch');
+      - name: Download immutable candidate
+        uses: actions/download-artifact@v4
+        with:
+          github-token: ${{ github.token }}
+          run-id: ${{ inputs.windows_run_id }}
+          name: hachimi-release-candidate-${{ inputs.windows_run_id }}
+          path: target/release-candidate
+      - name: Download raw Windows evidence
+        uses: actions/download-artifact@v4
+        with:
+          github-token: ${{ github.token }}
+          run-id: ${{ inputs.windows_run_id }}
+          pattern: windows-*-validation-${{ inputs.windows_run_id }}
+          path: target/release-evidence/windows
+          merge-multiple: true
+      - name: Download raw external staging evidence
+        uses: actions/download-artifact@v4
+        with:
+          github-token: ${{ github.token }}
+          run-id: ${{ inputs.external_staging_run_id }}
+          pattern: "*-staging-evidence-${{ inputs.external_staging_run_id }}"
+          path: target/release-evidence/staging
+          merge-multiple: true
+      - name: Verify tag, channel, version, and downloaded candidate
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          RELEASE_CHANNEL: ${{ inputs.release_channel }}
+        run: |
+          node scripts/check-clean-worktree.mjs
+          node scripts/release/version-check.mjs --tag "$RELEASE_TAG"
+          node scripts/release/verify-candidate-artifacts.mjs --root target/release-candidate --expected-commit "$GITHUB_SHA"
+          VERSION="${RELEASE_TAG#v}"
+          case "$RELEASE_CHANNEL" in
+            rc) [[ "$VERSION" =~ ^0\.3\.0-rc\.[0-9]+$ ]] ;;
+            ga) [[ "$VERSION" == "0.3.0" ]] ;;
+            *) exit 1 ;;
+          esac
+          if git ls-remote --exit-code --tags origin "refs/tags/$RELEASE_TAG" >/dev/null 2>&1; then
+            echo "release_tag_already_exists"
+            exit 1
+          fi
+      - name: Aggregate all five fail-closed release gates
+        env:
+          RELEASE_VERSION: ${{ inputs.release_tag }}
+        run: |
+          node scripts/release/verify-evidence.mjs \
+            --root target/release-evidence \
+            --required openai,forge,enterprise,windows_standard_user,windows_elevated \
+            --artifact-manifest target/release-candidate/artifact-manifest.json \
+            --expected-version "${RELEASE_VERSION#v}" \
+            --expected-commit "$GITHUB_SHA" \
+            --output release-manifest.json
+          node scripts/release/create-source-summary.mjs target/release-source-summary.json
+      - name: Create immutable GitHub Release and tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          RELEASE_CHANNEL: ${{ inputs.release_channel }}
+        run: |
+          PRERELEASE=()
+          if [[ "$RELEASE_CHANNEL" != "ga" ]]; then PRERELEASE=(--prerelease); fi
+          gh release create "$RELEASE_TAG" \
+            target/release-candidate/*.exe \
+            target/release-candidate/*.msi \
+            target/release-candidate/*.zip \
+            target/release-candidate/artifact-manifest.json \
+            LICENSE NOTICE.md \
+            target/release-evidence/release-manifest.json \
+            target/release-source-summary.json \
+            --target "$GITHUB_SHA" \
+            --title "Hachimi $RELEASE_TAG" \
+            --notes-file docs/RELEASE_NOTES_TEMPLATE.md \
+            "${PRERELEASE[@]}"

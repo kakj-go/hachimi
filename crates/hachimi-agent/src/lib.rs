@@ -10,6 +10,7 @@ mod mcp_resource_tools;
 mod mcp_tools;
 mod model_view;
 mod multi_agent;
+mod plan_tool;
 mod profiles;
 mod review;
 mod review_tools;
@@ -45,6 +46,7 @@ pub use multi_agent::{
     AGENT_CANCEL_TOOL, AGENT_COLLECT_TOOL, AGENT_SEND_TOOL, AGENT_SPAWN_TOOL, AGENT_WAIT_TOOL,
     MultiAgentCoordinator,
 };
+pub use plan_tool::{UPDATE_PLAN_TOOL, update_plan_tool};
 pub use profiles::{
     WorkloadProfileSpec, profile_allows_tool, profile_runtime_context, workload_profile_spec,
 };
@@ -85,7 +87,7 @@ pub use workload_resolver::{
 };
 pub use workspace_tools::{
     WorkspaceToolKind, register_workspace_tools, workspace_tool_executors,
-    workspace_tool_executors_with_diff_tracking,
+    workspace_tool_executors_with_diff_tracker, workspace_tool_executors_with_diff_tracking,
 };
 
 pub type ToolFuture = Pin<Box<dyn Future<Output = Result<ToolResult, ToolExecutionError>> + Send>>;

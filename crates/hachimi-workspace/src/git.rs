@@ -10,12 +10,12 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+use hachimi_process_policy::{ProcessPolicy, tokio_command};
 use hachimi_protocol::{
     ForgeKind, GitCommitSummary, GitFileStatus, GitMutationResponse, GitPushResponse,
     GitRemoteRecord, GitWorkspaceSnapshot, ProjectGitSnapshot, ProjectGitState, ProjectId,
 };
 use tokio::io::AsyncWriteExt;
-use tokio::process::Command;
 
 use crate::{WorkerContext, WorkspaceError, WorkspaceErrorCode, WorkspaceOutput, relative_display};
 
@@ -420,6 +420,10 @@ impl WorkerContext {
         &self,
         history_limit: u16,
     ) -> Result<GitWorkspaceSnapshot, WorkspaceError> {
+        let raw_status = self
+            .git_raw(["status", "--porcelain=v1", "-z"], true)
+            .await?;
+        let status_fingerprint = crate::worker_io::sha256(&raw_status.stdout);
         let status = self.git_status_snapshot().await?;
         let WorkspaceOutput::GitStatusSnapshot { entries } = status else {
             return Err(WorkspaceError::new(
@@ -456,6 +460,7 @@ impl WorkerContext {
             detached: head_sha.is_some() && branch.is_none(),
             branch,
             head_sha,
+            status_fingerprint,
             status: entries
                 .into_iter()
                 .map(|entry| GitFileStatus {
@@ -555,7 +560,7 @@ impl WorkerContext {
         I: IntoIterator<Item = S>,
         S: AsRef<std::ffi::OsStr>,
     {
-        let mut command = Command::new(crate::git_program());
+        let mut command = tokio_command(crate::git_program(), ProcessPolicy::HiddenCaptured);
         command
             .arg("-c")
             .arg(format!("core.hooksPath={DISABLED_HOOKS_PATH}"))
@@ -598,7 +603,7 @@ impl WorkerContext {
         I: IntoIterator<Item = S>,
         S: AsRef<OsStr>,
     {
-        let mut command = Command::new(crate::git_program());
+        let mut command = tokio_command(crate::git_program(), ProcessPolicy::HiddenCaptured);
         command
             .arg("-c")
             .arg(format!("core.hooksPath={DISABLED_HOOKS_PATH}"))
@@ -919,11 +924,14 @@ mod tests {
                 .iter()
                 .any(|entry| entry.path == "staged.txt" && entry.index_status == "A")
         );
-        let tree = std::process::Command::new(crate::git_program())
-            .args(["show", "--pretty=", "--name-only", "HEAD"])
-            .current_dir(fixture.path())
-            .output()
-            .expect("show commit");
+        let tree = hachimi_process_policy::std_command(
+            crate::git_program(),
+            ProcessPolicy::HiddenCaptured,
+        )
+        .args(["show", "--pretty=", "--name-only", "HEAD"])
+        .current_dir(fixture.path())
+        .output()
+        .expect("show commit");
         assert!(tree.status.success());
         assert!(
             tree.stdout.is_empty(),
@@ -954,11 +962,14 @@ mod tests {
         };
         assert_eq!(remotes.len(), 1);
         assert_eq!(remotes[0].forge_kind, ForgeKind::Unknown);
-        let head = std::process::Command::new(crate::git_program())
-            .args(["rev-parse", "HEAD"])
-            .current_dir(fixture.path())
-            .output()
-            .expect("head");
+        let head = hachimi_process_policy::std_command(
+            crate::git_program(),
+            ProcessPolicy::HiddenCaptured,
+        )
+        .args(["rev-parse", "HEAD"])
+        .current_dir(fixture.path())
+        .output()
+        .expect("head");
         let head = String::from_utf8_lossy(&head.stdout).trim().to_owned();
         let WorkspaceOutput::GitPush { response } = worker
             .git_push(
@@ -987,11 +998,14 @@ mod tests {
     }
 
     fn run_git(cwd: &std::path::Path, arguments: &[&str]) {
-        let output = std::process::Command::new(crate::git_program())
-            .args(arguments)
-            .current_dir(crate::restricted_process_cwd(cwd))
-            .output()
-            .expect("git command");
+        let output = hachimi_process_policy::std_command(
+            crate::git_program(),
+            ProcessPolicy::HiddenCaptured,
+        )
+        .args(arguments)
+        .current_dir(crate::restricted_process_cwd(cwd))
+        .output()
+        .expect("git command");
         assert!(
             output.status.success(),
             "git {arguments:?}: {}",

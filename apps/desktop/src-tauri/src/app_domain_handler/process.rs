@@ -37,6 +37,42 @@ const ALLOWED_ENVIRONMENT: &[&str] = &[
     "HACHIMI_WORKSPACE_WORKER_TOKEN",
 ];
 
+fn validate_process_sandbox(
+    status: SandboxStatus,
+    restricted_backend: bool,
+) -> Result<(), AppServerDomainError> {
+    if status != SandboxStatus::Enforced && restricted_backend {
+        return Err(AppServerDomainError::new(
+            "sandbox_not_enforced",
+            "process execution is disabled until Windows sandbox attestation succeeds",
+        ));
+    }
+    Ok(())
+}
+
+fn process_run_binding(
+    context: &MutationContext,
+) -> Result<Option<(hachimi_protocol::RunId, u64)>, AppServerDomainError> {
+    match (context.expected_run_id.clone(), context.expected_generation) {
+        (Some(run_id), Some(generation)) => Ok(Some((run_id, generation))),
+        (None, None) => Ok(None),
+        _ => Err(AppServerDomainError::new(
+            "process_run_binding_incomplete",
+            "process Run and generation must either both be present or both be absent",
+        )),
+    }
+}
+
+fn validate_direct_terminal(request: &ProcessSpawnRequest) -> Result<(), AppServerDomainError> {
+    if !request.tty || !request.stream_stdin || !request.stream_output {
+        return Err(AppServerDomainError::new(
+            "process_direct_terminal_invalid",
+            "direct user processes must be interactive terminals with stdin and output streaming",
+        ));
+    }
+    Ok(())
+}
+
 impl DesktopAppDomainHandler {
     fn sandbox_backend(&self) -> Option<Arc<dyn SandboxBackend>> {
         (self.sandbox_runtime.snapshot().report.backend != "desktop-e2e-deterministic")
@@ -115,7 +151,6 @@ impl DesktopAppDomainHandler {
         context: &AppServerContext,
         request: ProcessSpawnRequest,
     ) -> Result<ProcessSessionRecord, AppServerDomainError> {
-        let _activity = self.enter_sandbox_activity()?;
         Self::validate_mutation(context, &request.context)?;
         if request.command.is_empty()
             || request.command.len() > MAX_COMMAND_ITEMS
@@ -128,36 +163,52 @@ impl DesktopAppDomainHandler {
                 "command must contain 1-128 bounded arguments",
             ));
         }
-        let sandbox_snapshot = self.sandbox_runtime.snapshot();
-        if SandboxStatus::from_report(&sandbox_snapshot.report) != SandboxStatus::Enforced
-            && self.sandbox_backend().is_some()
+        let run_binding = process_run_binding(&request.context)?;
+        let restricted = run_binding.is_some();
+        let _activity = if restricted {
+            Some(self.enter_sandbox_activity()?)
+        } else {
+            validate_direct_terminal(&request)?;
+            None
+        };
+        if restricted {
+            let sandbox_snapshot = self.sandbox_runtime.snapshot();
+            validate_process_sandbox(
+                SandboxStatus::from_report(&sandbox_snapshot.report),
+                self.sandbox_backend().is_some(),
+            )?;
+        }
+        let checkout = self
+            .resolve_session_checkout(&request.session_id, &request.checkout_id)
+            .await?;
+        if let Some((run_id, generation)) = &run_binding {
+            let workspace = self
+                .resolve_session_workspace(&request.session_id, &request.checkout_id)
+                .await?;
+            if workspace.run.id != *run_id || workspace.run.generation != *generation {
+                return Err(AppServerDomainError::new(
+                    "process_run_precondition_failed",
+                    "the active Run or generation changed",
+                ));
+            }
+            self.assert_process_run_binding(&request.session_id, run_id, *generation)
+                .await?;
+        } else if !self
+            .store
+            .project_tool_context_matches(&request.session_id, &request.checkout_id)
+            .await
+            .map_err(process_domain_error)?
         {
             return Err(AppServerDomainError::new(
-                "sandbox_not_enforced",
-                "process execution is disabled until Windows sandbox attestation succeeds",
+                "process_direct_user_forbidden",
+                "direct user terminals require a bound project tool context",
             ));
         }
-        let run_id = request.context.expected_run_id.clone().ok_or_else(|| {
-            AppServerDomainError::new("process_run_required", "processes require an active Run")
-        })?;
-        let generation = request.context.expected_generation.ok_or_else(|| {
-            AppServerDomainError::new(
-                "process_generation_required",
-                "processes require a Run generation",
-            )
-        })?;
-        let workspace = self
-            .resolve_session_workspace(&request.session_id, &request.checkout_id)
-            .await?;
-        if workspace.run.id != run_id || workspace.run.generation != generation {
-            return Err(AppServerDomainError::new(
-                "process_run_precondition_failed",
-                "the active Run or generation changed",
-            ));
-        }
-        self.assert_process_run_binding(&request.session_id, &run_id, generation)
-            .await?;
-        let environment = resolve_process_environment(request.environment.clone())?;
+        let environment = if restricted {
+            resolve_process_environment(request.environment.clone())?
+        } else {
+            resolve_user_terminal_environment(request.environment.clone())?
+        };
         let output_cap = usize::try_from(
             request
                 .output_bytes_cap
@@ -170,9 +221,9 @@ impl DesktopAppDomainHandler {
         let candidate = ProcessSessionRecord {
             id: ProcessSessionId::random(),
             session_id: request.session_id.clone(),
-            run_id: Some(run_id),
+            run_id: run_binding.as_ref().map(|(run_id, _)| run_id.clone()),
             checkout_id: request.checkout_id,
-            run_generation: Some(generation),
+            run_generation: run_binding.as_ref().map(|(_, generation)| *generation),
             owner_client_id: context.client.client_id.clone(),
             command_summary: process_command_summary(&request.command),
             interactive: request.tty,
@@ -191,11 +242,14 @@ impl DesktopAppDomainHandler {
             || async {
                 let launch = ProcessLaunchSpec {
                     record: candidate,
-                    restricted_launcher: self
-                        .sandbox_backend()
-                        .map(|_| sandbox_sidecar_path("hachimi-sandbox-launcher")),
+                    restricted_launcher: if restricted {
+                        self.sandbox_backend()
+                            .map(|_| sandbox_sidecar_path("hachimi-sandbox-launcher"))
+                    } else {
+                        None
+                    },
                     command: request.command,
-                    cwd: workspace.checkout.path.into(),
+                    cwd: checkout.path.into(),
                     environment,
                     tty: request.tty,
                     stream_stdin: request.stream_stdin,
@@ -409,8 +463,163 @@ fn resolve_process_environment(
     Ok(environment)
 }
 
+fn resolve_user_terminal_environment(
+    values: BTreeMap<String, Option<String>>,
+) -> Result<BTreeMap<String, String>, AppServerDomainError> {
+    let mut environment = std::env::vars()
+        .filter_map(|(name, value)| {
+            let normalized = name.to_ascii_uppercase();
+            (!normalized.starts_with("HACHIMI_")
+                && !normalized.is_empty()
+                && !normalized.contains(['=', '\0'])
+                && !value.contains('\0'))
+            .then_some((normalized, value))
+        })
+        .collect::<BTreeMap<_, _>>();
+    environment.extend(
+        resolve_process_environment(values)?
+            .into_iter()
+            .filter(|(name, _)| !name.starts_with("HACHIMI_")),
+    );
+    Ok(environment)
+}
+
 fn process_timeout(timeout_ms: Option<u64>) -> Option<Duration> {
     timeout_ms
         .filter(|value| *value > 0)
         .map(|value| Duration::from_millis(value).min(MAX_PROCESS_TIMEOUT))
+}
+
+#[cfg(test)]
+mod tests {
+    use hachimi_protocol::{CheckoutId, ProcessStatus, RequestId, RunId};
+
+    use super::*;
+
+    fn mutation(run_id: Option<&str>, generation: Option<u64>) -> MutationContext {
+        MutationContext {
+            request_id: RequestId("process-test-request".into()),
+            client_id: ClientId("workbench".into()),
+            protocol_version: hachimi_protocol::CONTROL_PROTOCOL_VERSION,
+            idempotency_key: "process-test".into(),
+            expected_run_id: run_id.map(RunId::from),
+            expected_generation: generation,
+        }
+    }
+
+    fn direct_record(owner: &str) -> ProcessSessionRecord {
+        ProcessSessionRecord {
+            id: ProcessSessionId::random(),
+            session_id: SessionId::from("project-tool-session"),
+            run_id: None,
+            checkout_id: CheckoutId::from("project-tool-checkout"),
+            run_generation: None,
+            owner_client_id: ClientId(owner.into()),
+            command_summary: "powershell.exe".into(),
+            interactive: true,
+            status: ProcessStatus::Running,
+            exit_code: None,
+            output_limit_bytes: 1024,
+            created_at_ms: 1,
+            updated_at_ms: 1,
+            reconnect_expires_at_ms: None,
+        }
+    }
+
+    #[test]
+    fn direct_process_binding_requires_both_run_fields_or_neither() {
+        assert_eq!(process_run_binding(&mutation(None, None)).unwrap(), None);
+        assert_eq!(
+            process_run_binding(&mutation(Some("run-1"), Some(7))).unwrap(),
+            Some((RunId::from("run-1"), 7))
+        );
+        for context in [mutation(Some("run-1"), None), mutation(None, Some(7))] {
+            assert_eq!(
+                process_run_binding(&context).unwrap_err().code,
+                "process_run_binding_incomplete"
+            );
+        }
+    }
+
+    #[test]
+    fn process_spawn_requires_enforced_sandbox_for_restricted_backend() {
+        assert!(validate_process_sandbox(SandboxStatus::Enforced, true).is_ok());
+        assert!(validate_process_sandbox(SandboxStatus::Disabled, false).is_ok());
+        assert_eq!(
+            validate_process_sandbox(SandboxStatus::Degraded, true)
+                .unwrap_err()
+                .code,
+            "sandbox_not_enforced"
+        );
+    }
+
+    #[test]
+    fn direct_processes_must_be_interactive_terminals() {
+        let mut request = ProcessSpawnRequest {
+            context: mutation(None, None),
+            session_id: SessionId::from("project-tool-session"),
+            checkout_id: CheckoutId::from("project-tool-checkout"),
+            command: vec!["powershell.exe".into()],
+            tty: true,
+            stream_stdin: true,
+            stream_output: true,
+            output_bytes_cap: None,
+            timeout_ms: None,
+            environment: BTreeMap::new(),
+            size: None,
+        };
+        assert!(validate_direct_terminal(&request).is_ok());
+        request.stream_stdin = false;
+        assert_eq!(
+            validate_direct_terminal(&request).unwrap_err().code,
+            "process_direct_terminal_invalid"
+        );
+    }
+
+    #[test]
+    fn direct_terminal_inherits_user_environment_without_internal_capabilities() {
+        let environment = resolve_user_terminal_environment(BTreeMap::from([
+            ("PATH".into(), Some("terminal-path".into())),
+            (
+                "HACHIMI_WORKSPACE_WORKER_TOKEN".into(),
+                Some("explicit-value".into()),
+            ),
+        ]))
+        .unwrap();
+        assert_eq!(
+            environment.get("PATH").map(String::as_str),
+            Some("terminal-path")
+        );
+        assert_eq!(environment.get("HACHIMI_WORKSPACE_WORKER_TOKEN"), None);
+        for name in std::env::vars()
+            .map(|(name, _)| name)
+            .filter(|name| name.starts_with("HACHIMI_"))
+        {
+            assert!(!environment.contains_key(&name));
+        }
+    }
+
+    #[test]
+    fn direct_process_mutations_require_the_process_owner() {
+        let record = direct_record("window:workbench");
+        let context = mutation(None, None);
+        assert!(
+            DesktopAppDomainHandler::check_process_owner(
+                &record,
+                &ClientId("window:workbench".into()),
+                &context,
+            )
+            .is_ok()
+        );
+        assert_eq!(
+            DesktopAppDomainHandler::check_process_owner(
+                &record,
+                &ClientId("window:other".into()),
+                &context,
+            )
+            .unwrap_err()
+            .code,
+            "process_owner_mismatch"
+        );
+    }
 }

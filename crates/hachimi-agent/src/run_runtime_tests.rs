@@ -125,6 +125,7 @@ impl AgentRunPreparer for WindowlessPreparer {
                     },
                 ),
                 world_refresher: None,
+                diff_tracker: None,
             })
         })
     }
@@ -244,7 +245,7 @@ async fn service_principal_executes_a_background_run_without_a_window_transport(
             .iter()
             .any(|item| matches!(
                 &item.payload,
-                hachimi_protocol::ItemPayload::Assistant { text }
+                hachimi_protocol::ItemPayload::Assistant { text, .. }
                     if text == "windowless scheduled Run completed"
             ))
     );

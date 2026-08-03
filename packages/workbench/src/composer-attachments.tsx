@@ -18,6 +18,7 @@ export interface ComposerAttachmentPreview {
 export function ComposerAttachmentList(props: {
   attachments: ComposerAttachmentPreview[];
   onRemove: (attachmentId: string) => void;
+  onOpen?: (attachment: ComposerAttachmentPreview) => void;
 }) {
   const i18n = useI18n();
   const folderSummary = (count: number) =>
@@ -65,6 +66,7 @@ export function ComposerAttachmentList(props: {
                 removeLabel={`${i18n.t("workbench.removeAttachment")}: ${attachment.name}`}
                 removeClass="composer-attachment-remove"
                 onRemove={() => props.onRemove(attachment.id)}
+                {...(props.onOpen ? { onOpen: () => props.onOpen!(attachment) } : {})}
               />
             );
           }}

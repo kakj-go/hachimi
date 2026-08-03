@@ -56,6 +56,7 @@ impl hachimi_sandbox::SandboxBackend for DeterministicE2eSandboxBackend {
             use tokio::io::AsyncWriteExt;
 
             let mut command = tokio::process::Command::new(&spec.executable);
+            hachimi_process_policy::ProcessPolicy::HiddenCaptured.apply_tokio(&mut command);
             command
                 .args(&spec.args)
                 .current_dir(&spec.cwd)

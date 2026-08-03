@@ -311,8 +311,14 @@ pub fn profile_runtime_context(
             "Every side effect requires current Tool, Policy, Approval, Sandbox, Host, and grant checks."
         }
     };
+    let progress_rule = match entry_profile {
+        EntryProfile::Workbench => {
+            "Before and after meaningful tool phases, send a brief commentary update that states the current conclusion and next step. Do not narrate every trivial read. Reserve the final answer for the completed result."
+        }
+        EntryProfile::PetConversation | EntryProfile::DesktopControl => "",
+    };
     format!(
-        "{}\n\nRuntime entry_profile={entry_profile:?}; workload={workload:?}; context={context:?}. {mode_rule}",
+        "{}\n\nRuntime entry_profile={entry_profile:?}; workload={workload:?}; context={context:?}. {mode_rule} {progress_rule}",
         spec.system_prompt
     )
 }

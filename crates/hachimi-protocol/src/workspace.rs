@@ -137,6 +137,8 @@ pub struct GitWorkspaceRequest {
 pub struct GitWorkspaceSnapshot {
     pub branch: Option<String>,
     pub head_sha: Option<String>,
+    /// SHA-256 of `git status --porcelain=v1 -z`, used to reject stale Git mutations.
+    pub status_fingerprint: String,
     pub detached: bool,
     pub status: Vec<GitFileStatus>,
     pub recent_commits: Vec<GitCommitSummary>,
@@ -259,8 +261,20 @@ pub struct FsSearchSnapshot {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum DiffScope {
-    Run { run_id: RunId },
-    Checkout { checkout_id: CheckoutId },
+    Run {
+        run_id: RunId,
+    },
+    Checkout {
+        checkout_id: CheckoutId,
+    },
+    Session {
+        session_id: SessionId,
+        checkout_id: CheckoutId,
+    },
+    Branch {
+        checkout_id: CheckoutId,
+        branch: String,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type)]

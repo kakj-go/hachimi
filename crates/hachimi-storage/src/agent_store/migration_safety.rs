@@ -294,7 +294,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn upgrades_v18_to_v22_with_online_backup_manifest() {
+    async fn upgrades_v18_to_v25_with_online_backup_manifest() {
         let fixture = tempfile::tempdir().expect("fixture");
         let old_migrations = fixture.path().join("migrations-v18");
         fs::create_dir(&old_migrations).expect("migration directory");
@@ -325,7 +325,7 @@ mod tests {
                 .fetch_one(store.pool())
                 .await
                 .expect("migration version");
-        assert_eq!(version, 22);
+        assert_eq!(version, 25);
 
         let backup_directory = PathBuf::from(format!("{}.backups", database.display()));
         let manifest_path = fs::read_dir(&backup_directory)
@@ -337,8 +337,8 @@ mod tests {
         let manifest: MigrationBackupManifest =
             serde_json::from_slice(&fs::read(manifest_path).expect("manifest bytes"))
                 .expect("manifest");
-        assert_eq!((manifest.from_migration, manifest.to_migration), (18, 22));
-        assert_eq!(manifest.protocol_version, 29);
+        assert_eq!((manifest.from_migration, manifest.to_migration), (18, 25));
+        assert_eq!(manifest.protocol_version, 30);
         let backup = backup_directory.join(&manifest.database_file);
         assert_eq!(
             manifest.database_sha256,

@@ -315,6 +315,7 @@ export function AttachmentCard(
     removeLabel?: string;
     removeClass?: string;
     onRemove?: () => void;
+    onOpen?: () => void;
   } & ComponentStateProps,
 ) {
   return (
@@ -324,7 +325,6 @@ export function AttachmentCard(
       data-component="attachment-card"
       data-testid={props.testId}
       title={props.title}
-      role="listitem"
       data-variant={props.variant ?? "default"}
       data-size={props.size ?? "normal"}
       data-tone={props.tone ?? "neutral"}
@@ -332,6 +332,15 @@ export function AttachmentCard(
       data-state={componentState(props)}
       data-invalid={props.invalid || undefined}
       aria-busy={props.loading || undefined}
+      role={props.onOpen ? "button" : "listitem"}
+      tabIndex={props.onOpen ? 0 : undefined}
+      onClick={() => props.onOpen?.()}
+      onKeyDown={(event) => {
+        if (props.onOpen && (event.key === "Enter" || event.key === " ")) {
+          event.preventDefault();
+          props.onOpen();
+        }
+      }}
     >
       <span class={props.image ? "attachment-preview" : "attachment-file-icon"}>
         {props.preview ?? props.icon}
@@ -350,7 +359,10 @@ export function AttachmentCard(
           class={props.removeClass}
           aria-label={props.removeLabel ?? `Remove ${props.name}`}
           disabled={props.disabled || props.loading}
-          onClick={() => props.onRemove?.()}
+          onClick={(event) => {
+            event.stopPropagation();
+            props.onRemove?.();
+          }}
         >
           ×
         </button>

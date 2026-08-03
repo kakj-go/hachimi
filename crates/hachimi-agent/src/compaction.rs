@@ -531,10 +531,13 @@ impl SemanticCompactor {
                     }
                     Err(error) => return Err(error.into()),
                     Ok(event) => match event {
-                        ModelEvent::TextDelta { delta } => output.push_str(&delta),
+                        ModelEvent::AgentMessageDelta { delta, .. }
+                        | ModelEvent::TextDelta { delta } => output.push_str(&delta),
                         ModelEvent::ReasoningDelta { .. } => {}
                         ModelEvent::Usage { usage: current } => usage = current,
                         ModelEvent::Completed { finish_reason } => completed = Some(finish_reason),
+                        ModelEvent::AgentMessageStarted { .. }
+                        | ModelEvent::AgentMessageCompleted { .. } => {}
                         ModelEvent::ToolCallDelta { .. } | ModelEvent::ToolCallCompleted { .. } => {
                             return Err(CompactionError::QualityRejected(
                                 "summary_returned_tool_call",
@@ -912,6 +915,7 @@ const fn is_semantic_item(kind: TranscriptItemKind) -> bool {
             | TranscriptItemKind::FileChange
             | TranscriptItemKind::McpCall
             | TranscriptItemKind::DynamicToolCall
+            | TranscriptItemKind::CollabToolCall
             | TranscriptItemKind::Review
     )
 }
@@ -928,6 +932,7 @@ fn render_item(item: &TranscriptItem, max_chars: usize) -> Option<String> {
         TranscriptItemKind::FileChange => "file_change",
         TranscriptItemKind::McpCall => "mcp_result_untrusted",
         TranscriptItemKind::DynamicToolCall => "dynamic_tool_result_untrusted",
+        TranscriptItemKind::CollabToolCall => "collab_tool_result_untrusted",
         TranscriptItemKind::Review => "review",
         TranscriptItemKind::UserInputRequest
         | TranscriptItemKind::ContextCompaction
@@ -944,11 +949,11 @@ fn render_item(item: &TranscriptItem, max_chars: usize) -> Option<String> {
 
 fn transcript_text(item: &TranscriptItem) -> Option<String> {
     use ItemPayload::{
-        Assistant, CommandExecution, DynamicToolCall, FileChange, McpCall, Plan, Reasoning, Review,
-        SystemContext, ToolExecution, User,
+        Assistant, CollabToolCall, CommandExecution, DynamicToolCall, FileChange, McpCall, Plan,
+        Reasoning, Review, SystemContext, ToolExecution, User,
     };
     match &item.payload {
-        User { text, .. } | Assistant { text } | Plan { text, .. } => Some(text.clone()),
+        User { text, .. } | Assistant { text, .. } | Plan { text, .. } => Some(text.clone()),
         Reasoning { summary, .. } | Review { summary, .. } => Some(summary.clone()),
         ToolExecution {
             result: Some(result),
@@ -969,7 +974,20 @@ fn transcript_text(item: &TranscriptItem) -> Option<String> {
             namespace,
             name,
             status,
+            ..
         } => Some(format!("{namespace}.{name}: {status}")),
+        CollabToolCall {
+            title,
+            status,
+            summary,
+            ..
+        } => Some(format!(
+            "{title}: {status}{}",
+            summary
+                .as_deref()
+                .map(|value| format!(": {value}"))
+                .unwrap_or_default()
+        )),
         SystemContext { message, .. } => Some(message.clone()),
         _ => None,
     }
@@ -1245,7 +1263,10 @@ mod tests {
                 text: text.into(),
                 attachment_ids: Vec::new(),
             },
-            TranscriptItemKind::Assistant => ItemPayload::Assistant { text: text.into() },
+            TranscriptItemKind::Assistant => ItemPayload::Assistant {
+                text: text.into(),
+                phase: hachimi_protocol::AgentMessagePhase::Unknown,
+            },
             _ => panic!("unsupported semantic fixture kind"),
         };
         TranscriptItem {

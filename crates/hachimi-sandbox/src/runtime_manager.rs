@@ -9,6 +9,7 @@ use std::{
     sync::{Arc, RwLock},
 };
 
+use hachimi_process_policy::{ProcessPolicy, std_command};
 use hachimi_protocol::{
     SandboxBootstrapPhase, SandboxBootstrapState, SandboxCapabilityReport, SandboxReadiness,
     SandboxRuntimeSnapshot,
@@ -291,7 +292,7 @@ fn run_per_user_setup(
         });
     }
     use std::os::windows::process::CommandExt;
-    let mut command = std::process::Command::new(helper);
+    let mut command = std_command(helper, ProcessPolicy::HiddenCaptured);
     command
         .arg("--marker")
         .arg(marker)

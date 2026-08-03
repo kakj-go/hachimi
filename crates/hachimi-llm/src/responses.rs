@@ -1,20 +1,23 @@
 use futures_util::StreamExt;
 use hachimi_model_runtime::ModelRuntimeError;
 use hachimi_protocol::{
-    ModelCompactionRequest, ModelCompactionResult, ModelEvent, ModelFinishReason, ModelMessage,
-    ModelRequest, ModelRole, ModelToolCall, TokenUsage, ToolCallId,
+    AgentMessagePhase, ModelCompactionRequest, ModelCompactionResult, ModelEvent,
+    ModelFinishReason, ModelMessage, ModelRequest, ModelRole, ModelToolCall, TokenUsage,
+    ToolCallId,
 };
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use super::{
-    OpenAiCompatibleRuntime, is_context_overflow, provider_error_detail, request_error, send_event,
+    OpenAiCompatibleRuntime, ProviderToolEventDecoder, ProviderToolNames, is_context_overflow,
+    provider_error_detail, request_error, send_event,
 };
 
 pub(super) async fn send_model_request(
     runtime: &OpenAiCompatibleRuntime,
     request: ModelRequest,
+    tool_names: ProviderToolNames,
     cancellation: &CancellationToken,
     sender: &mpsc::Sender<Result<ModelEvent, ModelRuntimeError>>,
 ) -> Result<(), ModelRuntimeError> {
@@ -27,7 +30,7 @@ pub(super) async fn send_model_request(
     );
     let mut body = json!({
         "model": runtime.settings.model_name,
-        "input": messages_to_items(&request.messages),
+        "input": messages_to_items(&request.messages, &tool_names),
         "stream": true,
         "store": false,
     });
@@ -39,7 +42,7 @@ pub(super) async fn send_model_request(
                 .map(|tool| {
                     json!({
                         "type": "function",
-                        "name": tool.name,
+                        "name": tool_names.encode(&tool.name),
                         "description": tool.description,
                         "parameters": tool.input_schema,
                         "strict": runtime.capabilities.strict_json_schema,
@@ -68,14 +71,18 @@ pub(super) async fn send_model_request(
         let value: Value = response.json().await.map_err(|_| {
             ModelRuntimeError::InvalidStream("Responses returned invalid JSON".into())
         })?;
+        let mut decoder = ProviderToolEventDecoder::new(tool_names);
         for event in response_events(&value, runtime.capabilities.reasoning_summary)? {
-            send_event(sender, event, cancellation).await?;
+            for event in decoder.decode_event(event) {
+                send_event(sender, event, cancellation).await?;
+            }
         }
         return Ok(());
     }
     stream_response(
         response,
         runtime.capabilities.reasoning_summary,
+        tool_names,
         cancellation,
         sender,
     )
@@ -91,9 +98,10 @@ pub(super) async fn compact(
         "{}/responses/compact",
         runtime.settings.base_url.trim_end_matches('/')
     );
+    let tool_names = ProviderToolNames::for_messages(&request.messages);
     let compact_body = json!({
         "model": runtime.settings.model_name,
-        "input": messages_to_items(&request.messages),
+        "input": messages_to_items(&request.messages, &tool_names),
     });
     let compact_response =
         send_request(runtime, compact_endpoint, compact_body, &cancellation).await?;
@@ -175,12 +183,14 @@ async fn send_request(
 async fn stream_response(
     response: reqwest::Response,
     allow_reasoning_summary: bool,
+    tool_names: ProviderToolNames,
     cancellation: &CancellationToken,
     sender: &mpsc::Sender<Result<ModelEvent, ModelRuntimeError>>,
 ) -> Result<(), ModelRuntimeError> {
     let mut stream = response.bytes_stream();
     let mut pending = Vec::<u8>::new();
     let mut completed = false;
+    let mut decoder = ProviderToolEventDecoder::new(tool_names);
     loop {
         let next = tokio::select! {
             () = cancellation.cancelled() => return Err(ModelRuntimeError::Cancelled),
@@ -209,10 +219,12 @@ async fn stream_response(
                 ModelRuntimeError::InvalidStream("Responses emitted invalid SSE JSON".into())
             })?;
             for event in stream_events(&value, allow_reasoning_summary)? {
-                if matches!(event, ModelEvent::Completed { .. }) {
-                    completed = true;
+                for event in decoder.decode_event(event) {
+                    if matches!(event, ModelEvent::Completed { .. }) {
+                        completed = true;
+                    }
+                    send_event(sender, event, cancellation).await?;
                 }
-                send_event(sender, event, cancellation).await?;
             }
         }
     }
@@ -225,7 +237,7 @@ async fn stream_response(
     }
 }
 
-fn messages_to_items(messages: &[ModelMessage]) -> Vec<Value> {
+fn messages_to_items(messages: &[ModelMessage], tool_names: &ProviderToolNames) -> Vec<Value> {
     let mut items = Vec::new();
     for message in messages {
         match message.role {
@@ -276,7 +288,7 @@ fn messages_to_items(messages: &[ModelMessage]) -> Vec<Value> {
                     json!({
                         "type": "function_call",
                         "call_id": call.id.as_str(),
-                        "name": call.name,
+                        "name": tool_names.encode(&call.name),
                         "arguments": call.arguments.to_string(),
                     })
                 }));
@@ -327,7 +339,8 @@ fn stream_events(
         .and_then(Value::as_str)
         .ok_or_else(|| ModelRuntimeError::InvalidStream("Responses event omitted type".into()))?;
     match event_type {
-        "response.output_text.delta" => Ok(vec![ModelEvent::TextDelta {
+        "response.output_text.delta" => Ok(vec![ModelEvent::AgentMessageDelta {
+            message_id: response_message_id(value, None),
             delta: required_string(value, "delta", "output-text delta")?.into(),
         }]),
         "response.reasoning_summary_text.delta" if allow_reasoning_summary => {
@@ -356,6 +369,12 @@ fn stream_events(
                     "output_item.added omitted item".into(),
                 ));
             };
+            if item.get("type").and_then(Value::as_str) == Some("message") {
+                return Ok(vec![ModelEvent::AgentMessageStarted {
+                    message_id: response_message_id(value, Some(item)),
+                    phase: response_message_phase(item),
+                }]);
+            }
             if item.get("type").and_then(Value::as_str) != Some("function_call") {
                 return Ok(Vec::new());
             }
@@ -388,6 +407,11 @@ fn stream_events(
                     "output_item.done omitted item".into(),
                 ));
             };
+            if item.get("type").and_then(Value::as_str) == Some("message") {
+                return Ok(vec![ModelEvent::AgentMessageCompleted {
+                    message_id: response_message_id(value, Some(item)),
+                }]);
+            }
             if item.get("type").and_then(Value::as_str) != Some("function_call") {
                 return Ok(Vec::new());
             }
@@ -449,9 +473,18 @@ fn output_item_events(
             ModelRuntimeError::InvalidStream("Responses JSON omitted output Items".into())
         })?;
     let mut events = Vec::new();
-    for item in output {
+    for (output_index, item) in output.iter().enumerate() {
         match item.get("type").and_then(Value::as_str) {
             Some("message") => {
+                let message_id = item
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| format!("response-message-{output_index}"));
+                events.push(ModelEvent::AgentMessageStarted {
+                    message_id: message_id.clone(),
+                    phase: response_message_phase(item),
+                });
                 let content = item
                     .get("content")
                     .and_then(Value::as_array)
@@ -460,11 +493,13 @@ fn output_item_events(
                     })?;
                 for part in content {
                     if part.get("type").and_then(Value::as_str) == Some("output_text") {
-                        events.push(ModelEvent::TextDelta {
+                        events.push(ModelEvent::AgentMessageDelta {
+                            message_id: message_id.clone(),
                             delta: required_string(part, "text", "output_text")?.into(),
                         });
                     }
                 }
+                events.push(ModelEvent::AgentMessageCompleted { message_id });
             }
             Some("function_call") => events.push(ModelEvent::ToolCallCompleted {
                 call: parse_function_call(item)?,
@@ -518,10 +553,15 @@ fn visible_text_and_usage(value: &Value) -> Result<(String, TokenUsage), ModelRu
         ));
     }
     let events = output_item_events(value, false)?;
-    if events
-        .iter()
-        .any(|event| !matches!(event, ModelEvent::TextDelta { .. }))
-    {
+    if events.iter().any(|event| {
+        !matches!(
+            event,
+            ModelEvent::AgentMessageStarted { .. }
+                | ModelEvent::AgentMessageDelta { .. }
+                | ModelEvent::AgentMessageCompleted { .. }
+                | ModelEvent::TextDelta { .. }
+        )
+    }) {
         return Err(ModelRuntimeError::InvalidStream(
             "compacted summary returned a tool call".into(),
         ));
@@ -529,7 +569,9 @@ fn visible_text_and_usage(value: &Value) -> Result<(String, TokenUsage), ModelRu
     let text = events
         .into_iter()
         .filter_map(|event| match event {
-            ModelEvent::TextDelta { delta } => Some(delta),
+            ModelEvent::AgentMessageDelta { delta, .. } | ModelEvent::TextDelta { delta } => {
+                Some(delta)
+            }
             _ => None,
         })
         .collect::<String>();
@@ -608,13 +650,36 @@ fn required_string<'a>(
         .ok_or_else(|| ModelRuntimeError::InvalidStream(format!("{kind} omitted {field}")))
 }
 
+fn response_message_id(event: &Value, item: Option<&Value>) -> String {
+    event
+        .get("item_id")
+        .or_else(|| item.and_then(|item| item.get("id")))
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .unwrap_or_else(|| {
+            let output_index = event
+                .get("output_index")
+                .and_then(Value::as_u64)
+                .unwrap_or_default();
+            format!("response-message-{output_index}")
+        })
+}
+
+fn response_message_phase(item: &Value) -> AgentMessagePhase {
+    match item.get("phase").and_then(Value::as_str) {
+        Some("commentary") => AgentMessagePhase::Commentary,
+        Some("final_answer") => AgentMessagePhase::FinalAnswer,
+        _ => AgentMessagePhase::Unknown,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use futures_util::StreamExt;
     use hachimi_model_runtime::{ModelRuntime, ModelRuntimeError};
     use hachimi_protocol::{
-        LlmSettings, ModelCompactionRequest, ModelEvent, ModelFinishReason, ModelMessage,
-        ModelRequest, ProviderProtocolKind, StructuredOutputMode,
+        AgentMessagePhase, LlmSettings, ModelCompactionRequest, ModelEvent, ModelFinishReason,
+        ModelMessage, ModelRequest, ProviderProtocolKind, StructuredOutputMode,
     };
     use serde_json::json;
     use tokio::{
@@ -634,7 +699,7 @@ mod tests {
                 "status": "completed",
                 "output": [
                     { "type": "reasoning", "summary": [{ "type": "summary_text", "text": "Checked inputs." }] },
-                    { "type": "message", "content": [{ "type": "output_text", "text": "done" }] },
+                    { "type": "message", "id": "message-1", "phase": "commentary", "content": [{ "type": "output_text", "text": "done" }] },
                     { "type": "function_call", "call_id": "call-1", "name": "read", "arguments": "{\"path\":\"a\"}" }
                 ],
                 "usage": { "input_tokens": 7, "output_tokens": 3 }
@@ -646,6 +711,18 @@ mod tests {
         assert!(events.iter().any(
             |event| matches!(event, ModelEvent::ToolCallCompleted { call } if call.name == "read")
         ));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            ModelEvent::AgentMessageStarted {
+                message_id,
+                phase: AgentMessagePhase::Commentary,
+            } if message_id == "message-1"
+        )));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            ModelEvent::AgentMessageDelta { message_id, delta }
+                if message_id == "message-1" && delta == "done"
+        )));
         assert!(matches!(
             events.last(),
             Some(ModelEvent::Completed {
@@ -709,9 +786,10 @@ mod tests {
         while let Some(event) = stream.next().await {
             events.push(event.expect("event"));
         }
-        assert!(events.iter().any(
-            |event| matches!(event, ModelEvent::TextDelta { delta } if delta == "HACHIMI_OK")
-        ));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            ModelEvent::AgentMessageDelta { delta, .. } if delta == "HACHIMI_OK"
+        )));
         assert!(events.iter().any(|event| matches!(
             event,
             ModelEvent::Usage { usage } if usage.input_tokens == 3 && usage.output_tokens == 2

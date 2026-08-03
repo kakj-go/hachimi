@@ -6,6 +6,7 @@
 
 use std::{ffi::OsString, future::Future, path::PathBuf, pin::Pin, process::Stdio, time::Duration};
 
+use hachimi_process_policy::ProcessPolicy;
 use hachimi_protocol::{
     CapabilityGrantSet, CheckoutId, FileSystemAccess, PermissionGrantScope, RunId, SessionId,
     ToolEffect,
@@ -178,6 +179,7 @@ pub(crate) fn spawn_with_launcher(
             }
         }
         let mut command = Command::new(launcher);
+        ProcessPolicy::HiddenCaptured.apply_tokio(&mut command);
         command
             .arg("--")
             .arg(&spec.executable)
@@ -458,6 +460,7 @@ mod tests {
         let directory = tempfile::tempdir().expect("directory");
         let marker = directory.path().join("late-marker.txt");
         let mut command = Command::new("powershell.exe");
+        ProcessPolicy::HiddenCaptured.apply_tokio(&mut command);
         command
             .args([
                 "-NoProfile",

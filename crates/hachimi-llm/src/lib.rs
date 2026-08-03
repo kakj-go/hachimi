@@ -3,6 +3,7 @@
 //! This crate deliberately does not register a Pet provider or an Agent runtime.
 
 mod embeddings;
+mod provider_tool_names;
 mod responses;
 
 use std::{
@@ -20,11 +21,11 @@ use hachimi_model_runtime::{
     WorkloadClassificationRequest, WorkloadClassificationResult,
 };
 use hachimi_protocol::{
-    LlmSettings, LlmSettingsInput, LlmTestResult, ModelCompactionRequest, ModelEvent,
-    ModelFinishReason, ModelMessage, ModelRequest, ModelRole, ModelToolCall, ProviderCapabilities,
-    ProviderCapabilityProbe, ProviderCapabilityProbeSource, ProviderEmbeddingRequest,
-    ProviderProtocolKind, RunConfiguration, StructuredOutputMode, TokenUsage, ToolCallId,
-    WorkloadKind,
+    AgentMessagePhase, LlmSettings, LlmSettingsInput, LlmTestResult, ModelCompactionRequest,
+    ModelEvent, ModelFinishReason, ModelMessage, ModelRequest, ModelRole, ModelToolCall,
+    ProviderCapabilities, ProviderCapabilityProbe, ProviderCapabilityProbeSource,
+    ProviderEmbeddingRequest, ProviderProtocolKind, RunConfiguration, StructuredOutputMode,
+    TokenUsage, ToolCallId, WorkloadKind,
 };
 use reqwest::StatusCode;
 use serde_json::{Value, json};
@@ -33,6 +34,8 @@ use tokio::sync::{RwLock, mpsc};
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_util::sync::CancellationToken;
 use url::Url;
+
+use provider_tool_names::{ProviderToolEventDecoder, ProviderToolNames};
 
 const API_KEY_SERVICE: &str = "com.hachimi.desktop";
 const API_KEY_ACCOUNT: &str = "llm-api-key";
@@ -295,6 +298,45 @@ impl ModelRuntime for OpenAiCompatibleRuntime {
     }
 }
 
+#[derive(Debug, Default)]
+struct CompatibleMessageEventDecoder {
+    started: bool,
+}
+
+impl CompatibleMessageEventDecoder {
+    fn decode_event(&mut self, event: ModelEvent) -> Vec<ModelEvent> {
+        const MESSAGE_ID: &str = "compatible-message-0";
+        match event {
+            ModelEvent::TextDelta { delta } => {
+                let mut events = Vec::with_capacity(if self.started { 1 } else { 2 });
+                if !self.started {
+                    self.started = true;
+                    events.push(ModelEvent::AgentMessageStarted {
+                        message_id: MESSAGE_ID.into(),
+                        phase: AgentMessagePhase::Unknown,
+                    });
+                }
+                events.push(ModelEvent::AgentMessageDelta {
+                    message_id: MESSAGE_ID.into(),
+                    delta,
+                });
+                events
+            }
+            completed @ ModelEvent::Completed { .. } => {
+                let mut events = Vec::with_capacity(if self.started { 2 } else { 1 });
+                if self.started {
+                    events.push(ModelEvent::AgentMessageCompleted {
+                        message_id: MESSAGE_ID.into(),
+                    });
+                }
+                events.push(completed);
+                events
+            }
+            event => vec![event],
+        }
+    }
+}
+
 impl OpenAiCompatibleRuntime {
     async fn send_model_request(
         &self,
@@ -302,13 +344,14 @@ impl OpenAiCompatibleRuntime {
         cancellation: &CancellationToken,
         sender: &mpsc::Sender<Result<ModelEvent, ModelRuntimeError>>,
     ) -> Result<(), ModelRuntimeError> {
+        let tool_names = ProviderToolNames::for_request(&request);
         match self.settings.protocol {
             ProviderProtocolKind::ChatCompletions => {
-                self.send_chat_completions_request(request, cancellation, sender)
+                self.send_chat_completions_request(request, &tool_names, cancellation, sender)
                     .await
             }
             ProviderProtocolKind::Responses => {
-                responses::send_model_request(self, request, cancellation, sender).await
+                responses::send_model_request(self, request, tool_names, cancellation, sender).await
             }
             ProviderProtocolKind::Embeddings => Err(ModelRuntimeError::UnsupportedCapability(
                 "generation_protocol",
@@ -319,6 +362,7 @@ impl OpenAiCompatibleRuntime {
     async fn send_chat_completions_request(
         &self,
         request: ModelRequest,
+        tool_names: &ProviderToolNames,
         cancellation: &CancellationToken,
         sender: &mpsc::Sender<Result<ModelEvent, ModelRuntimeError>>,
     ) -> Result<(), ModelRuntimeError> {
@@ -331,7 +375,7 @@ impl OpenAiCompatibleRuntime {
         );
         let mut body = json!({
             "model": self.settings.model_name,
-            "messages": request.messages.iter().map(message_to_openai).collect::<Vec<_>>(),
+            "messages": request.messages.iter().map(|message| message_to_openai(message, tool_names)).collect::<Vec<_>>(),
             "stream": true,
             "stream_options": { "include_usage": true }
         });
@@ -344,7 +388,7 @@ impl OpenAiCompatibleRuntime {
                         json!({
                             "type": "function",
                             "function": {
-                                "name": tool.name,
+                                "name": tool_names.encode(&tool.name),
                                 "description": tool.description,
                                 "parameters": tool.input_schema
                             }
@@ -390,8 +434,14 @@ impl OpenAiCompatibleRuntime {
             let value: Value = response.json().await.map_err(|_| {
                 ModelRuntimeError::InvalidStream("provider returned invalid JSON".into())
             })?;
+            let mut decoder = ProviderToolEventDecoder::new(tool_names.clone());
+            let mut message_decoder = CompatibleMessageEventDecoder::default();
             for event in response_events(&value)? {
-                send_event(sender, event, cancellation).await?;
+                for event in message_decoder.decode_event(event) {
+                    for event in decoder.decode_event(event) {
+                        send_event(sender, event, cancellation).await?;
+                    }
+                }
             }
             return Ok(());
         }
@@ -399,6 +449,8 @@ impl OpenAiCompatibleRuntime {
         let mut stream = response.bytes_stream();
         let mut pending = Vec::<u8>::new();
         let mut completed = false;
+        let mut decoder = ProviderToolEventDecoder::new(tool_names.clone());
+        let mut message_decoder = CompatibleMessageEventDecoder::default();
         loop {
             let next = tokio::select! {
                 () = cancellation.cancelled() => return Err(ModelRuntimeError::Cancelled),
@@ -424,14 +476,13 @@ impl OpenAiCompatibleRuntime {
                 let data = data.trim();
                 if data == "[DONE]" {
                     if !completed {
-                        send_event(
-                            sender,
-                            ModelEvent::Completed {
-                                finish_reason: ModelFinishReason::Unknown,
-                            },
-                            cancellation,
-                        )
-                        .await?;
+                        for event in message_decoder.decode_event(ModelEvent::Completed {
+                            finish_reason: ModelFinishReason::Unknown,
+                        }) {
+                            for event in decoder.decode_event(event) {
+                                send_event(sender, event, cancellation).await?;
+                            }
+                        }
                     }
                     return Ok(());
                 }
@@ -442,10 +493,14 @@ impl OpenAiCompatibleRuntime {
                     ModelRuntimeError::InvalidStream("provider emitted invalid SSE JSON".into())
                 })?;
                 for event in stream_events(&value)? {
-                    if matches!(event, ModelEvent::Completed { .. }) {
-                        completed = true;
+                    for event in message_decoder.decode_event(event) {
+                        for event in decoder.decode_event(event) {
+                            if matches!(event, ModelEvent::Completed { .. }) {
+                                completed = true;
+                            }
+                            send_event(sender, event, cancellation).await?;
+                        }
                     }
-                    send_event(sender, event, cancellation).await?;
                 }
             }
         }
@@ -840,7 +895,7 @@ async fn send_event(
     }
 }
 
-fn message_to_openai(message: &ModelMessage) -> Value {
+fn message_to_openai(message: &ModelMessage, tool_names: &ProviderToolNames) -> Value {
     match message.role {
         ModelRole::System => json!({ "role": "system", "content": message.content }),
         ModelRole::User if !message.input_images.is_empty() => {
@@ -880,7 +935,7 @@ fn message_to_openai(message: &ModelMessage) -> Value {
                                 "id": call.id.as_str(),
                                 "type": "function",
                                 "function": {
-                                    "name": call.name,
+                                    "name": tool_names.encode(&call.name),
                                     "arguments": call.arguments.to_string()
                                 }
                             })
@@ -893,7 +948,7 @@ fn message_to_openai(message: &ModelMessage) -> Value {
         ModelRole::Tool => json!({
             "role": "tool",
             "tool_call_id": message.tool_call_id.as_ref().map(ToolCallId::as_str),
-            "name": message.name,
+            "name": message.name.as_deref().map(|name| tool_names.encode(name)),
             "content": message.content
         }),
     }
@@ -1186,10 +1241,14 @@ pub async fn test_connection(
     let mut completed = false;
     while let Some(event) = stream.next().await {
         match event.map_err(|error| LlmError::Request(error.to_string()))? {
-            ModelEvent::TextDelta { delta } => content.push_str(&delta),
+            ModelEvent::AgentMessageDelta { delta, .. } | ModelEvent::TextDelta { delta } => {
+                content.push_str(&delta);
+            }
             ModelEvent::ReasoningDelta { delta } => public_summary.push_str(&delta),
             ModelEvent::Completed { .. } => completed = true,
-            ModelEvent::ToolCallDelta { .. }
+            ModelEvent::AgentMessageStarted { .. }
+            | ModelEvent::AgentMessageCompleted { .. }
+            | ModelEvent::ToolCallDelta { .. }
             | ModelEvent::ToolCallCompleted { .. }
             | ModelEvent::Usage { .. } => {}
         }
@@ -1441,7 +1500,9 @@ mod tests {
             name: "read_file".into(),
             arguments: json!({ "path": "README.md" }),
         };
-        let value = message_to_openai(&ModelMessage::assistant("", vec![call]));
+        let message = ModelMessage::assistant("", vec![call]);
+        let tool_names = ProviderToolNames::for_messages(std::slice::from_ref(&message));
+        let value = message_to_openai(&message, &tool_names);
         assert_eq!(value["role"], "assistant");
         assert_eq!(value["tool_calls"][0]["function"]["name"], "read_file");
         assert_eq!(
@@ -1452,14 +1513,15 @@ mod tests {
 
     #[test]
     fn converts_ephemeral_images_to_openai_multimodal_content() {
-        let value = message_to_openai(&ModelMessage::user_with_images(
+        let message = ModelMessage::user_with_images(
             "untrusted screenshot",
             vec![hachimi_protocol::ModelInputImage {
                 media_type: "image/png".into(),
                 data_base64: "iVBORw0KGgo=".into(),
                 source_label: "computer frame test".into(),
             }],
-        ));
+        );
+        let value = message_to_openai(&message, &ProviderToolNames::default());
         assert_eq!(value["role"], "user");
         assert_eq!(value["content"][0]["type"], "text");
         assert_eq!(value["content"][1]["type"], "image_url");

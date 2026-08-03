@@ -1,0 +1,161 @@
+.workbench-git-controls {
+  display: grid;
+  gap: 2px;
+}
+
+[data-component="floating-popover-trigger"].workbench-git-trigger {
+  border-color: transparent;
+  background: transparent;
+  color: var(--color-text-base);
+}
+
+[data-component="floating-popover-content"].workbench-git-popover {
+  width: min(440px, calc(100vw - 32px));
+  max-height: min(640px, calc(100vh - 40px));
+  overflow: auto;
+  display: grid;
+  gap: 12px;
+  padding: 14px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg);
+  background: var(--color-bg-floating);
+  box-shadow: var(--shadow-overlay);
+  z-index: 80;
+}
+
+.workbench-git-popover-heading,
+.workbench-git-submit-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.workbench-git-popover-heading > span {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+
+.workbench-branch-list,
+.workbench-git-phases {
+  display: grid;
+  gap: 6px;
+}
+
+.workbench-branch-list {
+  max-height: 300px;
+  overflow: auto;
+}
+
+.workbench-branch-row {
+  width: 100%;
+  min-width: 0;
+  min-height: 46px;
+  display: grid;
+  grid-template-columns: 20px minmax(0, 1fr) 18px;
+  align-items: center;
+  justify-items: start;
+  gap: 8px;
+  padding: 7px 9px;
+  border-color: transparent;
+  background: transparent;
+  text-align: left;
+}
+
+.workbench-branch-row.current {
+  border-color: var(--color-border-focus);
+  background: var(--color-bg-subtle);
+}
+
+.workbench-branch-row > span {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+
+.workbench-branch-row strong,
+.workbench-branch-row small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.workbench-branch-row > svg:last-child {
+  justify-self: end;
+}
+
+.workbench-create-branch {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: end;
+  gap: 8px;
+}
+
+.workbench-git-hint,
+.workbench-git-error,
+.workbench-git-success {
+  margin: 0;
+  font-size: var(--font-size-sm);
+}
+
+.workbench-git-hint {
+  color: var(--color-text-muted);
+}
+
+.workbench-git-error {
+  color: var(--danger);
+}
+
+.workbench-git-success {
+  color: var(--success);
+}
+
+.workbench-git-diff-stat {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  white-space: nowrap;
+}
+
+.workbench-git-phases > div {
+  display: grid;
+  grid-template-columns: 64px 76px minmax(0, 1fr);
+  gap: 8px;
+  padding: 7px 8px;
+  border-radius: var(--radius-md);
+  background: var(--color-bg-subtle);
+}
+
+.workbench-git-phases > div[data-status="failed"] {
+  color: var(--danger);
+}
+
+.workbench-git-phases small {
+  overflow-wrap: anywhere;
+}
+
+.workbench-git-submit-row {
+  justify-content: flex-end;
+  flex-wrap: wrap;
+}
+
+.workbench-compare-row {
+  grid-template-columns: 22px minmax(0, 1fr) minmax(72px, 42%);
+}
+
+.workbench-compare-row .environment-row-tail {
+  width: 100%;
+  display: block;
+  overflow: hidden;
+  color: var(--color-text-base);
+  text-overflow: ellipsis;
+  text-align: right;
+  white-space: nowrap;
+}
+
+@media (max-width: 720px) {
+  .workbench-create-branch {
+    grid-template-columns: 1fr;
+  }
+}

@@ -582,11 +582,20 @@ pub(super) async fn manage_workbench_project(
     match action.as_str() {
         "open" => {
             #[cfg(target_os = "windows")]
-            let mut command = std::process::Command::new("explorer.exe");
+            let mut command = hachimi_process_policy::std_command(
+                "explorer.exe",
+                hachimi_process_policy::ProcessPolicy::VisibleApplication,
+            );
             #[cfg(target_os = "macos")]
-            let mut command = std::process::Command::new("open");
+            let mut command = hachimi_process_policy::std_command(
+                "open",
+                hachimi_process_policy::ProcessPolicy::VisibleApplication,
+            );
             #[cfg(all(unix, not(target_os = "macos")))]
-            let mut command = std::process::Command::new("xdg-open");
+            let mut command = hachimi_process_policy::std_command(
+                "xdg-open",
+                hachimi_process_policy::ProcessPolicy::VisibleApplication,
+            );
             command
                 .arg(&project.root_path)
                 .spawn()
@@ -657,11 +666,26 @@ pub(super) async fn import_workbench_attachment(
 }
 
 #[tauri::command]
+pub(super) async fn read_workbench_attachment(
+    window: WebviewWindow,
+    state: State<'_, DesktopState>,
+    attachment_id: hachimi_protocol::AttachmentId,
+) -> Result<hachimi_protocol::WorkbenchAttachmentPreview, CommandError> {
+    state.authorize(&window, ControlMethod::WorkbenchWindow)?;
+    require_window(&window, "workbench")?;
+    state
+        .workbench
+        .attachment_preview(&attachment_id)
+        .await
+        .map_err(|error| CommandError::operation("workbench_attachment_preview_failed", error))
+}
+
+#[tauri::command]
 pub(super) async fn list_workbench_sessions(
     window: WebviewWindow,
     state: State<'_, DesktopState>,
     project_id: Option<ProjectId>,
-) -> Result<Vec<SessionRecord>, CommandError> {
+) -> Result<Vec<hachimi_protocol::WorkbenchSessionListItem>, CommandError> {
     state.authorize(&window, ControlMethod::WorkbenchWindow)?;
     require_window(&window, "workbench")?;
     state
@@ -890,8 +914,20 @@ pub(super) async fn start_workbench_task(
         )
         .await
         .map_err(|error| CommandError::operation("workbench_task_start_failed", error))?;
+    if !request.attachment_ids.is_empty()
+        && let Ok(environment) = state
+            .workbench
+            .environment_snapshot(&snapshot.session.id)
+            .await
+    {
+        crate::environment_commands::emit_workbench_environment(
+            &app,
+            &environment,
+            vec![hachimi_protocol::WorkbenchEnvironmentChangeReason::Sources],
+        );
+    }
     if snapshot.run.status == hachimi_protocol::RunStatus::Queued {
-        spawn_workbench_run(app, client, snapshot.clone(), request.skill_ids);
+        spawn_workbench_run(app.clone(), client, snapshot.clone(), request.skill_ids);
     }
     Ok(snapshot)
 }
@@ -1043,61 +1079,9 @@ pub(super) fn spawn_workbench_run_with_recovery(
             tracing::warn!(run_id = %run_id, %error, "failed to persist structured Review output");
         }
         if let Ok(Some(run)) = store.get_run(&run_id).await {
-            let _ = app.emit_to("workbench", WORKBENCH_RUN_EVENT, run);
+            emit_workbench_run_completion(&app, run);
         }
     });
-}
-
-async fn finalize_review_run(
-    store: &AgentStore,
-    snapshot: &WorkbenchTaskSnapshot,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    if snapshot.run.purpose != hachimi_protocol::RunPurpose::Review {
-        return Ok(());
-    }
-    let Some(current) = store.get_run(&snapshot.run.id).await? else {
-        return Ok(());
-    };
-    if current.status != hachimi_protocol::RunStatus::Succeeded {
-        return Ok(());
-    }
-    let Some(review) = store.get_review_by_run(&snapshot.run.id).await? else {
-        return Ok(());
-    };
-    let transcript = store.list_transcript(&snapshot.session.id).await?;
-    let final_text = transcript
-        .iter()
-        .rev()
-        .find(|item| {
-            item.run_id.as_ref() == Some(&snapshot.run.id)
-                && item.kind == hachimi_protocol::TranscriptItemKind::Assistant
-                && item.status == hachimi_protocol::ItemStatus::Completed
-        })
-        .and_then(|item| match &item.payload {
-            hachimi_protocol::ItemPayload::Assistant { text } => Some(text.clone()),
-            _ => None,
-        })
-        .unwrap_or_default();
-    let parsed = hachimi_agent::parse_review_output(&final_text);
-    let checkout = snapshot
-        .checkout
-        .as_ref()
-        .ok_or("Review Run is missing its Project checkout")?;
-    let findings = hachimi_agent::materialize_review_findings(
-        &review.id,
-        Path::new(&checkout.path),
-        &parsed.output,
-    );
-    store
-        .complete_review(
-            &review,
-            &parsed.output,
-            &findings,
-            parsed.used_plain_text_fallback,
-            i64::try_from(epoch_millis()).unwrap_or(i64::MAX),
-        )
-        .await?;
-    Ok(())
 }
 
 #[cfg(all(debug_assertions, feature = "desktop-e2e"))]

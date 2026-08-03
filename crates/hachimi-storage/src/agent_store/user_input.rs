@@ -1,13 +1,17 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use hachimi_protocol::{
-    ItemPayload, ItemStatus, RunId, RunStatus, SessionId, UserInputAnswer, UserInputRequestId,
-    UserInputRequestRecord, UserInputResolution, UserInputResolutionAction, UserInputStatus,
+    ItemPayload, ItemStatus, RunEventPayload, RunId, RunStatus, SessionId, UserInputAnswer,
+    UserInputDisplayAnswer, UserInputRequestId, UserInputRequestRecord, UserInputResolution,
+    UserInputResolutionAction, UserInputStatus,
 };
 use serde_json::json;
 use sqlx::Row;
 
-use super::{AgentStore, AgentStoreError, append_event_tx, get_run_tx, next_sequence_tx};
+use super::{
+    AgentStore, AgentStoreError, append_event_tx, append_event_typed_tx, get_run_tx,
+    next_sequence_tx, transcript_item_from_row,
+};
 
 impl AgentStore {
     pub async fn create_user_input_request(
@@ -32,6 +36,7 @@ impl AgentStore {
         let payload = ItemPayload::UserInputRequest {
             request_id: request.id.clone(),
             questions: request.questions.clone(),
+            display_answers: Vec::new(),
         };
         sqlx::query(
             "INSERT INTO transcript_items (id, session_id, run_id, sequence, kind, status, payload_json, relations_json, created_at_ms) VALUES (?, ?, ?, ?, 'user_input_request', 'in_progress', ?, ?, ?)",
@@ -48,7 +53,7 @@ impl AgentStore {
         .execute(&mut *transaction)
         .await?;
         sqlx::query(
-            "INSERT INTO user_input_requests (id, session_id, run_id, run_generation, item_id, questions_json, status, expires_at_ms, created_at_ms, resolved_at_ms, resolved_by) VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?, NULL, NULL)",
+            "INSERT INTO user_input_requests (id, session_id, run_id, run_generation, item_id, questions_json, answers_display_json, status, expires_at_ms, created_at_ms, resolved_at_ms, resolved_by) VALUES (?, ?, ?, ?, ?, ?, '[]', 'pending', ?, ?, NULL, NULL)",
         )
         .bind(request.id.as_str())
         .bind(request.session_id.as_str())
@@ -167,11 +172,32 @@ impl AgentStore {
                 "user_input.cancelled",
             ),
         };
+        let display_answers = if resolution.action == UserInputResolutionAction::Submit {
+            resolution
+                .answers
+                .iter()
+                .map(|answer| {
+                    let secret = request
+                        .questions
+                        .iter()
+                        .find(|question| question.id == answer.question_id)
+                        .is_some_and(|question| question.secret);
+                    UserInputDisplayAnswer {
+                        question_id: answer.question_id.clone(),
+                        value: (!secret).then(|| answer.value.clone()),
+                        secret_provided: secret,
+                    }
+                })
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
 
         let updated = sqlx::query(
-            "UPDATE user_input_requests SET status = ?, resolved_at_ms = ?, resolved_by = ? WHERE id = ? AND status = 'pending'",
+            "UPDATE user_input_requests SET status = ?, answers_display_json = ?, resolved_at_ms = ?, resolved_by = ? WHERE id = ? AND status = 'pending'",
         )
         .bind(request_status.as_str())
+        .bind(serde_json::to_string(&display_answers)?)
         .bind(resolution.resolved_at_ms)
         .bind(&resolution.resolved_by)
         .bind(request.id.as_str())
@@ -180,8 +206,14 @@ impl AgentStore {
         if updated.rows_affected() != 1 {
             return Err(AgentStoreError::UserInputNotPending(request.id));
         }
-        sqlx::query("UPDATE transcript_items SET status = ? WHERE id = ?")
+        let completed_payload = ItemPayload::UserInputRequest {
+            request_id: request.id.clone(),
+            questions: request.questions.clone(),
+            display_answers: display_answers.clone(),
+        };
+        sqlx::query("UPDATE transcript_items SET status = ?, payload_json = ? WHERE id = ?")
             .bind(item_status.as_str())
+            .bind(serde_json::to_string(&completed_payload)?)
             .bind(request.item_id.as_str())
             .execute(&mut *transaction)
             .await?;
@@ -190,6 +222,11 @@ impl AgentStore {
             .bind(request.run_id.as_str())
             .execute(&mut *transaction)
             .await?;
+        let item_row = sqlx::query("SELECT * FROM transcript_items WHERE id = ?")
+            .bind(request.item_id.as_str())
+            .fetch_one(&mut *transaction)
+            .await?;
+        let completed_item = transcript_item_from_row(&item_row, &request.session_id)?;
         append_event_tx(
             &mut transaction,
             &request.session_id,
@@ -204,8 +241,21 @@ impl AgentStore {
             resolution.resolved_at_ms,
         )
         .await?;
+        append_event_typed_tx(
+            &mut transaction,
+            &request.session_id,
+            Some(&request.run_id),
+            "item.completed",
+            Some(RunEventPayload::ItemCompleted {
+                item: Box::new(completed_item),
+            }),
+            json!({ "requestId": request.id, "status": item_status }),
+            resolution.resolved_at_ms,
+        )
+        .await?;
         transaction.commit().await?;
         request.status = request_status;
+        request.display_answers = display_answers;
         request.resolved_at_ms = Some(resolution.resolved_at_ms);
         request.resolved_by = Some(resolution.resolved_by.clone());
         Ok(request)
@@ -322,6 +372,7 @@ pub(super) fn user_input_from_row(
         run_generation: u64::try_from(row.get::<i64, _>("run_generation")).unwrap_or_default(),
         item_id: hachimi_protocol::ItemId::new(row.get::<String, _>("item_id")),
         questions: serde_json::from_str(row.get("questions_json"))?,
+        display_answers: serde_json::from_str(row.get("answers_display_json"))?,
         status,
         expires_at_ms: row.get("expires_at_ms"),
         created_at_ms: row.get("created_at_ms"),

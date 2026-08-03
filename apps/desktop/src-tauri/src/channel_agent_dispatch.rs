@@ -169,7 +169,7 @@ async fn final_assistant_text(
                 return None;
             }
             match item.payload {
-                ItemPayload::Assistant { text } => Some(text),
+                ItemPayload::Assistant { text, .. } => Some(text),
                 _ => None,
             }
         })

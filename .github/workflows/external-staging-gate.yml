@@ -1,0 +1,363 @@
+name: External Staging Gate
+
+on:
+  workflow_dispatch:
+    inputs:
+      candidate_run_id:
+        description: Windows Release Gate run id that produced the immutable candidate
+        required: true
+        type: string
+
+permissions:
+  actions: read
+  contents: read
+
+concurrency:
+  group: external-staging-${{ inputs.candidate_run_id }}
+  cancel-in-progress: false
+
+jobs:
+  resolve-candidate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      commit_sha: ${{ steps.run.outputs.commit_sha }}
+    steps:
+      - id: run
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const runId = Number('${{ inputs.candidate_run_id }}');
+            if (!Number.isSafeInteger(runId) || runId <= 0) core.setFailed('candidate_run_id_invalid');
+            const { data } = await github.rest.actions.getWorkflowRun({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              run_id: runId,
+            });
+            if (data.name !== 'Windows Release Gate') core.setFailed('candidate_workflow_mismatch');
+            const { data: jobs } = await github.rest.actions.listJobsForWorkflowRun({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              run_id: runId,
+              per_page: 100,
+            });
+            const build = jobs.jobs.find((job) => job.name === 'build-candidate');
+            if (!build || build.conclusion !== 'success') core.setFailed('candidate_build_not_successful');
+            core.setOutput('commit_sha', data.head_sha);
+
+  openai:
+    needs: resolve-candidate
+    runs-on: [self-hosted, windows, x64, hachimi-staging]
+    environment: hachimi-openai-staging
+    timeout-minutes: 60
+    env:
+      CONFIG_JSON: ${{ vars.HACHIMI_STAGING_OPENAI_CONFIG_JSON }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve-candidate.outputs.commit_sha }}
+          lfs: true
+      - uses: actions/download-artifact@v4
+        with:
+          github-token: ${{ github.token }}
+          run-id: ${{ inputs.candidate_run_id }}
+          name: hachimi-release-candidate-${{ inputs.candidate_run_id }}
+          path: target/release-candidate
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24.10.0
+      - uses: dtolnay/rust-toolchain@stable
+      - run: corepack enable
+      - run: corepack prepare pnpm@11.15.1 --activate
+      - run: pnpm install --frozen-lockfile
+      - name: Verify disk and immutable candidate
+        shell: powershell
+        run: |
+          & scripts/release/check-disk-space.ps1 -MinimumFreeGiB 30
+          pnpm release:artifact-verify -- --root target/release-candidate --expected-commit ${{ needs.resolve-candidate.outputs.commit_sha }}
+      - name: Provision temporary OpenAI credential and config
+        shell: powershell
+        env:
+          STAGING_SECRET: ${{ secrets.HACHIMI_STAGING_OPENAI_API_KEY }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:CONFIG_JSON) -or [string]::IsNullOrWhiteSpace($env:STAGING_SECRET)) { throw 'OpenAI staging environment is incomplete.' }
+          New-Item -ItemType Directory -Path target/staging-config -Force | Out-Null
+          [IO.File]::WriteAllText((Join-Path $pwd 'target/staging-config/openai.json'), $env:CONFIG_JSON, [Text.UTF8Encoding]::new($false))
+          cargo build -p hachimi-llm --bin hachimi-staging-credential
+          $env:STAGING_SECRET | & target/debug/hachimi-staging-credential.exe set com.hachimi.desktop llm-api-key
+          if ($LASTEXITCODE -ne 0) { throw 'OpenAI staging credential provisioning failed.' }
+          & target/debug/hachimi-staging-credential.exe assert-present com.hachimi.desktop llm-api-key
+          if ($LASTEXITCODE -ne 0) { throw 'OpenAI staging credential verification failed.' }
+          "HACHIMI_STAGING_OPENAI_CONFIG=$((Resolve-Path target/staging-config/openai.json).Path)" | Out-File $env:GITHUB_ENV -Append
+          $artifacts = Get-ChildItem target/release-candidate -File | Where-Object { $_.Extension -in '.exe', '.msi', '.zip' }
+          "HACHIMI_RELEASE_ARTIFACTS=$(($artifacts.FullName -join [System.IO.Path]::PathSeparator))" | Out-File $env:GITHUB_ENV -Append
+      - run: pnpm test:staging:openai
+      - name: Upload sanitized OpenAI evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: openai-staging-evidence-${{ github.run_id }}
+          path: target/release-evidence/**/openai.summary.json
+          if-no-files-found: error
+          retention-days: 90
+      - name: Revoke temporary credential and prune build output
+        if: always()
+        shell: powershell
+        run: |
+          $cleanupFailed = $false
+          if (Test-Path target/debug/hachimi-staging-credential.exe) {
+            & target/debug/hachimi-staging-credential.exe clear com.hachimi.desktop llm-api-key
+            if ($LASTEXITCODE -ne 0) { $cleanupFailed = $true }
+            & target/debug/hachimi-staging-credential.exe assert-absent com.hachimi.desktop llm-api-key
+            if ($LASTEXITCODE -ne 0) { $cleanupFailed = $true }
+          }
+          if (Test-Path target/staging-config/openai.json) { Remove-Item -LiteralPath target/staging-config/openai.json -Force }
+          if (Test-Path target/staging-config) { Remove-Item -LiteralPath target/staging-config -Force }
+          cargo clean --target-dir ${{ github.workspace }}\target
+          if ($cleanupFailed) { throw 'OpenAI staging credential cleanup failed.' }
+
+  forge:
+    needs: resolve-candidate
+    runs-on: [self-hosted, windows, x64, hachimi-staging]
+    environment: hachimi-forge-staging
+    timeout-minutes: 90
+    env:
+      CONFIG_JSON: ${{ vars.HACHIMI_STAGING_FORGE_CONFIG_JSON }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve-candidate.outputs.commit_sha }}
+          lfs: true
+      - uses: actions/download-artifact@v4
+        with:
+          github-token: ${{ github.token }}
+          run-id: ${{ inputs.candidate_run_id }}
+          name: hachimi-release-candidate-${{ inputs.candidate_run_id }}
+          path: target/release-candidate
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24.10.0
+      - uses: dtolnay/rust-toolchain@stable
+      - run: corepack enable
+      - run: corepack prepare pnpm@11.15.1 --activate
+      - run: pnpm install --frozen-lockfile
+      - name: Verify disk and immutable candidate
+        shell: powershell
+        run: |
+          & scripts/release/check-disk-space.ps1 -MinimumFreeGiB 30
+          pnpm release:artifact-verify -- --root target/release-candidate --expected-commit ${{ needs.resolve-candidate.outputs.commit_sha }}
+      - name: Provision temporary Forge credentials and config
+        shell: powershell
+        env:
+          GITHUB_SECRET: ${{ secrets.HACHIMI_STAGING_GITHUB_TOKEN }}
+          GITLAB_SECRET: ${{ secrets.HACHIMI_STAGING_GITLAB_TOKEN }}
+          GITEE_SECRET: ${{ secrets.HACHIMI_STAGING_GITEE_TOKEN }}
+          GITEA_SECRET: ${{ secrets.HACHIMI_STAGING_GITEA_TOKEN }}
+          FORGEJO_SECRET: ${{ secrets.HACHIMI_STAGING_FORGEJO_TOKEN }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:CONFIG_JSON)) { throw 'Forge staging config is missing.' }
+          & scripts/prepare-managed-git.ps1
+          "HACHIMI_GIT_EXECUTABLE=$((Resolve-Path apps/desktop/src-tauri/managed-git/cmd/git.exe).Path)" | Out-File $env:GITHUB_ENV -Append
+          New-Item -ItemType Directory -Path target/staging-config -Force | Out-Null
+          [IO.File]::WriteAllText((Join-Path $pwd 'target/staging-config/forge.json'), $env:CONFIG_JSON, [Text.UTF8Encoding]::new($false))
+          cargo build -p hachimi-llm --bin hachimi-staging-credential
+          $config = Get-Content -LiteralPath target/staging-config/forge.json -Raw | ConvertFrom-Json
+          $secretByPlatform = @{
+            github = $env:GITHUB_SECRET; gitlab = $env:GITLAB_SECRET; gitee = $env:GITEE_SECRET
+            gitea = $env:GITEA_SECRET; forgejo = $env:FORGEJO_SECRET
+          }
+          $entries = @($config.repositories | ForEach-Object {
+            [pscustomobject]@{ Account = $_.secretRef; Secret = $secretByPlatform[$_.platformLabel] }
+          })
+          foreach ($entry in $entries) {
+            if ([string]::IsNullOrWhiteSpace($entry.Secret)) { throw "Forge staging credential missing for $($entry.Account)." }
+            $entry.Secret | & target/debug/hachimi-staging-credential.exe set com.hachimi.forge $entry.Account
+            if ($LASTEXITCODE -ne 0) { throw "Forge staging credential provisioning failed for $($entry.Account)." }
+            & target/debug/hachimi-staging-credential.exe assert-present com.hachimi.forge $entry.Account
+            if ($LASTEXITCODE -ne 0) { throw "Forge staging credential verification failed for $($entry.Account)." }
+          }
+          "HACHIMI_STAGING_FORGE_CONFIG=$((Resolve-Path target/staging-config/forge.json).Path)" | Out-File $env:GITHUB_ENV -Append
+          $artifacts = Get-ChildItem target/release-candidate -File | Where-Object { $_.Extension -in '.exe', '.msi', '.zip' }
+          "HACHIMI_RELEASE_ARTIFACTS=$(($artifacts.FullName -join [System.IO.Path]::PathSeparator))" | Out-File $env:GITHUB_ENV -Append
+      - run: pnpm test:staging:forge
+      - name: Upload sanitized Forge evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: forge-staging-evidence-${{ github.run_id }}
+          path: target/release-evidence/**/forge.summary.json
+          if-no-files-found: error
+          retention-days: 90
+      - name: Revoke temporary credentials and prune build output
+        if: always()
+        shell: powershell
+        run: |
+          $cleanupFailed = $false
+          if (Test-Path target/staging-config/forge.json) {
+            $config = Get-Content -LiteralPath target/staging-config/forge.json -Raw | ConvertFrom-Json
+            $gitExecutable = if (Test-Path Env:HACHIMI_GIT_EXECUTABLE) { $env:HACHIMI_GIT_EXECUTABLE } else { 'git.exe' }
+            foreach ($repository in $config.repositories) {
+              foreach ($branch in @($repository.sourceRef, $repository.mergeSourceRef)) {
+                if (-not $branch.StartsWith('hachimi-gate/')) { $cleanupFailed = $true; continue }
+                & $gitExecutable -C $repository.checkoutPath ls-remote --exit-code --heads $repository.remoteName "refs/heads/$branch" | Out-Null
+                if ($LASTEXITCODE -eq 0) {
+                  & $gitExecutable -C $repository.checkoutPath push $repository.remoteName --delete $branch
+                  if ($LASTEXITCODE -ne 0) { $cleanupFailed = $true }
+                } elseif ($LASTEXITCODE -ne 2) {
+                  $cleanupFailed = $true
+                }
+              }
+            }
+          }
+          if (Test-Path target/debug/hachimi-staging-credential.exe) {
+            if (Test-Path target/staging-config/forge.json) {
+              $config = Get-Content -LiteralPath target/staging-config/forge.json -Raw | ConvertFrom-Json
+              foreach ($repository in $config.repositories) {
+                & target/debug/hachimi-staging-credential.exe clear com.hachimi.forge $repository.secretRef
+                if ($LASTEXITCODE -ne 0) { $cleanupFailed = $true }
+                & target/debug/hachimi-staging-credential.exe assert-absent com.hachimi.forge $repository.secretRef
+                if ($LASTEXITCODE -ne 0) { $cleanupFailed = $true }
+              }
+            }
+          }
+          if (Test-Path target/staging-config/forge.json) { Remove-Item -LiteralPath target/staging-config/forge.json -Force }
+          if (Test-Path target/staging-config) { Remove-Item -LiteralPath target/staging-config -Force }
+          cargo clean --target-dir ${{ github.workspace }}\target
+          if ($cleanupFailed) { throw 'Forge staging branch cleanup failed.' }
+
+  enterprise:
+    needs: resolve-candidate
+    runs-on: [self-hosted, windows, x64, hachimi-enterprise-staging]
+    environment: hachimi-enterprise-staging
+    timeout-minutes: 120
+    env:
+      CONFIG_JSON: ${{ vars.HACHIMI_STAGING_ENTERPRISE_CONFIG_JSON }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve-candidate.outputs.commit_sha }}
+          lfs: true
+      - uses: actions/download-artifact@v4
+        with:
+          github-token: ${{ github.token }}
+          run-id: ${{ inputs.candidate_run_id }}
+          name: hachimi-release-candidate-${{ inputs.candidate_run_id }}
+          path: target/release-candidate
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24.10.0
+      - uses: dtolnay/rust-toolchain@stable
+      - run: corepack enable
+      - run: corepack prepare pnpm@11.15.1 --activate
+      - run: pnpm install --frozen-lockfile
+      - name: Verify disk and immutable candidate
+        shell: powershell
+        run: |
+          & scripts/release/check-disk-space.ps1 -MinimumFreeGiB 30
+          pnpm release:artifact-verify -- --root target/release-candidate --expected-commit ${{ needs.resolve-candidate.outputs.commit_sha }}
+      - name: Provision temporary enterprise credentials and config
+        shell: powershell
+        env:
+          WECOM_SECRET: ${{ secrets.HACHIMI_STAGING_WECOM_CREDENTIAL_JSON }}
+          DINGTALK_SECRET: ${{ secrets.HACHIMI_STAGING_DINGTALK_CREDENTIAL_JSON }}
+          FEISHU_SECRET: ${{ secrets.HACHIMI_STAGING_FEISHU_CREDENTIAL_JSON }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:CONFIG_JSON)) { throw 'Enterprise staging config is missing.' }
+          New-Item -ItemType Directory -Path target/staging-config -Force | Out-Null
+          [IO.File]::WriteAllText((Join-Path $pwd 'target/staging-config/enterprise.json'), $env:CONFIG_JSON, [Text.UTF8Encoding]::new($false))
+          $portable = Get-ChildItem target/release-candidate -Filter '*.zip' -File | Select-Object -First 1
+          if (-not $portable) { throw 'Enterprise staging candidate portable ZIP is missing.' }
+          New-Item -ItemType Directory -Path target/staging-candidate -Force | Out-Null
+          Expand-Archive -LiteralPath $portable.FullName -DestinationPath target/staging-candidate -Force
+          $candidateExe = Get-ChildItem target/staging-candidate -Recurse -Filter 'hachimi-desktop.exe' -File | Select-Object -First 1
+          if (-not $candidateExe) { throw 'Enterprise staging candidate executable is missing.' }
+          cargo build -p hachimi-llm --bin hachimi-staging-credential
+          $config = Get-Content -LiteralPath target/staging-config/enterprise.json -Raw | ConvertFrom-Json
+          $secretByPlatform = @{
+            wecom = $env:WECOM_SECRET; ding_talk = $env:DINGTALK_SECRET; feishu = $env:FEISHU_SECRET
+          }
+          $entries = @($config.connections | ForEach-Object {
+            [pscustomobject]@{ Account = $_.accountId; Secret = $secretByPlatform[$_.platform] }
+          })
+          foreach ($entry in $entries) {
+            if ([string]::IsNullOrWhiteSpace($entry.Secret)) { throw "Enterprise staging credential missing for $($entry.Account)." }
+            $entry.Secret | & target/debug/hachimi-staging-credential.exe set com.hachimi.connector $entry.Account
+            if ($LASTEXITCODE -ne 0) { throw "Enterprise staging credential provisioning failed for $($entry.Account)." }
+            & target/debug/hachimi-staging-credential.exe assert-present com.hachimi.connector $entry.Account
+            if ($LASTEXITCODE -ne 0) { throw "Enterprise staging credential verification failed for $($entry.Account)." }
+          }
+          $wecomAccount = ($config.connections | Where-Object platform -eq 'wecom' | Select-Object -First 1).accountId
+          $env:WECOM_SECRET | & target/debug/hachimi-staging-credential.exe set com.hachimi.channel "wecom:$wecomAccount"
+          if ($LASTEXITCODE -ne 0) { throw 'WeCom Channel credential provisioning failed.' }
+          & target/debug/hachimi-staging-credential.exe assert-present com.hachimi.channel "wecom:$wecomAccount"
+          if ($LASTEXITCODE -ne 0) { throw 'WeCom Channel credential verification failed.' }
+          [guid]::NewGuid().ToString() | & target/debug/hachimi-staging-credential.exe set com.hachimi.channel loopback-webhook:local
+          if ($LASTEXITCODE -ne 0) { throw 'Gateway loopback credential provisioning failed.' }
+          & target/debug/hachimi-staging-credential.exe assert-present com.hachimi.channel loopback-webhook:local
+          if ($LASTEXITCODE -ne 0) { throw 'Gateway loopback credential verification failed.' }
+          "HACHIMI_STAGING_ENTERPRISE_CONFIG=$((Resolve-Path target/staging-config/enterprise.json).Path)" | Out-File $env:GITHUB_ENV -Append
+          "HACHIMI_STAGING_HACHIMI_EXE=$($candidateExe.FullName)" | Out-File $env:GITHUB_ENV -Append
+          $artifacts = Get-ChildItem target/release-candidate -File | Where-Object { $_.Extension -in '.exe', '.msi', '.zip' }
+          "HACHIMI_RELEASE_ARTIFACTS=$(($artifacts.FullName -join [System.IO.Path]::PathSeparator))" | Out-File $env:GITHUB_ENV -Append
+      - run: pnpm test:staging:enterprise
+      - name: Upload sanitized enterprise evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: enterprise-staging-evidence-${{ github.run_id }}
+          path: target/release-evidence/**/enterprise.summary.json
+          if-no-files-found: error
+          retention-days: 90
+      - name: Revoke temporary credentials and prune build output
+        if: always()
+        shell: powershell
+        run: |
+          $cleanupFailed = $false
+          if (Test-Path target/debug/hachimi-staging-credential.exe) {
+            if (Test-Path target/staging-config/enterprise.json) {
+              $config = Get-Content -LiteralPath target/staging-config/enterprise.json -Raw | ConvertFrom-Json
+              foreach ($connection in $config.connections) {
+                & target/debug/hachimi-staging-credential.exe clear com.hachimi.connector $connection.accountId
+                if ($LASTEXITCODE -ne 0) { $cleanupFailed = $true }
+                & target/debug/hachimi-staging-credential.exe assert-absent com.hachimi.connector $connection.accountId
+                if ($LASTEXITCODE -ne 0) { $cleanupFailed = $true }
+              }
+              $wecomAccount = ($config.connections | Where-Object platform -eq 'wecom' | Select-Object -First 1).accountId
+              & target/debug/hachimi-staging-credential.exe clear com.hachimi.channel "wecom:$wecomAccount"
+              if ($LASTEXITCODE -ne 0) { $cleanupFailed = $true }
+              & target/debug/hachimi-staging-credential.exe assert-absent com.hachimi.channel "wecom:$wecomAccount"
+              if ($LASTEXITCODE -ne 0) { $cleanupFailed = $true }
+            }
+            & target/debug/hachimi-staging-credential.exe clear com.hachimi.channel loopback-webhook:local
+            if ($LASTEXITCODE -ne 0) { $cleanupFailed = $true }
+            & target/debug/hachimi-staging-credential.exe assert-absent com.hachimi.channel loopback-webhook:local
+            if ($LASTEXITCODE -ne 0) { $cleanupFailed = $true }
+          }
+          if (Test-Path target/staging-config/enterprise.json) { Remove-Item -LiteralPath target/staging-config/enterprise.json -Force }
+          if (Test-Path target/staging-config) { Remove-Item -LiteralPath target/staging-config -Force }
+          cargo clean --target-dir ${{ github.workspace }}\target
+          if ($cleanupFailed) { throw 'Enterprise staging credential cleanup failed.' }
+
+  verify-evidence:
+    needs: [resolve-candidate, openai, forge, enterprise]
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve-candidate.outputs.commit_sha }}
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: "*-staging-evidence-${{ github.run_id }}"
+          path: target/release-evidence
+          merge-multiple: true
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24.10.0
+      - run: node scripts/release/verify-evidence.mjs --root target/release-evidence --required openai,forge,enterprise --output release-manifest.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: external-staging-evidence-${{ github.run_id }}
+          path: target/release-evidence/release-manifest.json
+          if-no-files-found: error
+          retention-days: 90

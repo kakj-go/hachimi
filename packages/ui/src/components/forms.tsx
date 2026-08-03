@@ -42,6 +42,9 @@ export interface TextFieldProps {
   type?: JSX.InputHTMLAttributes<HTMLInputElement>["type"];
   maxLength?: number;
   autofocus?: boolean;
+  ref?: (element: HTMLInputElement) => void;
+  onFocus?: JSX.EventHandler<HTMLInputElement, FocusEvent>;
+  onBlur?: JSX.EventHandler<HTMLInputElement, FocusEvent>;
   onInput?: JSX.EventHandler<HTMLInputElement, InputEvent>;
   onKeyDown?: JSX.EventHandler<HTMLInputElement, KeyboardEvent>;
 }
@@ -72,6 +75,7 @@ export function TextField(props: TextFieldProps) {
         {props.label}
       </KTextField.Label>
       <KTextField.Input
+        ref={props.ref}
         class="ui-input"
         data-component="text-field-input"
         data-variant={props.variant ?? "default"}
@@ -95,6 +99,8 @@ export function TextField(props: TextFieldProps) {
         maxLength={props.maxLength}
         autofocus={props.autofocus}
         placeholder={props.placeholder ?? ""}
+        onFocus={props.onFocus}
+        onBlur={props.onBlur}
         onInput={props.onInput ?? (() => undefined)}
         onKeyDown={props.onKeyDown}
       />

@@ -11,6 +11,7 @@ use std::{
     time::Duration,
 };
 
+use hachimi_process_policy::ProcessPolicy;
 use hachimi_protocol::{ProcessOutputStream, ProcessTerminalSize};
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWriteExt},
@@ -71,6 +72,7 @@ async fn spawn_pipe(
     let command = resolve_restricted_command(launcher.as_deref(), &command, &environment)?;
     let (program, args) = command_program_and_args(launcher.as_deref(), &command)?;
     let mut process = Command::new(program);
+    ProcessPolicy::HiddenCaptured.apply_tokio(&mut process);
     process
         .args(args)
         .current_dir(cwd)

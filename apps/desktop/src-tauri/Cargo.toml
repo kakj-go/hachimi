@@ -37,6 +37,7 @@ hachimi-llm.workspace = true
 hachimi-motion.workspace = true
 hachimi-policy.workspace = true
 hachimi-process.workspace = true
+hachimi-process-policy.workspace = true
 hachimi-protocol.workspace = true
 hachimi-storage.workspace = true
 hachimi-user-input.workspace = true
@@ -62,6 +63,7 @@ tokio.workspace = true
 tokio-util.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+thiserror.workspace = true
 url.workspace = true
 uuid.workspace = true
 

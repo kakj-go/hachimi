@@ -169,6 +169,7 @@ impl McpServerRequestHandler for BrokeredMcpElicitation {
                 run_generation: correlation.run_generation,
                 item_id: ItemId::random(),
                 questions: form.questions.clone(),
+                display_answers: Vec::new(),
                 status: UserInputStatus::Pending,
                 expires_at_ms: None,
                 created_at_ms,

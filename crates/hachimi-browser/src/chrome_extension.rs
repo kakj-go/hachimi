@@ -296,6 +296,9 @@ impl BrowserBroker for ChromeExtensionBroker {
                 url: observation.url,
                 title: observation.title,
                 text: observation.text,
+                screenshot_png: None,
+                viewport_width: None,
+                viewport_height: None,
             })
         })
     }
@@ -526,153 +529,6 @@ impl BrowserBroker for ChromeExtensionBroker {
             self.request(identity, session_id.clone(), ExtensionCommandKind::Stop)
                 .await?;
             self.state.lock().sessions.remove(&session_id);
-            Ok(())
-        })
-    }
-}
-
-pub struct CompositeBrowserBroker {
-    managed: Arc<dyn BrowserBroker>,
-    extension: Arc<dyn BrowserBroker>,
-    profiles: Arc<Mutex<BTreeMap<BrowserSessionId, BrowserProfileKind>>>,
-}
-
-impl std::fmt::Debug for CompositeBrowserBroker {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("CompositeBrowserBroker")
-            .finish_non_exhaustive()
-    }
-}
-
-impl CompositeBrowserBroker {
-    #[must_use]
-    pub fn new(managed: Arc<dyn BrowserBroker>, extension: Arc<dyn BrowserBroker>) -> Self {
-        Self {
-            managed,
-            extension,
-            profiles: Arc::new(Mutex::new(BTreeMap::new())),
-        }
-    }
-
-    fn broker_for(&self, profile: BrowserProfileKind) -> &Arc<dyn BrowserBroker> {
-        match profile {
-            BrowserProfileKind::Isolated => &self.managed,
-            BrowserProfileKind::ChromeExtension => &self.extension,
-        }
-    }
-
-    fn active_broker(
-        &self,
-        session_id: &BrowserSessionId,
-    ) -> Result<&Arc<dyn BrowserBroker>, BrowserHostError> {
-        let profile = self
-            .profiles
-            .lock()
-            .get(session_id)
-            .copied()
-            .ok_or(BrowserHostError::SessionNotFound)?;
-        Ok(self.broker_for(profile))
-    }
-}
-
-impl BrowserBroker for CompositeBrowserBroker {
-    fn attest_profile<'a>(
-        &'a self,
-        profile_kind: BrowserProfileKind,
-    ) -> BrowserBrokerFuture<'a, ()> {
-        self.broker_for(profile_kind).attest_profile(profile_kind)
-    }
-
-    fn start<'a>(
-        &'a self,
-        session_id: &'a BrowserSessionId,
-        profile_kind: BrowserProfileKind,
-        initial_url: Option<&'a str>,
-        initial_network_policy: BrowserNetworkPolicy,
-        extension_identity: Option<&'a str>,
-    ) -> BrowserBrokerFuture<'a, ()> {
-        Box::pin(async move {
-            self.broker_for(profile_kind)
-                .start(
-                    session_id,
-                    profile_kind,
-                    initial_url,
-                    initial_network_policy,
-                    extension_identity,
-                )
-                .await?;
-            self.profiles
-                .lock()
-                .insert(session_id.clone(), profile_kind);
-            Ok(())
-        })
-    }
-
-    fn observe<'a>(
-        &'a self,
-        session_id: &'a BrowserSessionId,
-    ) -> BrowserBrokerFuture<'a, BrokerObservation> {
-        let broker = self.active_broker(session_id).cloned();
-        Box::pin(async move { broker?.observe(session_id).await })
-    }
-
-    fn act<'a>(
-        &'a self,
-        session_id: &'a BrowserSessionId,
-        expected_origin: &'a str,
-        action: &'a BrowserAction,
-    ) -> BrowserBrokerFuture<'a, BrokerActionResult> {
-        let broker = self.active_broker(session_id).cloned();
-        Box::pin(async move { broker?.act(session_id, expected_origin, action).await })
-    }
-
-    fn stage_upload<'a>(
-        &'a self,
-        session_id: &'a BrowserSessionId,
-        source: &'a Path,
-    ) -> BrowserBrokerFuture<'a, BrowserFileToken> {
-        let broker = self.active_broker(session_id).cloned();
-        Box::pin(async move { broker?.stage_upload(session_id, source).await })
-    }
-
-    fn import_download<'a>(
-        &'a self,
-        session_id: &'a BrowserSessionId,
-        download_token: &'a str,
-        destination: &'a Path,
-    ) -> BrowserBrokerFuture<'a, BrowserImportedDownload> {
-        let broker = self.active_broker(session_id).cloned();
-        Box::pin(async move {
-            broker?
-                .import_download(session_id, download_token, destination)
-                .await
-        })
-    }
-
-    fn set_network_policy<'a>(
-        &'a self,
-        session_id: &'a BrowserSessionId,
-        policy: BrowserNetworkPolicy,
-    ) -> BrowserBrokerFuture<'a, ()> {
-        let broker = self.active_broker(session_id).cloned();
-        Box::pin(async move { broker?.set_network_policy(session_id, policy).await })
-    }
-
-    fn take_over<'a>(&'a self, session_id: &'a BrowserSessionId) -> BrowserBrokerFuture<'a, ()> {
-        let broker = self.active_broker(session_id).cloned();
-        Box::pin(async move {
-            broker?.take_over(session_id).await?;
-            self.profiles.lock().remove(session_id);
-            Ok(())
-        })
-    }
-
-    fn stop<'a>(&'a self, session_id: &'a BrowserSessionId) -> BrowserBrokerFuture<'a, ()> {
-        let broker = self.active_broker(session_id).cloned();
-        Box::pin(async move {
-            broker?.stop(session_id).await?;
-            self.profiles.lock().remove(session_id);
             Ok(())
         })
     }

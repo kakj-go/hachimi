@@ -142,7 +142,8 @@ fn transcript_message(
         | TranscriptItemKind::CommandExecution
         | TranscriptItemKind::FileChange
         | TranscriptItemKind::McpCall
-        | TranscriptItemKind::DynamicToolCall => {
+        | TranscriptItemKind::DynamicToolCall
+        | TranscriptItemKind::CollabToolCall => {
             let name = match &item.payload {
                 hachimi_protocol::ItemPayload::ToolExecution { name, .. } => name.as_str(),
                 _ => "tool",
@@ -166,7 +167,7 @@ fn transcript_message(
 fn transcript_text(item: &TranscriptItem) -> Option<String> {
     use hachimi_protocol::ItemPayload;
     match &item.payload {
-        ItemPayload::User { text, .. } | ItemPayload::Assistant { text } => Some(text.clone()),
+        ItemPayload::User { text, .. } | ItemPayload::Assistant { text, .. } => Some(text.clone()),
         ItemPayload::Reasoning { summary, .. } => Some(summary.clone()),
         ItemPayload::Plan { text, .. } => Some(text.clone()),
         ItemPayload::ToolExecution {
@@ -188,7 +189,20 @@ fn transcript_text(item: &TranscriptItem) -> Option<String> {
             namespace,
             name,
             status,
+            ..
         } => Some(format!("{namespace}.{name}: {status}")),
+        ItemPayload::CollabToolCall {
+            title,
+            status,
+            summary,
+            ..
+        } => Some(format!(
+            "{title}: {status}{}",
+            summary
+                .as_deref()
+                .map(|value| format!(": {value}"))
+                .unwrap_or_default()
+        )),
         ItemPayload::Review { summary, .. } => Some(summary.clone()),
         ItemPayload::SystemContext { message, .. } => Some(message.clone()),
         ItemPayload::Approval { summary, .. } => Some(summary.clone()),
@@ -248,6 +262,7 @@ mod tests {
             },
             TranscriptItemKind::Assistant => ItemPayload::Assistant {
                 text: content["text"].as_str().unwrap_or_default().into(),
+                phase: hachimi_protocol::AgentMessagePhase::Unknown,
             },
             TranscriptItemKind::ToolExecution => ItemPayload::ToolExecution {
                 tool_call_id: ToolCallId::new(format!("tool-{sequence}")),

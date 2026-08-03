@@ -19,7 +19,7 @@ const DESKTOP_WAKE_ADDRESS: &str = "127.0.0.1:42373";
 const MAX_HTTP_REQUEST_BYTES: usize = 64 * 1024;
 
 pub(super) fn run(data_root: &Path) {
-    let database = data_root.join("agent.sqlite3");
+    let database = data_root.join("agent-v2.sqlite3");
     let token = keyring::Entry::new("com.hachimi.channel", "loopback-webhook:local")
         .and_then(|entry| entry.get_password())
         .unwrap_or_else(|error| panic!("failed to read per-user Gateway credential: {error}"));
@@ -177,13 +177,11 @@ pub(super) fn ensure_running(executable: &Path) -> std::io::Result<()> {
     {
         return Ok(());
     }
-    let mut command = std::process::Command::new(executable);
+    let mut command = hachimi_process_policy::std_command(
+        executable,
+        hachimi_process_policy::ProcessPolicy::HiddenBackground,
+    );
     command.arg("--gateway");
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt as _;
-        command.creation_flags(0x0800_0000);
-    }
     command.spawn().map(|_| ())
 }
 
@@ -446,7 +444,10 @@ async fn notify_desktop(token: &str) {
         let Ok(executable) = std::env::current_exe() else {
             return;
         };
-        let mut command = std::process::Command::new(executable);
+        let mut command = hachimi_process_policy::std_command(
+            executable,
+            hachimi_process_policy::ProcessPolicy::HiddenBackground,
+        );
         #[cfg(windows)]
         {
             use std::os::windows::process::CommandExt as _;

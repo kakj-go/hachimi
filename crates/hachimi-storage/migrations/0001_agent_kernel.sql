@@ -58,7 +58,7 @@ CREATE TABLE transcript_items (
     kind TEXT NOT NULL CHECK (kind IN (
         'user', 'assistant', 'reasoning', 'tool_execution', 'plan', 'approval',
         'user_input_request', 'command_execution', 'file_change', 'mcp_call',
-        'dynamic_tool_call', 'context_compaction', 'review', 'system_context'
+        'dynamic_tool_call', 'collab_tool_call', 'context_compaction', 'review', 'system_context'
     )),
     status TEXT NOT NULL CHECK (status IN ('pending', 'in_progress', 'completed', 'failed', 'interrupted')),
     payload_json TEXT NOT NULL,

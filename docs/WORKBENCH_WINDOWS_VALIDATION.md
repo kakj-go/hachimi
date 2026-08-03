@@ -1,6 +1,6 @@
 # Workbench Windows 验收清单
 
-更新时间：2026-07-28
+更新时间：2026-08-02
 
 ## 普通 Desktop E2E
 
@@ -20,7 +20,9 @@
 - [x] Scheduler Rust 测试验证 retry 终态约束、fresh TaskRun/invocation key，以及通知失败不改变成功执行状态；
 - [x] 真实 `SystemClock` release soak 覆盖短期 At、anchored Every、6-field Cron 和 20+ occurrence；
 - [x] Terminal Vitest/真实 WebView2 覆盖 base64 bytes、分段 UTF-8、非法字节、output cap、resize、stdin echo、reload reattach、kill 和孙进程终止；
-- [x] Desktop runner 在 restart/session/failure/finally 精确回收 E2E 应用和 WebDriver 进程树；Workspace Worker/MCP stdio 使用 `CREATE_NO_WINDOW`。完整 4-spec 回归中应用实例最大为 1，结束后残留为 0；
+- [x] Desktop runner 在 restart/session/failure/finally 精确回收 E2E 应用和 WebDriver 进程树；Workspace、Git、Diff、MCP、Gateway、Sandbox helper、子代理与 sidecar 统一使用 `hachimi-process-policy`，后台捕获进程在 Windows 使用 `CREATE_NO_WINDOW`，用户主动打开的应用保持可见；
+- [x] 完整 5-spec Desktop E2E 持续枚举 Desktop 进程树中的可见 `ConsoleWindowClass`；监控器失效或发现 Git、PowerShell、cmd、helper 等可见控制台都会使回归失败，当前报告 `findings: []`；
+- [x] Workbench 使用 `agent-v2.sqlite3`，Run/Item、Run Summary、计划修订、UserInput 脱敏、Git 高层操作和 Session 活动状态均通过真实 WebView2 恢复验证；
 - [ ] 真实墙钟自然触发 At/Every/Cron、系统通知展示和 UI retry 的长时间 WebView2 E2E 仍待发布环境执行。
 
 ## 管理员 Windows Runner

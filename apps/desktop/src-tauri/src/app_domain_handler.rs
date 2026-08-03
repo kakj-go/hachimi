@@ -1005,6 +1005,27 @@ impl DesktopAppDomainHandler {
         session_id: &SessionId,
         checkout_id: &CheckoutId,
     ) -> Result<DomainWorkspace, AppServerDomainError> {
+        let checkout = self
+            .resolve_session_checkout(session_id, checkout_id)
+            .await?;
+        let run = self
+            .store
+            .list_runs(session_id)
+            .await
+            .map_err(domain_error("workspace_runs_failed"))?
+            .into_iter()
+            .last()
+            .ok_or_else(|| {
+                AppServerDomainError::new("workspace_run_not_found", "session has no run")
+            })?;
+        Ok(DomainWorkspace { checkout, run })
+    }
+
+    async fn resolve_session_checkout(
+        &self,
+        session_id: &SessionId,
+        checkout_id: &CheckoutId,
+    ) -> Result<CheckoutRecord, AppServerDomainError> {
         let session = self
             .store
             .get_session(session_id)
@@ -1019,25 +1040,13 @@ impl DesktopAppDomainHandler {
                 "checkout is not bound to this session",
             ));
         }
-        let checkout = self
-            .store
+        self.store
             .get_checkout(checkout_id)
             .await
             .map_err(domain_error("workspace_checkout_failed"))?
             .ok_or_else(|| {
                 AppServerDomainError::new("workspace_checkout_not_found", "checkout does not exist")
-            })?;
-        let run = self
-            .store
-            .list_runs(session_id)
-            .await
-            .map_err(domain_error("workspace_runs_failed"))?
-            .into_iter()
-            .last()
-            .ok_or_else(|| {
-                AppServerDomainError::new("workspace_run_not_found", "session has no run")
-            })?;
-        Ok(DomainWorkspace { checkout, run })
+            })
     }
 
     async fn resolve_diff_workspace(
@@ -1084,7 +1093,51 @@ impl DesktopAppDomainHandler {
                     })?;
                 Ok(DomainWorkspace { checkout, run })
             }
-            DiffScope::Checkout { checkout_id } => {
+            DiffScope::Session {
+                session_id,
+                checkout_id,
+            } => {
+                let session = self
+                    .store
+                    .get_session(session_id)
+                    .await
+                    .map_err(domain_error("workspace_session_failed"))?
+                    .ok_or_else(|| {
+                        AppServerDomainError::new(
+                            "workspace_session_not_found",
+                            "session does not exist",
+                        )
+                    })?;
+                if session.context.checkout_id() != Some(checkout_id) {
+                    return Err(AppServerDomainError::new(
+                        "workspace_session_checkout_mismatch",
+                        "session is not bound to the requested checkout",
+                    ));
+                }
+                let checkout = self
+                    .store
+                    .get_checkout(checkout_id)
+                    .await
+                    .map_err(domain_error("workspace_checkout_failed"))?
+                    .ok_or_else(|| {
+                        AppServerDomainError::new(
+                            "workspace_checkout_not_found",
+                            "checkout does not exist",
+                        )
+                    })?;
+                let run = self
+                    .store
+                    .list_runs(session_id)
+                    .await
+                    .map_err(domain_error("workspace_runs_failed"))?
+                    .into_iter()
+                    .last()
+                    .ok_or_else(|| {
+                        AppServerDomainError::new("workspace_run_not_found", "session has no run")
+                    })?;
+                Ok(DomainWorkspace { checkout, run })
+            }
+            DiffScope::Checkout { checkout_id } | DiffScope::Branch { checkout_id, .. } => {
                 let checkout = self
                     .store
                     .get_checkout(checkout_id)
@@ -1132,6 +1185,25 @@ impl DesktopAppDomainHandler {
             workspace.checkout.id.as_str(),
             workspace.run.generation,
         )
+    }
+
+    async fn diff_base_revision(
+        &self,
+        scope: &DiffScope,
+        workspace: &DomainWorkspace,
+    ) -> Result<Option<String>, AppServerDomainError> {
+        match scope {
+            DiffScope::Branch { branch, .. } => Ok(Some(format!("{branch}...HEAD"))),
+            DiffScope::Session { session_id, .. } => Ok(self
+                .store
+                .get_session_environment_state(session_id)
+                .await
+                .map_err(domain_error("workspace_environment_failed"))?
+                .and_then(|state| state.baseline_revision)),
+            DiffScope::Run { .. } | DiffScope::Checkout { .. } => {
+                Ok(workspace.checkout.base_revision.clone())
+            }
+        }
     }
 
     async fn dispatch_fs(
@@ -1199,11 +1271,12 @@ impl DesktopAppDomainHandler {
                         });
                     FsAppResponse::Diff(snapshot)
                 } else {
+                    let base_revision = self.diff_base_revision(&scope, &workspace).await?;
                     match Self::workspace_client(&workspace)
                         .execute(
                             WorkspaceOperation::GitDiffStructured {
                                 scope,
-                                base_revision: workspace.checkout.base_revision.clone(),
+                                base_revision,
                             },
                             DIFF_OPERATION_TIMEOUT,
                             tokio_util::sync::CancellationToken::new(),
@@ -1261,25 +1334,33 @@ impl DesktopAppDomainHandler {
                                 .map_err(domain_error("workspace_diff_artifact_read_failed"))?,
                         )
                     }
-                    DiffScope::Checkout { .. } => match Self::workspace_client(&workspace)
-                        .execute(
-                            WorkspaceOperation::GitDiffFileChunk {
-                                scope: request.scope,
-                                path: request.path,
-                                base_revision: workspace.checkout.base_revision.clone(),
-                                offset: request.offset,
-                                limit: request.limit,
-                                if_match: request.if_match,
-                            },
-                            DIFF_OPERATION_TIMEOUT,
-                            tokio_util::sync::CancellationToken::new(),
-                        )
-                        .await
-                        .map_err(workspace_domain_error)?
-                    {
-                        WorkspaceOutput::DiffFileChunk { chunk } => FsAppResponse::DiffFile(chunk),
-                        _ => return Err(workspace_protocol_error("file Diff chunk")),
-                    },
+                    DiffScope::Checkout { .. }
+                    | DiffScope::Session { .. }
+                    | DiffScope::Branch { .. } => {
+                        let base_revision =
+                            self.diff_base_revision(&request.scope, &workspace).await?;
+                        match Self::workspace_client(&workspace)
+                            .execute(
+                                WorkspaceOperation::GitDiffFileChunk {
+                                    scope: request.scope,
+                                    path: request.path,
+                                    base_revision,
+                                    offset: request.offset,
+                                    limit: request.limit,
+                                    if_match: request.if_match,
+                                },
+                                DIFF_OPERATION_TIMEOUT,
+                                tokio_util::sync::CancellationToken::new(),
+                            )
+                            .await
+                            .map_err(workspace_domain_error)?
+                        {
+                            WorkspaceOutput::DiffFileChunk { chunk } => {
+                                FsAppResponse::DiffFile(chunk)
+                            }
+                            _ => return Err(workspace_protocol_error("file Diff chunk")),
+                        }
+                    }
                 }
             }
             FsAppRequest::Watch(request) => {

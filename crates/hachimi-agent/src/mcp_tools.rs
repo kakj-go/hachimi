@@ -15,9 +15,9 @@ use hachimi_capabilities::{
 };
 use hachimi_protocol::{
     McpCallOutcome, McpCallSummaryRecord, McpMediaReference, McpServerId, RunId, SessionId,
-    ToolDescriptor, ToolEffect,
+    SessionSourceOrigin, ToolDescriptor, ToolEffect,
 };
-use hachimi_storage::AgentStore;
+use hachimi_storage::{AgentStore, canonical_session_source_url};
 use serde_json::{Value, json};
 
 use crate::{
@@ -41,6 +41,7 @@ pub struct McpToolRuntimeContext {
     pub session_id: SessionId,
     pub run_id: RunId,
     pub request_handler: Arc<dyn McpServerRequestHandler>,
+    pub environment_change_sink: Option<Arc<dyn Fn(SessionId) + Send + Sync>>,
 }
 
 #[derive(Clone)]
@@ -49,6 +50,7 @@ struct McpRunHandlers {
     run_id: RunId,
     request: Arc<dyn McpServerRequestHandler>,
     progress: Arc<dyn McpProgressHandler>,
+    environment_change_sink: Option<Arc<dyn Fn(SessionId) + Send + Sync>>,
 }
 
 impl Default for McpToolPolicy {
@@ -139,6 +141,7 @@ pub fn mcp_tool_executors_with_gate_and_elicitation(
             run_id: context.run_id,
             request: context.request_handler,
             progress,
+            environment_change_sink: context.environment_change_sink,
         }),
     )
 }
@@ -268,6 +271,13 @@ impl ToolExecutor for McpTool {
                         created_at_ms: started_at_ms,
                     })
                     .await;
+                if let Ok(result) = &result
+                    && !result.is_error
+                    && persist_mcp_resource_links(store, handlers, result).await
+                    && let Some(sink) = &handlers.environment_change_sink
+                {
+                    sink(handlers.session_id.clone());
+                }
             }
             match result {
                 Ok(result) => Ok(tool_result(
@@ -288,6 +298,45 @@ impl ToolExecutor for McpTool {
     fn waits_for_cancellation(&self) -> bool {
         true
     }
+}
+
+async fn persist_mcp_resource_links(
+    store: &AgentStore,
+    handlers: &McpRunHandlers,
+    result: &McpCallResult,
+) -> bool {
+    let mut changed = false;
+    for (url, title) in mcp_resource_links(result) {
+        changed |= store
+            .upsert_session_web_source(
+                &handlers.session_id,
+                Some(&handlers.run_id),
+                SessionSourceOrigin::Mcp,
+                &url,
+                title.as_deref(),
+                None,
+            )
+            .await
+            .is_ok();
+    }
+    changed
+}
+
+fn mcp_resource_links(result: &McpCallResult) -> Vec<(String, Option<String>)> {
+    result
+        .content
+        .iter()
+        .filter(|item| item.get("type").and_then(Value::as_str) == Some("resource_link"))
+        .filter_map(|item| {
+            let url = canonical_session_source_url(item.get("uri")?.as_str()?)?;
+            let title = item
+                .get("title")
+                .or_else(|| item.get("name"))
+                .and_then(Value::as_str)
+                .map(str::to_owned);
+            Some((url, title))
+        })
+        .collect()
 }
 
 fn now_ms() -> i64 {
@@ -464,6 +513,27 @@ mod tests {
         assert!(
             name.bytes()
                 .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+        );
+    }
+
+    #[test]
+    fn source_capture_accepts_only_explicit_http_resource_links() {
+        let links = mcp_resource_links(&McpCallResult {
+            content: vec![
+                json!({ "type": "text", "text": "See https://ignored.example/path" }),
+                json!({
+                    "type": "resource_link",
+                    "uri": "HTTPS://Example.COM:443/docs#part",
+                    "title": "Docs"
+                }),
+                json!({ "type": "resource_link", "uri": "file:///secret" }),
+            ],
+            structured_content: None,
+            is_error: false,
+        });
+        assert_eq!(
+            links,
+            vec![("https://example.com/docs".into(), Some("Docs".into()))]
         );
     }
 

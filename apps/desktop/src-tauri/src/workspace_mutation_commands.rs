@@ -853,6 +853,7 @@ mod tests {
             snapshot: GitWorkspaceSnapshot {
                 branch: Some("main".into()),
                 head_sha: Some("abc".into()),
+                status_fingerprint: "clean".into(),
                 detached: false,
                 status: Vec::new(),
                 recent_commits: Vec::new(),

@@ -148,9 +148,7 @@ impl AgentStore {
             Some(&run.id),
             "item.completed",
             Some(RunEventPayload::ItemCompleted {
-                item_id: persisted_item.id.clone(),
-                status: persisted_item.status,
-                payload: Box::new(persisted_item.payload.clone()),
+                item: Box::new(persisted_item.clone()),
             }),
             json!({ "itemId": persisted_item.id, "status": persisted_item.status }),
             persisted_item.created_at_ms,
@@ -320,9 +318,7 @@ impl AgentStore {
         .execute(&mut *transaction)
         .await?;
         let completed_payload = RunEventPayload::ItemCompleted {
-            item_id: persisted_item.id.clone(),
-            status: persisted_item.status,
-            payload: Box::new(persisted_item.payload.clone()),
+            item: Box::new(persisted_item.clone()),
         };
         append_event_typed_tx(
             &mut transaction,

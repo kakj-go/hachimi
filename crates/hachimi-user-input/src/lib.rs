@@ -355,6 +355,7 @@ mod tests {
             run_generation: run.generation,
             item_id: ItemId::new(format!("{id}-item")),
             questions: vec![question],
+            display_answers: Vec::new(),
             status: UserInputStatus::Pending,
             expires_at_ms,
             created_at_ms: now_ms(),

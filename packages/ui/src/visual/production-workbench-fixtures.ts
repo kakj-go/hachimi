@@ -1,0 +1,465 @@
+import type { Page } from "@playwright/test";
+import { resolve } from "node:path";
+import { DEFAULT_APPEARANCE } from "../theme/context";
+
+export const appearance = structuredClone(DEFAULT_APPEARANCE);
+
+export const initialSettings = {
+  schemaVersion: 8,
+  developerMode: false,
+  theme: "dark",
+  locale: "zh-CN",
+  alwaysOnTop: true,
+  petPlacement: null,
+  llm: {
+    baseUrl: "http://localhost:11434/v1",
+    modelName: "gemma4:e4b",
+    maxInputTokens: 0,
+    maxOutputTokens: 0,
+  },
+  voice: { muted: false, speedPercent: 100, computeMode: "auto" },
+  appearance,
+};
+
+export const motionEntry = {
+  id: "builtin.openmaiwaifu.standard-waiting.7c7cd057",
+  source: "builtin",
+  protected: true,
+  name: "standard waiting",
+  nameZh: "标准待机",
+  description: "OpenMaiWaifu idle",
+  descriptionZh: "OpenMaiWaifu 标准待机",
+  fileName: "7c7cd0574c34b20a1e9cccbae3abcdc7999cd406edb7f0323e5e2aa0be4e02d5.vrma",
+  sha256: "7c7cd0574c34b20a1e9cccbae3abcdc7999cd406edb7f0323e5e2aa0be4e02d5",
+  sizeBytes: 200000,
+  durationMs: 11667,
+  category: "idle",
+  tags: ["idle", "waiting"],
+  playbackMode: "loop",
+  rootMode: "in_place",
+  channels: ["full_body", "fingers"],
+  animatedBones: ["hips", "leftIndexProximal", "rightIndexProximal"],
+  fingerBoneCount: 30,
+  hasFingerMotion: true,
+  hasExpression: false,
+  hasLookAt: false,
+  mirrorable: true,
+  transitionInMs: 320,
+  transitionOutMs: 350,
+  sourceProject: "OpenMaiWaifu",
+  sourcePaths: ["standard-waiting.vrma"],
+  warnings: [],
+};
+
+const runtimeRequirements = [
+  "vrm_format",
+  "skinned_mesh",
+  "complete_humanoid",
+  "standard_blinks",
+  "five_visemes",
+  "standard_emotions",
+  "look_at",
+  "mtoon",
+  "spring_bone",
+  "spring_collider",
+  "skin_weights",
+  "resource_budget",
+].map((requirement) => ({ requirement, passed: true, detail: "" }));
+
+export const runtimeAssessment = {
+  compatibility: "runtime_ready",
+  detectorVersion: 4,
+  capabilities: [
+    "renderable_mesh",
+    "skinned_mesh",
+    "humanoid_skeleton",
+    "blink",
+    "viseme",
+    "look_at",
+    "spring_bone",
+    "m_toon",
+    "spring_bone_collider",
+    "five_finger_hands",
+    "five_visemes",
+    "standard_expressions",
+    "standard_motion_retarget",
+    "runtime_ready",
+  ],
+  statistics: {
+    nodeCount: 86,
+    meshCount: 3,
+    primitiveCount: 4,
+    triangleCount: 42_800,
+    materialCount: 9,
+    textureCount: 12,
+    boneCount: 67,
+    animationCount: 0,
+    morphTargetCount: 34,
+    maxTextureDimension: 2048,
+    estimatedTextureMemoryBytes: 100_663_296,
+  },
+  requirements: runtimeRequirements,
+  issues: [],
+};
+
+export const workspaceGitFixture = {
+  branch: "codex/workbench-layout",
+  headSha: "a".repeat(40),
+  statusFingerprint: "visual-status",
+  detached: false,
+  status: [],
+  recentCommits: [],
+};
+
+export const workbenchEnvironmentFixture = {
+  sessionId: "session-ui-unification",
+  checkout: {
+    id: "checkout-ui-unification",
+    projectId: "project-hachimi",
+    kind: "local",
+    path: "D:\\workspace\\rust\\hachimi-code",
+    baseRevision: null,
+    headRevision: "a".repeat(40),
+    status: "ready",
+    pinned: false,
+    createdAtMs: 1_774_184_400_000,
+    updatedAtMs: 1_774_184_520_000,
+  },
+  bindingRevision: 4,
+  baselineRevision: "9".repeat(40),
+  changes: { changedFiles: 6, additions: 42, deletions: 13, truncated: false },
+  git: {
+    branch: "codex/workbench-layout",
+    headSha: "a".repeat(40),
+    detached: false,
+    statusFingerprint: "visual-status",
+    uncommittedFiles: 5,
+    upstream: "origin/codex/workbench-layout",
+    ahead: 2,
+    behind: 0,
+    defaultComparisonRef: "origin/main",
+    refs: [
+      { name: "codex/workbench-layout", revision: "a".repeat(40), remote: false, current: true },
+      { name: "main", revision: "9".repeat(40), remote: false, current: false },
+      { name: "origin/main", revision: "9".repeat(40), remote: true, current: false },
+    ],
+    remotes: [
+      {
+        name: "origin",
+        displayUrl: "https://github.com/example/hachimi-code.git",
+        remoteUrlHash: "b".repeat(64),
+        forgeKind: "github",
+      },
+    ],
+  },
+  handoff: {
+    localCheckoutId: "checkout-ui-unification",
+    managedCheckoutId: "checkout-ui-worktree",
+    canHandoff: true,
+    blockedReason: null,
+  },
+  activity: {
+    kind: "browser",
+    browser_tab_id: "browser-tab-ui-unification",
+    run_id: "run-ui-unification",
+    domain: "learn.chatgpt.com",
+  },
+  sources: [
+    {
+      id: "source-upload-visual",
+      sessionId: "session-ui-unification",
+      runId: "run-ui-unification",
+      kind: "upload",
+      origin: "upload",
+      attachmentId: "attachment-visual-notes",
+      url: null,
+      title: "notes.txt",
+      browserTabId: null,
+      createdAtMs: 1_774_184_500_000,
+      lastUsedAtMs: 1_774_184_520_000,
+    },
+    {
+      id: "source-browser-visual",
+      sessionId: "session-ui-unification",
+      runId: "run-ui-unification",
+      kind: "web",
+      origin: "browser",
+      attachmentId: null,
+      url: "https://learn.chatgpt.com/docs/environments/git-worktrees",
+      title: "Git worktrees",
+      browserTabId: "browser-tab-ui-unification",
+      createdAtMs: 1_774_184_510_000,
+      lastUsedAtMs: 1_774_184_530_000,
+    },
+  ],
+  revision: 12,
+  generatedAtMs: 1_774_184_530_000,
+};
+
+export const workspaceDiffFixture = {
+  files: [
+    {
+      path: "packages/workbench/src/home.tsx",
+      previousPath: null,
+      status: "modified",
+      additions: 24,
+      deletions: 8,
+      binary: false,
+      tooLarge: false,
+      hunks: [
+        {
+          header: "@@ -1148,4 +1148,6 @@",
+          lines: [
+            { kind: "context", oldLine: 1148, newLine: 1148, text: "<main>" },
+            { kind: "deletion", oldLine: 1149, newLine: null, text: "<Toolbar />" },
+            { kind: "addition", oldLine: null, newLine: 1149, text: "<ConversationToolbar />" },
+          ],
+        },
+      ],
+    },
+  ],
+  artifactId: null,
+  truncated: false,
+  generatedAtMs: 1_774_184_520_000,
+};
+
+export const workspaceFileChunkFixture = {
+  path: "README.md",
+  offset: 0,
+  nextOffset: 73,
+  byteSize: 73,
+  eof: true,
+  binary: false,
+  utf8Text: "# Hachimi\n\nA local-first desktop workbench for reliable agent workflows.\n",
+  dataBase64: "",
+  etag: "readme-visual-etag",
+};
+
+export const directTerminalFixture = {
+  id: "process-project-tools",
+  sessionId: "session-ui-unification",
+  runId: null,
+  checkoutId: "checkout-ui-unification",
+  runGeneration: null,
+  ownerClientId: "window:workbench",
+  commandSummary: "powershell.exe",
+  interactive: true,
+  status: "running",
+  exitCode: null,
+  outputLimitBytes: 2_097_152,
+  createdAtMs: 1_774_184_520_000,
+  updatedAtMs: 1_774_184_520_000,
+  reconnectExpiresAtMs: 1_774_186_320_000,
+};
+
+const gestureEntry = {
+  ...motionEntry,
+  id: "builtin.clawatar.head-nod-yes.mock",
+  name: "Head Nod Yes",
+  nameZh: "点头同意",
+  description: "A natural affirmative head nod.",
+  descriptionZh: "自然的肯定点头动作。",
+  category: "gesture",
+  playbackMode: "once",
+  durationMs: 1800,
+  fingerBoneCount: 0,
+  hasFingerMotion: false,
+};
+
+export const taskScheduleFixtures = [
+  {
+    id: "schedule-daily-brief",
+    name: "每日工作简报",
+    enabled: true,
+    prompt: "汇总今天的会议记录、未读消息和待办事项，生成一份简洁的工作简报。",
+    schedule: { kind: "cron", expression: "0 0 9 * * 1-5", timezone: "Asia/Shanghai" },
+    entryProfile: "workbench",
+    workloadOverride: "office",
+    contextTemplate: { kind: "general" },
+    toolAllowlist: [],
+    skillAllowlist: [],
+    mcpToolAllowlist: [],
+    permissionConfig: {
+      permissionProfile: "read_only",
+      allowFileRead: false,
+      allowFileWrite: false,
+      allowExec: false,
+      externalTargets: [],
+    },
+    permissionRevision: 1,
+    timeoutMs: 120000,
+    misfirePolicy: "skip",
+    deliveryPolicy: "task_tab_only",
+    configRevision: 2,
+    createdBy: "user:visual",
+    nextRunAtMs: Date.parse("2026-07-27T01:00:00.000Z"),
+    health: "healthy",
+    healthReason: null,
+    createdAtMs: Date.parse("2026-07-20T01:00:00.000Z"),
+    updatedAtMs: Date.parse("2026-07-26T14:30:00.000Z"),
+  },
+  {
+    id: "schedule-project-review",
+    name: "项目变更检查",
+    enabled: false,
+    prompt: "检查工作区最近的代码变更并整理需要关注的风险。",
+    schedule: { kind: "cron", expression: "0 30 18 * * 5", timezone: "Asia/Shanghai" },
+    entryProfile: "workbench",
+    workloadOverride: "coding",
+    contextTemplate: {
+      kind: "project",
+      project_id: "project-hachimi",
+      execution_target: { kind: "local", project_id: "project-hachimi" },
+    },
+    toolAllowlist: [],
+    skillAllowlist: [],
+    mcpToolAllowlist: [],
+    permissionConfig: {
+      permissionProfile: "read_only",
+      allowFileRead: true,
+      allowFileWrite: false,
+      allowExec: false,
+      externalTargets: [],
+    },
+    permissionRevision: 1,
+    timeoutMs: 120000,
+    misfirePolicy: "skip",
+    deliveryPolicy: "task_tab_only",
+    configRevision: 1,
+    createdBy: "user:visual",
+    nextRunAtMs: null,
+    health: "needs_attention",
+    healthReason: "项目授权需要更新",
+    createdAtMs: Date.parse("2026-07-22T08:00:00.000Z"),
+    updatedAtMs: Date.parse("2026-07-26T13:00:00.000Z"),
+  },
+];
+
+export const taskRunFixtures = [
+  {
+    id: "task-run-daily-brief",
+    scheduleId: "schedule-daily-brief",
+    scheduleRevision: 2,
+    trigger: "scheduled",
+    scheduledForMs: Date.parse("2026-07-26T01:00:00.000Z"),
+    invocationKey: "visual:daily-brief",
+    requesterSessionId: null,
+    executionSessionId: "session-ui-unification",
+    runId: "run-ui-unification",
+    permissionSnapshotHash: "visual-scope",
+    status: "succeeded",
+    progressPercent: 100,
+    resultSummary: "工作简报已生成，共整理 4 项待办。",
+    errorCode: null,
+    errorSummary: null,
+    artifactIds: [],
+    deliveryStatus: "not_requested",
+    deliveryErrorCode: null,
+    createdAtMs: Date.parse("2026-07-26T01:00:00.000Z"),
+    startedAtMs: Date.parse("2026-07-26T01:00:02.000Z"),
+    finishedAtMs: Date.parse("2026-07-26T01:00:24.000Z"),
+    updatedAtMs: Date.parse("2026-07-26T01:00:24.000Z"),
+  },
+];
+
+export const runtimeMocks = {
+  voiceRuntime: {
+    available: true,
+    muted: false,
+    modelId: "builtin-melo-zh-en",
+    voiceName: "Hachimi 中文女声",
+    speaking: false,
+    speedPercent: 100,
+    provider: "sherpa_onnx_vits",
+    computeMode: "auto",
+    backend: "cpu",
+    fallbackReason: null,
+    loading: false,
+    languages: ["zh-CN"],
+    speakerCount: 1,
+    speakerId: 0,
+  },
+  speechRecognition: {
+    installed: true,
+    installing: false,
+    bundled: true,
+    modelName: "SenseVoice-Small INT8",
+    provider: "sherpa-onnx 1.13.4",
+    languages: ["zh-CN", "en-US", "ja-JP", "ko-KR", "yue"],
+    sizeBytes: 237_431_441,
+    computeMode: "auto",
+    backend: "direct_ml",
+    fallbackReason: null,
+    loading: false,
+    error: null,
+  },
+  voices: {
+    entries: [
+      {
+        id: "builtin-melo-zh-en",
+        name: "Hachimi 中英双语女声（MeloTTS）",
+        sha256: "e58351ed7149f290a54534538badd4077cdbe6fddc964b24d0bee870415d1514",
+        originalFileName: "vits-melo-tts-zh_en.tar.bz2",
+        sizeBytes: 167_006_755,
+        origin: "built_in",
+        modelType: "melo-vits",
+        languages: ["zh-CN", "en-US"],
+        sampleRate: 44_100,
+        speakerCount: 1,
+        speakerId: 0,
+        licenseSummary: "MIT",
+        licenseWarning: false,
+        protected: true,
+        importedAt: "0",
+      },
+    ],
+    currentId: "builtin-melo-zh-en",
+  },
+  avatars: {
+    entries: [
+      {
+        id: "mimi",
+        name: "Mimi",
+        originalFileName: "mimi.vrm",
+        sizeBytes: 4096,
+        sha256: "1234567890abcdef1234567890abcdef",
+        importedAt: "1767225600000",
+        isCurrent: true,
+        format: "vrm0",
+        assessment: runtimeAssessment,
+      },
+    ],
+    currentId: "mimi" as string | null,
+  },
+  motions: {
+    entries: [motionEntry, gestureEntry],
+    bindings: [] as Array<{
+      region: string;
+      motionId: string;
+      cooldownMs: number;
+      mirrorBySide: boolean;
+    }>,
+    disabledMotionIds: [] as string[],
+  },
+};
+
+export async function installMotionLabAssets(page: Page) {
+  await page.route("http://hachimi-avatar.localhost/mimi", (route) =>
+    route.fulfill({
+      path: resolve(
+        import.meta.dirname,
+        "../../../../assets/avatar-default/2639776812528692620/2639776812528692620.vrm",
+      ),
+      contentType: "model/gltf-binary",
+    }),
+  );
+  await page.route("http://hachimi-motion.localhost/builtin/*.vrma", (route) =>
+    route.fulfill({
+      path: resolve(
+        import.meta.dirname,
+        `../../../../assets/avatar-motions-v4/builtin/${motionEntry.fileName}`,
+      ),
+      contentType: "model/gltf-binary",
+    }),
+  );
+}

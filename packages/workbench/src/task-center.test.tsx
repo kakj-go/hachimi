@@ -1,5 +1,5 @@
 import { I18nProvider } from "@hachimi/i18n";
-import { For } from "solid-js";
+import { For, Show } from "solid-js";
 import { render } from "solid-js/web";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -25,6 +25,7 @@ vi.mock("@hachimi/ui", () => {
     ),
     CalendarClock: Icon,
     Check: Icon,
+    ChevronDown: Icon,
     Checkbox: (props: Record<string, unknown>) => (
       <label>
         <input
@@ -35,7 +36,32 @@ vi.mock("@hachimi/ui", () => {
         {props.label as never}
       </label>
     ),
+    Clock3: Icon,
+    Dialog: (props: Record<string, unknown>) => (
+      <Show when={props.open}>
+        <div role="dialog" aria-label={props.title as string}>
+          <h2>{props.title as never}</h2>
+          {props.description as never}
+          {props.children as never}
+        </div>
+      </Show>
+    ),
+    ExternalLink: Icon,
     GitBranch: Icon,
+    History: Icon,
+    IconButton: (props: Record<string, unknown>) => (
+      <button
+        type="button"
+        aria-label={props.label as string}
+        data-testid={props["data-testid"] as string | undefined}
+        disabled={props.disabled as boolean | undefined}
+        onClick={(event) =>
+          (props.onClick as ((event: MouseEvent) => void) | undefined)?.(event as MouseEvent)
+        }
+      >
+        {props.children as never}
+      </button>
+    ),
     PageHeading: (props: Record<string, unknown>) => (
       <header class={props.class as string | undefined}>
         <span>{props.eyebrow as never}</span>
@@ -45,6 +71,7 @@ vi.mock("@hachimi/ui", () => {
       </header>
     ),
     Play: Icon,
+    Pencil: Icon,
     Plus: Icon,
     RefreshCw: Icon,
     Settings: Icon,
@@ -66,10 +93,34 @@ vi.mock("@hachimi/ui", () => {
       </label>
     ),
     Square: Icon,
+    Switch: (props: Record<string, unknown>) => (
+      <input
+        type="checkbox"
+        aria-label={props.label as string}
+        data-testid={props.testId as string | undefined}
+        checked={props.checked as boolean | undefined}
+        disabled={props.disabled as boolean | undefined}
+        onChange={(event) =>
+          (props.onChange as ((checked: boolean) => void) | undefined)?.(
+            event.currentTarget.checked,
+          )
+        }
+      />
+    ),
+    Tabs: (props: Record<string, unknown>) => (
+      <div>
+        {
+          (props.tabs as Array<{ value: string; label: string; content: unknown }>).find(
+            (tab) => tab.value === props.value,
+          )?.content as never
+        }
+      </div>
+    ),
     TextArea: (props: Record<string, unknown>) => (
       <label>
         {props.label as never}
         <textarea
+          data-testid={props["data-testid"] as string | undefined}
           value={props.value as string}
           placeholder={props.placeholder as string}
           onInput={(event) => (props.onInput as ((event: InputEvent) => void) | undefined)?.(event)}
@@ -88,6 +139,7 @@ vi.mock("@hachimi/ui", () => {
       </label>
     ),
     Trash2: Icon,
+    Tooltip: (props: { children: unknown }) => <>{props.children as never}</>,
   };
 });
 
@@ -282,9 +334,7 @@ describe("TaskCenter", () => {
     );
 
     const editButton = await vi.waitFor(() => {
-      const button = [...root.querySelectorAll("button")].find((candidate) =>
-        candidate.textContent?.includes("编辑"),
-      );
+      const button = root.querySelector('[data-testid="task-edit"]');
       expect(button).toBeTruthy();
       return button as HTMLButtonElement;
     });
@@ -337,9 +387,7 @@ describe("TaskCenter", () => {
     );
 
     const editButton = await vi.waitFor(() => {
-      const button = [...root.querySelectorAll("button")].find((candidate) =>
-        candidate.textContent?.includes("编辑"),
-      );
+      const button = root.querySelector('[data-testid="task-edit"]');
       expect(button).toBeTruthy();
       return button as HTMLButtonElement;
     });
@@ -578,10 +626,15 @@ describe("TaskCenter", () => {
       root,
     );
 
+    const history = await vi.waitFor(() => {
+      const button = root.querySelector('[data-testid="task-history"]');
+      expect(button).toBeTruthy();
+      return button as HTMLButtonElement;
+    });
+    history.click();
+
     const continuation = await vi.waitFor(() => {
-      const button = [...root.querySelectorAll("button")].find((candidate) =>
-        candidate.textContent?.includes("转为交互"),
-      );
+      const button = root.querySelector('[data-testid="task-continue"]');
       expect(button).toBeTruthy();
       return button as HTMLButtonElement;
     });
@@ -590,12 +643,85 @@ describe("TaskCenter", () => {
     expect(continueTaskInteractively.mock.calls[0]![1]).toBe("task-attention");
     await vi.waitFor(() => expect(onOpenSession).toHaveBeenCalledWith("continuation-session"));
 
-    const retry = [...root.querySelectorAll("button")].find((candidate) =>
-      candidate.textContent?.includes("重试"),
-    ) as HTMLButtonElement;
+    history.click();
+    const retry = root.querySelector('[data-testid="task-retry"]') as HTMLButtonElement;
     retry.click();
     await vi.waitFor(() => expect(retryTaskRun).toHaveBeenCalledTimes(1));
     expect(retryTaskRun.mock.calls[0]![1]).toBe("task-cancelled");
+    dispose();
+  });
+
+  it("keeps card actions integrated and opens a completed run in its session", async () => {
+    const now = Date.now();
+    const schedule = scheduleFixture(now);
+    const completed = taskFixture("task-completed", "succeeded", now, "session-completed");
+    const setScheduleEnabled = vi.fn(
+      async (context: unknown, scheduleId: string, enabled: boolean) => {
+        void context;
+        void scheduleId;
+        void enabled;
+        return { ...schedule, enabled: false };
+      },
+    );
+    const removeSchedule = vi.fn(async (context: unknown, scheduleId: string) => {
+      void context;
+      void scheduleId;
+      return true;
+    });
+    const onOpenSession = vi.fn();
+    const port = {
+      listSchedules: vi.fn(async () => [schedule]),
+      listTaskRuns: vi.fn(async () => [completed]),
+      searchAgentSessions: vi.fn(async () => ({ items: [], nextCursor: null })),
+      listProjectGitRefs: vi.fn(async () => []),
+      listMcpServers: vi.fn(async () => []),
+      listMcpTools: vi.fn(async () => []),
+      setScheduleEnabled,
+      removeSchedule,
+    } as unknown as WorkbenchCommandPort;
+    const root = document.createElement("div");
+    document.body.append(root);
+    const dispose = render(
+      () => (
+        <I18nProvider initialLocale="zh-CN">
+          <TaskCenter commandPort={port} projects={[]} skills={[]} onOpenSession={onOpenSession} />
+        </I18nProvider>
+      ),
+      root,
+    );
+
+    const toggle = await vi.waitFor(() => {
+      const input = root.querySelector('[data-testid="task-toggle-enabled"]');
+      expect(input).toBeTruthy();
+      return input as HTMLInputElement;
+    });
+    toggle.click();
+    await vi.waitFor(() => expect(setScheduleEnabled).toHaveBeenCalledTimes(1));
+    expect(setScheduleEnabled.mock.calls[0]![2]).toBe(false);
+
+    (root.querySelector('[data-testid="task-history"]') as HTMLButtonElement).click();
+    await vi.waitFor(() => {
+      expect(root.querySelector('[data-testid="task-run-trigger"]')?.textContent).toBe("手动执行");
+      expect(root.querySelector('[data-testid="task-run-duration"]')?.textContent).toContain(
+        "2 秒",
+      );
+    });
+    (root.querySelector('[data-testid="task-open-session"]') as HTMLButtonElement).click();
+    expect(onOpenSession).toHaveBeenCalledWith("session-completed");
+
+    const deleteButton = await vi.waitFor(() => {
+      const button = root.querySelector('[data-testid="task-delete"]') as HTMLButtonElement;
+      expect(button.disabled).toBe(false);
+      return button;
+    });
+    deleteButton.click();
+    const confirmDelete = await vi.waitFor(() => {
+      const button = root.querySelector('[data-testid="task-delete-confirm"]');
+      expect(button).toBeTruthy();
+      return button as HTMLButtonElement;
+    });
+    confirmDelete.click();
+    await vi.waitFor(() => expect(removeSchedule).toHaveBeenCalledTimes(1));
     dispose();
   });
 });
@@ -634,7 +760,12 @@ function scheduleFixture(now: number) {
   } as const;
 }
 
-function taskFixture(id: string, status: "needs_attention" | "cancelled" | "queued", now: number) {
+function taskFixture(
+  id: string,
+  status: "needs_attention" | "cancelled" | "queued" | "succeeded",
+  now: number,
+  executionSessionId: string | null = null,
+) {
   return {
     id,
     scheduleId: "schedule-advanced",
@@ -643,7 +774,7 @@ function taskFixture(id: string, status: "needs_attention" | "cancelled" | "queu
     scheduledForMs: now,
     invocationKey: `fixture:${id}`,
     requesterSessionId: null,
-    executionSessionId: null,
+    executionSessionId,
     runId: null,
     permissionSnapshotHash: "fixture-scope",
     status,
@@ -655,7 +786,7 @@ function taskFixture(id: string, status: "needs_attention" | "cancelled" | "queu
     deliveryStatus: "not_requested",
     deliveryErrorCode: null,
     createdAtMs: now,
-    startedAtMs: null,
+    startedAtMs: status === "queued" ? null : now - 2_000,
     finishedAtMs: now,
     updatedAtMs: now,
   } as const;

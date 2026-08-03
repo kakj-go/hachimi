@@ -9,6 +9,7 @@ publish.workspace = true
 hachimi-core.workspace = true
 hachimi-enterprise.workspace = true
 hachimi-protocol.workspace = true
+hachimi-process-policy.workspace = true
 hachimi-sandbox.workspace = true
 hachimi-storage.workspace = true
 keyring.workspace = true

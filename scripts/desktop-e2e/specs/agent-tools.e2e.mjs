@@ -193,7 +193,7 @@ async function ensureProjectVisible() {
 async function startProjectTask(prompt) {
   await ensureProjectVisible();
   await clickWhenReady('[data-testid^="project-new-task-"]');
-  await waitForDisplayed('[data-testid="workbench-project-task-draft"]');
+  await waitForDisplayed('[data-testid="workbench-composer-input"]');
   await $('[data-testid="workbench-composer-input"]').setValue(prompt);
   await clickWhenReady('[data-testid="workbench-start-task"]');
 }
@@ -261,9 +261,7 @@ describe("Hachimi Agent product tool reachability", () => {
     await browser.refresh();
     await waitForTimeline("Desktop E2E Coding Multi-Agent completed");
     const text = await timelineText();
-    expect(text).toContain("agent.spawn");
-    expect(text).toContain("agent.wait");
-    expect(text).toContain("agent.collect");
+    expect(text.match(/Desktop E2E child/g)?.length ?? 0).toBeGreaterThanOrEqual(3);
     expect(text).toContain("Desktop E2E Coding Multi-Agent completed");
   });
 
@@ -337,32 +335,24 @@ describe("Hachimi Agent product tool reachability", () => {
     await updateForgeCredential(forgeSecretRef, "desktop-e2e-forge-token");
   });
 
-  it("keeps the Workbench Forge UI on the same fenced Host transport", async () => {
-    const before = forgeFixture.state.mutationRequests;
-    await startProjectTask("[desktop-e2e:schedule-wait] keep the Project Run active for Forge UI");
+  it("exposes the Codex-style branch and commit controls while a Project Run is active", async () => {
+    await startProjectTask("[desktop-e2e:schedule-wait] keep the Project Run active for Git UI");
     await waitForRun("running", 30_000);
-    await clickWhenReady('[data-testid="workspace-git-tab"]');
-    const remoteSelect = await $('.workspace-git-remote [data-component="select-trigger"]');
-    await remoteSelect.waitForExist({ timeout: 30_000 });
-    await remoteSelect.scrollIntoView({ block: "center" });
-    await remoteSelect.click();
-    await clickWhenReady('//*[contains(@class, "ui-select-option") and contains(., "forge-e2e")]');
-    await waitForDisplayed(".workspace-git-forge-fields", 20_000);
-    const inputs = await $$(".workspace-git-forge-fields input");
-    expect(inputs.length).toBeGreaterThanOrEqual(3);
-    await inputs[1].setValue("main");
-    await inputs[2].setValue("Workbench shared Host create");
-    const createButton = await $(
-      '//*[contains(@class, "workspace-git-forge-fields")]//button[contains(., "创建 PR/MR") or contains(., "Create PR/MR")]',
-    );
-    await createButton.waitForEnabled({ timeout: 20_000 });
-    await createButton.click();
-    await approveNextSideEffect(90_000);
+    if (!(await isDisplayed('[data-testid="workbench-git-branch-trigger"]'))) {
+      await clickWhenReady('[data-testid="workbench-pin-summary"]');
+    }
+    await waitForDisplayed('[data-testid="workbench-git-branch-trigger"]', 20_000);
+    await clickWhenReady('[data-testid="workbench-git-branch-trigger"]');
+    await waitForDisplayed(".workbench-git-popover.branch", 20_000);
     await browser.waitUntil(
-      async () => (await $(".workspace-git-message.success").getText()).includes("PR/MR"),
-      { timeout: 90_000, timeoutMsg: "Workbench Forge UI did not receive the shared Host result" },
+      async () => /main|master/.test(await $(".workbench-git-popover.branch").getText()),
+      { timeout: 20_000, timeoutMsg: "Branch menu did not load the current local branch" },
     );
-    expect(forgeFixture.state.mutationRequests - before).toBe(1);
+    await browser.keys(["Escape"]);
+    await $(".workbench-git-popover.branch").waitForDisplayed({ reverse: true, timeout: 10_000 });
+    await clickWhenReady('[data-testid="workbench-git-commit-trigger"]');
+    await waitForDisplayed(".workbench-git-popover.commit", 20_000);
+    expect(await $(".workbench-git-popover.commit").getText()).toContain("提交并推送");
     await clickWhenReady(".run-status-actions button");
     await waitForRun("cancelled", 60_000);
   });

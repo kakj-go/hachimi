@@ -154,9 +154,9 @@ export function DesktopControlPage(props: {
           ? commands.localHostCommand({ kind: "computer_list_windows" })
           : Promise.resolve(undefined),
       ]);
-    const desktopSessions = nextSessions.filter(
-      (session) => session.entryProfile === "desktop_control" && !session.archived,
-    );
+    const desktopSessions = nextSessions
+      .map((item) => item.session)
+      .filter((session) => session.entryProfile === "desktop_control" && !session.archived);
     setSessions(desktopSessions);
     setRecoveries(nextRecoveries);
     if (hostSettings?.kind === "browser_host_settings") {

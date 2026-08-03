@@ -75,6 +75,13 @@ async function replaceRichText(selector, value) {
   );
 }
 
+async function waitForEditorPath(path) {
+  await browser.waitUntil(async () => (await $(".skill-editor-header strong").getText()) === path, {
+    timeout: 20_000,
+    timeoutMsg: `Skill editor did not switch to ${path}`,
+  });
+}
+
 describe("Hachimi Skills and MCP settings", () => {
   before(async () => {
     await switchToWorkbench();
@@ -94,6 +101,7 @@ describe("Hachimi Skills and MCP settings", () => {
     await waitForDisplayed('[data-testid="skill-entry-name"]');
     await $('[data-testid="skill-entry-name"]').setValue("reference.md");
     await clickDialogPrimary();
+    await waitForEditorPath("reference.md");
     await replaceRichText(
       '[data-testid="skill-markdown-editor"]',
       "Desktop E2E reference loaded through SkillHost.\n",
@@ -101,6 +109,7 @@ describe("Hachimi Skills and MCP settings", () => {
     await clickWhenReady('[data-testid="skill-save"]');
 
     await clickWhenReady('[data-testid="skill-node-SKILL.md"]');
+    await waitForEditorPath("SKILL.md");
     await replaceRichText(
       '[data-testid="skill-markdown-editor"]',
       "# Desktop E2E Skill\n\n[Reference](reference.md)\n",

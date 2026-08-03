@@ -468,6 +468,7 @@ pub(super) fn transcript_kind_db(kind: TranscriptItemKind) -> &'static str {
         TranscriptItemKind::FileChange => "file_change",
         TranscriptItemKind::McpCall => "mcp_call",
         TranscriptItemKind::DynamicToolCall => "dynamic_tool_call",
+        TranscriptItemKind::CollabToolCall => "collab_tool_call",
         TranscriptItemKind::ContextCompaction => "context_compaction",
         TranscriptItemKind::Review => "review",
     }

@@ -23,23 +23,16 @@ import {
 import { useI18n } from "@hachimi/i18n";
 import {
   AlertTriangle,
-  Badge,
   Button,
-  CalendarClock,
-  Check,
+  ChevronDown,
   Checkbox,
-  GitBranch,
+  Dialog,
   PageHeading,
-  Play,
   Plus,
-  RefreshCw,
-  Settings,
   ShieldCheck,
   SelectField,
-  Square,
   TextArea,
   TextField,
-  Trash2,
 } from "@hachimi/ui";
 import {
   For,
@@ -54,6 +47,8 @@ import {
 
 import type { WorkbenchCommandPort } from "./workbench-command-port";
 import { directUserMutationContext } from "./mutation-context";
+import { TaskCard } from "./task-card";
+import { TaskHistoryDialog } from "./task-history-dialog";
 import { TaskEventForm } from "./task-event-form";
 import "./task-center.css";
 
@@ -102,12 +97,16 @@ export function TaskCenter(props: {
   const [taskRuns, setTaskRuns] = createSignal<TaskRunRecord[]>([]);
   const [eventReceipts, setEventReceipts] = createSignal<ScheduleEventReceipt[]>([]);
   const [selectedScheduleId, setSelectedScheduleId] = createSignal<string>();
+  const [removeScheduleId, setRemoveScheduleId] = createSignal<string>();
   const [showCreate, setShowCreate] = createSignal(false);
   const [editingScheduleId, setEditingScheduleId] = createSignal<string>();
   const [loading, setLoading] = createSignal(true);
   const [submitting, setSubmitting] = createSignal(false);
   const [busyId, setBusyId] = createSignal<string>();
   const [failure, setFailure] = createSignal<string>();
+  const [nameError, setNameError] = createSignal<string>();
+  const [promptError, setPromptError] = createSignal<string>();
+  const [advancedOpen, setAdvancedOpen] = createSignal(false);
   const [name, setName] = createSignal(zh() ? "每日任务" : "Daily task");
   const [prompt, setPrompt] = createSignal("");
   const [frequency, setFrequency] = createSignal<ScheduleFrequency>("daily");
@@ -197,9 +196,10 @@ export function TaskCenter(props: {
           : eligibleSessions[0]?.id,
       );
       setSelectedScheduleId((current) =>
-        current && nextSchedules.some((schedule) => schedule.id === current)
-          ? current
-          : nextSchedules[0]?.id,
+        current && nextSchedules.some((schedule) => schedule.id === current) ? current : undefined,
+      );
+      setRemoveScheduleId((current) =>
+        current && nextSchedules.some((schedule) => schedule.id === current) ? current : undefined,
       );
       setFailure(undefined);
     } catch (error) {
@@ -337,23 +337,35 @@ export function TaskCenter(props: {
     setMaxOccurrences("");
     setEndAt("");
     setStopAfterSuccess(false);
+    setNameError(undefined);
+    setPromptError(undefined);
+    setAdvancedOpen(false);
   }
 
   async function submitSchedule() {
     if (!name().trim() || !prompt().trim()) {
-      setFailure(zh() ? "请输入任务名称和提示词。" : "Enter a task name and prompt.");
+      setNameError(!name().trim() ? (zh() ? "请输入任务名称。" : "Enter a task name.") : undefined);
+      setPromptError(
+        !prompt().trim() ? (zh() ? "请输入任务提示词。" : "Enter a task prompt.") : undefined,
+      );
       return;
     }
+    setNameError(undefined);
+    setPromptError(undefined);
+    setFailure(undefined);
     if (contextKind() === "project" && !projectId()) {
       setFailure(zh() ? "请选择项目。" : "Select a project.");
+      setAdvancedOpen(true);
       return;
     }
     if (contextKind() === "session_continuation" && !sessionId()) {
       setFailure(zh() ? "请选择要续接的对话。" : "Select a Session to continue.");
+      setAdvancedOpen(true);
       return;
     }
     if (executionKind() === "managed_worktree" && !baseRevision()) {
       setFailure(zh() ? "请选择 Worktree 基础分支。" : "Select a Worktree base branch.");
+      setAdvancedOpen(true);
       return;
     }
     if (frequency() === "event") {
@@ -385,10 +397,12 @@ export function TaskCenter(props: {
       setFailure(
         zh() ? "最大执行次数必须是正整数。" : "Maximum occurrences must be a positive integer.",
       );
+      setAdvancedOpen(true);
       return;
     }
     if (endAt() && new Date(endAt()).getTime() <= Date.now()) {
       setFailure(zh() ? "截止时间必须晚于当前时间。" : "End time must be in the future.");
+      setAdvancedOpen(true);
       return;
     }
     if (browserUnattended() && parseOrigins(browserDocumentOrigins()).length === 0) {
@@ -397,21 +411,23 @@ export function TaskCenter(props: {
           ? "无人值守 Browser 至少需要一个精确的文档 Origin。"
           : "Unattended Browser requires at least one exact document origin.",
       );
+      setAdvancedOpen(true);
       return;
     }
     setSubmitting(true);
     try {
       const draft = buildDefinition();
       const editing = schedules().find((schedule) => schedule.id === editingScheduleId());
-      const snapshot = editing
-        ? await updateExistingSchedule(editing, draft)
-        : await props.commandPort.createSchedule({
-            context: directUserMutationContext(),
-            definition: draft,
-            authorize: true,
-          });
+      if (editing) {
+        await updateExistingSchedule(editing, draft);
+      } else {
+        await props.commandPort.createSchedule({
+          context: directUserMutationContext(),
+          definition: draft,
+          authorize: true,
+        });
+      }
       await refresh();
-      setSelectedScheduleId(snapshot.definition.id);
       setShowCreate(false);
       resetForm();
     } catch (error) {
@@ -458,6 +474,7 @@ export function TaskCenter(props: {
   }
 
   function beginEdit(schedule: ScheduleDefinition) {
+    setFailure(undefined);
     setEditingScheduleId(schedule.id);
     setName(schedule.name);
     setPrompt(schedule.prompt);
@@ -745,28 +762,14 @@ export function TaskCenter(props: {
     <section class="task-center" data-testid="workbench-task-center">
       <PageHeading
         class="task-center-header"
-        eyebrow={
-          <>
-            <CalendarClock size={15} /> {zh() ? "自动化" : "Automation"}
-          </>
-        }
         title={zh() ? "任务" : "Tasks"}
-        description={
-          zh()
-            ? "按计划创建全新的 Agent Run；后台任务只使用你明确授权的 Skill、工具和项目权限。"
-            : "Create fresh Agent Runs on a schedule using only explicitly authorized skills, tools, and project permissions."
-        }
         actions={
           <Button
             variant="primary"
             onClick={() => {
-              if (showCreate()) {
-                setShowCreate(false);
-                resetForm();
-              } else {
-                resetForm();
-                setShowCreate(true);
-              }
+              setFailure(undefined);
+              resetForm();
+              setShowCreate(true);
             }}
             data-testid="task-create-toggle"
           >
@@ -783,20 +786,47 @@ export function TaskCenter(props: {
         )}
       </Show>
 
-      <Show when={showCreate()}>
+      <Dialog
+        open={showCreate()}
+        size="wide"
+        title={
+          editingScheduleId() ? (zh() ? "编辑任务" : "Edit task") : zh() ? "新建任务" : "New task"
+        }
+        closeLabel={zh() ? "关闭" : "Close"}
+        loading={submitting()}
+        onOpenChange={(open) => {
+          if (!open) {
+            setShowCreate(false);
+            resetForm();
+          }
+        }}
+      >
         <form
-          class="task-create-card"
+          class="task-editor-form"
           onSubmit={(event) => {
             event.preventDefault();
             void submitSchedule();
           }}
         >
+          <Show when={failure()}>
+            {(message) => (
+              <div class="task-editor-error" role="alert">
+                <AlertTriangle size={15} />
+                {message()}
+              </div>
+            )}
+          </Show>
           <div class="task-form-grid">
             <TextField
               label={zh() ? "名称" : "Name"}
               testId="task-name"
               value={name()}
-              onInput={(event) => setName(event.currentTarget.value)}
+              {...(nameError() ? { error: nameError()! } : {})}
+              autofocus
+              onInput={(event) => {
+                setName(event.currentTarget.value);
+                if (event.currentTarget.value.trim()) setNameError(undefined);
+              }}
             />
             <SelectField
               label={zh() ? "执行范围" : "Context"}
@@ -958,244 +988,262 @@ export function TaskCenter(props: {
             data-testid="task-prompt"
             label={zh() ? "提示词" : "Prompt"}
             value={prompt()}
-            onInput={(event) => setPrompt(event.currentTarget.value)}
+            invalid={Boolean(promptError())}
+            {...(promptError() ? { description: promptError()! } : {})}
+            onInput={(event) => {
+              setPrompt(event.currentTarget.value);
+              if (event.currentTarget.value.trim()) setPromptError(undefined);
+            }}
             placeholder={
               zh()
                 ? "例如：汇总今天的会议记录并列出待办"
                 : "Example: summarize today's meeting notes and list action items"
             }
           />
-          <div class="task-permission-section">
-            <div>
-              <strong>{zh() ? "权限与扩展" : "Permissions and extensions"}</strong>
-              <small>
-                {zh()
-                  ? "修改以下范围会要求重新授权。后台任务不会弹出临时审批。"
-                  : "Changing this scope requires reauthorization. Background tasks never wait on an interactive approval."}
-              </small>
-            </div>
-            <SelectField
-              label={zh() ? "完成通知" : "Completion notification"}
-              testId="task-delivery-policy"
-              value={deliveryPolicy()}
-              options={[
-                {
-                  value: "task_tab_only",
-                  label: zh() ? "仅任务中心" : "Task Center only",
-                },
-                {
-                  value: "task_tab_and_system_notification",
-                  label: zh() ? "任务中心 + 系统通知" : "Task Center + system notification",
-                },
-              ]}
-              description={
-                zh()
-                  ? "系统通知只显示任务名称和终态，不包含提示词、结果正文或路径。"
-                  : "System notifications contain only the task name and terminal status, never prompts, result text, or paths."
-              }
-              onChange={(value) => setDeliveryPolicy(value as DeliveryPolicy)}
-            />
-            <div class="task-form-grid task-stop-options">
-              <TextField
-                label={zh() ? "最大执行次数" : "Maximum occurrences"}
-                type="number"
-                value={maxOccurrences()}
-                placeholder={zh() ? "不限" : "Unlimited"}
-                onInput={(event) => setMaxOccurrences(event.currentTarget.value)}
-              />
-              <TextField
-                label={zh() ? "截止时间" : "End at"}
-                type="datetime-local"
-                value={endAt()}
-                onInput={(event) => setEndAt(event.currentTarget.value)}
-              />
-            </div>
-            <Checkbox
-              class="task-check"
-              label={zh() ? "首次成功后停止" : "Stop after first success"}
-              checked={stopAfterSuccess()}
-              onChange={(event) => setStopAfterSuccess(event.currentTarget.checked)}
-            />
-            <Show when={contextKind() === "project"}>
-              <Checkbox
-                class="task-check"
-                label={zh() ? "允许项目写入" : "Allow project writes"}
-                checked={allowWrite()}
-                onChange={(event) => setAllowWrite(event.currentTarget.checked)}
-              />
-              <Checkbox
-                class="task-check"
-                label={zh() ? "允许受限命令" : "Allow restricted commands"}
-                checked={allowExec()}
-                onChange={(event) => setAllowExec(event.currentTarget.checked)}
-              />
-            </Show>
-            <div class="task-skill-grid">
-              <For each={props.skills.filter((skill) => skill.enabled)}>
-                {(skill) => (
-                  <Checkbox
-                    class="task-check"
-                    label={skill.qualifiedName}
-                    checked={selectedSkillIds().includes(skill.id)}
-                    onChange={(event) =>
-                      setSelectedSkillIds((current) =>
-                        event.currentTarget.checked
-                          ? [...current, skill.id]
-                          : current.filter((id) => id !== skill.id),
-                      )
-                    }
-                  />
-                )}
-              </For>
-            </div>
-            <Show when={mcpTools().length > 0}>
-              <div class="task-extension-heading">
-                <strong>{zh() ? "MCP 工具" : "MCP tools"}</strong>
+          <details
+            class="task-advanced-section"
+            open={advancedOpen()}
+            onToggle={(event) => setAdvancedOpen(event.currentTarget.open)}
+          >
+            <summary>
+              <span>
+                <strong>{zh() ? "高级设置" : "Advanced settings"}</strong>
                 <small>
                   {zh()
-                    ? "后台调用固定到 Server、Tool 和 Schema 版本；非只读工具会进入持久授权范围。"
-                    : "Background calls are pinned to the Server, Tool, and Schema revision. Non-read-only tools enter the persisted authorization scope."}
+                    ? `${selectedSkillIds().length + selectedMcpTools().length} 项扩展 · ${allowWrite() || allowExec() ? "扩展权限" : "只读"}`
+                    : `${selectedSkillIds().length + selectedMcpTools().length} extensions · ${allowWrite() || allowExec() ? "elevated" : "read only"}`}
                 </small>
+              </span>
+              <ChevronDown size={16} aria-hidden="true" />
+            </summary>
+            <div class="task-permission-section">
+              <SelectField
+                label={zh() ? "完成通知" : "Completion notification"}
+                testId="task-delivery-policy"
+                value={deliveryPolicy()}
+                options={[
+                  {
+                    value: "task_tab_only",
+                    label: zh() ? "仅任务中心" : "Task Center only",
+                  },
+                  {
+                    value: "task_tab_and_system_notification",
+                    label: zh() ? "任务中心 + 系统通知" : "Task Center + system notification",
+                  },
+                ]}
+                description={
+                  zh()
+                    ? "系统通知只显示任务名称和终态，不包含提示词、结果正文或路径。"
+                    : "System notifications contain only the task name and terminal status, never prompts, result text, or paths."
+                }
+                onChange={(value) => setDeliveryPolicy(value as DeliveryPolicy)}
+              />
+              <div class="task-form-grid task-stop-options">
+                <TextField
+                  label={zh() ? "最大执行次数" : "Maximum occurrences"}
+                  type="number"
+                  value={maxOccurrences()}
+                  placeholder={zh() ? "不限" : "Unlimited"}
+                  onInput={(event) => setMaxOccurrences(event.currentTarget.value)}
+                />
+                <TextField
+                  label={zh() ? "截止时间" : "End at"}
+                  type="datetime-local"
+                  value={endAt()}
+                  onInput={(event) => setEndAt(event.currentTarget.value)}
+                />
               </div>
-              <div class="task-skill-grid" data-testid="task-mcp-tools">
-                <For each={mcpTools()}>
-                  {(entry) => {
-                    const selected = () =>
-                      selectedMcpTools().some(
-                        (selection) =>
-                          selection.serverId === entry.server.configuration.id &&
-                          selection.toolName === entry.tool.name &&
-                          selection.schemaHash === entry.tool.schemaHash &&
-                          selection.hostIdentityHash === entry.tool.hostIdentityHash,
-                      );
-                    return (
-                      <Checkbox
-                        class="task-check"
-                        label={`${entry.server.configuration.displayName} / ${entry.tool.name}${
-                          entry.readOnly ? (zh() ? "（只读）" : " (read only)") : ""
-                        }`}
-                        checked={selected()}
-                        onChange={(event) => {
-                          const selection: McpToolSelection = {
-                            serverId: entry.server.configuration.id,
-                            toolName: entry.tool.name,
-                            schemaHash: entry.tool.schemaHash,
-                            hostIdentityHash: entry.tool.hostIdentityHash,
-                          };
-                          setSelectedMcpTools((current) =>
-                            event.currentTarget.checked
-                              ? [
-                                  ...current.filter((item) => !sameMcpTool(item, selection)),
-                                  selection,
-                                ]
-                              : current.filter((item) => !sameMcpTool(item, selection)),
-                          );
-                        }}
-                      />
-                    );
-                  }}
-                </For>
-              </div>
-            </Show>
-            <Show when={connectors().length > 0}>
-              <div class="task-extension-heading">
-                <strong>{zh() ? "Connector" : "Connectors"}</strong>
-                <small>
-                  {zh()
-                    ? "账户、贡献点内容和 Host/Schema/Action revision 会固定到本次授权。"
-                    : "Account, contribution content, and Host/Schema/Action revisions are pinned to this authorization."}
-                </small>
-              </div>
-              <div class="task-connector-list" data-testid="task-connectors">
-                <For each={connectors()}>
-                  {(entry) => (
-                    <div class="task-connector-card">
-                      <strong>{entry.account.displayName}</strong>
-                      <small>
-                        {entry.account.pluginId} / {entry.account.connectorId}
-                      </small>
-                      <div class="task-skill-grid">
-                        <For each={entry.descriptor.actions}>
-                          {(action) => (
-                            <Checkbox
-                              class="task-check"
-                              label={action}
-                              checked={(
-                                selectedConnectorActions()[entry.account.id] ?? []
-                              ).includes(action)}
-                              onChange={(event) =>
-                                setSelectedConnectorActions((current) => {
-                                  const selected = current[entry.account.id] ?? [];
-                                  const next = event.currentTarget.checked
-                                    ? [...new Set([...selected, action])]
-                                    : selected.filter((value) => value !== action);
-                                  return { ...current, [entry.account.id]: next };
-                                })
-                              }
-                            />
-                          )}
-                        </For>
-                      </div>
-                    </div>
+              <Checkbox
+                class="task-check"
+                label={zh() ? "首次成功后停止" : "Stop after first success"}
+                checked={stopAfterSuccess()}
+                onChange={(event) => setStopAfterSuccess(event.currentTarget.checked)}
+              />
+              <Show when={contextKind() === "project"}>
+                <Checkbox
+                  class="task-check"
+                  label={zh() ? "允许项目写入" : "Allow project writes"}
+                  checked={allowWrite()}
+                  onChange={(event) => setAllowWrite(event.currentTarget.checked)}
+                />
+                <Checkbox
+                  class="task-check"
+                  label={zh() ? "允许受限命令" : "Allow restricted commands"}
+                  checked={allowExec()}
+                  onChange={(event) => setAllowExec(event.currentTarget.checked)}
+                />
+              </Show>
+              <div class="task-skill-grid">
+                <For each={props.skills.filter((skill) => skill.enabled)}>
+                  {(skill) => (
+                    <Checkbox
+                      class="task-check"
+                      label={skill.qualifiedName}
+                      checked={selectedSkillIds().includes(skill.id)}
+                      onChange={(event) =>
+                        setSelectedSkillIds((current) =>
+                          event.currentTarget.checked
+                            ? [...current, skill.id]
+                            : current.filter((id) => id !== skill.id),
+                        )
+                      }
+                    />
                   )}
                 </For>
               </div>
-            </Show>
-            <div class="task-extension-heading">
-              <strong>{zh() ? "隔离 Browser（无人值守）" : "Isolated Browser (unattended)"}</strong>
-              <small>
-                {zh()
-                  ? "默认关闭；只支持 isolated profile。Origin 和能力会固定到 ScheduleGrant，Computer 无人值守始终不支持。"
-                  : "Off by default and isolated-profile only. Origins and capabilities are pinned to the ScheduleGrant; unattended Computer remains unsupported."}
-              </small>
-            </div>
-            <Checkbox
-              class="task-check"
-              label={zh() ? "启用无人值守 Browser" : "Enable unattended Browser"}
-              checked={browserUnattended()}
-              onChange={(event) => setBrowserUnattended(event.currentTarget.checked)}
-            />
-            <Show when={browserUnattended()}>
-              <div class="task-browser-grant" data-testid="task-browser-grant">
-                <TextArea
-                  label={zh() ? "文档 Origin（每行一个）" : "Document origins (one per line)"}
-                  value={browserDocumentOrigins()}
-                  onInput={(event) => setBrowserDocumentOrigins(event.currentTarget.value)}
-                  placeholder="https://example.com"
-                />
-                <TextArea
-                  label={zh() ? "资源 Origin（每行一个）" : "Resource origins (one per line)"}
-                  value={browserResourceOrigins()}
-                  onInput={(event) => setBrowserResourceOrigins(event.currentTarget.value)}
-                  placeholder="https://static.example.com"
-                />
-                <div class="task-skill-grid">
-                  <For each={BROWSER_CAPABILITIES}>
-                    {(capability) => (
-                      <Checkbox
-                        class="task-check"
-                        label={capability}
-                        checked={browserCapabilities().includes(capability)}
-                        onChange={(event) =>
-                          setBrowserCapabilities((current) =>
-                            event.currentTarget.checked
-                              ? [...new Set([...current, capability])]
-                              : current.filter((value) => value !== capability),
-                          )
-                        }
-                      />
+              <Show when={mcpTools().length > 0}>
+                <div class="task-extension-heading">
+                  <strong>{zh() ? "MCP 工具" : "MCP tools"}</strong>
+                  <small>
+                    {zh()
+                      ? "后台调用固定到 Server、Tool 和 Schema 版本；非只读工具会进入持久授权范围。"
+                      : "Background calls are pinned to the Server, Tool, and Schema revision. Non-read-only tools enter the persisted authorization scope."}
+                  </small>
+                </div>
+                <div class="task-skill-grid" data-testid="task-mcp-tools">
+                  <For each={mcpTools()}>
+                    {(entry) => {
+                      const selected = () =>
+                        selectedMcpTools().some(
+                          (selection) =>
+                            selection.serverId === entry.server.configuration.id &&
+                            selection.toolName === entry.tool.name &&
+                            selection.schemaHash === entry.tool.schemaHash &&
+                            selection.hostIdentityHash === entry.tool.hostIdentityHash,
+                        );
+                      return (
+                        <Checkbox
+                          class="task-check"
+                          label={`${entry.server.configuration.displayName} / ${entry.tool.name}${
+                            entry.readOnly ? (zh() ? "（只读）" : " (read only)") : ""
+                          }`}
+                          checked={selected()}
+                          onChange={(event) => {
+                            const selection: McpToolSelection = {
+                              serverId: entry.server.configuration.id,
+                              toolName: entry.tool.name,
+                              schemaHash: entry.tool.schemaHash,
+                              hostIdentityHash: entry.tool.hostIdentityHash,
+                            };
+                            setSelectedMcpTools((current) =>
+                              event.currentTarget.checked
+                                ? [
+                                    ...current.filter((item) => !sameMcpTool(item, selection)),
+                                    selection,
+                                  ]
+                                : current.filter((item) => !sameMcpTool(item, selection)),
+                            );
+                          }}
+                        />
+                      );
+                    }}
+                  </For>
+                </div>
+              </Show>
+              <Show when={connectors().length > 0}>
+                <div class="task-extension-heading">
+                  <strong>{zh() ? "Connector" : "Connectors"}</strong>
+                  <small>
+                    {zh()
+                      ? "账户、贡献点内容和 Host/Schema/Action revision 会固定到本次授权。"
+                      : "Account, contribution content, and Host/Schema/Action revisions are pinned to this authorization."}
+                  </small>
+                </div>
+                <div class="task-connector-list" data-testid="task-connectors">
+                  <For each={connectors()}>
+                    {(entry) => (
+                      <div class="task-connector-card">
+                        <strong>{entry.account.displayName}</strong>
+                        <small>
+                          {entry.account.pluginId} / {entry.account.connectorId}
+                        </small>
+                        <div class="task-skill-grid">
+                          <For each={entry.descriptor.actions}>
+                            {(action) => (
+                              <Checkbox
+                                class="task-check"
+                                label={action}
+                                checked={(
+                                  selectedConnectorActions()[entry.account.id] ?? []
+                                ).includes(action)}
+                                onChange={(event) =>
+                                  setSelectedConnectorActions((current) => {
+                                    const selected = current[entry.account.id] ?? [];
+                                    const next = event.currentTarget.checked
+                                      ? [...new Set([...selected, action])]
+                                      : selected.filter((value) => value !== action);
+                                    return { ...current, [entry.account.id]: next };
+                                  })
+                                }
+                              />
+                            )}
+                          </For>
+                        </div>
+                      </div>
                     )}
                   </For>
                 </div>
-                <Checkbox
-                  class="task-check"
-                  label={zh() ? "允许已列出的私网 Origin" : "Allow listed private-network origins"}
-                  checked={browserPrivateNetwork()}
-                  onChange={(event) => setBrowserPrivateNetwork(event.currentTarget.checked)}
-                />
+              </Show>
+              <div class="task-extension-heading">
+                <strong>
+                  {zh() ? "隔离 Browser（无人值守）" : "Isolated Browser (unattended)"}
+                </strong>
+                <small>
+                  {zh()
+                    ? "默认关闭；只支持 isolated profile。Origin 和能力会固定到 ScheduleGrant，Computer 无人值守始终不支持。"
+                    : "Off by default and isolated-profile only. Origins and capabilities are pinned to the ScheduleGrant; unattended Computer remains unsupported."}
+                </small>
               </div>
-            </Show>
-          </div>
+              <Checkbox
+                class="task-check"
+                label={zh() ? "启用无人值守 Browser" : "Enable unattended Browser"}
+                checked={browserUnattended()}
+                onChange={(event) => setBrowserUnattended(event.currentTarget.checked)}
+              />
+              <Show when={browserUnattended()}>
+                <div class="task-browser-grant" data-testid="task-browser-grant">
+                  <TextArea
+                    label={zh() ? "文档 Origin（每行一个）" : "Document origins (one per line)"}
+                    value={browserDocumentOrigins()}
+                    onInput={(event) => setBrowserDocumentOrigins(event.currentTarget.value)}
+                    placeholder="https://example.com"
+                  />
+                  <TextArea
+                    label={zh() ? "资源 Origin（每行一个）" : "Resource origins (one per line)"}
+                    value={browserResourceOrigins()}
+                    onInput={(event) => setBrowserResourceOrigins(event.currentTarget.value)}
+                    placeholder="https://static.example.com"
+                  />
+                  <div class="task-skill-grid">
+                    <For each={BROWSER_CAPABILITIES}>
+                      {(capability) => (
+                        <Checkbox
+                          class="task-check"
+                          label={capability}
+                          checked={browserCapabilities().includes(capability)}
+                          onChange={(event) =>
+                            setBrowserCapabilities((current) =>
+                              event.currentTarget.checked
+                                ? [...new Set([...current, capability])]
+                                : current.filter((value) => value !== capability),
+                            )
+                          }
+                        />
+                      )}
+                    </For>
+                  </div>
+                  <Checkbox
+                    class="task-check"
+                    label={
+                      zh() ? "允许已列出的私网 Origin" : "Allow listed private-network origins"
+                    }
+                    checked={browserPrivateNetwork()}
+                    onChange={(event) => setBrowserPrivateNetwork(event.currentTarget.checked)}
+                  />
+                </div>
+              </Show>
+            </div>
+          </details>
           <footer class="task-form-actions">
             <Button
               variant="ghost"
@@ -1219,292 +1267,146 @@ export function TaskCenter(props: {
             </Button>
           </footer>
         </form>
+      </Dialog>
+
+      <Show
+        when={schedules().length > 0}
+        fallback={
+          <div class="task-empty">
+            <strong>
+              {loading()
+                ? zh()
+                  ? "正在加载任务"
+                  : "Loading tasks"
+                : zh()
+                  ? "还没有任务"
+                  : "No tasks yet"}
+            </strong>
+            <Show when={!loading()}>
+              <Button
+                variant="primary"
+                onClick={() => {
+                  setFailure(undefined);
+                  resetForm();
+                  setShowCreate(true);
+                }}
+              >
+                <Plus size={16} />
+                {zh() ? "新建任务" : "New task"}
+              </Button>
+            </Show>
+          </div>
+        }
+      >
+        <div class="task-card-grid">
+          <For each={schedules()}>
+            {(schedule) => (
+              <TaskCard
+                schedule={schedule}
+                recentRun={taskRuns().find((task) => task.scheduleId === schedule.id)}
+                projects={props.projects}
+                zh={zh()}
+                busy={busyId() === schedule.id}
+                onRun={() =>
+                  void mutate(
+                    schedule.id,
+                    props.commandPort.runScheduleNow(directUserMutationContext(), schedule.id),
+                  )
+                }
+                onHistory={() => setSelectedScheduleId(schedule.id)}
+                onToggle={(enabled) =>
+                  void mutate(
+                    schedule.id,
+                    props.commandPort.setScheduleEnabled(
+                      directUserMutationContext(),
+                      schedule.id,
+                      enabled,
+                      schedule.configRevision,
+                    ),
+                  )
+                }
+                onEdit={() => beginEdit(schedule)}
+                onDelete={() => setRemoveScheduleId(schedule.id)}
+                onReauthorize={() =>
+                  void mutate(
+                    schedule.id,
+                    props.commandPort.reauthorizeSchedule(directUserMutationContext(), schedule.id),
+                  )
+                }
+              />
+            )}
+          </For>
+        </div>
       </Show>
 
-      <div class="task-center-layout">
-        <div class="task-schedule-list">
-          <Show
-            when={schedules().length > 0}
-            fallback={
-              <div class="task-empty">
-                <CalendarClock size={28} />
-                <strong>
-                  {loading()
-                    ? zh()
-                      ? "加载中…"
-                      : "Loading…"
-                    : zh()
-                      ? "还没有任务"
-                      : "No tasks yet"}
-                </strong>
-              </div>
-            }
-          >
-            <For each={schedules()}>
-              {(schedule) => {
-                const recent = () => taskRuns().find((task) => task.scheduleId === schedule.id);
-                return (
-                  <Button
-                    type="button"
-                    class="task-schedule-row"
-                    data-testid="task-schedule-row"
-                    aria-label={schedule.name}
-                    title={schedule.name}
-                    classList={{ selected: selectedScheduleId() === schedule.id }}
-                    onClick={() => setSelectedScheduleId(schedule.id)}
-                  >
-                    <span class="task-schedule-icon">
-                      <CalendarClock size={17} />
-                    </span>
-                    <span>
-                      <strong>{schedule.name}</strong>
-                      <small>{scheduleLabel(schedule, zh())}</small>
-                    </span>
-                    <Badge tone={healthTone(schedule.health)}>{schedule.health}</Badge>
-                    <small>{recent()?.status ?? (zh() ? "尚未运行" : "Not run")}</small>
-                  </Button>
-                );
-              }}
-            </For>
-          </Show>
-        </div>
+      <TaskHistoryDialog
+        schedule={selectedSchedule()}
+        runs={selectedRuns()}
+        events={selectedEvents()}
+        zh={zh()}
+        busyId={busyId()}
+        onClose={() => setSelectedScheduleId(undefined)}
+        onOpenSession={(sessionId) => {
+          setSelectedScheduleId(undefined);
+          props.onOpenSession(sessionId);
+        }}
+        onCancel={(run) =>
+          void mutate(run.id, props.commandPort.cancelTaskRun(directUserMutationContext(), run.id))
+        }
+        onRetry={(run) =>
+          void mutate(run.id, props.commandPort.retryTaskRun(directUserMutationContext(), run.id))
+        }
+        onContinue={(run) => {
+          const openSession = props.onOpenSession;
+          void mutate(
+            run.id,
+            props.commandPort
+              .continueTaskInteractively(directUserMutationContext(), run.id)
+              .then((continuation) => {
+                setSelectedScheduleId(undefined);
+                openSession(continuation.session.id);
+              }),
+          );
+        }}
+      />
 
-        <Show when={selectedSchedule()}>
-          {(schedule) => (
-            <article class="task-detail-card">
-              <header>
-                <div>
-                  <h2>{schedule().name}</h2>
-                  <p>{schedule().prompt}</p>
-                </div>
-                <Badge tone={healthTone(schedule().health)}>{schedule().health}</Badge>
-              </header>
-              <div class="task-detail-meta">
-                <span>
-                  <CalendarClock size={14} /> {scheduleLabel(schedule(), zh())}
-                </span>
-                <span>
-                  <GitBranch size={14} /> {contextLabel(schedule(), props.projects, zh())}
-                </span>
-                <span>
-                  <ShieldCheck size={14} /> revision {schedule().permissionRevision}
-                </span>
-              </div>
-              <div class="task-detail-actions">
-                <Button
-                  variant="default"
-                  data-testid="task-run-now"
-                  disabled={busyId() === schedule().id}
-                  onClick={() => {
-                    const current = schedule();
-                    void mutate(
-                      current.id,
-                      props.commandPort.runScheduleNow(directUserMutationContext(), current.id),
-                    );
-                  }}
-                >
-                  <Play size={15} /> {zh() ? "立即运行" : "Run now"}
-                </Button>
-                <Button
-                  variant="ghost"
-                  data-testid="task-toggle-enabled"
-                  disabled={busyId() === schedule().id}
-                  onClick={() => {
-                    const current = schedule();
-                    void mutate(
-                      current.id,
-                      props.commandPort.setScheduleEnabled(
-                        directUserMutationContext(),
-                        current.id,
-                        !current.enabled,
-                        current.configRevision,
-                      ),
-                    );
-                  }}
-                >
-                  {schedule().enabled ? <Square size={14} /> : <Check size={14} />}
-                  {schedule().enabled ? (zh() ? "停用" : "Disable") : zh() ? "启用" : "Enable"}
-                </Button>
-                <Button
-                  variant="ghost"
-                  data-testid="task-edit"
-                  disabled={busyId() === schedule().id}
-                  onClick={() => beginEdit(schedule())}
-                >
-                  <Settings size={14} /> {zh() ? "编辑" : "Edit"}
-                </Button>
-                <Show when={schedule().health !== "healthy"}>
-                  <Button
-                    variant="ghost"
-                    onClick={() => {
-                      const current = schedule();
-                      void mutate(
-                        current.id,
-                        props.commandPort.reauthorizeSchedule(
-                          directUserMutationContext(),
-                          current.id,
-                        ),
-                      );
-                    }}
-                  >
-                    <RefreshCw size={14} /> {zh() ? "重新授权" : "Reauthorize"}
-                  </Button>
-                </Show>
-                <Button
-                  variant="danger"
-                  onClick={() => {
-                    if (
-                      !window.confirm(
-                        zh()
-                          ? "删除任务定义？历史运行会保留。"
-                          : "Delete the task definition? Run history is retained.",
-                      )
-                    )
-                      return;
-                    const current = schedule();
-                    void mutate(
-                      current.id,
-                      props.commandPort.removeSchedule(directUserMutationContext(), current.id),
-                    );
-                  }}
-                >
-                  <Trash2 size={14} /> {zh() ? "删除" : "Delete"}
-                </Button>
-              </div>
-              <Show when={schedule().schedule.kind === "event"}>
-                <section class="task-event-history" data-testid="task-event-history">
-                  <h3>{zh() ? "最近事件" : "Recent events"}</h3>
-                  <Show
-                    when={selectedEvents().length > 0}
-                    fallback={
-                      <p class="task-history-empty">
-                        {zh() ? "尚未收到匹配事件" : "No matching events received"}
-                      </p>
-                    }
-                  >
-                    <For each={selectedEvents()}>
-                      {(receipt) => (
-                        <div class="task-event-row">
-                          <Badge tone={eventReceiptTone(receipt.status)}>{receipt.status}</Badge>
-                          <span>
-                            <strong>{receipt.event.eventType}</strong>
-                            <small>
-                              {receipt.event.source.kind} · {receipt.event.source.id}
-                            </small>
-                            <small>
-                              {receipt.event.subject ?? receipt.event.eventId} ·{" "}
-                              {formatTime(receipt.event.receivedAtMs)}
-                            </small>
-                          </span>
-                          <small>
-                            {zh() ? "触发" : "Runs"}: {receipt.taskRuns.length}
-                          </small>
-                        </div>
-                      )}
-                    </For>
-                  </Show>
-                </section>
-              </Show>
-              <section class="task-run-history">
-                <h3>{zh() ? "运行历史" : "Run history"}</h3>
-                <Show
-                  when={selectedRuns().length > 0}
-                  fallback={<p class="task-history-empty">{zh() ? "尚未运行" : "No runs yet"}</p>}
-                >
-                  <For each={selectedRuns()}>
-                    {(task) => (
-                      <div class="task-run-row" data-testid="task-run-row">
-                        <span class={`task-status-dot ${task.status}`} />
-                        <span>
-                          <strong data-testid="task-run-status">{task.status}</strong>
-                          <small>{formatTime(task.createdAtMs)}</small>
-                          <Show when={task.eventContext}>
-                            {(event) => (
-                              <small>
-                                Event · {event().source.kind}/{event().source.id} ·{" "}
-                                {event().eventType}
-                              </small>
-                            )}
-                          </Show>
-                          <Show when={task.errorSummary}>
-                            <small class="task-run-error">{task.errorSummary}</small>
-                          </Show>
-                        </span>
-                        <div class="task-run-actions">
-                          <Show when={task.executionSessionId}>
-                            <Button
-                              type="button"
-                              onClick={() => props.onOpenSession(task.executionSessionId!)}
-                            >
-                              {zh() ? "查看" : "Open"}
-                            </Button>
-                          </Show>
-                          <Show when={["queued", "preparing", "running"].includes(task.status)}>
-                            <Button
-                              type="button"
-                              data-testid="task-cancel"
-                              onClick={() => {
-                                const taskId = task.id;
-                                void mutate(
-                                  taskId,
-                                  props.commandPort.cancelTaskRun(
-                                    directUserMutationContext(),
-                                    taskId,
-                                  ),
-                                );
-                              }}
-                            >
-                              {zh() ? "取消" : "Cancel"}
-                            </Button>
-                          </Show>
-                          <Show when={task.status === "needs_attention"}>
-                            <Button
-                              type="button"
-                              onClick={() => {
-                                const taskId = task.id;
-                                const openSession = props.onOpenSession;
-                                void mutate(
-                                  taskId,
-                                  props.commandPort
-                                    .continueTaskInteractively(directUserMutationContext(), taskId)
-                                    .then((continuation) => openSession(continuation.session.id)),
-                                );
-                              }}
-                            >
-                              {zh() ? "转为交互" : "Continue"}
-                            </Button>
-                          </Show>
-                          <Show
-                            when={["failed", "timed_out", "lost", "cancelled"].includes(
-                              task.status,
-                            )}
-                          >
-                            <Button
-                              type="button"
-                              onClick={() => {
-                                const taskId = task.id;
-                                void mutate(
-                                  taskId,
-                                  props.commandPort.retryTaskRun(
-                                    directUserMutationContext(),
-                                    taskId,
-                                  ),
-                                );
-                              }}
-                            >
-                              {zh() ? "重试" : "Retry"}
-                            </Button>
-                          </Show>
-                        </div>
-                      </div>
-                    )}
-                  </For>
-                </Show>
-              </section>
-            </article>
-          )}
-        </Show>
-      </div>
+      <Dialog
+        open={Boolean(removeScheduleId())}
+        tone="danger"
+        title={zh() ? "删除任务" : "Delete task"}
+        description={
+          zh()
+            ? `删除“${schedules().find((schedule) => schedule.id === removeScheduleId())?.name ?? ""}”？运行历史和对应会话会保留。`
+            : `Delete “${schedules().find((schedule) => schedule.id === removeScheduleId())?.name ?? ""}”? Run history and sessions will be preserved.`
+        }
+        closeLabel={zh() ? "关闭" : "Close"}
+        onOpenChange={(open) => {
+          if (!open) setRemoveScheduleId(undefined);
+        }}
+      >
+        <div class="task-delete-actions">
+          <Button variant="ghost" onClick={() => setRemoveScheduleId(undefined)}>
+            {zh() ? "取消" : "Cancel"}
+          </Button>
+          <Button
+            variant="danger"
+            data-testid="task-delete-confirm"
+            disabled={Boolean(removeScheduleId() && busyId() === removeScheduleId())}
+            onClick={() => {
+              const id = removeScheduleId();
+              if (!id) return;
+              void mutate(
+                id,
+                props.commandPort
+                  .removeSchedule(directUserMutationContext(), id)
+                  .then(() => setRemoveScheduleId(undefined)),
+              );
+            }}
+          >
+            {zh() ? "删除任务" : "Delete task"}
+          </Button>
+        </div>
+      </Dialog>
     </section>
   );
 }
@@ -1575,30 +1477,6 @@ function sameMcpTool(left: McpToolSelection, right: McpToolSelection): boolean {
   );
 }
 
-function formatTime(value: number | null): string {
-  return value
-    ? new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" }).format(value)
-    : "—";
-}
-
-function scheduleLabel(schedule: ScheduleDefinition, zh: boolean): string {
-  if (schedule.schedule.kind === "event") {
-    if (!schedule.enabled) return zh ? "已停用" : "Disabled";
-    return zh ? "等待匹配事件" : "Waiting for matching event";
-  }
-  const next = formatTime(schedule.nextRunAtMs);
-  if (!schedule.enabled) return zh ? "已停用" : "Disabled";
-  return `${zh ? "下次" : "Next"}: ${next}`;
-}
-
-function eventReceiptTone(
-  status: ScheduleEventReceipt["status"],
-): "neutral" | "success" | "warning" | "danger" {
-  if (status === "accepted") return "success";
-  if (status === "conflict") return "danger";
-  return "warning";
-}
-
 function parseEventLabels(value: string): Record<string, string> {
   const labels: Record<string, string> = {};
   const lines = value
@@ -1626,25 +1504,4 @@ function formatEventLabels(labels: Record<string, string>): string {
     .sort(([left], [right]) => left.localeCompare(right))
     .map(([key, value]) => `${key}=${value}`)
     .join("\n");
-}
-
-function contextLabel(
-  schedule: ScheduleDefinition,
-  projects: ProjectRecord[],
-  zh: boolean,
-): string {
-  if (schedule.contextTemplate.kind === "general") return zh ? "通用" : "General";
-  if (schedule.contextTemplate.kind === "session_continuation") {
-    return `${zh ? "对话续接" : "Session continuation"}: ${schedule.contextTemplate.session_id}`;
-  }
-  const projectId = schedule.contextTemplate.project_id;
-  return projects.find((project) => project.id === projectId)?.displayName ?? projectId;
-}
-
-function healthTone(
-  health: ScheduleDefinition["health"],
-): "neutral" | "success" | "warning" | "danger" {
-  if (health === "healthy") return "success";
-  if (health === "invalid") return "danger";
-  return "warning";
 }

@@ -6,7 +6,11 @@ use hachimi_control_plane::{
     PluginAppResponse,
 };
 use hachimi_core::WindowKind;
-use hachimi_protocol::{ClientContext, LocalHostCommandRequest, LocalHostCommandResponse};
+use hachimi_protocol::{
+    BrowserAction, BrowserSessionId, ClientContext, LocalHostCommandRequest,
+    LocalHostCommandResponse, RunId, SessionId, SessionSourceOrigin,
+    WorkbenchEnvironmentChangeReason,
+};
 use tauri::{Manager, State, WebviewWindow};
 
 use super::{CommandError, DesktopState};
@@ -514,6 +518,7 @@ pub(super) async fn local_host_command(
     state: State<'_, DesktopState>,
     request: LocalHostCommandRequest,
 ) -> Result<LocalHostCommandResponse, CommandError> {
+    let browser_source = browser_source_candidate(&request);
     let runtime = state.control_plane.feature_flags().runtime_features;
     if is_plugin_command(&request) && !runtime.plugin_runtime {
         return Err(CommandError::new("feature_disabled", "plugin_runtime"));
@@ -534,7 +539,173 @@ pub(super) async fn local_host_command(
     let Some(request) = request_to_domain(&window, request).await? else {
         return Ok(LocalHostCommandResponse::Cancelled);
     };
-    domain_to_response(dispatch(&window, &state, request).await?)
+    let response = domain_to_response(dispatch(&window, &state, request).await?)?;
+    if let Some(candidate) = browser_source
+        && browser_source_succeeded(&response)
+    {
+        let browser_session_id = candidate.browser_session_id.or_else(|| match &response {
+            LocalHostCommandResponse::BrowserSession(session) => Some(session.id.clone()),
+            _ => None,
+        });
+        let browser_session = match &response {
+            LocalHostCommandResponse::BrowserSession(session) => Some(session.clone()),
+            _ => match browser_session_id.as_ref() {
+                Some(browser_session_id) => state
+                    .agent_store
+                    .get_browser_session(browser_session_id)
+                    .await
+                    .map_err(|error| {
+                        CommandError::operation("browser_source_owner_failed", error)
+                    })?,
+                None => None,
+            },
+        };
+        let response_url = match &response {
+            LocalHostCommandResponse::BrowserObservation(observation) => {
+                canonical_browser_url(&observation.url)
+            }
+            LocalHostCommandResponse::BrowserAction(result) => result
+                .output
+                .as_ref()
+                .and_then(|output| output.get("url"))
+                .and_then(serde_json::Value::as_str)
+                .and_then(canonical_browser_url),
+            LocalHostCommandResponse::BrowserSession(session) => session
+                .current_url
+                .as_deref()
+                .and_then(canonical_browser_url),
+            _ => None,
+        };
+        let title = match &response {
+            LocalHostCommandResponse::BrowserObservation(observation) => {
+                let title = observation.title.trim();
+                (!title.is_empty()).then(|| title.to_owned())
+            }
+            LocalHostCommandResponse::BrowserAction(result) => result
+                .output
+                .as_ref()
+                .and_then(|output| output.get("title"))
+                .and_then(serde_json::Value::as_str)
+                .map(str::trim)
+                .filter(|title| !title.is_empty())
+                .map(str::to_owned),
+            _ => None,
+        };
+        let Some(url) = response_url
+            .or_else(|| {
+                browser_session
+                    .as_ref()
+                    .and_then(|session| session.current_url.as_deref())
+                    .and_then(canonical_browser_url)
+            })
+            .or_else(|| {
+                candidate
+                    .fallback_url
+                    .as_deref()
+                    .and_then(canonical_browser_url)
+            })
+        else {
+            return Ok(response);
+        };
+        let owner = match candidate.session_id {
+            Some(session_id) => Some((session_id, candidate.run_id)),
+            None => browser_session.map(|session| (session.owner_session_id, session.owner_run_id)),
+        };
+        if let Some((session_id, run_id)) = owner {
+            state
+                .agent_store
+                .upsert_session_web_source(
+                    &session_id,
+                    Some(&run_id),
+                    SessionSourceOrigin::Browser,
+                    &url,
+                    title.as_deref(),
+                    None,
+                )
+                .await
+                .map_err(|error| CommandError::operation("browser_source_store_failed", error))?;
+            if let Ok(environment) = state.workbench.environment_snapshot(&session_id).await {
+                crate::environment_commands::emit_workbench_environment(
+                    window.app_handle(),
+                    &environment,
+                    vec![
+                        WorkbenchEnvironmentChangeReason::Browser,
+                        WorkbenchEnvironmentChangeReason::Sources,
+                    ],
+                );
+            }
+        }
+    }
+    Ok(response)
+}
+
+struct BrowserSourceCandidate {
+    session_id: Option<SessionId>,
+    run_id: RunId,
+    browser_session_id: Option<BrowserSessionId>,
+    fallback_url: Option<String>,
+}
+
+fn browser_source_candidate(request: &LocalHostCommandRequest) -> Option<BrowserSourceCandidate> {
+    match request {
+        LocalHostCommandRequest::BrowserStart {
+            session_id,
+            run_id,
+            initial_url,
+            ..
+        } => Some(BrowserSourceCandidate {
+            session_id: Some(session_id.clone()),
+            run_id: run_id.clone(),
+            browser_session_id: None,
+            fallback_url: initial_url.clone(),
+        }),
+        LocalHostCommandRequest::BrowserObserve {
+            browser_session_id,
+            run_id,
+        } => Some(BrowserSourceCandidate {
+            session_id: None,
+            run_id: run_id.clone(),
+            browser_session_id: Some(browser_session_id.clone()),
+            fallback_url: None,
+        }),
+        LocalHostCommandRequest::BrowserAct { run_id, request } => {
+            let fallback_url = match &request.action {
+                BrowserAction::Navigate { url } => Some(url),
+                BrowserAction::TabNew { url: Some(url) } => Some(url),
+                _ => None,
+            }
+            .cloned();
+            Some(BrowserSourceCandidate {
+                session_id: None,
+                run_id: run_id.clone(),
+                browser_session_id: Some(request.browser_session_id.clone()),
+                fallback_url,
+            })
+        }
+        _ => None,
+    }
+}
+
+fn browser_source_succeeded(response: &LocalHostCommandResponse) -> bool {
+    match response {
+        LocalHostCommandResponse::BrowserSession(_) => true,
+        LocalHostCommandResponse::BrowserObservation(_) => true,
+        LocalHostCommandResponse::BrowserAction(result) => result.accepted,
+        _ => false,
+    }
+}
+
+fn canonical_browser_url(value: &str) -> Option<String> {
+    let mut url = url::Url::parse(value).ok()?;
+    if !matches!(url.scheme(), "http" | "https")
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.host_str().is_none()
+    {
+        return None;
+    }
+    url.set_fragment(None);
+    Some(url.into())
 }
 
 fn is_plugin_command(request: &LocalHostCommandRequest) -> bool {

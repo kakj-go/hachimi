@@ -7,6 +7,7 @@ import {
   existsSync,
   mkdtempSync,
   mkdirSync,
+  readFileSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
@@ -549,6 +550,41 @@ checked(
 );
 
 testEnvironment.HACHIMI_DESKTOP_E2E_APP = resolve(buildTarget, "debug/hachimi-desktop.exe");
+const consoleStopFile = join(artifacts, "console-window-monitor.stop");
+const consoleReportFile = join(artifacts, "console-window-monitor.json");
+let consoleMonitorProcess;
+let consoleMonitorExit;
+if (process.platform === "win32") {
+  consoleMonitorProcess = spawn(
+    "powershell.exe",
+    [
+      "-NoLogo",
+      "-NoProfile",
+      "-NonInteractive",
+      "-ExecutionPolicy",
+      "Bypass",
+      "-File",
+      join(root, "scripts/desktop-e2e/support/console-window-monitor.ps1"),
+      "-ApplicationPath",
+      testEnvironment.HACHIMI_DESKTOP_E2E_APP,
+      "-StopFile",
+      consoleStopFile,
+      "-ReportFile",
+      consoleReportFile,
+    ],
+    {
+      cwd: root,
+      env: testEnvironment,
+      stdio: ["ignore", "pipe", "pipe"],
+      windowsHide: true,
+    },
+  );
+  consoleMonitorProcess.stdout.pipe(process.stdout);
+  consoleMonitorProcess.stderr.pipe(process.stderr);
+  consoleMonitorExit = new Promise((resolveExit) => {
+    consoleMonitorProcess.once("exit", resolveExit);
+  });
+}
 const driverProcess = spawn(driver, ["--native-driver", nativeDriver], {
   cwd: root,
   env: testEnvironment,
@@ -579,6 +615,7 @@ async function waitForPort(port, description) {
 }
 
 let succeeded = false;
+let consoleWindowFailure;
 try {
   await waitForPort(4444, "tauri-driver");
   await checkedAsync(
@@ -591,6 +628,24 @@ try {
   for (const child of activeChildren) terminateProcessTree(child.pid);
   terminateProcessTree(driverProcess.pid);
   cleanupExecutableProcesses(testEnvironment.HACHIMI_DESKTOP_E2E_APP);
+  if (consoleMonitorProcess) {
+    writeFileSync(consoleStopFile, "stop", "utf8");
+    await Promise.race([
+      consoleMonitorExit,
+      new Promise((resolveDelay) => setTimeout(resolveDelay, 5_000)),
+    ]);
+    if (consoleMonitorProcess.exitCode == null) terminateProcessTree(consoleMonitorProcess.pid);
+    if (existsSync(consoleReportFile)) {
+      const report = JSON.parse(readFileSync(consoleReportFile, "utf8"));
+      if (Array.isArray(report.findings) && report.findings.length > 0) {
+        succeeded = false;
+        consoleWindowFailure = `Desktop E2E observed ${report.findings.length} descendant ConsoleWindowClass window(s)`;
+      }
+    } else if (succeeded) {
+      succeeded = false;
+      consoleWindowFailure = "Desktop E2E console-window monitor did not produce a report";
+    }
+  }
   driverLog.end();
   await new Promise((resolveClose) => mcpServer.close(resolveClose));
   if (succeeded && process.env.HACHIMI_KEEP_DESKTOP_E2E !== "1") {
@@ -599,3 +654,4 @@ try {
     console.error(`Desktop E2E fixture retained at ${temporaryRoot}`);
   }
 }
+if (consoleWindowFailure) throw new Error(consoleWindowFailure);

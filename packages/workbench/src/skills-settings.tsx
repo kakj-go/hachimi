@@ -97,6 +97,9 @@ export function SkillsSettingsPage() {
   let stopChanges: (() => void) | undefined;
   let stopNativeDrag: (() => void) | undefined;
   let skillSubscriptionId: SkillSubscriptionId | undefined;
+  let skillSelectionGeneration = 0;
+  let fileLoadGeneration = 0;
+  let externalRefreshGeneration = 0;
 
   const selectedSkill = createMemo(() => skills().find((skill) => skill.id === selectedSkillId()));
 
@@ -121,18 +124,23 @@ export function SkillsSettingsPage() {
       });
       return;
     }
+    const generation = ++skillSelectionGeneration;
+    fileLoadGeneration += 1;
+    externalRefreshGeneration += 1;
     setSelectedSkillId(skillId);
+    setSelectedPath("");
+    setFile();
+    setDraft("");
+    setDirty(false);
+    setConflict(false);
     const nextTree = await commands.getSkillTree(skillId);
+    if (generation !== skillSelectionGeneration || selectedSkillId() !== skillId) return;
     setTree(nextTree);
     if (findNode(nextTree, "SKILL.md")) {
       setSelectedPath("SKILL.md");
       await loadFile(skillId, "SKILL.md", true);
     } else {
-      setSelectedPath("");
-      setFile();
-      setDraft("");
-      setDirty(false);
-      setConflict(false);
+      fileLoadGeneration += 1;
     }
   }
 
@@ -150,8 +158,20 @@ export function SkillsSettingsPage() {
       });
       return;
     }
-    const snapshot = await commands.readSkillFile(skillId, relativePath);
+    const generation = ++fileLoadGeneration;
+    externalRefreshGeneration += 1;
     setSelectedPath(relativePath);
+    setFile();
+    setDraft("");
+    setDirty(false);
+    setConflict(false);
+    const snapshot = await commands.readSkillFile(skillId, relativePath);
+    if (
+      generation !== fileLoadGeneration ||
+      selectedSkillId() !== skillId ||
+      selectedPath() !== relativePath
+    )
+      return;
     setFile(snapshot);
     setDraft(snapshot.content ?? "");
     setDirty(false);
@@ -159,14 +179,33 @@ export function SkillsSettingsPage() {
   }
 
   async function refreshExternalChanges() {
+    const refreshGeneration = ++externalRefreshGeneration;
     try {
       const nextSkills = await commands.listSkills();
+      if (refreshGeneration !== externalRefreshGeneration) return;
       setSkills(nextSkills);
       const skillId = selectedSkillId();
+      if (skillId) {
+        const nextTree = await commands.getSkillTree(skillId);
+        if (refreshGeneration !== externalRefreshGeneration || selectedSkillId() !== skillId)
+          return;
+        setTree(nextTree);
+      }
       const current = file();
-      if (skillId) setTree(await commands.getSkillTree(skillId));
+      const currentFileLoadGeneration = fileLoadGeneration;
       if (skillId && current) {
         const disk = await commands.readSkillFile(skillId, current.relativePath);
+        const active = file();
+        if (
+          refreshGeneration !== externalRefreshGeneration ||
+          currentFileLoadGeneration !== fileLoadGeneration ||
+          selectedSkillId() !== skillId ||
+          !active ||
+          active.skillId !== current.skillId ||
+          active.relativePath !== current.relativePath ||
+          active.revision !== current.revision
+        )
+          return;
         if (disk.revision !== current.revision) {
           if (dirty()) setConflict(true);
           else {

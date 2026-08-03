@@ -375,6 +375,11 @@ impl DesktopAppDomainHandler {
                     .observe(&browser_session_id, &run_id, run_generation)
                     .await
                     .map_err(domain_error("browser_observe_failed"))?;
+                let session = self
+                    .browser
+                    .session_snapshot(&browser_session_id, &run_id)
+                    .map_err(domain_error("browser_session_snapshot_failed"))?;
+                self.persist_browser_session(&session).await?;
                 self.store
                     .touch_desktop_control_observation(
                         &session_id,
@@ -424,6 +429,11 @@ impl DesktopAppDomainHandler {
                     };
                 match self.browser.authorize_action(&run_id, &request).await {
                     Ok(result) => {
+                        let session = self
+                            .browser
+                            .session_snapshot(&request.browser_session_id, &run_id)
+                            .map_err(domain_error("browser_session_snapshot_failed"))?;
+                        self.persist_browser_session(&session).await?;
                         self.update_desktop_control_action(
                             &owner_session,
                             action_id.as_deref(),
@@ -1491,18 +1501,10 @@ impl DesktopAppDomainHandler {
         &self,
         session: &hachimi_protocol::BrowserSession,
     ) -> Result<(), AppServerDomainError> {
-        sqlx::query(
-            "INSERT INTO browser_sessions(id, owner_session_id, owner_run_id, record_json, updated_at_ms, owner_run_generation) VALUES(?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET record_json = excluded.record_json, owner_run_generation = excluded.owner_run_generation, updated_at_ms = excluded.updated_at_ms",
-        )
-        .bind(session.id.as_str())
-        .bind(session.owner_session_id.as_str())
-        .bind(session.owner_run_id.as_str())
-        .bind(serde_json::to_string(session).map_err(domain_error("browser_session_encode_failed"))?)
-        .bind(now_ms())
-        .bind(i64::try_from(session.run_generation).unwrap_or(i64::MAX))
-        .execute(self.store.pool())
-        .await
-        .map_err(domain_error("browser_session_store_failed"))?;
+        self.store
+            .upsert_session_browser(session)
+            .await
+            .map_err(domain_error("browser_session_store_failed"))?;
         Ok(())
     }
 

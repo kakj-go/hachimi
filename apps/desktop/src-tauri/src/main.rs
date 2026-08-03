@@ -6,15 +6,22 @@ compile_error!("the desktop-e2e feature is forbidden in release builds");
 mod agent_commands;
 mod agent_git_forge_tools;
 mod agent_host_tools;
+mod agent_host_tools_support;
 mod agent_runtime_host;
 mod app_domain_handler;
 mod app_shell;
 mod browser_extension_server;
+mod browser_router;
+mod browser_tool_policy;
+mod browser_workspace_commands;
 mod channel_agent_dispatch;
 mod desktop_e2e;
 #[cfg(all(debug_assertions, feature = "desktop-e2e"))]
 mod desktop_e2e_agent_tools;
 mod domain_run_launcher;
+mod embedded_browser;
+mod embedded_browser_agent;
+mod environment_commands;
 mod extension_commands;
 mod forge_commands;
 mod gateway_process;
@@ -27,6 +34,7 @@ mod media_commands;
 mod plugin_content_protocol;
 mod process_commands;
 mod project_git_commands;
+mod project_tool_commands;
 mod review_commands;
 mod sandbox_commands;
 mod schedule_host_grants;
@@ -34,12 +42,15 @@ mod scheduler_commands;
 mod skill_drop;
 mod storage_layout;
 mod workbench_commands;
+mod workbench_plan_commands;
 mod workspace_commands;
 mod workspace_mutation_commands;
 
 use agent_commands::*;
 use app_shell::*;
+use browser_workspace_commands::*;
 use desktop_e2e::*;
+use environment_commands::*;
 use extension_commands::*;
 use forge_commands::*;
 use local_host_commands::*;
@@ -47,6 +58,7 @@ use mcp_commands::*;
 use media_commands::*;
 use process_commands::*;
 use project_git_commands::*;
+use project_tool_commands::*;
 use review_commands::*;
 use sandbox_commands::*;
 use scheduler_commands::*;
@@ -64,6 +76,7 @@ use std::{
 };
 use storage_layout::*;
 use workbench_commands::*;
+use workbench_plan_commands::*;
 use workspace_commands::*;
 use workspace_mutation_commands::*;
 
@@ -93,7 +106,7 @@ use hachimi_protocol::{
     MotionEnabledUpdateRequest, MotionImportCommitRequest, MotionImportInspection,
     MotionMetadataUpdateRequest, MotionRuntimeAsset, PetContextMenuRequest, PetTurnEvent,
     PetTurnRequest, PlanAcceptanceRequest, ProjectId, ProjectRecord, ResourceEntryRequest, RunId,
-    RunRecord, SETTINGS_SCHEMA_VERSION, SessionId, SessionRecord, SkillSubscriptionId,
+    RunRecord, SETTINGS_SCHEMA_VERSION, SessionId, SkillSubscriptionId,
     SpeechRecognitionRuntimeState, SpeechRecognitionSettingsInput, ThemeProfile,
     ThemeProfileDocument, ThemeScheme, VoiceCatalogSnapshot, VoiceImportCommitRequest,
     VoiceModelInspection, VoiceRuntimeState, VoiceSettingsInput, WindowPlacementV1,
@@ -137,6 +150,7 @@ const SPEECH_RECOGNITION_STATE_EVENT: &str = "speech-recognition-state-changed";
 const AVATAR_CATALOG_EVENT: &str = "avatar:catalog-changed";
 const MOTION_CATALOG_EVENT: &str = "motion:catalog-changed";
 const WORKBENCH_RUN_EVENT: &str = "workbench:run-updated";
+const WORKBENCH_SESSION_ACTIVITY_EVENT: &str = "workbench:session-activity-changed";
 const DEFAULT_AVATAR_RESOURCE: &str =
     "resources/avatar-default/2639776812528692620/2639776812528692620.vrm";
 const MOTION_CATALOG_RESOURCE: &str = "resources/avatar-motions-v4/catalog.json";
@@ -336,7 +350,7 @@ struct DesktopState {
     gateway: hachimi_gateway::GatewayHost,
     plugin_host: hachimi_extensions::PluginHost,
     plugin_surfaces: plugin_content_protocol::PluginSurfaceRegistry,
-    browser: Arc<hachimi_browser::BrowserHost>,
+    embedded_browser: Arc<embedded_browser::EmbeddedBrowserService<Wry>>,
     sandbox_runtime: Arc<SandboxRuntimeManager>,
     sandbox_activity: SandboxActivityTracker,
     control_plane: Arc<ControlPlane>,
@@ -1149,15 +1163,36 @@ fn main() {
             subscribe_skills,
             unsubscribe_skills,
             list_workbench_projects,
+            get_workbench_project_tool_context,
             list_run_recoveries,
             resolve_run_recovery,
             add_workbench_project,
             manage_workbench_project,
             import_workbench_attachment,
+            read_workbench_attachment,
             list_workbench_sessions,
             get_workbench_session,
+            get_workbench_environment,
+            open_browser_workspace,
+            mutate_browser_workspace,
+            update_browser_surface_layout,
+            get_browser_history,
+            get_embedded_browser_settings,
+            choose_browser_download_directory,
+            update_embedded_browser_settings,
+            clear_embedded_browser_data,
+            get_browser_downloads,
+            manage_browser_download,
+            list_embedded_browser_permission_requests,
+            list_embedded_browser_site_permissions,
+            resolve_embedded_browser_permission,
+            revoke_embedded_browser_site_permission,
+            open_system_browser,
+            handoff_workbench_session,
             resolve_workbench_approval,
             accept_workbench_plan,
+            revise_workbench_plan,
+            execute_workbench_git,
             list_project_git_refs,
             inspect_project_git,
             refresh_project_git,
@@ -1305,8 +1340,9 @@ fn main() {
                 desktop_control: env_disabled("HACHIMI_DISABLE_DESKTOP_CONTROL"),
             });
             let agent_store = tauri::async_runtime::block_on(AgentStore::connect(
-                data_dir.join("agent.sqlite3"),
+                data_dir.join("agent-v2.sqlite3"),
             ))?;
+            let run_activity = agent_store.subscribe_run_activity();
             let mut recovery = tauri::async_runtime::block_on(
                 agent_store.recover_interrupted_with_run_recovery(
                     runtime_features.run_recovery,
@@ -1332,6 +1368,21 @@ fn main() {
             let approval_broker = PersistentApprovalBroker::new(agent_store.clone());
             let user_input_broker = PersistentUserInputBroker::new(agent_store.clone());
             let resource_dir = app.path().resource_dir()?;
+            tauri::async_runtime::block_on(agent_store.reconcile_browser_startup())?;
+            let embedded_browser = Arc::new(embedded_browser::EmbeddedBrowserService::new(
+                app.handle().clone(),
+                agent_store.clone(),
+                &data_dir,
+                &resource_dir,
+            ));
+            let embedded_agent_browser = Arc::new(
+                embedded_browser_agent::EmbeddedAgentBrowser::new(
+                    app.handle().clone(),
+                    agent_store.clone(),
+                    Arc::clone(&embedded_browser),
+                    settings.developer_mode,
+                ),
+            );
             let managed_sandbox = managed_sandbox_runtime::stage(&data_dir, &resource_dir)
                 .map_err(std::io::Error::other)?;
             let sandbox_probe = Arc::new(
@@ -1377,6 +1428,14 @@ fn main() {
                 data_dir.join("worktrees"),
                 data_dir.join("attachments"),
             );
+            let reconciled_handoffs =
+                tauri::async_runtime::block_on(workbench.reconcile_handoffs())?;
+            if reconciled_handoffs > 0 {
+                tracing::warn!(
+                    count = reconciled_handoffs,
+                    "unfinished Workbench Handoffs were reconciled during startup"
+                );
+            }
             let skill_host = hachimi_skills::SkillHost::new(
                 data_dir.join("skills/user"),
                 agent_store.clone(),
@@ -1525,23 +1584,12 @@ fn main() {
             {
                 tracing::warn!(%error, "MCP startup reconciliation failed");
             }
-            let browser_executable = std::env::var_os("HACHIMI_MANAGED_CHROMIUM")
-                .map(PathBuf::from)
-                .unwrap_or(app.path().resource_dir()?.join("managed-chromium/chrome.exe"));
-            let managed_browser_broker = Arc::new(hachimi_browser::ManagedChromiumBroker::new(
-                browser_executable,
-                data_dir.join("browser/profiles"),
-                data_dir.join("browser/downloads"),
-            ));
             let chrome_extension_broker = Arc::new(hachimi_browser::ChromeExtensionBroker::new(
                 data_dir.join("browser/extension-files"),
             ));
             let browser = Arc::new(hachimi_browser::BrowserHost::with_broker(
                 Arc::new(hachimi_browser::SystemBrowserClock),
-                Arc::new(hachimi_browser::CompositeBrowserBroker::new(
-                    managed_browser_broker,
-                    chrome_extension_broker.clone(),
-                )),
+                chrome_extension_broker.clone(),
             ));
             if feature_flags.runtime_features.desktop_control {
                 tauri::async_runtime::spawn({
@@ -1592,6 +1640,7 @@ fn main() {
             let multi_agent = hachimi_agent::MultiAgentCoordinator::new(agent_store.clone());
             let agent_preparer = Arc::new(agent_runtime_host::DesktopAgentRunPreparer::new(
                 agent_runtime_host::DesktopAgentRunDependencies {
+                    app: app.handle().clone(),
                     store: agent_store.clone(),
                     workbench: workbench.clone(),
                     approvals: approval_broker.clone(),
@@ -1600,6 +1649,7 @@ fn main() {
                     mcp: mcp_control.clone(),
                     sandbox_backend: sandbox_backend.clone(),
                     browser: Arc::clone(&browser),
+                    embedded_browser: embedded_agent_browser,
                     computer: Arc::clone(&computer),
                     plugins: plugins.clone(),
                     multi_agent: multi_agent.clone(),
@@ -1749,7 +1799,7 @@ fn main() {
                 gateway: gateway.clone(),
                 plugin_host: plugins,
                 plugin_surfaces,
-                browser,
+                embedded_browser,
                 sandbox_runtime,
                 sandbox_activity,
                 control_plane,
@@ -1765,6 +1815,10 @@ fn main() {
                 placement_revision: AtomicU64::new(0),
             };
             app.manage(state);
+            workbench_plan_commands::start_workbench_activity_bridge(
+                app.handle().clone(),
+                run_activity,
+            );
             schedule_auto_resume_runs(app.handle().clone(), recovery.auto_resume_run_ids);
             start_desktop_scheduler(app.handle(), scheduler, feature_flags.scheduler);
             gateway_runtime::start_gateway_runtime(

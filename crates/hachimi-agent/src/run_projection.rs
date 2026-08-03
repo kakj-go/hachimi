@@ -7,12 +7,13 @@ use std::{
 };
 
 use hachimi_protocol::{
-    ArtifactId, ArtifactKind, ArtifactRecord, BehaviorMode, CapabilityGrantSet, ItemId,
-    ItemPayload, ItemRelations, ItemStatus, ModelEvent, ModelMessage, ModelRole, PlanId, PlanStep,
-    PlanStepId, PlanStepStatus, ProposedPlan, ProposedPlanStatus, RunRecord, RunStatus,
-    RunStepCheckpoint, RunStepCheckpointId, RunUsageSnapshot, SandboxCapabilityReport,
-    SandboxReadiness, ToolExecutionResult, TranscriptItem, TranscriptItemKind, WorkloadKind,
-    WorkloadResolution, WorkloadResolutionSource,
+    AgentMessagePhase, AgentTaskRecord, ArtifactId, ArtifactKind, ArtifactRecord, BehaviorMode,
+    CapabilityGrantSet, ItemId, ItemPayload, ItemRelations, ItemStatus, McpServerId, ModelEvent,
+    ModelFinishReason, ModelMessage, ModelRole, PlanId, PlanStep, PlanStepId, PlanStepStatus,
+    ProcessSessionId, ProposedPlan, ProposedPlanStatus, RunRecord, RunStatus, RunStepCheckpoint,
+    RunStepCheckpointId, RunUsageSnapshot, SandboxCapabilityReport, SandboxReadiness,
+    ToolExecutionResult, TranscriptItem, TranscriptItemKind, WorkloadKind, WorkloadResolution,
+    WorkloadResolutionSource,
 };
 use hachimi_storage::{AgentStore, AgentStoreError};
 use serde_json::json;
@@ -112,6 +113,7 @@ pub struct RunStepContext {
     pub run_tool_allowlist: Option<Vec<String>>,
     pub capability_grants: Option<CapabilityGrantSet>,
     pub world_refresher: Option<Arc<dyn crate::StepWorldStateRefresher>>,
+    pub diff_tracker: Option<Arc<crate::RunDiffTracker>>,
 }
 
 impl std::fmt::Debug for RunStepContext {
@@ -124,6 +126,10 @@ impl std::fmt::Debug for RunStepContext {
             .field(
                 "world_refresher",
                 &self.world_refresher.as_ref().map(|_| "configured"),
+            )
+            .field(
+                "diff_tracker",
+                &self.diff_tracker.as_ref().map(|_| "configured"),
             )
             .finish()
     }
@@ -187,6 +193,7 @@ impl PersistedToolLoop {
                 run_tool_allowlist: None,
                 capability_grants: None,
                 world_refresher: None,
+                diff_tracker: None,
             },
             cancellation,
         )
@@ -313,6 +320,10 @@ impl PersistedToolLoop {
         } else {
             outcome
         };
+        if let Some(tracker) = &step_context.diff_tracker {
+            // A final Diff failure degrades the summary only; it never changes the Run result.
+            let _ = tracker.refresh(&CancellationToken::new()).await;
+        }
         if let Some(open) = projection.open_assistant {
             let status = if matches!(outcome, Err(ModelRuntimeError::Cancelled)) {
                 ItemStatus::Interrupted
@@ -323,7 +334,10 @@ impl PersistedToolLoop {
                 .complete_transcript_item(
                     &open.item_id,
                     status,
-                    ItemPayload::Assistant { text: open.text },
+                    ItemPayload::Assistant {
+                        text: open.text,
+                        phase: open.phase,
+                    },
                 )
                 .await?;
         }
@@ -376,14 +390,15 @@ impl PersistedToolLoop {
                         TranscriptItemKind::Assistant,
                         ItemPayload::Assistant {
                             text: outcome.final_text.clone(),
+                            phase: AgentMessagePhase::FinalAnswer,
                         },
                     )
                 };
                 let already_projected = kind == TranscriptItemKind::Assistant
-                    && projection
-                        .last_assistant
-                        .as_ref()
-                        .is_some_and(|assistant| assistant.text == outcome.final_text);
+                    && projection.last_assistant.as_ref().is_some_and(|assistant| {
+                        assistant.text == outcome.final_text
+                            && assistant.phase == AgentMessagePhase::FinalAnswer
+                    });
                 if !already_projected {
                     let item_id = ItemId::random();
                     self.store
@@ -401,6 +416,26 @@ impl PersistedToolLoop {
                         .await?;
                     self.store
                         .complete_transcript_item(&item_id, ItemStatus::Completed, payload)
+                        .await?;
+                }
+                if let Some(plan_id) = run.configuration.accepted_plan_id.as_ref()
+                    && let Some(plan) = self.store.get_proposed_plan(plan_id).await?
+                {
+                    let completed_steps = plan
+                        .steps
+                        .into_iter()
+                        .map(|mut step| {
+                            step.status = PlanStepStatus::Completed;
+                            step
+                        })
+                        .collect::<Vec<_>>();
+                    self.store
+                        .update_execution_plan(
+                            plan_id,
+                            &run.id,
+                            Some("Execution completed successfully."),
+                            &completed_steps,
+                        )
                         .await?;
                 }
                 self.store
@@ -455,14 +490,105 @@ impl PersistedToolLoop {
 #[derive(Debug)]
 struct AssistantProjection {
     item_id: ItemId,
+    message_id: String,
+    text: String,
+    phase: AgentMessagePhase,
+}
+
+#[derive(Debug)]
+struct TextProjection {
+    item_id: ItemId,
     text: String,
 }
 
 #[derive(Debug, Default)]
 struct LoopProjection {
     open_assistant: Option<AssistantProjection>,
-    open_reasoning: Option<AssistantProjection>,
+    open_reasoning: Option<TextProjection>,
     last_assistant: Option<AssistantProjection>,
+    saw_tool_call: bool,
+}
+
+async fn start_assistant_projection(
+    store: &AgentStore,
+    run: &RunRecord,
+    projection: &mut LoopProjection,
+    message_id: String,
+    phase: AgentMessagePhase,
+) -> Result<(), AgentStoreError> {
+    if let Some(open) = projection.open_assistant.as_mut()
+        && open.message_id == message_id
+    {
+        if open.phase == AgentMessagePhase::Unknown && phase != AgentMessagePhase::Unknown {
+            open.phase = phase;
+        }
+        return Ok(());
+    }
+    if let Some(mut previous) = projection.open_assistant.take() {
+        if previous.phase == AgentMessagePhase::Unknown {
+            previous.phase = AgentMessagePhase::Commentary;
+        }
+        store
+            .complete_transcript_item(
+                &previous.item_id,
+                ItemStatus::Completed,
+                ItemPayload::Assistant {
+                    text: previous.text.clone(),
+                    phase: previous.phase,
+                },
+            )
+            .await?;
+        projection.last_assistant = Some(previous);
+    }
+    let item_id = ItemId::random();
+    store
+        .append_transcript_item(TranscriptItem {
+            id: item_id.clone(),
+            session_id: run.session_id.clone(),
+            run_id: Some(run.id.clone()),
+            sequence: 0,
+            kind: TranscriptItemKind::Assistant,
+            status: ItemStatus::InProgress,
+            payload: ItemPayload::Assistant {
+                text: String::new(),
+                phase,
+            },
+            relations: ItemRelations::default(),
+            created_at_ms: now_ms(),
+        })
+        .await?;
+    projection.open_assistant = Some(AssistantProjection {
+        item_id,
+        message_id,
+        text: String::new(),
+        phase,
+    });
+    Ok(())
+}
+
+async fn complete_assistant_projection(
+    store: &AgentStore,
+    projection: &mut LoopProjection,
+    inferred_phase: AgentMessagePhase,
+) -> Result<(), AgentStoreError> {
+    let Some(mut assistant) = projection.open_assistant.take() else {
+        return Ok(());
+    };
+    if assistant.phase == AgentMessagePhase::Unknown {
+        assistant.phase = inferred_phase;
+    }
+    store
+        .complete_transcript_item(
+            &assistant.item_id,
+            ItemStatus::Completed,
+            ItemPayload::Assistant {
+                text: assistant.text.clone(),
+                phase: assistant.phase,
+            },
+        )
+        .await?;
+    projection.last_assistant = Some(assistant);
+    Ok(())
 }
 
 async fn project_loop_events(
@@ -494,26 +620,20 @@ async fn project_loop_events(
             LoopEvent::ToolStarted(call) => {
                 let item_id = ItemId::random();
                 calls.insert(call.id.clone(), (call.clone(), item_id.clone()));
-                let arguments = transcript_tool_arguments(&call);
+                let (kind, payload) = projected_tool_start(&run, &call);
                 store
                     .append_transcript_item(TranscriptItem {
                         id: item_id,
                         session_id: run.session_id.clone(),
                         run_id: Some(run.id.clone()),
                         sequence: 0,
-                        kind: TranscriptItemKind::ToolExecution,
+                        kind,
                         status: ItemStatus::InProgress,
-                        payload: ItemPayload::ToolExecution {
-                            tool_call_id: call.id.clone(),
-                            name: call.name.clone(),
-                            arguments: arguments.clone(),
-                            step_revision: call.step_revision,
-                            tool_plan_hash: call.tool_plan_hash.clone(),
-                            registry_revision: call.registry_revision.clone(),
-                            result: None,
-                        },
+                        payload,
                         relations: ItemRelations {
                             tool_call_id: Some(call.id.clone()),
+                            process_session_id: (call.name == "workspace_exec")
+                                .then(|| ProcessSessionId::new(call.id.to_string())),
                             ..ItemRelations::default()
                         },
                         created_at_ms: now_ms(),
@@ -531,6 +651,23 @@ async fn project_loop_events(
                     store.create_artifact(&artifact).await?;
                 }
                 if let Some((call, item_id)) = call {
+                    let payload = projected_tool_completed(
+                        &run,
+                        &call,
+                        &result,
+                        status,
+                        persisted_model_content,
+                        persisted_structured_content,
+                    );
+                    if let ItemPayload::CollabToolCall {
+                        agent_task_id: Some(task_id),
+                        ..
+                    } = &payload
+                    {
+                        store
+                            .link_agent_task_transcript_item(task_id, &item_id)
+                            .await?;
+                    }
                     store
                         .complete_transcript_item(
                             &item_id,
@@ -541,20 +678,7 @@ async fn project_loop_events(
                                 | ToolResultStatus::Rejected
                                 | ToolResultStatus::TimedOut => ItemStatus::Failed,
                             },
-                            ItemPayload::ToolExecution {
-                                tool_call_id: result.call_id.clone(),
-                                name: result.tool_name.clone(),
-                                arguments: transcript_tool_arguments(&call),
-                                step_revision: call.step_revision,
-                                tool_plan_hash: call.tool_plan_hash,
-                                registry_revision: call.registry_revision,
-                                result: Some(ToolExecutionResult {
-                                    status: status.into(),
-                                    model_content: persisted_model_content,
-                                    structured_content: persisted_structured_content,
-                                    stable_result_code: status.into(),
-                                }),
-                            },
+                            payload,
                         )
                         .await?;
                     if let Some(checkpoint) = store
@@ -580,31 +704,59 @@ async fn project_loop_events(
             // transcript history. `UsageReconciled` below persists the
             // authoritative snapshot after active-context reconciliation.
             LoopEvent::Model(ModelEvent::Usage { .. }) => {}
+            LoopEvent::Model(ModelEvent::AgentMessageStarted { message_id, phase })
+                if run.configuration.behavior_mode != BehaviorMode::Plan =>
+            {
+                start_assistant_projection(&store, &run, &mut projection, message_id, phase)
+                    .await?;
+            }
+            LoopEvent::Model(ModelEvent::AgentMessageDelta { message_id, delta })
+                if run.configuration.behavior_mode != BehaviorMode::Plan =>
+            {
+                start_assistant_projection(
+                    &store,
+                    &run,
+                    &mut projection,
+                    message_id,
+                    AgentMessagePhase::Unknown,
+                )
+                .await?;
+                let assistant = projection
+                    .open_assistant
+                    .as_mut()
+                    .expect("assistant projection initialized");
+                assistant.text.push_str(&delta);
+                store
+                    .append_live_item_delta(&run.session_id, &run.id, &assistant.item_id, &delta)
+                    .await?;
+            }
+            LoopEvent::Model(ModelEvent::AgentMessageCompleted { message_id })
+                if run.configuration.behavior_mode != BehaviorMode::Plan =>
+            {
+                let should_complete = projection.open_assistant.as_ref().is_some_and(|assistant| {
+                    assistant.message_id == message_id
+                        && assistant.phase != AgentMessagePhase::Unknown
+                });
+                if should_complete {
+                    complete_assistant_projection(
+                        &store,
+                        &mut projection,
+                        AgentMessagePhase::Unknown,
+                    )
+                    .await?;
+                }
+            }
             LoopEvent::Model(ModelEvent::TextDelta { delta })
                 if run.configuration.behavior_mode != BehaviorMode::Plan =>
             {
-                if projection.open_assistant.is_none() {
-                    let item_id = ItemId::random();
-                    store
-                        .append_transcript_item(TranscriptItem {
-                            id: item_id.clone(),
-                            session_id: run.session_id.clone(),
-                            run_id: Some(run.id.clone()),
-                            sequence: 0,
-                            kind: TranscriptItemKind::Assistant,
-                            status: ItemStatus::InProgress,
-                            payload: ItemPayload::Assistant {
-                                text: String::new(),
-                            },
-                            relations: ItemRelations::default(),
-                            created_at_ms: now_ms(),
-                        })
-                        .await?;
-                    projection.open_assistant = Some(AssistantProjection {
-                        item_id,
-                        text: String::new(),
-                    });
-                }
+                start_assistant_projection(
+                    &store,
+                    &run,
+                    &mut projection,
+                    "legacy-message-0".into(),
+                    AgentMessagePhase::Unknown,
+                )
+                .await?;
                 let assistant = projection
                     .open_assistant
                     .as_mut()
@@ -630,7 +782,7 @@ async fn project_loop_events(
                             created_at_ms: now_ms(),
                         })
                         .await?;
-                    projection.open_reasoning = Some(AssistantProjection {
+                    projection.open_reasoning = Some(TextProjection {
                         item_id,
                         text: String::new(),
                     });
@@ -644,20 +796,18 @@ async fn project_loop_events(
                     .append_live_item_delta(&run.session_id, &run.id, &reasoning.item_id, &delta)
                     .await?;
             }
-            LoopEvent::Model(ModelEvent::Completed { .. }) => {
-                projection.last_assistant = None;
-                if let Some(assistant) = projection.open_assistant.take() {
-                    store
-                        .complete_transcript_item(
-                            &assistant.item_id,
-                            ItemStatus::Completed,
-                            ItemPayload::Assistant {
-                                text: assistant.text.clone(),
-                            },
-                        )
-                        .await?;
-                    projection.last_assistant = Some(assistant);
-                }
+            LoopEvent::Model(
+                ModelEvent::ToolCallDelta { .. } | ModelEvent::ToolCallCompleted { .. },
+            ) => projection.saw_tool_call = true,
+            LoopEvent::Model(ModelEvent::Completed { finish_reason }) => {
+                let inferred_phase =
+                    if projection.saw_tool_call || finish_reason == ModelFinishReason::ToolCalls {
+                        AgentMessagePhase::Commentary
+                    } else {
+                        AgentMessagePhase::FinalAnswer
+                    };
+                complete_assistant_projection(&store, &mut projection, inferred_phase).await?;
+                projection.saw_tool_call = false;
                 if let Some(reasoning) = projection.open_reasoning.take() {
                     store
                         .complete_transcript_item(
@@ -756,6 +906,315 @@ fn unavailable_world_state(host_context: Option<&str>) -> StepWorldState {
         },
         host_ready: true,
     }
+}
+
+fn projected_tool_start(
+    run: &RunRecord,
+    call: &crate::ToolCall,
+) -> (TranscriptItemKind, ItemPayload) {
+    if call.name == "workspace_exec" {
+        let command = command_text(&call.arguments);
+        return (
+            TranscriptItemKind::CommandExecution,
+            ItemPayload::CommandExecution {
+                process_session_id: ProcessSessionId::new(call.id.to_string()),
+                command_summary: command.chars().take(240).collect(),
+                command,
+                cwd: call
+                    .arguments
+                    .get("cwd")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_owned),
+                status: "running".into(),
+                aggregated_output: String::new(),
+                exit_code: None,
+                duration_ms: None,
+                output_artifact_id: None,
+            },
+        );
+    }
+    if matches!(
+        call.name.as_str(),
+        "workspace_write_file" | "workspace_replace_text"
+    ) {
+        let path = call
+            .arguments
+            .get("path")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("workspace")
+            .to_owned();
+        return (
+            TranscriptItemKind::FileChange,
+            ItemPayload::FileChange {
+                path,
+                change_kind: "modifying".into(),
+                artifact_id: None,
+            },
+        );
+    }
+    if is_collab_tool(&call.name) {
+        return (
+            TranscriptItemKind::CollabToolCall,
+            ItemPayload::CollabToolCall {
+                tool_name: call.name.clone(),
+                agent_task_id: None,
+                parent_run_id: run.id.clone(),
+                child_run_id: None,
+                title: call
+                    .arguments
+                    .get("title")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or(&call.name)
+                    .to_owned(),
+                status: "running".into(),
+                summary: None,
+                usage: Default::default(),
+            },
+        );
+    }
+    if call.name.starts_with("mcp_") {
+        return (
+            TranscriptItemKind::McpCall,
+            ItemPayload::McpCall {
+                server_id: McpServerId::new(mcp_server_label(&call.name)),
+                tool_name: call.name.clone(),
+                status: "running".into(),
+                arguments: transcript_tool_arguments(call),
+                result: None,
+                error: None,
+            },
+        );
+    }
+    if let Some((namespace, name)) = dynamic_tool_parts(&call.name) {
+        return (
+            TranscriptItemKind::DynamicToolCall,
+            ItemPayload::DynamicToolCall {
+                namespace,
+                name,
+                status: "running".into(),
+                arguments: transcript_tool_arguments(call),
+                result: None,
+                error: None,
+            },
+        );
+    }
+    (
+        TranscriptItemKind::ToolExecution,
+        ItemPayload::ToolExecution {
+            tool_call_id: call.id.clone(),
+            name: call.name.clone(),
+            arguments: transcript_tool_arguments(call),
+            step_revision: call.step_revision,
+            tool_plan_hash: call.tool_plan_hash.clone(),
+            registry_revision: call.registry_revision.clone(),
+            result: None,
+        },
+    )
+}
+
+fn projected_tool_completed(
+    run: &RunRecord,
+    call: &crate::ToolCall,
+    result: &crate::ToolResult,
+    status: &str,
+    model_content: String,
+    structured_content: serde_json::Value,
+) -> ItemPayload {
+    if call.name == "workspace_exec" {
+        let stdout = structured_content
+            .get("stdout")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        let stderr = structured_content
+            .get("stderr")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        let output = match (stdout.is_empty(), stderr.is_empty()) {
+            (false, false) => format!("{stdout}\n{stderr}"),
+            (false, true) => stdout.to_owned(),
+            (true, false) => stderr.to_owned(),
+            (true, true) => model_content,
+        };
+        let command = command_text(&call.arguments);
+        return ItemPayload::CommandExecution {
+            process_session_id: ProcessSessionId::new(call.id.to_string()),
+            command_summary: command.chars().take(240).collect(),
+            command,
+            cwd: call
+                .arguments
+                .get("cwd")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned),
+            status: status.into(),
+            aggregated_output: bounded_output(&output, 262_144),
+            exit_code: structured_value(&structured_content, "exitCode", "exit_code")
+                .and_then(serde_json::Value::as_i64)
+                .and_then(|value| i32::try_from(value).ok()),
+            duration_ms: structured_value(&structured_content, "durationMs", "duration_ms")
+                .and_then(serde_json::Value::as_u64),
+            output_artifact_id: None,
+        };
+    }
+    if matches!(
+        call.name.as_str(),
+        "workspace_write_file" | "workspace_replace_text"
+    ) {
+        return ItemPayload::FileChange {
+            path: call
+                .arguments
+                .get("path")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("workspace")
+                .to_owned(),
+            change_kind: if status == "succeeded" {
+                "modified"
+            } else {
+                status
+            }
+            .into(),
+            artifact_id: None,
+        };
+    }
+    if is_collab_tool(&call.name) {
+        let task = collab_task(&structured_content);
+        return ItemPayload::CollabToolCall {
+            tool_name: call.name.clone(),
+            agent_task_id: task.as_ref().map(|task| task.id.clone()).or_else(|| {
+                call.arguments
+                    .get("taskId")
+                    .and_then(serde_json::Value::as_str)
+                    .map(hachimi_protocol::AgentTaskId::from)
+            }),
+            parent_run_id: run.id.clone(),
+            child_run_id: task.as_ref().map(|task| task.child_run_id.clone()),
+            title: task
+                .as_ref()
+                .map(|task| task.title.clone())
+                .or_else(|| {
+                    call.arguments
+                        .get("title")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_owned)
+                })
+                .unwrap_or_else(|| call.name.clone()),
+            status: task
+                .as_ref()
+                .map(|task| format!("{:?}", task.status).to_ascii_lowercase())
+                .unwrap_or_else(|| status.into()),
+            summary: task
+                .as_ref()
+                .and_then(|task| task.result_summary.clone())
+                .or_else(|| (!model_content.is_empty()).then(|| model_content.clone())),
+            usage: task.map_or_else(Default::default, |task| task.usage),
+        };
+    }
+    if call.name.starts_with("mcp_") {
+        return ItemPayload::McpCall {
+            server_id: McpServerId::new(mcp_server_label(&call.name)),
+            tool_name: call.name.clone(),
+            status: status.into(),
+            arguments: transcript_tool_arguments(call),
+            result: Some(structured_content),
+            error: (status != "succeeded").then_some(model_content),
+        };
+    }
+    if let Some((namespace, name)) = dynamic_tool_parts(&call.name) {
+        return ItemPayload::DynamicToolCall {
+            namespace,
+            name,
+            status: status.into(),
+            arguments: transcript_tool_arguments(call),
+            result: Some(structured_content),
+            error: (status != "succeeded").then_some(model_content),
+        };
+    }
+    ItemPayload::ToolExecution {
+        tool_call_id: result.call_id.clone(),
+        name: result.tool_name.clone(),
+        arguments: transcript_tool_arguments(call),
+        step_revision: call.step_revision,
+        tool_plan_hash: call.tool_plan_hash.clone(),
+        registry_revision: call.registry_revision.clone(),
+        result: Some(ToolExecutionResult {
+            status: status.into(),
+            model_content,
+            structured_content,
+            stable_result_code: status.into(),
+        }),
+    }
+}
+
+fn is_collab_tool(name: &str) -> bool {
+    matches!(
+        name,
+        crate::AGENT_SPAWN_TOOL
+            | crate::AGENT_SEND_TOOL
+            | crate::AGENT_WAIT_TOOL
+            | crate::AGENT_CANCEL_TOOL
+            | crate::AGENT_COLLECT_TOOL
+    )
+}
+
+fn mcp_server_label(name: &str) -> String {
+    name.strip_prefix("mcp_")
+        .and_then(|value| value.split('_').next())
+        .filter(|value| !value.is_empty())
+        .unwrap_or("mcp")
+        .to_owned()
+}
+
+fn dynamic_tool_parts(name: &str) -> Option<(String, String)> {
+    let (namespace, tool) = name.split_once('.')?;
+    (!namespace.is_empty() && !tool.is_empty()).then(|| (namespace.to_owned(), tool.to_owned()))
+}
+
+fn collab_task(value: &serde_json::Value) -> Option<AgentTaskRecord> {
+    serde_json::from_value(value.clone()).ok().or_else(|| {
+        value
+            .get("tasks")
+            .and_then(serde_json::Value::as_array)
+            .and_then(|tasks| tasks.first())
+            .and_then(|task| serde_json::from_value(task.clone()).ok())
+    })
+}
+
+fn command_text(arguments: &serde_json::Value) -> String {
+    let program = arguments
+        .get("program")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("command");
+    let args = arguments
+        .get("args")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(serde_json::Value::as_str)
+        .collect::<Vec<_>>()
+        .join(" ");
+    if args.is_empty() {
+        program.into()
+    } else {
+        format!("{program} {args}")
+    }
+}
+
+fn bounded_output(value: &str, max_chars: usize) -> String {
+    let count = value.chars().count();
+    if count <= max_chars {
+        return value.to_owned();
+    }
+    let head = max_chars / 2;
+    let tail = max_chars.saturating_sub(head);
+    let start = value.chars().take(head).collect::<String>();
+    let end = value
+        .chars()
+        .rev()
+        .take(tail)
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect::<String>();
+    format!("{start}\n… output truncated …\n{end}")
 }
 
 fn persisted_tool_result(result: &crate::ToolResult) -> (String, serde_json::Value) {
@@ -935,12 +1394,12 @@ fn now_ms() -> i64 {
 mod tests {
     use futures_util::stream;
     use hachimi_protocol::{
-        ApprovalPolicy, BehaviorMode, CheckoutId, CheckoutKind, CheckoutRecord, CheckoutStatus,
-        EntryProfile, ExecutionTarget, LlmSettings, ModelFinishReason, ModelRequest,
-        PermissionProfile, ProjectId, ProjectRecord, ProviderCapabilities, ProviderCapabilityProbe,
-        ProviderCapabilityProbeSource, RunBudget, RunConfiguration, RunDriverKind, RunEventPayload,
-        RunId, RunOrigin, RunPurpose, SessionContextBinding, SessionId, SessionRecord,
-        WorkloadKind,
+        AgentMessagePhase, ApprovalPolicy, BehaviorMode, CheckoutId, CheckoutKind, CheckoutRecord,
+        CheckoutStatus, EntryProfile, ExecutionTarget, LlmSettings, ModelFinishReason,
+        ModelRequest, PermissionProfile, ProjectId, ProjectRecord, ProviderCapabilities,
+        ProviderCapabilityProbe, ProviderCapabilityProbeSource, RunBudget, RunConfiguration,
+        RunDriverKind, RunEventPayload, RunId, RunOrigin, RunPurpose, SessionContextBinding,
+        SessionId, SessionRecord, WorkloadKind,
     };
 
     use super::*;
@@ -1176,24 +1635,35 @@ mod tests {
             .expect("transcript");
         assert!(transcript.iter().any(|item| matches!(
             &item.payload,
-            ItemPayload::Assistant { text } if text == "done"
+            ItemPayload::Assistant { text, phase }
+                if text == "done" && *phase == AgentMessagePhase::FinalAnswer
         )));
         let events = store.list_events(&run.session_id, 0).await.expect("events");
         let assistant = transcript
             .iter()
-            .find(|item| matches!(&item.payload, ItemPayload::Assistant { text } if text == "done"))
+            .find(|item| {
+                matches!(
+                    &item.payload,
+                    ItemPayload::Assistant { text, phase }
+                        if text == "done" && *phase == AgentMessagePhase::FinalAnswer
+                )
+            })
             .expect("assistant item");
         assert!(events.iter().any(|event| matches!(
             &event.payload,
-            RunEventPayload::ItemStarted { item_id, kind }
-                if item_id == &assistant.id && *kind == TranscriptItemKind::Assistant
+            RunEventPayload::ItemStarted { item }
+                if item.id == assistant.id && item.kind == TranscriptItemKind::Assistant
         )));
         assert!(events.iter().any(|event| matches!(
             &event.payload,
-            RunEventPayload::ItemCompleted { item_id, status, payload }
-                if item_id == &assistant.id
-                    && *status == ItemStatus::Completed
-                    && matches!(payload.as_ref(), ItemPayload::Assistant { text } if text == "done")
+            RunEventPayload::ItemCompleted { item }
+                if item.id == assistant.id
+                    && item.status == ItemStatus::Completed
+                    && matches!(
+                        &item.payload,
+                        ItemPayload::Assistant { text, phase }
+                            if text == "done" && *phase == AgentMessagePhase::FinalAnswer
+                    )
         )));
         assert!(
             events

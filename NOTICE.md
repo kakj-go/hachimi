@@ -21,3 +21,9 @@ ONNX Runtime, and DirectML are stored in
 apps/desktop/src-tauri/resources/ai-models/THIRD-PARTY-NOTICES.md. Binary
 packages include the same notices and license files under their resources
 directory.
+
+Windows desktop packages include Chromium Embedded Framework 151.3.14
+(Chromium 151.0.7922.72) through cef-rs 151.2.0+151.3.14. CEF and Chromium are
+redistributed under their respective BSD-style and third-party licenses. The
+bundled CREDITS.html contains Chromium third-party notices; the fixed official
+minimal archive URL and SHA-256 are recorded in the CEF Runtime manifest.

@@ -97,6 +97,7 @@ impl AgentStore {
         let rows = sqlx::query(
             "SELECT * FROM sessions
              WHERE (? IS NULL OR (context_kind = 'project' AND json_extract(context_json, '$.project_id') = ?))
+               AND NOT EXISTS (SELECT 1 FROM project_tool_contexts tools WHERE tools.session_id = sessions.id)
                AND (? IS NULL OR archived = ?)
                AND (? IS NULL OR title LIKE ?)
                AND (? IS NULL OR updated_at_ms < ? OR (updated_at_ms = ? AND id > ?))
@@ -658,6 +659,7 @@ fn forkable_history_payload(
         | ItemPayload::Approval { .. }
         | ItemPayload::UserInputRequest { .. }
         | ItemPayload::CommandExecution { .. }
+        | ItemPayload::CollabToolCall { .. }
         | ItemPayload::Review { .. } => return None,
     };
     Some((kind, payload))
@@ -881,6 +883,7 @@ mod tests {
                 status: ItemStatus::InProgress,
                 payload: ItemPayload::Assistant {
                     text: String::new(),
+                    phase: hachimi_protocol::AgentMessagePhase::Unknown,
                 },
                 relations: ItemRelations::default(),
                 created_at_ms: 1_700_000_000_010,
@@ -918,6 +921,7 @@ mod tests {
                 ItemStatus::Completed,
                 ItemPayload::Assistant {
                     text: "streaming".into(),
+                    phase: hachimi_protocol::AgentMessagePhase::FinalAnswer,
                 },
             )
             .await
@@ -991,7 +995,13 @@ mod tests {
                 payload: ItemPayload::CommandExecution {
                     process_session_id: hachimi_protocol::ProcessSessionId::from("old-process"),
                     command_summary: "secret command".into(),
+                    command: "secret command".into(),
+                    cwd: None,
                     status: "exited".into(),
+                    aggregated_output: String::new(),
+                    exit_code: Some(0),
+                    duration_ms: None,
+                    output_artifact_id: None,
                 },
                 relations: ItemRelations::default(),
                 created_at_ms: 1_700_000_000_011,
@@ -1149,6 +1159,7 @@ mod tests {
                 auto_resolution_ms: None,
                 default_answer: None,
             }],
+            display_answers: Vec::new(),
             status: UserInputStatus::Pending,
             expires_at_ms: None,
             created_at_ms: 1_700_000_000_030,

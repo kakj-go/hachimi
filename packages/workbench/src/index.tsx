@@ -1668,7 +1668,7 @@ function LoadedWorkbench(props: {
   const [history, setHistory] = createSignal<WorkbenchRoute[]>([initialRoute]);
   const [historyIndex, setHistoryIndex] = createSignal(0);
   const [failure, setFailure] = createSignal<string>();
-  const [sidebarCollapsed, setSidebarCollapsed] = createSignal(false);
+  const [sidebarCollapsed, setSidebarCollapsed] = createSignal(window.innerWidth <= 760);
   const route = () => history()[historyIndex()] ?? "home";
   let stopNavigation: (() => void) | undefined;
   let stopSettings: (() => void) | undefined;

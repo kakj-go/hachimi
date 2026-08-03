@@ -29,6 +29,7 @@ export function WorkspaceFileEditor(props: {
   saving: boolean;
   conflict: boolean;
   readOnlyMessage?: string | undefined;
+  showHeader?: boolean;
   locale: "zh-CN" | "en-US";
   onInput: (value: string) => void;
   onSave: () => void;
@@ -42,6 +43,7 @@ export function WorkspaceFileEditor(props: {
   let editor: MonacoEditor | undefined;
   let contentChange: MonacoDisposable | undefined;
   let saveAction: MonacoDisposable | undefined;
+  let themeObserver: MutationObserver | undefined;
   let disposed = false;
   let applyingValue = false;
   let loadingMonaco = false;
@@ -57,7 +59,6 @@ export function WorkspaceFileEditor(props: {
       return;
     }
     loadingMonaco = true;
-    const initialValue = untrack(() => props.value);
     const initialPath = untrack(() => props.path);
     const saveLabel = untrack(() => (zh() ? "保存文件" : "Save file"));
     const onInput = props.onInput;
@@ -66,8 +67,9 @@ export function WorkspaceFileEditor(props: {
       .then((monaco) => {
         if (disposed || !container) return;
         editor = monaco.editor.create(container, {
-          value: initialValue,
+          value: untrack(() => props.value),
           language: languageForPath(initialPath),
+          theme: monacoTheme(),
           automaticLayout: true,
           minimap: { enabled: false },
           fontFamily: "var(--font-code)",
@@ -80,6 +82,13 @@ export function WorkspaceFileEditor(props: {
           tabSize: 2,
           insertSpaces: true,
         }) as MonacoEditor;
+        if (typeof MutationObserver === "function") {
+          themeObserver = new MutationObserver(() => monaco.editor.setTheme(monacoTheme()));
+          themeObserver.observe(document.documentElement, {
+            attributes: true,
+            attributeFilter: ["data-color-scheme"],
+          });
+        }
         contentChange = editor.onDidChangeModelContent(() => {
           if (!applyingValue) onInput(editor?.getValue() ?? "");
         });
@@ -110,36 +119,39 @@ export function WorkspaceFileEditor(props: {
     disposed = true;
     saveAction?.dispose();
     contentChange?.dispose();
+    themeObserver?.disconnect();
     editor?.dispose();
   });
 
   return (
     <section class="workspace-file-editor" data-component="workspace-editor">
-      <header>
-        <File size={13} />
-        <strong>{props.path}</strong>
-        <Show when={props.dirty}>
-          <span class="workspace-editor-dirty">{zh() ? "未保存" : "Unsaved"}</span>
-        </Show>
-        <Show when={props.editable}>
+      <Show when={props.showHeader !== false}>
+        <header>
+          <File size={13} />
+          <strong>{props.path}</strong>
+          <Show when={props.dirty}>
+            <span class="workspace-editor-dirty">{zh() ? "未保存" : "Unsaved"}</span>
+          </Show>
+          <Show when={props.editable}>
+            <Button
+              data-testid="workspace-save-file"
+              disabled={!props.dirty || props.saving || props.conflict}
+              title={zh() ? "保存 (Ctrl+S)" : "Save (Ctrl+S)"}
+              onClick={props.onSave}
+            >
+              <Check size={12} />{" "}
+              {props.saving ? (zh() ? "保存中" : "Saving") : zh() ? "保存" : "Save"}
+            </Button>
+          </Show>
           <Button
-            data-testid="workspace-save-file"
-            disabled={!props.dirty || props.saving || props.conflict}
-            title={zh() ? "保存 (Ctrl+S)" : "Save (Ctrl+S)"}
-            onClick={props.onSave}
+            aria-label={zh() ? "关闭文件" : "Close file"}
+            title={zh() ? "关闭文件" : "Close file"}
+            onClick={props.onClose}
           >
-            <Check size={12} />{" "}
-            {props.saving ? (zh() ? "保存中" : "Saving") : zh() ? "保存" : "Save"}
+            <X size={12} />
           </Button>
-        </Show>
-        <Button
-          aria-label={zh() ? "关闭文件" : "Close file"}
-          title={zh() ? "关闭文件" : "Close file"}
-          onClick={props.onClose}
-        >
-          <X size={12} />
-        </Button>
-      </header>
+        </header>
+      </Show>
       <Show when={props.conflict}>
         <div class="workspace-editor-conflict" role="alert">
           <AlertTriangle size={13} />
@@ -188,6 +200,10 @@ export function WorkspaceFileEditor(props: {
       </Show>
     </section>
   );
+}
+
+function monacoTheme(): "vs" | "vs-dark" {
+  return document.documentElement.dataset.colorScheme === "light" ? "vs" : "vs-dark";
 }
 
 function languageForPath(path: string): string {

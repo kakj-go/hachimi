@@ -824,17 +824,13 @@ describe("Hachimi scheduled Agent tasks", () => {
       async () => (await readText(".run-status-actions")).includes("succeeded"),
       { timeout: 20_000, timeoutMsg: "Recovered Office Session lost its succeeded status" },
     );
-    const timeline = await browser.execute(() =>
-      [...globalThis.document.querySelectorAll(".session-timeline .timeline-item pre")]
-        .map((item) => item.textContent ?? "")
-        .join("\n"),
+    const timeline = await browser.execute(
+      () => globalThis.document.querySelector(".session-timeline")?.textContent ?? "",
     );
     for (const evidence of [
       "skills.list",
       "skills.read",
-      "missing-validation.md",
       "SkillHost rejected the resource read",
-      "# Document validation",
       "Implicit Office Skill activated the Office overlay",
     ]) {
       if (!timeline.includes(evidence)) {

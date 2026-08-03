@@ -232,28 +232,40 @@ fn verify_managed_git(root: &Path) {
     }
 }
 
-fn verify_managed_chromium(root: &Path) {
-    const VERSION: &str = "151.0.7922.47";
-    const ARCHIVE_SHA256: &str = "fc77bb98b550b7da23b14edfa282b59a022e7fdb075ac7625d2a5152ceb22396";
-    let manifest_path = root.join("manifest.json");
+fn verify_cef_runtime(root: &Path) {
+    const CEF_CRATE_VERSION: &str = "151.2.0+151.3.14";
+    const CHROMIUM_VERSION: &str = "151.0.7922.72";
+    const ARCHIVE_SHA256: &str = "c63a18909fea077b5c3b5f9a3194f05781cd909efa8a6d7a543cad99c4183a55";
+    let manifest_path = root.join("runtime-manifest.json");
     println!("cargo:rerun-if-changed={}", manifest_path.display());
-    let files: serde_json::Value = serde_json::from_slice(
-        &std::fs::read(&manifest_path).unwrap_or_else(|error| {
-            panic!(
-                "pinned managed Chromium {VERSION} is missing; run scripts/prepare-managed-chromium.ps1: {error}"
-            )
-        }),
-    )
-    .expect("managed Chromium manifest is invalid");
-    let files = files
+    if !manifest_path.is_file() {
+        if std::env::var("PROFILE").as_deref() == Ok("release") {
+            panic!("CEF Runtime is missing; run scripts/build-cef-host.ps1 -Release");
+        }
+        println!(
+            "cargo:warning=CEF Runtime is absent; the embedded browser is unavailable until scripts/build-cef-host.ps1 runs"
+        );
+        return;
+    }
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&manifest_path).expect("read CEF Runtime manifest"))
+            .expect("CEF Runtime manifest is invalid");
+    assert_eq!(manifest["schemaVersion"].as_u64(), Some(1));
+    assert_eq!(
+        manifest["cefCrateVersion"].as_str(),
+        Some(CEF_CRATE_VERSION)
+    );
+    assert_eq!(manifest["chromiumVersion"].as_str(), Some(CHROMIUM_VERSION));
+    assert_eq!(manifest["platform"].as_str(), Some("windows-x64"));
+    assert_eq!(manifest["archiveSha256"].as_str(), Some(ARCHIVE_SHA256));
+    let files = manifest["files"]
         .as_array()
-        .expect("managed Chromium manifest must be an array");
-    assert!(!files.is_empty(), "managed Chromium manifest is empty");
-    let mut has_executable = false;
+        .expect("CEF Runtime manifest must contain files");
+    assert!(!files.is_empty(), "CEF Runtime manifest is empty");
+    let mut has_host = false;
+    let mut has_libcef = false;
     for entry in files {
-        let relative = entry["path"]
-            .as_str()
-            .expect("managed Chromium path must be text");
+        let relative = entry["path"].as_str().expect("CEF Runtime path");
         let relative_path = Path::new(relative);
         assert!(
             !relative_path.as_os_str().is_empty()
@@ -261,41 +273,28 @@ fn verify_managed_chromium(root: &Path) {
                     component,
                     Component::ParentDir | Component::RootDir | Component::Prefix(_)
                 )),
-            "invalid managed Chromium path: {relative}"
+            "invalid CEF Runtime path: {relative}"
         );
-        has_executable |= relative.eq_ignore_ascii_case("chrome.exe");
+        has_host |= relative.eq_ignore_ascii_case("hachimi-cef-host.exe");
+        has_libcef |= relative.eq_ignore_ascii_case("libcef.dll");
         let path = root.join(relative_path);
         println!("cargo:rerun-if-changed={}", path.display());
         let metadata = std::fs::symlink_metadata(&path).unwrap_or_else(|error| {
-            panic!(
-                "managed Chromium file is missing: {}: {error}",
-                path.display()
-            )
+            panic!("CEF Runtime file is missing: {}: {error}", path.display())
         });
         assert!(metadata.is_file() && !metadata.file_type().is_symlink());
         assert_eq!(
             metadata.len(),
-            entry["size"]
-                .as_u64()
-                .expect("managed Chromium size must be an integer"),
-            "managed Chromium size mismatch: {}",
-            path.display()
+            entry["size"].as_u64().expect("CEF Runtime size")
         );
         assert_eq!(
             sha256_file(&path),
-            entry["sha256"]
-                .as_str()
-                .expect("managed Chromium SHA-256 must be text"),
-            "managed Chromium SHA-256 mismatch: {}",
+            entry["sha256"].as_str().expect("CEF Runtime SHA-256"),
+            "CEF Runtime SHA-256 mismatch: {}",
             path.display()
         );
     }
-    assert!(
-        has_executable,
-        "managed Chromium manifest has no chrome.exe"
-    );
-    println!("cargo:rustc-env=HACHIMI_MANAGED_CHROMIUM_VERSION={VERSION}");
-    println!("cargo:rustc-env=HACHIMI_MANAGED_CHROMIUM_ARCHIVE_SHA256={ARCHIVE_SHA256}");
+    assert!(has_host && has_libcef, "CEF Runtime is incomplete");
 }
 
 fn verify_motion_catalog(root: &Path) {
@@ -420,7 +419,6 @@ fn read_glb_json(path: &Path) -> serde_json::Value {
 }
 
 fn main() {
-    println!("cargo:rerun-if-changed=managed-chromium/manifest.json");
     println!(
         "cargo:rerun-if-changed=resources/native/sherpa-onnx-1.13.4-directml/windows-x64/manifest.json"
     );
@@ -439,7 +437,7 @@ fn main() {
             std::path::Path::new("resources/native/sherpa-onnx-1.13.4-directml/windows-x64");
         verify_native_runtime(runtime);
         verify_managed_git(Path::new("managed-git"));
-        verify_managed_chromium(Path::new("managed-chromium"));
+        verify_cef_runtime(Path::new("../../../target/cef-bundle"));
     }
     register_sandbox_sidecar_hashes();
     tauri_build::build();

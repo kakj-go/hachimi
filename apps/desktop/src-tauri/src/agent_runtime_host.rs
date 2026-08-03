@@ -16,7 +16,7 @@ use hachimi_agent::{
     StepWorldStateRefresher, ToolExecutor, apply_patch_tool, authorized_tool,
     build_model_view_with_checkpoint, mcp_elicitation_handler_with_store,
     mcp_resource_tool_executors, mcp_tool_executors_with_gate_and_elicitation,
-    request_user_input_tool, skill_runtime_tools, workspace_tool_executors_with_diff_tracking,
+    request_user_input_tool, skill_runtime_tools, workspace_tool_executors_with_diff_tracker,
 };
 use hachimi_capabilities::mcp_exposed_tool_name;
 use hachimi_control_plane::McpControlService;
@@ -32,6 +32,7 @@ use hachimi_storage::AgentStore;
 use hachimi_user_input::PersistentUserInputBroker;
 use hachimi_workspace::{WorkspaceHostClient, WorkspaceLaunchCheck, WorkspaceLaunchGuard};
 use sha2::{Digest, Sha256};
+use tauri::AppHandle;
 use tokio_util::sync::CancellationToken;
 
 use crate::workbench_commands::{sandbox_sidecar_path, workspace_worker_path};
@@ -244,6 +245,7 @@ impl DesktopStepWorldStateRefresher {
 
 #[derive(Clone)]
 pub(super) struct DesktopAgentRunPreparer {
+    app: AppHandle,
     store: AgentStore,
     workbench: hachimi_workbench::WorkbenchService,
     approvals: hachimi_approvals::PersistentApprovalBroker,
@@ -252,6 +254,7 @@ pub(super) struct DesktopAgentRunPreparer {
     mcp: McpControlService,
     sandbox_backend: Option<Arc<dyn SandboxBackend>>,
     browser: Arc<hachimi_browser::BrowserHost>,
+    embedded_browser: Arc<crate::embedded_browser_agent::EmbeddedAgentBrowser>,
     computer: Arc<hachimi_computer::ComputerHost>,
     plugins: hachimi_extensions::PluginHost,
     multi_agent: MultiAgentCoordinator,
@@ -259,6 +262,7 @@ pub(super) struct DesktopAgentRunPreparer {
 }
 
 pub(super) struct DesktopAgentRunDependencies {
+    pub(super) app: AppHandle,
     pub(super) store: AgentStore,
     pub(super) workbench: hachimi_workbench::WorkbenchService,
     pub(super) approvals: hachimi_approvals::PersistentApprovalBroker,
@@ -267,6 +271,7 @@ pub(super) struct DesktopAgentRunDependencies {
     pub(super) mcp: McpControlService,
     pub(super) sandbox_backend: Option<Arc<dyn SandboxBackend>>,
     pub(super) browser: Arc<hachimi_browser::BrowserHost>,
+    pub(super) embedded_browser: Arc<crate::embedded_browser_agent::EmbeddedAgentBrowser>,
     pub(super) computer: Arc<hachimi_computer::ComputerHost>,
     pub(super) plugins: hachimi_extensions::PluginHost,
     pub(super) multi_agent: MultiAgentCoordinator,
@@ -276,6 +281,7 @@ pub(super) struct DesktopAgentRunDependencies {
 impl DesktopAgentRunPreparer {
     pub(super) fn new(dependencies: DesktopAgentRunDependencies) -> Self {
         let DesktopAgentRunDependencies {
+            app,
             store,
             workbench,
             approvals,
@@ -284,12 +290,14 @@ impl DesktopAgentRunPreparer {
             mcp,
             sandbox_backend,
             browser,
+            embedded_browser,
             computer,
             plugins,
             multi_agent,
             runtime_features,
         } = dependencies;
         Self {
+            app,
             store,
             workbench,
             approvals,
@@ -298,11 +306,34 @@ impl DesktopAgentRunPreparer {
             mcp,
             sandbox_backend,
             browser,
+            embedded_browser,
             computer,
             plugins,
             multi_agent,
             runtime_features,
         }
+    }
+
+    fn environment_change_sink(
+        &self,
+        reasons: Vec<hachimi_protocol::WorkbenchEnvironmentChangeReason>,
+    ) -> crate::agent_host_tools::EnvironmentChangeSink {
+        let app = self.app.clone();
+        let workbench = self.workbench.clone();
+        Arc::new(move |session_id| {
+            let app = app.clone();
+            let workbench = workbench.clone();
+            let reasons = reasons.clone();
+            tauri::async_runtime::spawn(async move {
+                if let Ok(environment) = workbench.environment_snapshot(&session_id).await {
+                    crate::environment_commands::emit_workbench_environment(
+                        &app,
+                        &environment,
+                        reasons,
+                    );
+                }
+            });
+        })
     }
 }
 
@@ -547,13 +578,14 @@ impl DesktopAgentRunPreparer {
             &self.approvals,
         );
         let mut tool_executors = Vec::new();
-        for tool in workspace_tool_executors_with_diff_tracking(
+        let (workspace_tools, diff_tracker) = workspace_tool_executors_with_diff_tracker(
             Arc::clone(&workspace_host),
             self.store.clone(),
             request.session.id.clone(),
             request.run.id.clone(),
             checkout.id.clone(),
-        ) {
+        );
+        for tool in workspace_tools {
             if is_review && tool.descriptor().effect != hachimi_protocol::ToolEffect::ReadOnly {
                 continue;
             }
@@ -673,6 +705,7 @@ impl DesktopAgentRunPreparer {
             )),
             state,
             world_refresher: Some(world_refresher),
+            diff_tracker: Some(diff_tracker),
         })
     }
 
@@ -806,6 +839,7 @@ impl DesktopAgentRunPreparer {
             host_context: Some("context=general".into()),
             state,
             world_refresher: Some(world_refresher),
+            diff_tracker: None,
         })
     }
 
@@ -830,11 +864,26 @@ impl DesktopAgentRunPreparer {
                 request.run.id.clone(),
             ));
         }
+        if let Some(plan_id) = request.run.configuration.accepted_plan_id.clone() {
+            let session_id = request.session.id.clone();
+            let environment_change_sink = self.environment_change_sink(vec![
+                hachimi_protocol::WorkbenchEnvironmentChangeReason::Plan,
+            ]);
+            tool_executors.push(hachimi_agent::update_plan_tool(
+                self.store.clone(),
+                plan_id,
+                request.run.id.clone(),
+                Some(Arc::new(move || {
+                    environment_change_sink(session_id.clone());
+                })),
+            ));
+        }
         let mut local_host_authorization = authorization.clone();
         local_host_authorization.capability_host = "local-host-broker".into();
         for tool in crate::agent_host_tools::local_host_tool_executors(
             crate::agent_host_tools::LocalHostToolContext {
                 browser: Arc::clone(&self.browser),
+                embedded_browser: Arc::clone(&self.embedded_browser),
                 computer: Arc::clone(&self.computer),
                 plugins: self.plugins.clone(),
                 store: self.store.clone(),
@@ -845,6 +894,13 @@ impl DesktopAgentRunPreparer {
                 schedule_host_grant: request.schedule_host_grant.clone(),
                 desktop_control_enabled: self.runtime_features.desktop_control,
                 enterprise_integrations_enabled: self.runtime_features.enterprise_integrations,
+                browser_environment_change_sink: self.environment_change_sink(vec![
+                    hachimi_protocol::WorkbenchEnvironmentChangeReason::Browser,
+                    hachimi_protocol::WorkbenchEnvironmentChangeReason::Sources,
+                ]),
+                source_environment_change_sink: self.environment_change_sink(vec![
+                    hachimi_protocol::WorkbenchEnvironmentChangeReason::Sources,
+                ]),
             },
         ) {
             tool_executors.push(authorized_tool(tool, local_host_authorization.clone()));
@@ -893,6 +949,9 @@ impl DesktopAgentRunPreparer {
                     session_id: request.session.id.clone(),
                     run_id: request.run.id.clone(),
                     request_handler: Arc::clone(&elicitation),
+                    environment_change_sink: Some(self.environment_change_sink(vec![
+                        hachimi_protocol::WorkbenchEnvironmentChangeReason::Sources,
+                    ])),
                 },
             ) {
                 tool_executors.push(authorized_tool(tool, mcp_authorization.clone()));

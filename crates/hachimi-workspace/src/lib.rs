@@ -38,6 +38,7 @@ use std::{
 };
 
 use atomic_write_file::AtomicWriteFile;
+use hachimi_process_policy::ProcessPolicy;
 use hachimi_sandbox::{
     PathAccess, PathSecurityError, SandboxBackend, SandboxLaunchSpec, SandboxNetworkPolicy,
     resolve_checkout_path, validate_checkout_root,
@@ -1029,7 +1030,7 @@ impl WorkspaceHostClient {
         } else {
             Command::new(&self.worker_program)
         };
-        hide_background_window(&mut command);
+        ProcessPolicy::HiddenBackground.apply_tokio(&mut command);
         command.env_clear();
         copy_process_environment(&mut command);
         command
@@ -1044,17 +1045,6 @@ impl WorkspaceHostClient {
         })
     }
 }
-
-#[cfg(windows)]
-fn hide_background_window(command: &mut Command) {
-    use std::os::windows::process::CommandExt as _;
-
-    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-    command.as_std_mut().creation_flags(CREATE_NO_WINDOW);
-}
-
-#[cfg(not(windows))]
-fn hide_background_window(_command: &mut Command) {}
 
 #[derive(Debug)]
 struct RunTempDirectory {
@@ -1711,6 +1701,7 @@ impl WorkerContext {
         } else {
             std::ffi::OsString::from(program)
         });
+        ProcessPolicy::HiddenCaptured.apply_tokio(&mut command);
         command
             .args(args)
             .current_dir(restricted_process_cwd(cwd))

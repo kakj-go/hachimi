@@ -1260,6 +1260,7 @@ mod tests {
                         },
                     ),
                     world_refresher: None,
+                    diff_tracker: None,
                 })
             })
         }

@@ -1154,7 +1154,7 @@ async fn final_pet_output(
             return None;
         }
         match item.payload {
-            ItemPayload::Assistant { text } => Some(text),
+            ItemPayload::Assistant { text, .. } => Some(text),
             _ => None,
         }
     })?;
@@ -1237,11 +1237,13 @@ mod pet_output_tests {
                 auto_resolution_ms: None,
                 default_answer: None,
             }],
+            display_answers: Vec::new(),
         };
         assert!(pet_payload_contains_secret_input(&payload));
         assert!(!pet_payload_contains_secret_input(
             &ItemPayload::Assistant {
                 text: "safe".into(),
+                phase: hachimi_protocol::AgentMessagePhase::FinalAnswer,
             }
         ));
     }

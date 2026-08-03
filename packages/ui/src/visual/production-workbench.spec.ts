@@ -1,220 +1,63 @@
 import { expect, test, type Page } from "@playwright/test";
 import AxeBuilder from "@axe-core/playwright";
 import { resolve } from "node:path";
-import { DEFAULT_APPEARANCE } from "../theme/context";
-
-const appearance = structuredClone(DEFAULT_APPEARANCE);
-const motionEntry = {
-  id: "builtin.openmaiwaifu.standard-waiting.7c7cd057",
-  source: "builtin",
-  protected: true,
-  name: "standard waiting",
-  nameZh: "标准待机",
-  description: "OpenMaiWaifu idle",
-  descriptionZh: "OpenMaiWaifu 标准待机",
-  fileName: "7c7cd0574c34b20a1e9cccbae3abcdc7999cd406edb7f0323e5e2aa0be4e02d5.vrma",
-  sha256: "7c7cd0574c34b20a1e9cccbae3abcdc7999cd406edb7f0323e5e2aa0be4e02d5",
-  sizeBytes: 200000,
-  durationMs: 11667,
-  category: "idle",
-  tags: ["idle", "waiting"],
-  playbackMode: "loop",
-  rootMode: "in_place",
-  channels: ["full_body", "fingers"],
-  animatedBones: ["hips", "leftIndexProximal", "rightIndexProximal"],
-  fingerBoneCount: 30,
-  hasFingerMotion: true,
-  hasExpression: false,
-  hasLookAt: false,
-  mirrorable: true,
-  transitionInMs: 320,
-  transitionOutMs: 350,
-  sourceProject: "OpenMaiWaifu",
-  sourcePaths: ["standard-waiting.vrma"],
-  warnings: [],
-};
-
-const initialSettings = {
-  schemaVersion: 8,
-  developerMode: false,
-  theme: "dark",
-  locale: "zh-CN",
-  alwaysOnTop: true,
-  petPlacement: null,
-  llm: {
-    baseUrl: "http://localhost:11434/v1",
-    modelName: "gemma4:e4b",
-    maxInputTokens: 0,
-    maxOutputTokens: 0,
-  },
-  voice: { muted: false, speedPercent: 100, computeMode: "auto" },
+import {
   appearance,
-};
+  directTerminalFixture,
+  initialSettings,
+  installMotionLabAssets,
+  motionEntry,
+  runtimeAssessment,
+  runtimeMocks,
+  taskRunFixtures,
+  taskScheduleFixtures,
+  workbenchEnvironmentFixture,
+  workspaceDiffFixture,
+  workspaceFileChunkFixture,
+  workspaceGitFixture,
+} from "./production-workbench-fixtures";
+import { installEnvironmentSummaryVisualTests } from "./environment-summary-visual";
+import { assertApprovalPolicyTones, installSessionScrollVisualTest } from "./session-scroll-visual";
 
-async function installTauriMocks(
+export async function installTauriMocks(
   page: Page,
   withComposerData = false,
   schedulerEnabled = false,
   withSessionData = false,
   themeMode: "light" | "dark" | "system" = "dark",
+  gateMode: "approval" | "plan" | "user_input" = "approval",
 ) {
   await page.addInitScript(
     ({
       appearance,
+      directTerminalFixture,
       initialSettings,
       motionEntry,
+      runtimeAssessment,
+      runtimeMocks,
+      taskRunFixtures,
+      taskScheduleFixtures,
+      workbenchEnvironmentFixture,
+      workspaceDiffFixture,
+      workspaceFileChunkFixture,
+      workspaceGitFixture,
       withComposerData,
       schedulerEnabled,
       withSessionData,
       themeMode,
+      gateMode,
     }) => {
-      type MockSettings = Omit<typeof initialSettings, "theme"> & {
-        theme: "light" | "dark" | "system";
-      };
+      type MockSettings = Omit<typeof initialSettings, "theme"> & { theme: typeof themeMode };
       let settings: MockSettings = { ...initialSettings, theme: themeMode };
-      const runtimeRequirements = [
-        "vrm_format",
-        "skinned_mesh",
-        "complete_humanoid",
-        "standard_blinks",
-        "five_visemes",
-        "standard_emotions",
-        "look_at",
-        "mtoon",
-        "spring_bone",
-        "spring_collider",
-        "skin_weights",
-        "resource_budget",
-      ].map((requirement) => ({ requirement, passed: true, detail: "" }));
-      const runtimeStatistics = {
-        nodeCount: 86,
-        meshCount: 3,
-        primitiveCount: 4,
-        triangleCount: 42_800,
-        materialCount: 9,
-        textureCount: 12,
-        boneCount: 67,
-        animationCount: 0,
-        morphTargetCount: 34,
-        maxTextureDimension: 2048,
-        estimatedTextureMemoryBytes: 100_663_296,
-      };
-      const runtimeAssessment = {
-        compatibility: "runtime_ready",
-        detectorVersion: 4,
-        capabilities: [
-          "renderable_mesh",
-          "skinned_mesh",
-          "humanoid_skeleton",
-          "blink",
-          "viseme",
-          "look_at",
-          "spring_bone",
-          "m_toon",
-          "spring_bone_collider",
-          "five_finger_hands",
-          "five_visemes",
-          "standard_expressions",
-          "standard_motion_retarget",
-          "runtime_ready",
-        ],
-        statistics: runtimeStatistics,
-        requirements: runtimeRequirements,
-        issues: [],
-      };
-      let voiceRuntime = {
-        available: true,
-        muted: false,
-        modelId: "builtin-melo-zh-en",
-        voiceName: "Hachimi 中文女声",
-        speaking: false,
-        speedPercent: 100,
-        provider: "sherpa_onnx_vits",
-        computeMode: "auto",
-        backend: "cpu",
-        fallbackReason: null,
-        loading: false,
-        languages: ["zh-CN"],
-        speakerCount: 1,
-        speakerId: 0,
-      };
-      let speechRecognition = {
-        installed: true,
-        installing: false,
-        bundled: true,
-        modelName: "SenseVoice-Small INT8",
-        provider: "sherpa-onnx 1.13.4",
-        languages: ["zh-CN", "en-US", "ja-JP", "ko-KR", "yue"],
-        sizeBytes: 237_431_441,
-        computeMode: "auto",
-        backend: "direct_ml",
-        fallbackReason: null,
-        loading: false,
-        error: null,
-      };
-      let voices = {
-        entries: [
-          {
-            id: "builtin-melo-zh-en",
-            name: "Hachimi 中英双语女声（MeloTTS）",
-            sha256: "e58351ed7149f290a54534538badd4077cdbe6fddc964b24d0bee870415d1514",
-            originalFileName: "vits-melo-tts-zh_en.tar.bz2",
-            sizeBytes: 167_006_755,
-            origin: "built_in",
-            modelType: "melo-vits",
-            languages: ["zh-CN", "en-US"],
-            sampleRate: 44_100,
-            speakerCount: 1,
-            speakerId: 0,
-            licenseSummary: "MIT",
-            licenseWarning: false,
-            protected: true,
-            importedAt: "0",
-          },
-        ],
-        currentId: "builtin-melo-zh-en",
-      };
-      let avatars = {
-        entries: [
-          {
-            id: "mimi",
-            name: "Mimi",
-            originalFileName: "mimi.vrm",
-            sizeBytes: 4096,
-            sha256: "1234567890abcdef1234567890abcdef",
-            importedAt: "1767225600000",
-            isCurrent: true,
-            format: "vrm0",
-            assessment: runtimeAssessment,
-          },
-        ],
-        currentId: "mimi" as string | null,
-      };
-      const gestureEntry = {
-        ...motionEntry,
-        id: "builtin.clawatar.head-nod-yes.mock",
-        name: "Head Nod Yes",
-        nameZh: "点头同意",
-        description: "A natural affirmative head nod.",
-        descriptionZh: "自然的肯定点头动作。",
-        category: "gesture",
-        playbackMode: "once",
-        durationMs: 1800,
-        fingerBoneCount: 0,
-        hasFingerMotion: false,
-      };
-      let motions = {
-        entries: [motionEntry, gestureEntry],
-        bindings: [] as Array<{
-          region: string;
-          motionId: string;
-          cooldownMs: number;
-          mirrorBySide: boolean;
-        }>,
-        disabledMotionIds: [] as string[],
-      };
+      let voiceRuntime = structuredClone(runtimeMocks.voiceRuntime);
+      let speechRecognition = structuredClone(runtimeMocks.speechRecognition);
+      let voices = structuredClone(runtimeMocks.voices);
+      let avatars = structuredClone(runtimeMocks.avatars);
+      let motions = structuredClone(runtimeMocks.motions);
       const calls: Array<{ command: string; args: Record<string, unknown> }> = [];
       const testState = { failNextUpdate: false };
+      const taskSchedules = structuredClone(taskScheduleFixtures);
+      const taskRuns = structuredClone(taskRunFixtures);
       const session = {
         id: "session-ui-unification",
         context: {
@@ -234,7 +77,12 @@ async function installTauriMocks(
       const run = {
         id: "run-ui-unification",
         sessionId: session.id,
-        status: "waiting_approval",
+        status:
+          gateMode === "user_input"
+            ? "waiting_user_input"
+            : gateMode === "plan"
+              ? "succeeded"
+              : "waiting_approval",
         purpose: "task",
         generation: 2,
         configuration: {},
@@ -290,8 +138,8 @@ async function installTauriMocks(
             type: "tool_execution",
             data: {
               tool_call_id: "tool-call-ui-unification",
-              name: "check_component_contracts",
-              arguments: { sourceFiles: 42 },
+              name: "apply_patch",
+              arguments: { patch: "*** Begin Patch" },
               step_revision: 1,
               tool_plan_hash: "ui-tool-plan",
               registry_revision: "ui-tool-registry",
@@ -306,7 +154,7 @@ async function installTauriMocks(
           relations: {},
           createdAtMs: 1_774_184_490_000,
         },
-      ];
+      ] as Array<Record<string, unknown>>;
       const approval = {
         id: "approval-ui-unification",
         sessionId: session.id,
@@ -328,15 +176,156 @@ async function installTauriMocks(
         createdAtMs: 1_774_184_520_000,
         resolvedAtMs: null,
       };
+      const proposedPlan = {
+        id: "plan-ui-unification",
+        sessionId: session.id,
+        runId: run.id,
+        revision: 2,
+        goal: "统一 Workbench 消息、摘要、终端和右侧查看器",
+        assumptions: ["保留 Hachimi 品牌和共享 UI 组件"],
+        steps: [
+          { id: "step-1", description: "统一消息和运行步骤的信息层级", status: "completed" },
+          { id: "step-2", description: "实现置顶环境摘要和资源 Inspector", status: "pending" },
+          { id: "step-3", description: "重建计划、问题和审批阻塞层", status: "pending" },
+          { id: "step-4", description: "完成 Desktop E2E 与视觉验收", status: "pending" },
+        ],
+        affectedResources: ["packages/workbench/src"],
+        verification: ["visual", "desktop-e2e"],
+        risks: [],
+        openQuestions: [],
+        contentMarkdown: "# Workbench Codex 对齐计划\n\n完整实施消息、摘要、终端和 Inspector。",
+        status: "proposed",
+        acceptedRunId: null,
+        createdAtMs: 1_774_184_520_000,
+        acceptedAtMs: null,
+      };
+      const userInput = {
+        id: "input-ui-unification",
+        sessionId: session.id,
+        runId: run.id,
+        runGeneration: run.generation,
+        itemId: "item-user-input",
+        questions: [
+          {
+            id: "scope",
+            header: "对齐范围",
+            prompt: "本轮应优先完成哪一部分？",
+            options: [
+              { label: "完整工作台", value: "all", description: "消息、摘要、终端和 Inspector" },
+              { label: "消息时间线", value: "timeline", description: "优先收敛流式步骤" },
+              { label: "面板布局", value: "panels", description: "优先收敛摘要与查看器" },
+            ],
+            secret: false,
+            autoResolutionMs: 120000,
+            defaultAnswer: "all",
+          },
+          {
+            id: "density",
+            header: "界面密度",
+            prompt: "执行过程采用哪种信息密度？",
+            options: [
+              { label: "Codex 紧凑", value: "compact", description: "推荐，显示更多运行步骤" },
+              { label: "标准", value: "normal", description: "保留更多留白" },
+            ],
+            secret: false,
+            autoResolutionMs: null,
+            defaultAnswer: "compact",
+          },
+        ],
+        status: "pending",
+        expiresAtMs: 1_774_184_640_000,
+        createdAtMs: 1_774_184_520_000,
+        resolvedAtMs: null,
+        resolvedBy: null,
+      };
+      if (gateMode === "plan") {
+        transcript.push({
+          id: "item-plan",
+          sessionId: session.id,
+          runId: run.id,
+          sequence: 4,
+          kind: "plan",
+          status: "completed",
+          payload: {
+            type: "plan",
+            data: {
+              plan_id: proposedPlan.id,
+              revision: proposedPlan.revision,
+              text: proposedPlan.contentMarkdown,
+              steps: proposedPlan.steps,
+            },
+          },
+          relations: {},
+          createdAtMs: 1_774_184_520_000,
+        });
+      }
+      if (gateMode === "user_input") {
+        transcript.push({
+          id: userInput.itemId,
+          sessionId: session.id,
+          runId: run.id,
+          sequence: 4,
+          kind: "user_input_request",
+          status: "in_progress",
+          payload: {
+            type: "user_input_request",
+            data: {
+              request_id: userInput.id,
+              questions: userInput.questions,
+              display_answers: [],
+            },
+          },
+          relations: { userInputRequestId: userInput.id },
+          createdAtMs: userInput.createdAtMs,
+        });
+      }
+      const attachment = {
+        id: "attachment-visual-notes",
+        contentHash: "attachment-visual-notes-hash",
+        originalName: "notes.txt",
+        mimeType: "text/plain",
+        byteSize: 15,
+        createdAtMs: 1_774_184_520_000,
+      };
       const sessionSnapshot = {
         session,
+        checkout: {
+          id: "checkout-ui-unification",
+          projectId: "project-hachimi",
+          kind: "local",
+          path: "D:\\workspace\\rust\\hachimi-code",
+          baseRevision: null,
+          headRevision: "1234567890abcdef",
+          status: "ready",
+          pinned: false,
+          createdAtMs: 1_774_184_400_000,
+          updatedAtMs: 1_774_184_520_000,
+        },
         runs: [run],
         events: [],
         transcript,
-        pendingApprovals: [approval],
-        proposedPlans: [],
+        attachments: [attachment],
+        pendingApprovals: gateMode === "approval" ? [approval] : [],
+        proposedPlans: gateMode === "plan" ? [proposedPlan] : [],
         artifacts: [],
         agentTasks: [],
+        runSummaries: [],
+        browserSessions: [
+          {
+            id: "browser-ui-unification",
+            profileKind: "isolated",
+            ownerSessionId: session.id,
+            ownerRunId: run.id,
+            runGeneration: run.generation,
+            origin: "https://learn.chatgpt.com",
+            currentUrl: "https://learn.chatgpt.com/docs/environments/git-worktrees",
+            taskTabGroup: "visual-test",
+            revision: 3,
+            status: "ready",
+            createdAtMs: 1_774_184_500_000,
+          },
+        ],
+        sources: workbenchEnvironmentFixture.sources,
       };
       let nextCallbackId = 1;
       const callbacks = new Map<number, (data: unknown) => unknown>();
@@ -389,18 +378,22 @@ async function installTauriMocks(
                 ]
               : [];
           }
-          if (command === "list_workbench_sessions") return withSessionData ? [session] : [];
+          if (command === "list_workbench_sessions") {
+            return withSessionData ? [{ session, latestRun: run, latestTerminalRun: null }] : [];
+          }
           if (command === "search_agent_sessions") {
             return { items: withSessionData ? [session] : [], nextCursor: null };
           }
           if (command === "get_workbench_session") return sessionSnapshot;
+          if (command === "get_workbench_environment") return workbenchEnvironmentFixture;
+          if (command === "get_workbench_project_tool_context") return sessionSnapshot;
           if (command === "resume_agent_session") {
             return {
               session,
               activeRun: run,
               transcript,
-              pendingApprovals: [approval],
-              pendingUserInputs: [],
+              pendingApprovals: gateMode === "approval" ? [approval] : [],
+              pendingUserInputs: gateMode === "user_input" ? [userInput] : [],
               usageSnapshot: null,
               snapshotSequence: 3,
               previousTranscriptCursor: null,
@@ -449,6 +442,7 @@ async function installTauriMocks(
               etag: "workspace-ui-unification",
             };
           }
+          if (command === "read_workspace_file_chunk") return workspaceFileChunkFixture;
           if (command === "watch_workspace_files") {
             return {
               id: "watch-ui-unification",
@@ -458,9 +452,15 @@ async function installTauriMocks(
               generation: 1,
             };
           }
+          if (command === "get_workspace_git") {
+            return workspaceGitFixture;
+          }
+          if (command === "get_workspace_diff") {
+            return { ...workspaceDiffFixture, scope: args.scope };
+          }
+          if (command === "list_schedules") return schedulerEnabled ? taskSchedules : [];
+          if (command === "list_task_runs") return schedulerEnabled ? taskRuns : [];
           if (
-            command === "list_schedules" ||
-            command === "list_task_runs" ||
             command === "list_schedule_event_receipts" ||
             command === "list_run_recoveries" ||
             command === "list_processes" ||
@@ -468,6 +468,18 @@ async function installTauriMocks(
           ) {
             return [];
           }
+          if (command === "spawn_process") {
+            return directTerminalFixture;
+          }
+          if (command === "read_process") {
+            return {
+              process: directTerminalFixture,
+              chunks: [],
+              nextSequence: 0,
+              closed: false,
+            };
+          }
+          if (command === "resize_process") return null;
           if (command === "local_host_command") {
             const request = args.request as { kind?: string };
             if (request.kind === "connector_list_accounts") {
@@ -535,6 +547,15 @@ async function installTauriMocks(
                 ]
               : [];
           }
+          if (command === "import_workbench_attachment") return attachment;
+          if (command === "read_workbench_attachment") {
+            return {
+              attachment,
+              utf8Text: "reference notes",
+              dataUrl: null,
+              truncated: false,
+            };
+          }
           if (command === "get_bootstrap_state") {
             return {
               protocolVersion: 29,
@@ -546,7 +567,7 @@ async function installTauriMocks(
               featureFlags: {
                 workbench: true,
                 motionLab: true,
-                workspaceTools: false,
+                workspaceTools: withComposerData,
                 browserControl: false,
                 computerObserve: false,
                 computerControl: false,
@@ -983,37 +1004,62 @@ async function installTauriMocks(
     },
     {
       appearance,
+      directTerminalFixture,
       initialSettings,
       motionEntry,
+      runtimeAssessment,
+      runtimeMocks,
+      taskRunFixtures,
+      taskScheduleFixtures,
+      workbenchEnvironmentFixture,
+      workspaceDiffFixture,
+      workspaceFileChunkFixture,
+      workspaceGitFixture,
       withComposerData,
       schedulerEnabled,
       withSessionData,
       themeMode,
+      gateMode,
     },
   );
 }
 
-async function installMotionLabAssets(page: Page) {
-  await page.route("http://hachimi-avatar.localhost/mimi", (route) =>
-    route.fulfill({
-      path: resolve(
-        import.meta.dirname,
-        "../../../../assets/avatar-default/2639776812528692620/2639776812528692620.vrm",
-      ),
-      contentType: "model/gltf-binary",
-    }),
+installSessionScrollVisualTest(installTauriMocks);
+installEnvironmentSummaryVisualTests(installTauriMocks);
+test("production task center uses cards and focused dialogs", async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await page.clock.setFixedTime(new Date("2026-07-26T15:00:00.000Z"));
+  await installTauriMocks(page, true, true);
+  await page.goto("http://127.0.0.1:1420/workbench.html?route=home");
+  await page.getByTestId("workbench-task-tab").click();
+  await expect(page.getByTestId("workbench-task-center")).toBeVisible();
+  await expect(page.locator(".workbench-toolbar")).toHaveCount(0);
+  await expect(page.getByTestId("task-schedule-card")).toHaveCount(2);
+  expect((await new AxeBuilder({ page }).include(".task-center").analyze()).violations).toEqual([]);
+  await expect(page).toHaveScreenshot("production-task-center-cards-1280x800.png", {
+    animations: "disabled",
+  });
+  await page.getByTestId("task-create-toggle").click();
+  await expect(page.getByTestId("task-name")).toBeVisible();
+  expect((await new AxeBuilder({ page }).include('[role="dialog"]').analyze()).violations).toEqual(
+    [],
   );
-  await page.route("http://hachimi-motion.localhost/builtin/*.vrma", (route) =>
-    route.fulfill({
-      path: resolve(
-        import.meta.dirname,
-        `../../../../assets/avatar-motions-v4/builtin/${motionEntry.fileName}`,
-      ),
-      contentType: "model/gltf-binary",
-    }),
-  );
-}
-
+  await expect(page).toHaveScreenshot("production-task-center-1280x800.png", {
+    animations: "disabled",
+  });
+  await page.getByRole("button", { name: /关闭|Close/ }).click();
+  await page.getByTestId("task-history").first().click();
+  await expect(page.getByTestId("task-run-history")).toBeVisible();
+  await expect(page).toHaveScreenshot("production-task-history-1280x800.png", {
+    animations: "disabled",
+  });
+  await page.getByRole("button", { name: /关闭|Close/ }).click();
+  await page.setViewportSize({ width: 720, height: 640 });
+  await expect(page.locator("html")).toHaveJSProperty("scrollWidth", 720);
+  await expect(page).toHaveScreenshot("production-task-center-cards-720x640.png", {
+    animations: "disabled",
+  });
+});
 test("production composer popovers dismiss outside and create visual Skill references", async ({
   page,
 }) => {
@@ -1021,7 +1067,6 @@ test("production composer popovers dismiss outside and create visual Skill refer
   await installTauriMocks(page, true);
   await page.goto("http://127.0.0.1:1420/workbench.html?route=home");
   await expect(page.getByRole("heading", { name: /hachimi-code/ })).toBeVisible();
-
   await page.getByTestId("workbench-project-trigger").click();
   const projectPopover = page.getByTestId("workbench-project-popover");
   await expect(projectPopover).toBeVisible();
@@ -1042,7 +1087,6 @@ test("production composer popovers dismiss outside and create visual Skill refer
   }
   await page.locator(".welcome-block h1").click();
   await expect(page.getByTestId("workbench-project-popover")).toHaveCount(0);
-
   await page.getByTestId("workbench-execution-target").click();
   const executionPopover = page.getByTestId("workbench-execution-popover");
   await expect(executionPopover).toBeVisible();
@@ -1065,44 +1109,18 @@ test("production composer popovers dismiss outside and create visual Skill refer
     });
   }
   await page.locator(".welcome-block h1").click();
-
   await page.getByTestId("workbench-task-options").click();
   const optionsPopover = page.getByTestId("workbench-options-popover");
   await expect(optionsPopover).toBeVisible();
   await expect(optionsPopover).toHaveCSS("width", "390px");
   await expect(optionsPopover).toContainText("文件和文件夹");
-  await expect(page.getByTestId("workbench-add-folder")).toBeVisible();
-
-  const fileChooserPromise = page.waitForEvent("filechooser");
+  await expect(page.getByTestId("workbench-add-folder")).toHaveCount(0);
   await page.getByTestId("workbench-add-attachment").click();
-  const fileChooser = await fileChooserPromise;
-  expect(fileChooser.isMultiple()).toBe(true);
-  await fileChooser.setFiles([
-    {
-      name: "shore.svg",
-      mimeType: "image/svg+xml",
-      buffer: Buffer.from(
-        '<svg xmlns="http://www.w3.org/2000/svg" width="120" height="120"><defs><linearGradient id="g" x2="0" y2="1"><stop stop-color="#62c7f2"/><stop offset=".58" stop-color="#d9f4fb"/><stop offset=".6" stop-color="#f7d48b"/><stop offset="1" stop-color="#d99a55"/></linearGradient></defs><rect width="120" height="120" fill="url(#g)"/><path d="M0 68 Q28 57 55 70 T120 67" fill="none" stroke="#fff" stroke-width="6" opacity=".8"/></svg>',
-      ),
-    },
-    { name: "notes.txt", mimeType: "text/plain", buffer: Buffer.from("reference notes") },
-  ]);
-  await expect(page.locator(".composer-attachment-card")).toHaveCount(2);
-  await expect(page.locator(".composer-attachment-card.image img")).toBeVisible();
-
-  await page.getByTestId("workbench-task-options").click();
-  const folderChooserPromise = page.waitForEvent("filechooser");
-  await page.getByTestId("workbench-add-folder").click();
-  const folderChooser = await folderChooserPromise;
-  expect(folderChooser.isMultiple()).toBe(true);
-  await expect(page.getByTestId("workbench-attachment-folder-input")).toHaveAttribute(
-    "webkitdirectory",
-    "",
-  );
-  await folderChooser.setFiles(resolve(import.meta.dirname, "fixtures/attachment-folder"));
-  await expect(page.locator(".composer-attachment-card")).toHaveCount(3);
-  await expect(page.locator(".composer-attachment-card.folder")).toContainText("1 个文件");
-
+  await expect(page.locator(".composer-attachment-card")).toHaveCount(1);
+  await expect(page.locator(".composer-attachment-card")).toContainText("notes.txt");
+  await page.locator(".composer-attachment-card").click();
+  await expect(page.locator(".workbench-inspector")).toBeVisible();
+  await expect(page.locator(".attachment-inspector")).toContainText("reference notes");
   await page.getByTestId("workbench-task-options").click();
   await page.getByTestId("workbench-skill-Documents").click();
   await expect(page.locator(".composer-skill-reference")).toContainText("Documents");
@@ -1124,8 +1142,7 @@ test("production composer popovers dismiss outside and create visual Skill refer
   await page.getByTestId("workbench-approval-policy").click();
   const approvalPopover = page.getByTestId("workbench-approval-popover");
   await expect(approvalPopover).toBeVisible();
-  await expect(approvalPopover).toHaveCSS("width", "380px");
-
+  await assertApprovalPolicyTones(page, approvalPopover);
   if (process.env.HACHIMI_CAPTURE_COMPOSER_QA) {
     await page.screenshot({
       path: resolve(import.meta.dirname, "../../../../target/composer-approval-popover-qa.png"),
@@ -1159,6 +1176,7 @@ test("production composer popovers dismiss outside and create visual Skill refer
 
 for (const viewport of [
   { name: "1855x1343", width: 1855, height: 1343 },
+  { name: "1440x900", width: 1440, height: 900 },
   { name: "1280x800", width: 1280, height: 800 },
   { name: "1024x768", width: 1024, height: 768 },
   { name: "960x640", width: 960, height: 640 },
@@ -1169,15 +1187,21 @@ for (const viewport of [
     await installTauriMocks(page);
     await page.goto("http://127.0.0.1:1420/workbench.html?route=home");
     await expect(page.getByRole("heading", { name: /hachimi-code/ })).toBeVisible();
+    await expect(page.getByTestId("workbench-open-location")).toHaveCount(0);
+    await expect(page.getByTestId("workbench-pin-summary")).toHaveCount(0);
     await expect(page.locator('[data-component="composer"]')).toHaveCSS(
       "background-color",
       "rgb(32, 36, 42)",
     );
+    const composerHeight = await page
+      .locator('[data-component="composer"]')
+      .evaluate((element) => element.getBoundingClientRect().height);
+    expect(composerHeight).toBeLessThanOrEqual(120);
     await expect(page.locator('[data-component="title-bar"]')).toHaveCSS("height", "46px");
     if (viewport.width > 760) {
       await expect(page.locator(".project-sidebar")).toHaveCSS(
         "width",
-        viewport.width <= 1100 ? "250px" : "276px",
+        viewport.width <= 1100 ? "250px" : "288px",
       );
     } else {
       await expect(page.locator(".project-sidebar")).toBeHidden();
@@ -1290,54 +1314,102 @@ test("production density changes the shared root contract", async ({ page }) => 
   }
 });
 
-test("production active Agent session uses the shared workflow and workspace contract", async ({
+test("project tools open before the first message and preserve the responsive inspector", async ({
   page,
 }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
   await page.clock.setFixedTime(new Date("2026-07-26T15:00:00.000Z"));
-  await installTauriMocks(page, true, false, true);
+  await installTauriMocks(page, true, false, false);
   await page.goto("http://127.0.0.1:1420/workbench.html?route=home");
-  await page.getByTestId("session-select-session-ui-unification").click();
+  await page.getByTestId("workbench-toggle-inspector").click();
+  let menu = page.getByTestId("workbench-resource-menu");
+  await expect(menu).toBeVisible();
+  for (const label of ["审阅", "终端", "浏览器", "文件"]) {
+    await expect(menu.getByRole("button", { name: label })).toBeEnabled();
+  }
+  await expect(page).toHaveScreenshot("production-project-tools-menu-1440x900.png", {
+    animations: "disabled",
+  });
+  await menu.getByRole("button", { name: "审阅" }).click();
+  await expect(page.locator('[data-component="workspace"][data-mode="review"]')).toBeVisible();
+  await expect(page.locator('[data-component="diff"]')).toBeVisible();
+  await expect(page.locator(".workspace-diff-file-list")).toContainText("home.tsx");
+  await expect(page).toHaveScreenshot("production-project-review-1440x900.png", {
+    animations: "disabled",
+  });
+  await page.getByTestId("workbench-toggle-inspector").click();
+  await page.getByTestId("workbench-toggle-inspector").click();
+  menu = page.getByTestId("workbench-resource-menu");
+  await menu.getByRole("button", { name: "终端" }).click();
+  await expect(
+    page.locator(".workbench-bottom-panel .terminal-session.active .xterm"),
+  ).toBeVisible();
+  await menu.getByRole("button", { name: "文件" }).click();
+  await expect(page.locator(".workspace-files-layout")).toBeVisible();
+  await page.getByRole("button", { name: "README.md" }).click();
+  await expect(page.locator(".workspace-file-tab-title")).toContainText("README.md");
+  await expect(page.locator(".workspace-path-bar")).toContainText("README.md");
+  await expect(page.locator(".composer-capability-note")).toContainText(
+    "任务将使用全局模型设置的快照",
+  );
+  await expect(page.locator(".workbench-bottom-panel .terminal-panel")).toBeVisible();
+  await expect(
+    page.locator('.workbench-bottom-panel .terminal-tab[data-process-status="running"]'),
+  ).toBeVisible();
+  await expect(
+    page.locator(".workbench-bottom-panel .terminal-session.active .xterm"),
+  ).toBeVisible();
+  await expect(page).toHaveScreenshot("production-project-tools-1440x900.png", {
+    animations: "disabled",
+  });
 
-  await expect(page.getByRole("heading", { name: "统一前端视觉规范与组件样式" })).toBeVisible();
-  await expect(page.locator('[data-component="agent-message"]')).toHaveCount(2);
-  await expect(page.locator('[data-component="tool-call"]')).toHaveCount(1);
-  await expect(page.locator('[data-component="approval"]')).toBeVisible();
-  await expect(page.locator('[data-component="workspace"]')).toBeVisible();
-  await expect(page.locator('[data-component="file-tree"]')).toBeVisible();
-  await expect(page.getByTestId("review-panel")).toContainText("代码 Review");
-  await expect(page.locator("html")).toHaveJSProperty("scrollWidth", 1440);
-
-  const result = await new AxeBuilder({ page })
-    .include(".home-main")
-    .withTags(["wcag2a", "wcag2aa"])
-    .disableRules(["nested-interactive"])
-    .analyze();
-  expect(result.violations).toEqual([]);
-  await expect(page).toHaveScreenshot("production-agent-session-1440x900.png", {
+  await page.setViewportSize({ width: 960, height: 700 });
+  await expect(page.locator(".workbench-inspector-wide")).toBeInViewport();
+  await expect(page.locator("html")).toHaveJSProperty("scrollWidth", 960);
+  await expect(page).toHaveScreenshot("production-project-tools-960x700.png", {
     animations: "disabled",
   });
 });
 
-test("production task center uses the shared form and page contract", async ({ page }) => {
-  await page.setViewportSize({ width: 1280, height: 800 });
+test("production plan confirmation replaces the composer with a compact revision gate", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
   await page.clock.setFixedTime(new Date("2026-07-26T15:00:00.000Z"));
-  await installTauriMocks(page, true, true);
+  await installTauriMocks(page, true, false, true, "dark", "plan");
   await page.goto("http://127.0.0.1:1420/workbench.html?route=home");
-  await page.getByTestId("workbench-task-tab").click();
-  await expect(page.getByTestId("workbench-task-center")).toBeVisible();
-  await page.getByTestId("task-create-toggle").click();
-  await expect(page.getByTestId("task-name")).toBeVisible();
-  await expect(page.getByTestId("task-prompt")).toBeVisible();
-  await expect(page.locator("html")).toHaveJSProperty("scrollWidth", 1280);
-  const result = await new AxeBuilder({ page })
-    .include(".task-center")
-    .withTags(["wcag2a", "wcag2aa"])
-    .analyze();
-  expect(result.violations).toEqual([]);
-  await expect(page).toHaveScreenshot("production-task-center-1280x800.png", {
+  await page.getByTestId("session-select-session-ui-unification").click();
+
+  await expect(page.getByTestId("workbench-execute-plan")).toBeVisible();
+  await expect(page.getByTestId("workbench-revise-plan")).toBeVisible();
+  await expect(page.locator('[data-component="composer"]')).toBeHidden();
+  await expect(page.locator(".timeline-plan-card")).toContainText("Workbench Codex 对齐计划");
+  await expect(page).toHaveScreenshot("production-plan-gate-1440x900.png", {
     animations: "disabled",
   });
+  await page.setViewportSize({ width: 720, height: 640 });
+  await expect(page).toHaveScreenshot("production-plan-gate-720x640.png");
+});
+
+test("production UserInput questions replace the composer with direct choices", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.clock.setFixedTime(new Date("2026-07-26T15:00:00.000Z"));
+  await installTauriMocks(page, true, false, true, "dark", "user_input");
+  await page.goto("http://127.0.0.1:1420/workbench.html?route=home");
+  await page.getByTestId("session-select-session-ui-unification").click();
+
+  await expect(page.locator('[data-component="user-input-card"]')).toBeVisible();
+  await expect(page.locator('[role="radiogroup"]')).toHaveCount(1);
+  await expect(page.locator(".user-input-pager")).toContainText("1 of 2");
+  await expect(page.getByTestId("workbench-submit-user-input")).toBeVisible();
+  await expect(page.locator('[data-component="composer"]')).toBeHidden();
+  await expect(page).toHaveScreenshot("production-user-input-gate-1440x900.png", {
+    animations: "disabled",
+  });
+  await page.setViewportSize({ width: 720, height: 640 });
+  await expect(page).toHaveScreenshot("production-user-input-gate-720x640.png");
 });
 
 for (const route of ["general", "llm", "voice", "avatar", "skills", "mcp"] as const) {
@@ -1412,7 +1484,8 @@ test("production theme dropdown matches the compact floating style", async ({ pa
 test("production navigation and theme mode remain interactive", async ({ page }) => {
   await installTauriMocks(page);
   await page.goto("http://127.0.0.1:1420/workbench.html?route=home");
-  await page.getByRole("button", { name: /连接大语言模型/ }).click();
+  await page.getByTestId("workbench-open-settings").click();
+  await page.getByRole("button", { name: "配置" }).click();
   await expect(page.getByRole("heading", { name: "大语言模型" })).toBeVisible();
   await page.getByRole("button", { name: "外观" }).click();
   await page.getByRole("button", { name: "浅色" }).click();
@@ -1910,10 +1983,6 @@ test("production home and appearance have no new WCAG A or AA violations", async
     await expect(page.getByText("Hachimi", { exact: true }).first()).toBeVisible();
     const result = await new AxeBuilder({ page })
       .withTags(["wcag2a", "wcag2aa", "wcag21a", "wcag21aa"])
-      // Kobalte exposes one focusable composite widget while keeping its
-      // native form input visually hidden. Axe treats that implementation
-      // detail as nested/aria-hidden focus even though it is removed from the
-      // tab order and announced through the composite control.
       .disableRules(["aria-hidden-focus", "nested-interactive"])
       .analyze();
     expect(result.violations).toEqual([]);

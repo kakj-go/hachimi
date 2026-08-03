@@ -1,7 +1,8 @@
 use hachimi_protocol::{
     AgentTaskCollection, AgentTaskId, AgentTaskMessageId, AgentTaskMessageRecord, AgentTaskRecord,
-    AgentTaskStatus, ArtifactId, ItemPayload, RunBudget, RunId, SessionId,
+    AgentTaskStatus, ArtifactId, ItemId, ItemPayload, RunBudget, RunEventPayload, RunId, SessionId,
 };
+use serde_json::json;
 use sqlx::Row;
 
 use super::{AgentStore, AgentStoreError};
@@ -19,6 +20,39 @@ pub struct AgentTaskExecutionClaim {
 }
 
 impl AgentStore {
+    pub async fn link_agent_task_transcript_item(
+        &self,
+        task_id: &AgentTaskId,
+        item_id: &ItemId,
+    ) -> Result<(), AgentStoreError> {
+        let mut transaction = self.pool.begin().await?;
+        let row = sqlx::query("SELECT relations_json FROM transcript_items WHERE id = ? AND kind = 'collab_tool_call'")
+            .bind(item_id.as_str())
+            .fetch_optional(&mut *transaction)
+            .await?
+            .ok_or_else(|| AgentStoreError::InvalidPersistedValue {
+                kind: "collab transcript item",
+                value: item_id.to_string(),
+            })?;
+        let mut relations: hachimi_protocol::ItemRelations =
+            serde_json::from_str(row.get("relations_json"))?;
+        relations.agent_task_id = Some(task_id.clone());
+        sqlx::query(
+            "INSERT INTO agent_task_transcript_items (agent_task_id, item_id) VALUES (?, ?) ON CONFLICT(agent_task_id) DO UPDATE SET item_id = excluded.item_id",
+        )
+        .bind(task_id.as_str())
+        .bind(item_id.as_str())
+        .execute(&mut *transaction)
+        .await?;
+        sqlx::query("UPDATE transcript_items SET relations_json = ? WHERE id = ?")
+            .bind(serde_json::to_string(&relations)?)
+            .bind(item_id.as_str())
+            .execute(&mut *transaction)
+            .await?;
+        transaction.commit().await?;
+        Ok(())
+    }
+
     pub async fn create_agent_task(
         &self,
         task: &AgentTaskRecord,
@@ -331,9 +365,12 @@ impl AgentStore {
         .bind(current.status.as_str())
         .execute(&self.pool)
         .await?;
-        self.get_agent_task(task_id)
+        let task = self
+            .get_agent_task(task_id)
             .await?
-            .ok_or_else(|| AgentStoreError::AgentTaskNotFound(task_id.clone()))
+            .ok_or_else(|| AgentStoreError::AgentTaskNotFound(task_id.clone()))?;
+        self.sync_agent_task_transcript_item(&task).await?;
+        Ok(task)
     }
 
     pub async fn reconcile_agent_task_from_run(
@@ -401,9 +438,76 @@ impl AgentStore {
         .bind(task_id.as_str())
         .execute(&self.pool)
         .await?;
-        self.get_agent_task(task_id)
+        let task = self
+            .get_agent_task(task_id)
             .await?
-            .ok_or_else(|| AgentStoreError::AgentTaskNotFound(task_id.clone()))
+            .ok_or_else(|| AgentStoreError::AgentTaskNotFound(task_id.clone()))?;
+        self.sync_agent_task_transcript_item(&task).await?;
+        Ok(task)
+    }
+
+    async fn sync_agent_task_transcript_item(
+        &self,
+        task: &AgentTaskRecord,
+    ) -> Result<(), AgentStoreError> {
+        let mut transaction = self.pool.begin().await?;
+        let Some(row) = sqlx::query(
+            "SELECT transcript_items.* FROM transcript_items JOIN agent_task_transcript_items ON agent_task_transcript_items.item_id = transcript_items.id WHERE agent_task_transcript_items.agent_task_id = ?",
+        )
+        .bind(task.id.as_str())
+        .fetch_optional(&mut *transaction)
+        .await?
+        else {
+            transaction.commit().await?;
+            return Ok(());
+        };
+        let session_id = SessionId::new(row.get::<String, _>("session_id"));
+        let mut item = super::transcript_item_from_row(&row, &session_id)?;
+        let ItemPayload::CollabToolCall {
+            tool_name,
+            parent_run_id,
+            ..
+        } = item.payload
+        else {
+            return Err(AgentStoreError::InvalidPersistedValue {
+                kind: "agent task transcript payload",
+                value: item.id.to_string(),
+            });
+        };
+        item.payload = ItemPayload::CollabToolCall {
+            tool_name,
+            agent_task_id: Some(task.id.clone()),
+            parent_run_id,
+            child_run_id: Some(task.child_run_id.clone()),
+            title: task.title.clone(),
+            status: task.status.as_str().to_owned(),
+            summary: task.result_summary.clone(),
+            usage: task.usage,
+        };
+        item.relations.agent_task_id = Some(task.id.clone());
+        item.relations.artifact_ids = task.artifact_ids.clone();
+        sqlx::query(
+            "UPDATE transcript_items SET payload_json = ?, relations_json = ? WHERE id = ?",
+        )
+        .bind(serde_json::to_string(&item.payload)?)
+        .bind(serde_json::to_string(&item.relations)?)
+        .bind(item.id.as_str())
+        .execute(&mut *transaction)
+        .await?;
+        super::append_event_typed_tx(
+            &mut transaction,
+            &item.session_id,
+            item.run_id.as_ref(),
+            "item.completed",
+            Some(RunEventPayload::ItemCompleted {
+                item: Box::new(item.clone()),
+            }),
+            json!({ "itemId": item.id, "status": item.status }),
+            task.updated_at_ms,
+        )
+        .await?;
+        transaction.commit().await?;
+        Ok(())
     }
 
     pub async fn append_agent_task_message(
@@ -529,7 +633,7 @@ async fn latest_assistant_summary(
     let Some(row) = row else { return Ok(None) };
     let payload: ItemPayload = serde_json::from_str(row.get("payload_json"))?;
     let summary = match payload {
-        ItemPayload::Assistant { text } => text,
+        ItemPayload::Assistant { text, .. } => text,
         ItemPayload::Plan { text, .. } => text,
         _ => return Ok(None),
     };

@@ -180,9 +180,23 @@
   background: color-mix(in srgb, var(--color-text-base) 8%, transparent);
 }
 
-.composer-popover-row.warning.selected {
-  background: color-mix(in srgb, var(--warning) 12%, transparent);
+.composer-popover-row[data-tone="recommended"].selected {
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 18%, transparent);
+}
+
+.composer-popover-row[data-tone="danger"] {
   color: var(--warning);
+}
+
+.composer-popover-row[data-tone="danger"]:hover:not(:disabled),
+.composer-popover-row[data-tone="danger"]:focus-visible,
+.composer-popover-row[data-tone="danger"].selected {
+  background: color-mix(in srgb, var(--warning) 12%, transparent);
+}
+
+.composer-popover-row[data-tone="danger"].selected {
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--warning) 24%, transparent);
 }
 
 .composer-popover-row:disabled {
@@ -209,8 +223,13 @@
   color: var(--color-text-base);
 }
 
-.composer-popover-row.warning.selected .composer-popover-row-icon,
-.composer-popover-row.warning.selected .composer-popover-row-check {
+.composer-popover-row[data-tone="recommended"].selected .composer-popover-row-icon,
+.composer-popover-row[data-tone="recommended"].selected .composer-popover-row-check {
+  color: var(--accent);
+}
+
+.composer-popover-row[data-tone="danger"] .composer-popover-row-icon,
+.composer-popover-row[data-tone="danger"] .composer-popover-row-check {
   color: var(--warning);
 }
 
@@ -248,7 +267,7 @@
   white-space: normal;
 }
 
-.composer-popover-row.warning.selected .composer-popover-row-copy small {
+.composer-popover-row[data-tone="danger"] .composer-popover-row-copy small {
   color: color-mix(in srgb, var(--warning) 78%, var(--muted));
 }
 
@@ -362,8 +381,16 @@
   border: 0;
   border-radius: var(--radius-md);
   background: transparent;
-  color: color-mix(in srgb, var(--warning) 72%, var(--text));
+  color: var(--color-text-muted);
   font: inherit;
+}
+
+.composer-options .composer-approval-trigger.policy-recommended {
+  color: color-mix(in srgb, var(--accent) 62%, var(--color-text-base));
+}
+
+.composer-options .composer-approval-trigger.policy-danger {
+  color: color-mix(in srgb, var(--warning) 82%, var(--color-text-base));
 }
 
 .composer-options .composer-approval-trigger > span {
@@ -374,13 +401,105 @@
 
 .composer-options .composer-approval-trigger:hover,
 .composer-options .composer-approval-trigger[data-expanded] {
-  background: color-mix(in srgb, var(--warning) 10%, transparent);
-  color: color-mix(in srgb, var(--warning) 58%, var(--text));
+  background: var(--color-overlay-hover);
+  color: var(--color-text-base);
   transform: translateY(-1px);
+}
+
+.composer-options .composer-approval-trigger.policy-recommended:hover,
+.composer-options .composer-approval-trigger.policy-recommended[data-expanded] {
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+  color: color-mix(in srgb, var(--accent) 72%, var(--color-text-base));
+}
+
+.composer-options .composer-approval-trigger.policy-danger:hover,
+.composer-options .composer-approval-trigger.policy-danger[data-expanded] {
+  background: color-mix(in srgb, var(--warning) 10%, transparent);
+  color: color-mix(in srgb, var(--warning) 72%, var(--color-text-base));
 }
 
 .composer-options .composer-approval-trigger:active {
   transform: translateY(0) scale(0.98);
+}
+
+.composer-options-divider {
+  width: 1px;
+  height: 18px;
+  flex: 0 0 1px;
+  margin: 0 5px;
+  background: var(--color-border-muted);
+}
+
+.composer-options [data-component="tooltip-trigger"] {
+  min-width: 0;
+  display: inline-flex;
+  flex: 0 0 auto;
+}
+
+.composer-options .composer-plan-mode-chip {
+  min-width: 0;
+  min-height: 34px;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 0 9px;
+  border: 0;
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: var(--color-text-muted);
+  font: inherit;
+  transition:
+    background var(--duration-fast) var(--ease-standard),
+    color var(--duration-fast) var(--ease-standard),
+    transform var(--duration-fast) var(--ease-standard),
+    box-shadow var(--duration-fast) var(--ease-standard);
+}
+
+.composer-options .composer-plan-mode-chip:hover,
+.composer-options .composer-plan-mode-chip:focus-visible {
+  background: var(--color-overlay-hover);
+  color: var(--color-text-base);
+}
+
+.composer-options .composer-plan-mode-chip:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px var(--color-border-focus);
+}
+
+.composer-options .composer-plan-mode-chip:active {
+  transform: scale(0.98);
+}
+
+.composer-plan-mode-icon {
+  width: 18px;
+  height: 18px;
+  display: inline-grid;
+  flex: 0 0 18px;
+  place-items: center;
+}
+
+.composer-plan-mode-icon > svg {
+  grid-area: 1 / 1;
+  transition:
+    opacity var(--duration-fast) var(--ease-standard),
+    transform var(--duration-fast) var(--ease-standard);
+}
+
+.composer-plan-mode-remove-icon {
+  opacity: 0;
+  transform: scale(0.72);
+}
+
+.composer-plan-mode-chip:hover .composer-plan-mode-default-icon,
+.composer-plan-mode-chip:focus-visible .composer-plan-mode-default-icon {
+  opacity: 0;
+  transform: scale(0.72);
+}
+
+.composer-plan-mode-chip:hover .composer-plan-mode-remove-icon,
+.composer-plan-mode-chip:focus-visible .composer-plan-mode-remove-icon {
+  opacity: 1;
+  transform: scale(1);
 }
 
 .composer-skill-icon {
@@ -537,6 +656,12 @@ html[data-color-scheme="light"] [data-component="floating-popover-content"].comp
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.composer-branch-refresh {
+  width: calc(100% - 20px);
+  margin: 0 10px 6px;
+  justify-content: flex-start;
 }
 
 .project-git-initial-fields {

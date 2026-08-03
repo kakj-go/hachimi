@@ -433,15 +433,18 @@ fn run_canary(
     cwd: &Path,
     arguments: &[&str],
 ) -> std::io::Result<std::process::ExitStatus> {
-    std::process::Command::new(launcher)
-        .arg("--")
-        .arg(canary)
-        .args(arguments)
-        .current_dir(cwd)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
+    hachimi_process_policy::std_command(
+        launcher,
+        hachimi_process_policy::ProcessPolicy::HiddenCaptured,
+    )
+    .arg("--")
+    .arg(canary)
+    .args(arguments)
+    .current_dir(cwd)
+    .stdin(Stdio::null())
+    .stdout(Stdio::null())
+    .stderr(Stdio::null())
+    .status()
 }
 
 fn read_marker(marker_path: &Path) -> Result<SandboxSetupMarker, SandboxCapabilityReport> {

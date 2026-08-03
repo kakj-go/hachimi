@@ -347,7 +347,7 @@ async fn mock_provider_drives_real_worker_and_persists_evidence_across_restart()
             .iter()
             .any(|item| matches!(
                 &item.payload,
-                hachimi_protocol::ItemPayload::Assistant { text }
+                hachimi_protocol::ItemPayload::Assistant { text, .. }
                     if text == &outcome.final_text
             ))
     );

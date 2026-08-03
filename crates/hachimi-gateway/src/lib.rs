@@ -1,5 +1,3 @@
-//! Durable local Channel/Gateway host. This crate owns transport ledgers, never an Agent loop.
-
 mod enterprise_provider;
 mod provider;
 mod sidecar_provider;
@@ -1442,20 +1440,26 @@ fn update_user_startup(executable: &Path, enabled: bool) -> Result<(), GatewayEr
         ));
     }
     if !enabled {
-        let existing = std::process::Command::new("reg.exe")
-            .args([
-                "QUERY",
-                r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run",
-                "/v",
-                "HachimiGateway",
-            ])
-            .output()
-            .map_err(|error| GatewayError::StartupRegistration(error.to_string()))?;
+        let existing = hachimi_process_policy::std_command(
+            "reg.exe",
+            hachimi_process_policy::ProcessPolicy::HiddenCaptured,
+        )
+        .args([
+            "QUERY",
+            r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run",
+            "/v",
+            "HachimiGateway",
+        ])
+        .output()
+        .map_err(|error| GatewayError::StartupRegistration(error.to_string()))?;
         if !existing.status.success() {
             return Ok(());
         }
     }
-    let mut command = std::process::Command::new("reg.exe");
+    let mut command = hachimi_process_policy::std_command(
+        "reg.exe",
+        hachimi_process_policy::ProcessPolicy::HiddenCaptured,
+    );
     command.args([
         if enabled { "ADD" } else { "DELETE" },
         r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run",
@@ -1664,15 +1668,18 @@ mod tests {
             .await
             .expect("register per-user startup");
         assert!(enabled.startup_registered);
-        let query = std::process::Command::new("reg.exe")
-            .args([
-                "QUERY",
-                r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run",
-                "/v",
-                "HachimiGateway",
-            ])
-            .output()
-            .expect("query per-user startup");
+        let query = hachimi_process_policy::std_command(
+            "reg.exe",
+            hachimi_process_policy::ProcessPolicy::HiddenCaptured,
+        )
+        .args([
+            "QUERY",
+            r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run",
+            "/v",
+            "HachimiGateway",
+        ])
+        .output()
+        .expect("query per-user startup");
         assert!(query.status.success());
         let value = String::from_utf8_lossy(&query.stdout);
         assert!(value.contains(&executable.to_string_lossy().into_owned()));
@@ -1683,15 +1690,18 @@ mod tests {
             .await
             .expect("remove per-user startup");
         assert!(!disabled.startup_registered);
-        let absent = std::process::Command::new("reg.exe")
-            .args([
-                "QUERY",
-                r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run",
-                "/v",
-                "HachimiGateway",
-            ])
-            .output()
-            .expect("query removed startup");
+        let absent = hachimi_process_policy::std_command(
+            "reg.exe",
+            hachimi_process_policy::ProcessPolicy::HiddenCaptured,
+        )
+        .args([
+            "QUERY",
+            r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run",
+            "/v",
+            "HachimiGateway",
+        ])
+        .output()
+        .expect("query removed startup");
         assert!(!absent.status.success());
     }
 

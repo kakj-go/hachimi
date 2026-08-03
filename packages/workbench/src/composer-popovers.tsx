@@ -22,10 +22,11 @@ import {
   Paperclip,
   Plus,
   RefreshCw,
-  ShieldAlert,
   ShieldCheck,
   ShieldOff,
   Sparkles,
+  Tooltip,
+  X,
 } from "@hachimi/ui";
 import { For, Show, type JSX } from "solid-js";
 
@@ -36,13 +37,15 @@ interface PopoverStateProps {
   onOpenChange: (id: ComposerPopoverId, open: boolean) => void;
 }
 
+type MenuRowTone = "neutral" | "recommended" | "danger";
+
 function MenuRow(props: {
   icon: JSX.Element;
   label: string;
   description?: string;
   selected?: boolean;
   disabled?: boolean;
-  warning?: boolean;
+  tone?: MenuRowTone;
   testId?: string;
   onSelect: () => void;
 }) {
@@ -50,7 +53,8 @@ function MenuRow(props: {
     <Button
       type="button"
       class="composer-popover-row"
-      classList={{ selected: props.selected, warning: props.warning }}
+      classList={{ selected: props.selected }}
+      data-tone={props.tone ?? "neutral"}
       data-testid={props.testId}
       disabled={props.disabled ?? false}
       aria-pressed={props.selected ?? false}
@@ -198,31 +202,33 @@ export function ComposerContextControls(
         </div>
       </FloatingPopover>
 
-      <div class="composer-git-state" data-testid="workbench-project-git-state">
-        <GitBranch size={15} aria-hidden="true" />
-        <span>{gitLabel()}</span>
-        <Show when={props.gitSnapshot?.state.kind === "unborn"}>
+      <Show when={props.executionKind === "local"}>
+        <div class="composer-git-state" data-testid="workbench-project-git-state">
+          <GitBranch size={15} aria-hidden="true" />
+          <span>{gitLabel()}</span>
+          <Show when={props.gitSnapshot?.state.kind === "unborn"}>
+            <Button
+              type="button"
+              variant="ghost"
+              size="small"
+              data-testid="project-git-create-initial"
+              onClick={props.onCreateInitialCommit}
+            >
+              {copy("创建首提", "Create initial commit")}
+            </Button>
+          </Show>
           <Button
             type="button"
             variant="ghost"
             size="small"
-            data-testid="project-git-create-initial"
-            onClick={props.onCreateInitialCommit}
+            aria-label={copy("刷新 Git 状态", "Refresh Git status")}
+            disabled={props.gitLoading || !props.selectedProject}
+            onClick={props.onRefreshGit}
           >
-            {copy("创建首提", "Create initial commit")}
+            <RefreshCw size={14} classList={{ "is-spinning": props.gitLoading }} />
           </Button>
-        </Show>
-        <Button
-          type="button"
-          variant="ghost"
-          size="small"
-          aria-label={copy("刷新 Git 状态", "Refresh Git status")}
-          disabled={props.gitLoading || !props.selectedProject}
-          onClick={props.onRefreshGit}
-        >
-          <RefreshCw size={14} classList={{ "is-spinning": props.gitLoading }} />
-        </Button>
-      </div>
+        </div>
+      </Show>
 
       <Show when={props.executionKind === "managed_worktree"}>
         <FloatingPopover
@@ -242,6 +248,17 @@ export function ComposerContextControls(
           }
         >
           <div class="composer-popover-heading">{i18n.t("workbench.branchPopoverTitle")}</div>
+          <Button
+            type="button"
+            variant="ghost"
+            size="small"
+            class="composer-branch-refresh"
+            disabled={props.gitLoading || !props.selectedProject}
+            onClick={props.onRefreshGit}
+          >
+            <RefreshCw size={14} classList={{ "is-spinning": props.gitLoading }} />
+            {copy("刷新分支", "Refresh branches")}
+          </Button>
           <div class="composer-popover-list composer-branch-list" role="listbox">
             <For each={props.gitRefs}>
               {(entry) => (
@@ -273,7 +290,7 @@ export function ComposerOptionsPopover(
     skillsLoading: boolean;
     skillsError: string | undefined;
     selectedSkillIds: string[];
-    onChooseAttachments: (kind: "files" | "folder") => void;
+    onChooseAttachments: () => void;
     onTogglePlanMode: () => void;
     onToggleSkill: (skillId: string) => void;
   },
@@ -299,7 +316,7 @@ export function ComposerOptionsPopover(
             type="button"
             class="composer-attachment-file-button"
             data-testid="workbench-add-attachment"
-            onClick={() => props.onChooseAttachments("files")}
+            onClick={props.onChooseAttachments}
           >
             <span class="composer-popover-row-icon" aria-hidden="true">
               <Paperclip size={18} />
@@ -308,17 +325,6 @@ export function ComposerOptionsPopover(
               <strong>{i18n.t("workbench.addAttachment")}</strong>
               <small>{i18n.t("workbench.addAttachmentDescription")}</small>
             </span>
-          </Button>
-          <Button
-            type="button"
-            class="composer-attachment-folder-button"
-            data-testid="workbench-add-folder"
-            aria-label={i18n.t("workbench.chooseFolder")}
-            title={i18n.t("workbench.chooseFolder")}
-            onClick={() => props.onChooseAttachments("folder")}
-          >
-            <FolderOpen size={14} />
-            <span>{i18n.t("workbench.folder")}</span>
           </Button>
         </div>
         <MenuRow
@@ -396,26 +402,28 @@ export function ApprovalPolicyPopover(
     icon: JSX.Element;
     label: string;
     description: string;
-    warning?: boolean;
+    tone: MenuRowTone;
   }> = [
     {
       value: "always_ask_side_effects",
       icon: <Hand size={18} />,
       label: i18n.t("workbench.approvalAlwaysAsk"),
       description: i18n.t("workbench.approvalAlwaysAskDescription"),
+      tone: "neutral",
     },
     {
       value: "only_when_needed",
       icon: <ShieldCheck size={18} />,
       label: i18n.t("workbench.approvalOnlyWhenNeeded"),
       description: i18n.t("workbench.approvalOnlyWhenNeededDescription"),
+      tone: "recommended",
     },
     {
       value: "never_prompt",
       icon: <ShieldOff size={18} />,
       label: i18n.t("workbench.approvalNeverPrompt"),
       description: i18n.t("workbench.approvalNeverPromptDescription"),
-      warning: true,
+      tone: "danger",
     },
   ];
   const selected = () => policies.find((policy) => policy.value === props.value) ?? policies[1]!;
@@ -425,13 +433,13 @@ export function ApprovalPolicyPopover(
       open={props.activePopover === "approval"}
       onOpenChange={(open) => props.onOpenChange("approval", open)}
       label={i18n.t("workbench.approvalPolicy")}
-      triggerClass="composer-approval-trigger composer-policy"
+      triggerClass={`composer-approval-trigger composer-policy policy-${selected().tone}`}
       triggerTestId="workbench-approval-policy"
       contentClass="composer-popover composer-approval-popover"
       contentTestId="workbench-approval-popover"
       trigger={
         <>
-          <ShieldAlert size={17} />
+          {selected().icon}
           <span>{selected().label}</span>
           <ChevronDown class="composer-trigger-chevron" size={13} aria-hidden="true" />
         </>
@@ -446,7 +454,8 @@ export function ApprovalPolicyPopover(
               label={policy.label}
               description={policy.description}
               selected={props.value === policy.value}
-              warning={policy.warning ?? false}
+              tone={policy.tone}
+              testId={`workbench-approval-policy-${policy.value}`}
               onSelect={() => {
                 props.onChange(policy.value);
                 props.onOpenChange("approval", false);
@@ -456,6 +465,32 @@ export function ApprovalPolicyPopover(
         </For>
       </div>
     </FloatingPopover>
+  );
+}
+
+export function PlanModeChip(props: { onDisable: () => void }) {
+  const i18n = useI18n();
+  const disableLabel = () => i18n.t("workbench.disablePlanMode");
+
+  return (
+    <>
+      <span class="composer-options-divider" aria-hidden="true" />
+      <Tooltip label={disableLabel()}>
+        <Button
+          type="button"
+          class="composer-plan-mode-chip"
+          data-testid="workbench-plan-mode-chip"
+          aria-label={disableLabel()}
+          onClick={props.onDisable}
+        >
+          <span class="composer-plan-mode-icon" aria-hidden="true">
+            <Lightbulb class="composer-plan-mode-default-icon" size={17} />
+            <X class="composer-plan-mode-remove-icon" size={16} />
+          </span>
+          <span>{i18n.t("workbench.planModeChip")}</span>
+        </Button>
+      </Tooltip>
+    </>
   );
 }
 

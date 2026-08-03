@@ -1,10 +1,14 @@
 //! Project, Checkout and task-draft services for the coding Workbench.
 
 mod attachment_host;
+mod environment;
+mod git_mutation;
+mod handoff;
 
 pub use attachment_host::AttachmentModelContext;
 
 use std::{
+    collections::BTreeSet,
     fs::{File, OpenOptions},
     io::{Read, Write},
     path::{Path, PathBuf},
@@ -12,23 +16,27 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 use hachimi_agent::{AgentRunCreateRequest, AgentRunFactory, AgentRunFactoryError};
+use hachimi_process_policy::{ProcessPolicy, tokio_command};
 use hachimi_protocol::{
     AttachmentId, AttachmentRecord, CheckoutId, CheckoutKind, CheckoutRecord, CheckoutStatus,
     EntryProfile, ExecutionTarget, GitRefRecord, ItemId, ItemPayload, ItemRelations, ItemStatus,
-    LlmSettings, PermissionProfile, PlanAcceptanceRequest, ProjectId, ProjectRecord,
-    ProviderCapabilities, RunBudget, RunId, RunOrigin, RunPurpose, RunRecord, RunStatus,
-    SessionContextBinding, SessionId, SessionRecord, TranscriptItem, TranscriptItemKind,
-    WorkbenchPlanAcceptanceSnapshot, WorkbenchSessionSnapshot, WorkbenchTaskSnapshot,
-    WorkbenchTaskStartRequest, WorkloadKind,
+    LlmSettings, PermissionProfile, PlanAcceptanceRequest, PlanRevisionRequest, ProjectId,
+    ProjectRecord, ProviderCapabilities, RunBudget, RunId, RunOrigin, RunPurpose, RunRecord,
+    RunStatus, SessionContextBinding, SessionId, TranscriptItem, TranscriptItemKind,
+    WorkbenchAttachmentPreview, WorkbenchGitAction, WorkbenchGitPhaseResult,
+    WorkbenchGitPhaseStatus, WorkbenchGitRequest, WorkbenchGitResponse,
+    WorkbenchPlanAcceptanceSnapshot, WorkbenchSessionListItem, WorkbenchSessionSnapshot,
+    WorkbenchTaskSnapshot, WorkbenchTaskStartRequest, WorkloadKind,
 };
-use hachimi_storage::{AgentStore, AgentStoreError};
+use hachimi_storage::{AgentStore, AgentStoreError, IdempotentMutationClaim};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
-use tokio::process::Command;
 use tokio_util::sync::CancellationToken;
 
 const MAX_ATTACHMENT_BYTES: u64 = 25 * 1024 * 1024;
+const MAX_ATTACHMENT_PREVIEW_BYTES: usize = 4 * 1024 * 1024;
 
 #[derive(Debug, Error)]
 pub enum WorkbenchError {
@@ -58,10 +66,22 @@ pub enum WorkbenchError {
     EmptyRevision,
     #[error("Git command failed: {0}")]
     Git(String),
+    #[error("Git HEAD changed since the operation was prepared")]
+    GitHeadChanged,
+    #[error("Git status changed since the operation was prepared")]
+    GitStatusChanged,
+    #[error("cannot switch branches while the checkout has uncommitted changes")]
+    GitCheckoutDirty,
+    #[error("Git action idempotency key must contain 1-128 bytes")]
+    InvalidGitIdempotencyKey,
+    #[error("the matching Git action is still in progress; refresh before retrying")]
+    GitActionIndeterminate,
     #[error("workbench operation was cancelled")]
     Cancelled,
     #[error("task prompt must contain 1-32000 characters")]
     InvalidPrompt,
+    #[error("the proposed plan revision changed; refresh before continuing")]
+    StalePlanRevision,
     #[error("attachment must be a regular file with a usable name")]
     InvalidAttachmentFile,
     #[error("attachment exceeds the {MAX_ATTACHMENT_BYTES} byte limit")]
@@ -84,6 +104,18 @@ pub enum WorkbenchError {
     CheckoutDirty,
     #[error("managed worktree path is outside the configured worktree root")]
     CheckoutOutsideManagedRoot,
+    #[error("the requested Handoff target does not differ from the active checkout")]
+    InvalidHandoffTarget,
+    #[error("Handoff preconditions changed; refresh the environment before retrying")]
+    HandoffPreconditionFailed,
+    #[error("the Handoff target contains changes that were not created by this Session")]
+    HandoffTargetChanged,
+    #[error("the Handoff Git histories cannot be moved with a fast-forward")]
+    HandoffHistoryDiverged,
+    #[error("Handoff failed and the original checkout was restored: {0}")]
+    HandoffFailed(String),
+    #[error("Handoff snapshot serialization failed: {0}")]
+    HandoffSnapshotJson(#[from] serde_json::Error),
 }
 
 #[derive(Debug, Clone)]
@@ -136,6 +168,39 @@ impl WorkbenchService {
         attachment_host::load_attachment_model_context(self.attachment_root.clone(), attachments)
             .await
             .map_err(WorkbenchError::Worker)
+    }
+
+    pub async fn attachment_preview(
+        &self,
+        attachment_id: &AttachmentId,
+    ) -> Result<WorkbenchAttachmentPreview, WorkbenchError> {
+        let attachment = self
+            .store
+            .get_attachment(attachment_id)
+            .await?
+            .ok_or_else(|| AgentStoreError::AttachmentNotFound(attachment_id.clone()))?;
+        let path = self.attachment_root.join(&attachment.content_hash);
+        let bytes = tokio::fs::read(path)
+            .await
+            .map_err(|error| WorkbenchError::Worker(error.to_string()))?;
+        let truncated = bytes.len() > MAX_ATTACHMENT_PREVIEW_BYTES;
+        let preview = &bytes[..bytes.len().min(MAX_ATTACHMENT_PREVIEW_BYTES)];
+        let utf8_text = is_text_mime(&attachment.mime_type)
+            .then(|| std::str::from_utf8(preview).ok().map(str::to_owned))
+            .flatten();
+        let data_url = attachment.mime_type.starts_with("image/").then(|| {
+            format!(
+                "data:{};base64,{}",
+                attachment.mime_type,
+                STANDARD.encode(preview)
+            )
+        });
+        Ok(WorkbenchAttachmentPreview {
+            attachment,
+            utf8_text,
+            data_url,
+            truncated,
+        })
     }
 
     pub async fn add_project(
@@ -198,8 +263,8 @@ impl WorkbenchService {
     pub async fn sessions(
         &self,
         project_id: Option<&ProjectId>,
-    ) -> Result<Vec<SessionRecord>, WorkbenchError> {
-        Ok(self.store.list_sessions(project_id).await?)
+    ) -> Result<Vec<WorkbenchSessionListItem>, WorkbenchError> {
+        Ok(self.store.list_workbench_session_items(project_id).await?)
     }
 
     pub async fn session_snapshot(
@@ -211,9 +276,28 @@ impl WorkbenchService {
             .get_session(session_id)
             .await?
             .ok_or_else(|| WorkbenchError::SessionNotFound(session_id.clone()))?;
+        let checkout = match session.context.checkout_id() {
+            Some(checkout_id) => self.store.get_checkout(checkout_id).await?,
+            None => None,
+        };
         let runs = self.store.list_runs(session_id).await?;
         let events = self.store.list_events(session_id, 0).await?;
         let transcript = self.store.list_transcript(session_id).await?;
+        let attachment_ids = transcript
+            .iter()
+            .filter_map(|item| match &item.payload {
+                ItemPayload::User { attachment_ids, .. } => Some(attachment_ids),
+                _ => None,
+            })
+            .flatten()
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        let mut attachments = Vec::with_capacity(attachment_ids.len());
+        for attachment_id in attachment_ids {
+            if let Some(attachment) = self.store.get_attachment(&attachment_id).await? {
+                attachments.push(attachment);
+            }
+        }
         let pending_approvals = self
             .store
             .list_pending_approvals()
@@ -224,15 +308,23 @@ impl WorkbenchService {
         let proposed_plans = self.store.list_proposed_plans(session_id).await?;
         let artifacts = self.store.list_session_artifacts(session_id).await?;
         let agent_tasks = self.store.list_agent_tasks_for_session(session_id).await?;
+        let run_summaries = self.store.list_run_summaries(session_id).await?;
+        let browser_sessions = self.store.list_session_browser_sessions(session_id).await?;
+        let sources = self.store.list_session_sources(session_id).await?;
         Ok(WorkbenchSessionSnapshot {
             session,
+            checkout,
             runs,
             events,
             transcript,
+            attachments,
             pending_approvals,
             proposed_plans,
             artifacts,
             agent_tasks,
+            run_summaries,
+            browser_sessions,
+            sources,
         })
     }
 
@@ -247,6 +339,13 @@ impl WorkbenchService {
             .get_proposed_plan(&request.plan_id)
             .await?
             .ok_or_else(|| AgentStoreError::ProposedPlanNotFound(request.plan_id.clone()))?;
+        if plan.revision != request.expected_revision {
+            return Err(WorkbenchError::StalePlanRevision);
+        }
+        let user_message = request.user_message.trim();
+        if user_message.is_empty() || user_message.chars().count() > 200 {
+            return Err(WorkbenchError::InvalidPrompt);
+        }
         let source_run = self
             .store
             .get_run(&plan.run_id)
@@ -321,10 +420,7 @@ impl WorkbenchService {
                     kind: TranscriptItemKind::User,
                     status: ItemStatus::Completed,
                     payload: ItemPayload::User {
-                        text: format!(
-                            "Accepted proposed plan revision {} for execution.",
-                            accepted_plan.revision
-                        ),
+                        text: user_message.to_owned(),
                         attachment_ids: Vec::new(),
                     },
                     relations: ItemRelations::default(),
@@ -341,6 +437,91 @@ impl WorkbenchService {
                 run,
             },
         })
+    }
+
+    pub async fn revise_plan(
+        &self,
+        request: &PlanRevisionRequest,
+        model_snapshot: LlmSettings,
+        principal: &str,
+        cancellation: &CancellationToken,
+    ) -> Result<WorkbenchTaskSnapshot, WorkbenchError> {
+        let plan = self
+            .store
+            .get_proposed_plan(&request.plan_id)
+            .await?
+            .ok_or_else(|| AgentStoreError::ProposedPlanNotFound(request.plan_id.clone()))?;
+        if plan.status != hachimi_protocol::ProposedPlanStatus::Proposed
+            || plan.revision != request.expected_revision
+        {
+            return Err(WorkbenchError::StalePlanRevision);
+        }
+        let instructions = request.instructions.trim();
+        if instructions.is_empty() || instructions.chars().count() > 32_000 {
+            return Err(WorkbenchError::InvalidPrompt);
+        }
+        let session = self
+            .store
+            .get_session(&plan.session_id)
+            .await?
+            .ok_or_else(|| WorkbenchError::SessionNotFound(plan.session_id.clone()))?;
+        let source_run = self
+            .store
+            .get_run(&plan.run_id)
+            .await?
+            .ok_or_else(|| AgentStoreError::RunNotFound(plan.run_id.clone()))?;
+        let (project_id, execution_target) = match &session.context {
+            SessionContextBinding::Project {
+                project_id,
+                checkout_id,
+            } => {
+                let checkout = self
+                    .store
+                    .get_checkout(checkout_id)
+                    .await?
+                    .ok_or_else(|| WorkbenchError::CheckoutNotFound(checkout_id.clone()))?;
+                let target = match checkout.kind {
+                    CheckoutKind::Local => ExecutionTarget::Local {
+                        project_id: project_id.clone(),
+                    },
+                    CheckoutKind::ManagedWorktree => ExecutionTarget::ManagedWorktree {
+                        project_id: project_id.clone(),
+                        base_revision: checkout.base_revision.unwrap_or_default(),
+                    },
+                };
+                (Some(project_id.clone()), Some(target))
+            }
+            SessionContextBinding::General => (None, None),
+            SessionContextBinding::Avatar { .. } => {
+                return Err(WorkbenchError::SessionContextMismatch);
+            }
+        };
+        let attachment_ids = self
+            .store
+            .list_run_managed_attachments(&plan.run_id)
+            .await?
+            .into_iter()
+            .map(|record| record.attachment.id)
+            .collect();
+        self.create_task(
+            &WorkbenchTaskStartRequest {
+                idempotency_key: request.idempotency_key.clone(),
+                entry_profile: session.entry_profile,
+                session_id: Some(session.id),
+                project_id,
+                prompt: instructions.to_owned(),
+                execution_target,
+                behavior_mode: hachimi_protocol::BehaviorMode::Plan,
+                approval_policy: source_run.configuration.approval_policy,
+                attachment_ids,
+                skill_ids: Vec::new(),
+            },
+            model_snapshot,
+            principal,
+            &request.idempotency_key,
+            cancellation,
+        )
+        .await
     }
 
     pub async fn git_refs(
@@ -388,6 +569,171 @@ impl WorkbenchService {
             (!reference.current, reference.remote, reference.name.clone())
         });
         Ok(refs)
+    }
+
+    pub async fn execute_git(
+        &self,
+        request: &WorkbenchGitRequest,
+        principal: &str,
+        generated_message: Option<&str>,
+    ) -> Result<WorkbenchGitResponse, WorkbenchError> {
+        if request.idempotency_key.trim().is_empty() || request.idempotency_key.len() > 128 {
+            return Err(WorkbenchError::InvalidGitIdempotencyKey);
+        }
+        let request_hash = sha256_text(
+            &serde_json::to_string(request).expect("Workbench Git requests are serializable"),
+        );
+        match self
+            .store
+            .claim_idempotent_mutation::<WorkbenchGitResponse>(
+                principal,
+                "workbench.git.execute",
+                &request.idempotency_key,
+                &request_hash,
+                now_ms(),
+            )
+            .await?
+        {
+            IdempotentMutationClaim::Completed(response) => return Ok(response),
+            IdempotentMutationClaim::Indeterminate => {
+                return Err(WorkbenchError::GitActionIndeterminate);
+            }
+            IdempotentMutationClaim::Claimed => {}
+        }
+        let result = self.execute_git_claimed(request, generated_message).await;
+        match &result {
+            Ok(response) => {
+                self.store
+                    .complete_idempotent_mutation(
+                        principal,
+                        "workbench.git.execute",
+                        &request.idempotency_key,
+                        response,
+                    )
+                    .await?;
+            }
+            Err(_) => {
+                self.store
+                    .abandon_idempotent_mutation(
+                        principal,
+                        "workbench.git.execute",
+                        &request.idempotency_key,
+                    )
+                    .await?;
+            }
+        }
+        result
+    }
+
+    async fn execute_git_claimed(
+        &self,
+        request: &WorkbenchGitRequest,
+        generated_message: Option<&str>,
+    ) -> Result<WorkbenchGitResponse, WorkbenchError> {
+        let session = self
+            .store
+            .get_session(&request.session_id)
+            .await?
+            .ok_or_else(|| WorkbenchError::SessionNotFound(request.session_id.clone()))?;
+        if session.context.checkout_id() != Some(&request.checkout_id) {
+            return Err(WorkbenchError::SessionContextMismatch);
+        }
+        let checkout = self
+            .store
+            .get_checkout(&request.checkout_id)
+            .await?
+            .ok_or_else(|| WorkbenchError::CheckoutNotFound(request.checkout_id.clone()))?;
+        let root = Path::new(&checkout.path);
+        let head = git_optional(root, &["rev-parse", "HEAD"]).await?;
+        if request.expected_head.as_deref() != head.as_deref() {
+            return Err(WorkbenchError::GitHeadChanged);
+        }
+        let status = git_required(root, &["status", "--porcelain=v1", "-z"], None).await?;
+        let fingerprint = sha256_text(&status);
+        if request.status_fingerprint != fingerprint {
+            return Err(WorkbenchError::GitStatusChanged);
+        }
+        let latest_run = self
+            .store
+            .list_runs(&request.session_id)
+            .await?
+            .into_iter()
+            .last()
+            .ok_or_else(|| WorkbenchError::SessionNotFound(request.session_id.clone()))?;
+        if request.context.expected_run_id.as_ref() != Some(&latest_run.id)
+            || request.context.expected_generation != Some(latest_run.generation)
+        {
+            return Err(WorkbenchError::SessionContextMismatch);
+        }
+        let skipped = || WorkbenchGitPhaseResult {
+            status: WorkbenchGitPhaseStatus::Skipped,
+            message: None,
+        };
+        let mut stage = skipped();
+        let mut commit = skipped();
+
+        match &request.action {
+            WorkbenchGitAction::Commit { message } => {
+                if request.include_unstaged {
+                    match git_required(root, &["add", "-A"], None).await {
+                        Ok(_) => stage = git_phase_ok("staged working tree changes"),
+                        Err(error) => stage = git_phase_failed(error.to_string()),
+                    }
+                }
+                if stage.status != WorkbenchGitPhaseStatus::Failed {
+                    let message = message
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty())
+                        .map(str::to_owned)
+                        .or_else(|| {
+                            generated_message
+                                .map(str::trim)
+                                .filter(|value| !value.is_empty())
+                                .map(str::to_owned)
+                        })
+                        .unwrap_or_else(|| deterministic_commit_message(&status));
+                    match git_required(root, &["commit", "-m", &message], None).await {
+                        Ok(output) => commit = git_phase_ok(output.trim()),
+                        Err(error) => commit = git_phase_failed(error.to_string()),
+                    }
+                }
+            }
+            WorkbenchGitAction::SwitchBranch { branch, remote } => {
+                if !status.is_empty() {
+                    return Err(WorkbenchError::GitCheckoutDirty);
+                }
+                stage = git_mutation::switch_branch(root, branch, *remote).await?;
+                if stage.status == WorkbenchGitPhaseStatus::Succeeded {
+                    let new_head = git_optional(root, &["rev-parse", "HEAD"]).await?;
+                    self.store
+                        .update_session_environment_baseline(
+                            &request.session_id,
+                            new_head.as_deref(),
+                        )
+                        .await?;
+                }
+            }
+            WorkbenchGitAction::CreateBranch { branch } => {
+                stage = git_mutation::create_branch(root, branch).await?;
+            }
+        }
+        let final_head = git_optional(root, &["rev-parse", "HEAD"]).await?;
+        let final_status = git_required(root, &["status", "--porcelain=v1", "-z"], None).await?;
+        let branch = git_optional(root, &["symbolic-ref", "--quiet", "--short", "HEAD"])
+            .await?
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty());
+        self.store
+            .bump_session_environment_revision(&request.session_id)
+            .await?;
+        Ok(WorkbenchGitResponse {
+            stage,
+            commit,
+            head: final_head,
+            status_fingerprint: sha256_text(&final_status),
+            branch,
+        })
     }
 
     pub async fn prepare_checkout(
@@ -710,6 +1056,28 @@ impl WorkbenchService {
                 .upsert_desktop_control_session(&created.session.id, now)
                 .await?;
         }
+        if let Some(checkout) = checkout.as_ref() {
+            self.store
+                .ensure_session_environment_state(
+                    &created.session.id,
+                    &checkout.id,
+                    checkout.kind,
+                    checkout.head_revision.as_deref(),
+                )
+                .await?;
+        }
+        for attachment_id in &request.attachment_ids {
+            if let Some(attachment) = self.store.get_attachment(attachment_id).await? {
+                self.store
+                    .upsert_session_upload_source(
+                        &created.session.id,
+                        Some(&created.run.id),
+                        attachment_id,
+                        &attachment.original_name,
+                    )
+                    .await?;
+            }
+        }
         Ok(WorkbenchTaskSnapshot {
             project,
             checkout,
@@ -812,8 +1180,39 @@ fn attachment_mime_type(name: &str) -> &'static str {
     }
 }
 
+fn sha256_text(value: &str) -> String {
+    Sha256::digest(value.as_bytes())
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+fn deterministic_commit_message(status: &str) -> String {
+    let files = status.split('\0').filter(|entry| !entry.is_empty()).count();
+    if files == 1 {
+        "Update 1 file".into()
+    } else {
+        format!("Update {files} files")
+    }
+}
+
+fn git_phase_ok(message: impl Into<String>) -> WorkbenchGitPhaseResult {
+    let message = message.into();
+    WorkbenchGitPhaseResult {
+        status: WorkbenchGitPhaseStatus::Succeeded,
+        message: (!message.is_empty()).then_some(message),
+    }
+}
+
+fn git_phase_failed(message: impl Into<String>) -> WorkbenchGitPhaseResult {
+    WorkbenchGitPhaseResult {
+        status: WorkbenchGitPhaseStatus::Failed,
+        message: Some(message.into()),
+    }
+}
+
 async fn git_optional(root: &Path, args: &[&str]) -> Result<Option<String>, WorkbenchError> {
-    let output = Command::new("git")
+    let output = tokio_command("git", ProcessPolicy::HiddenCaptured)
         .arg("-C")
         .arg(root)
         .args(args)
@@ -833,7 +1232,7 @@ async fn git_required(
     args: &[&str],
     cancellation: Option<&CancellationToken>,
 ) -> Result<String, WorkbenchError> {
-    let mut command = Command::new("git");
+    let mut command = tokio_command("git", ProcessPolicy::HiddenCaptured);
     command
         .arg("-C")
         .arg(root)
@@ -870,6 +1269,18 @@ fn now_ms() -> i64 {
     i64::try_from(millis).unwrap_or(i64::MAX)
 }
 
+fn is_text_mime(mime: &str) -> bool {
+    mime.starts_with("text/")
+        || matches!(
+            mime,
+            "application/json"
+                | "application/javascript"
+                | "application/xml"
+                | "application/yaml"
+                | "application/toml"
+        )
+}
+
 fn requested_provider_capabilities(settings: &LlmSettings) -> ProviderCapabilities {
     let structured =
         settings.structured_output_mode != hachimi_protocol::StructuredOutputMode::Disabled;
@@ -891,7 +1302,9 @@ fn requested_provider_capabilities(settings: &LlmSettings) -> ProviderCapabiliti
 
 #[cfg(test)]
 mod tests {
-    use hachimi_protocol::{PlanStep, PlanStepId, PlanStepStatus};
+    use hachimi_protocol::{
+        ClientId, MutationContext, PlanStep, PlanStepId, PlanStepStatus, RequestId,
+    };
 
     use std::process::Command as StdCommand;
 
@@ -910,6 +1323,17 @@ mod tests {
             .status()
             .expect("git");
         assert!(status.success());
+    }
+
+    fn mutation_context(run: &RunRecord, idempotency_key: &str) -> MutationContext {
+        MutationContext {
+            request_id: RequestId(format!("request-{idempotency_key}")),
+            client_id: ClientId("test-user".into()),
+            protocol_version: 1,
+            idempotency_key: idempotency_key.into(),
+            expected_run_id: Some(run.id.clone()),
+            expected_generation: Some(run.generation),
+        }
     }
 
     #[tokio::test]
@@ -1029,6 +1453,8 @@ mod tests {
         let acceptance_request = PlanAcceptanceRequest {
             idempotency_key: "accept-1".into(),
             plan_id: plan.id,
+            expected_revision: plan.revision,
+            user_message: "Yes, implement this plan".into(),
         };
         let accepted = service
             .accept_plan(&acceptance_request, LlmSettings::default(), "test-user")
@@ -1055,6 +1481,314 @@ mod tests {
             .await
             .expect("idempotent accept");
         assert_eq!(duplicate.task.run.id, accepted.task.run.id);
+        let confirmation_messages = service
+            .store()
+            .list_transcript(&accepted.task.session.id)
+            .await
+            .expect("accepted plan transcript")
+            .into_iter()
+            .filter(|item| item.run_id.as_ref() == Some(&accepted.task.run.id))
+            .filter_map(|item| match item.payload {
+                ItemPayload::User { text, .. } => Some(text),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(confirmation_messages, ["Yes, implement this plan"]);
+    }
+
+    #[tokio::test]
+    async fn high_level_git_rejects_stale_state_and_replays_local_commit() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        git(directory.path(), &["init", "-b", "main"]);
+        git(
+            directory.path(),
+            &["config", "user.email", "test@example.com"],
+        );
+        git(directory.path(), &["config", "user.name", "Hachimi Test"]);
+        std::fs::write(directory.path().join("README.md"), "initial\n").expect("file");
+        git(directory.path(), &["add", "README.md"]);
+        git(directory.path(), &["commit", "-m", "initial"]);
+
+        let store = AgentStore::connect_in_memory().await.expect("store");
+        let worktrees = tempfile::tempdir().expect("worktrees");
+        let attachments = tempfile::tempdir().expect("attachments");
+        let service = WorkbenchService::new(store, worktrees.path(), attachments.path());
+        let project = service
+            .add_project(directory.path())
+            .await
+            .expect("project");
+        let task = service
+            .create_task(
+                &WorkbenchTaskStartRequest {
+                    idempotency_key: "git-task".into(),
+                    entry_profile: EntryProfile::Workbench,
+                    session_id: None,
+                    project_id: Some(project.id.clone()),
+                    prompt: "Prepare Git changes".into(),
+                    execution_target: Some(ExecutionTarget::Local {
+                        project_id: project.id,
+                    }),
+                    behavior_mode: BehaviorMode::Default,
+                    approval_policy: ApprovalPolicy::OnlyWhenNeeded,
+                    attachment_ids: Vec::new(),
+                    skill_ids: Vec::new(),
+                },
+                LlmSettings::default(),
+                "test-user",
+                "git-task",
+                &CancellationToken::new(),
+            )
+            .await
+            .expect("task");
+        let checkout = task.checkout.expect("checkout");
+        std::fs::write(directory.path().join("README.md"), "changed\n").expect("change");
+        let head = git_optional(directory.path(), &["rev-parse", "HEAD"])
+            .await
+            .expect("head");
+        let status = git_required(directory.path(), &["status", "--porcelain=v1", "-z"], None)
+            .await
+            .expect("status");
+
+        let stale = service
+            .execute_git(
+                &WorkbenchGitRequest {
+                    context: mutation_context(&task.run, "stale-git-action"),
+                    idempotency_key: "stale-git-action".into(),
+                    session_id: task.session.id.clone(),
+                    checkout_id: checkout.id.clone(),
+                    expected_head: head.clone(),
+                    status_fingerprint: "stale".into(),
+                    include_unstaged: true,
+                    action: WorkbenchGitAction::Commit {
+                        message: Some("should not commit".into()),
+                    },
+                },
+                "test-user",
+                None,
+            )
+            .await;
+        assert!(matches!(stale, Err(WorkbenchError::GitStatusChanged)));
+
+        let action = WorkbenchGitRequest {
+            context: mutation_context(&task.run, "commit-action"),
+            idempotency_key: "commit-action".into(),
+            session_id: task.session.id,
+            checkout_id: checkout.id,
+            expected_head: head,
+            status_fingerprint: sha256_text(&status),
+            include_unstaged: true,
+            action: WorkbenchGitAction::Commit {
+                message: Some("update readme".into()),
+            },
+        };
+        let response = service
+            .execute_git(&action, "test-user", None)
+            .await
+            .expect("commit result");
+        assert_eq!(response.stage.status, WorkbenchGitPhaseStatus::Succeeded);
+        assert_eq!(response.commit.status, WorkbenchGitPhaseStatus::Succeeded);
+        let replay = service
+            .execute_git(&action, "test-user", None)
+            .await
+            .expect("idempotent replay");
+        assert_eq!(replay, response);
+    }
+
+    #[tokio::test]
+    async fn high_level_git_respects_staging_head_dirty_and_remote_tracking_fences() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        git(directory.path(), &["init", "-b", "main"]);
+        git(
+            directory.path(),
+            &["config", "user.email", "test@example.com"],
+        );
+        git(directory.path(), &["config", "user.name", "Hachimi Test"]);
+        std::fs::write(directory.path().join("README.md"), "initial\n").expect("file");
+        git(directory.path(), &["add", "README.md"]);
+        git(directory.path(), &["commit", "-m", "initial"]);
+
+        let store = AgentStore::connect_in_memory().await.expect("store");
+        let worktrees = tempfile::tempdir().expect("worktrees");
+        let attachments = tempfile::tempdir().expect("attachments");
+        let service = WorkbenchService::new(store, worktrees.path(), attachments.path());
+        let project = service
+            .add_project(directory.path())
+            .await
+            .expect("project");
+        let task = service
+            .create_task(
+                &WorkbenchTaskStartRequest {
+                    idempotency_key: "git-boundary-task".into(),
+                    entry_profile: EntryProfile::Workbench,
+                    session_id: None,
+                    project_id: Some(project.id.clone()),
+                    prompt: "Exercise Git boundaries".into(),
+                    execution_target: Some(ExecutionTarget::Local {
+                        project_id: project.id,
+                    }),
+                    behavior_mode: BehaviorMode::Default,
+                    approval_policy: ApprovalPolicy::OnlyWhenNeeded,
+                    attachment_ids: Vec::new(),
+                    skill_ids: Vec::new(),
+                },
+                LlmSettings::default(),
+                "test-user",
+                "git-boundary-task",
+                &CancellationToken::new(),
+            )
+            .await
+            .expect("task");
+        let checkout = task.checkout.expect("checkout");
+
+        std::fs::write(directory.path().join("staged.txt"), "staged\n").expect("staged");
+        std::fs::write(directory.path().join("unstaged.txt"), "unstaged\n").expect("unstaged");
+        git(directory.path(), &["add", "staged.txt"]);
+        let head = git_optional(directory.path(), &["rev-parse", "HEAD"])
+            .await
+            .expect("head");
+        let status = git_required(directory.path(), &["status", "--porcelain=v1", "-z"], None)
+            .await
+            .expect("status");
+        let staged_only = service
+            .execute_git(
+                &WorkbenchGitRequest {
+                    context: mutation_context(&task.run, "staged-only"),
+                    idempotency_key: "staged-only".into(),
+                    session_id: task.session.id.clone(),
+                    checkout_id: checkout.id.clone(),
+                    expected_head: head,
+                    status_fingerprint: sha256_text(&status),
+                    include_unstaged: false,
+                    action: WorkbenchGitAction::Commit {
+                        message: Some("commit staged only".into()),
+                    },
+                },
+                "test-user",
+                None,
+            )
+            .await
+            .expect("staged-only commit");
+        assert_eq!(staged_only.stage.status, WorkbenchGitPhaseStatus::Skipped);
+        assert_eq!(
+            staged_only.commit.status,
+            WorkbenchGitPhaseStatus::Succeeded
+        );
+        let committed = git_required(
+            directory.path(),
+            &["show", "--name-only", "--format="],
+            None,
+        )
+        .await
+        .expect("committed files");
+        assert!(committed.contains("staged.txt"));
+        assert!(!committed.contains("unstaged.txt"));
+        assert!(directory.path().join("unstaged.txt").exists());
+
+        let status = git_required(directory.path(), &["status", "--porcelain=v1", "-z"], None)
+            .await
+            .expect("status");
+        let include_unstaged = service
+            .execute_git(
+                &WorkbenchGitRequest {
+                    context: mutation_context(&task.run, "include-unstaged"),
+                    idempotency_key: "include-unstaged".into(),
+                    session_id: task.session.id.clone(),
+                    checkout_id: checkout.id.clone(),
+                    expected_head: staged_only.head,
+                    status_fingerprint: sha256_text(&status),
+                    include_unstaged: true,
+                    action: WorkbenchGitAction::Commit {
+                        message: Some("commit unstaged".into()),
+                    },
+                },
+                "test-user",
+                None,
+            )
+            .await
+            .expect("include unstaged commit");
+        assert_eq!(
+            include_unstaged.stage.status,
+            WorkbenchGitPhaseStatus::Succeeded
+        );
+        assert_eq!(
+            include_unstaged.commit.status,
+            WorkbenchGitPhaseStatus::Succeeded
+        );
+
+        std::fs::write(directory.path().join("dirty.txt"), "dirty\n").expect("dirty");
+        let current_head = git_optional(directory.path(), &["rev-parse", "HEAD"])
+            .await
+            .expect("head");
+        let dirty_status =
+            git_required(directory.path(), &["status", "--porcelain=v1", "-z"], None)
+                .await
+                .expect("dirty status");
+        let dirty_checkout = service
+            .execute_git(
+                &WorkbenchGitRequest {
+                    context: mutation_context(&task.run, "dirty-checkout"),
+                    idempotency_key: "dirty-checkout".into(),
+                    session_id: task.session.id.clone(),
+                    checkout_id: checkout.id.clone(),
+                    expected_head: current_head,
+                    status_fingerprint: sha256_text(&dirty_status),
+                    include_unstaged: true,
+                    action: WorkbenchGitAction::SwitchBranch {
+                        branch: "main".into(),
+                        remote: false,
+                    },
+                },
+                "test-user",
+                None,
+            )
+            .await;
+        assert!(matches!(
+            dirty_checkout,
+            Err(WorkbenchError::GitCheckoutDirty)
+        ));
+        std::fs::remove_file(directory.path().join("dirty.txt")).expect("remove dirty");
+
+        let remote = tempfile::tempdir().expect("remote");
+        git(remote.path(), &["init", "--bare"]);
+        let remote_path = remote.path().to_string_lossy();
+        git(directory.path(), &["remote", "add", "origin", &remote_path]);
+        git(directory.path(), &["branch", "feature"]);
+        git(directory.path(), &["push", "origin", "feature"]);
+        git(directory.path(), &["branch", "-D", "feature"]);
+        let current_head = git_optional(directory.path(), &["rev-parse", "HEAD"])
+            .await
+            .expect("head");
+        let status = git_required(directory.path(), &["status", "--porcelain=v1", "-z"], None)
+            .await
+            .expect("status");
+        let tracking = service
+            .execute_git(
+                &WorkbenchGitRequest {
+                    context: mutation_context(&task.run, "remote-tracking"),
+                    idempotency_key: "remote-tracking".into(),
+                    session_id: task.session.id,
+                    checkout_id: checkout.id,
+                    expected_head: current_head,
+                    status_fingerprint: sha256_text(&status),
+                    include_unstaged: true,
+                    action: WorkbenchGitAction::SwitchBranch {
+                        branch: "origin/feature".into(),
+                        remote: true,
+                    },
+                },
+                "test-user",
+                None,
+            )
+            .await
+            .expect("tracking checkout");
+        assert_eq!(tracking.stage.status, WorkbenchGitPhaseStatus::Succeeded);
+        assert_eq!(
+            git_required(directory.path(), &["branch", "--show-current"], None)
+                .await
+                .expect("current branch")
+                .trim(),
+            "feature"
+        );
     }
 
     #[tokio::test]

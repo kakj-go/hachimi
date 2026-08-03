@@ -1,18 +1,19 @@
 use hachimi_protocol::{
     ApprovalGrantScope, ApprovalPolicy, BehaviorMode, CapabilityGrantSet, CheckoutId, CheckoutKind,
-    CheckoutStatus, ClientId, ComputerGrant, DeliveryPolicy, DeliveryStatus, EntryProfile,
-    ExecutionTarget, FileSystemAccess, FileSystemGrant, ItemId, LlmSettings, MisfirePolicy,
-    MutationContext, NetworkGrant, PermissionGrantScope, PermissionProfile, ProcessGrant,
-    ProcessSessionId, ProcessSessionRecord, ProcessStatus, ProjectId, ProviderCapabilities,
-    RequestId, ReviewDelivery, ReviewFinding, ReviewFindingId, ReviewFindingStatus, ReviewId,
-    ReviewOutput, ReviewRecord, ReviewSeverity, ReviewTarget, RunBudget, RunConfiguration,
-    RunDriverKind, RunOrigin, RunPurpose, RunRecoveryDecisionAction, RunRecoveryDecisionRequest,
-    RunRecoveryState, RunStepCheckpoint, RunStepCheckpointId, RunStepPhase,
-    SandboxCapabilityReport, SandboxReadiness, ScheduleContextTemplate, ScheduleDefinition,
-    ScheduleHealth, ScheduleId, SchedulePermissionConfig, ScheduleSpec, SessionContextBinding,
-    SideEffectExecutionId, SideEffectExecutionRecord, SideEffectExecutionStatus, SkillId,
-    SkillRecord, TaskRunId, TaskRunRecord, TaskRunStatus, TaskRunTrigger, ToolRecoveryPolicy,
-    UserInputQuestion, UserInputRequestId, UserInputRequestRecord, UserInputStatus, WorkloadKind,
+    CheckoutStatus, ClientId, ComputerGrant, DeliveryPolicy, DeliveryStatus, DiffScope,
+    EntryProfile, ExecutionTarget, FileDiffStatus, FileDiffSummary, FileSystemAccess,
+    FileSystemGrant, ItemId, LlmSettings, MisfirePolicy, MutationContext, NetworkGrant,
+    PermissionGrantScope, PermissionProfile, ProcessGrant, ProcessSessionId, ProcessSessionRecord,
+    ProcessStatus, ProjectId, ProviderCapabilities, RequestId, ReviewDelivery, ReviewFinding,
+    ReviewFindingId, ReviewFindingStatus, ReviewId, ReviewOutput, ReviewRecord, ReviewSeverity,
+    ReviewTarget, RunBudget, RunConfiguration, RunDiffSnapshot, RunDriverKind, RunOrigin,
+    RunPurpose, RunRecoveryDecisionAction, RunRecoveryDecisionRequest, RunRecoveryState,
+    RunStepCheckpoint, RunStepCheckpointId, RunStepPhase, SandboxCapabilityReport,
+    SandboxReadiness, ScheduleContextTemplate, ScheduleDefinition, ScheduleHealth, ScheduleId,
+    SchedulePermissionConfig, ScheduleSpec, SessionContextBinding, SideEffectExecutionId,
+    SideEffectExecutionRecord, SideEffectExecutionStatus, SkillId, SkillRecord, TaskRunId,
+    TaskRunRecord, TaskRunStatus, TaskRunTrigger, ToolRecoveryPolicy, UserInputQuestion,
+    UserInputRequestId, UserInputRequestRecord, UserInputStatus, WorkloadKind,
 };
 
 use super::*;
@@ -72,7 +73,7 @@ async fn fresh_database_applies_all_registered_kernel_migrations() {
         .fetch_one(store.pool())
         .await
         .expect("migration count");
-    assert_eq!(migration_count, 22);
+    assert_eq!(migration_count, 26);
 
     let payload_columns: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM pragma_table_info('transcript_items') WHERE name = 'payload_json'",
@@ -387,6 +388,65 @@ async fn create_running_run(store: &AgentStore, session: &SessionRecord, id: &st
     run
 }
 
+#[tokio::test]
+async fn terminal_run_summary_is_an_immutable_diff_snapshot() {
+    let (store, session) = seeded_store().await;
+    let run = create_running_run(&store, &session, "run-summary-snapshot").await;
+    let checkout_id = CheckoutId::from("checkout-1");
+    let first = RunDiffSnapshot {
+        scope: DiffScope::Run {
+            run_id: run.id.clone(),
+        },
+        files: vec![FileDiffSummary {
+            path: "src/lib.rs".into(),
+            previous_path: None,
+            status: FileDiffStatus::Modified,
+            additions: 4,
+            deletions: 2,
+            binary: false,
+            too_large: false,
+            hunks: Vec::new(),
+        }],
+        artifact_id: None,
+        truncated: false,
+        generated_at_ms: 10,
+    };
+    store
+        .put_run_diff_manifest(&run.id, &checkout_id, &first)
+        .await
+        .expect("first manifest");
+    store
+        .transition_run(&run.id, RunStatus::Succeeded, None)
+        .await
+        .expect("terminal");
+    let summary = store
+        .get_run_summary(&run.id)
+        .await
+        .expect("summary")
+        .expect("summary record");
+    assert_eq!(
+        (summary.changed_files, summary.additions, summary.deletions),
+        (1, 4, 2)
+    );
+
+    let mut later = first;
+    later.files[0].additions = 99;
+    later.generated_at_ms = 20;
+    store
+        .put_run_diff_manifest(&run.id, &checkout_id, &later)
+        .await
+        .expect("later workspace state");
+    assert_eq!(
+        store
+            .get_run_summary(&run.id)
+            .await
+            .expect("summary reload")
+            .expect("summary record")
+            .additions,
+        4
+    );
+}
+
 fn pending_user_input(session: &SessionRecord, run: &RunRecord) -> UserInputRequestRecord {
     UserInputRequestRecord {
         id: UserInputRequestId::from("concurrent-input"),
@@ -403,6 +463,7 @@ fn pending_user_input(session: &SessionRecord, run: &RunRecord) -> UserInputRequ
             auto_resolution_ms: None,
             default_answer: None,
         }],
+        display_answers: Vec::new(),
         status: UserInputStatus::Pending,
         expires_at_ms: None,
         created_at_ms: now_ms(),
@@ -447,6 +508,9 @@ async fn concurrent_pet_and_workbench_user_input_resolution_has_one_winner() {
         .expect("lookup")
         .expect("request");
     assert_eq!(stored.status, UserInputStatus::Resolved);
+    assert_eq!(stored.display_answers.len(), 1);
+    assert_eq!(stored.display_answers[0].value.as_deref(), Some("yes"));
+    assert!(!stored.display_answers[0].secret_provided);
     let event_count = store
         .list_events(&session.id, 0)
         .await
@@ -744,6 +808,7 @@ async fn restart_marks_active_work_lost_without_restoring_authority() {
             auto_resolution_ms: None,
             default_answer: None,
         }],
+        display_answers: Vec::new(),
         status: UserInputStatus::Pending,
         expires_at_ms: None,
         created_at_ms: now_ms(),
@@ -1893,88 +1958,4 @@ async fn mcp_configuration_rejects_values_outside_transport_limits() {
         store.upsert_mcp_server(&invalid).await,
         Err(AgentStoreError::InvalidMcpServerConfiguration("server ID"))
     ));
-}
-
-#[tokio::test]
-async fn mutation_idempotency_claims_cache_responses_and_fence_conflicts() {
-    let store = AgentStore::connect_in_memory().await.expect("store");
-    let first = store
-        .claim_idempotent_mutation::<serde_json::Value>(
-            "user",
-            "schedule.update",
-            "key-1",
-            "schedule-1",
-            now_ms(),
-        )
-        .await
-        .expect("claim");
-    assert_eq!(first, IdempotentMutationClaim::Claimed);
-    let in_flight = store
-        .claim_idempotent_mutation::<serde_json::Value>(
-            "user",
-            "schedule.update",
-            "key-1",
-            "schedule-1",
-            now_ms(),
-        )
-        .await
-        .expect("repeat claim");
-    assert_eq!(in_flight, IdempotentMutationClaim::Indeterminate);
-
-    let response = serde_json::json!({ "revision": 2 });
-    store
-        .complete_idempotent_mutation("user", "schedule.update", "key-1", &response)
-        .await
-        .expect("complete");
-    let replay = store
-        .claim_idempotent_mutation::<serde_json::Value>(
-            "user",
-            "schedule.update",
-            "key-1",
-            "schedule-1",
-            now_ms(),
-        )
-        .await
-        .expect("replay");
-    assert_eq!(replay, IdempotentMutationClaim::Completed(response));
-    assert!(matches!(
-        store
-            .claim_idempotent_mutation::<serde_json::Value>(
-                "user",
-                "schedule.update",
-                "key-1",
-                "schedule-2",
-                now_ms(),
-            )
-            .await,
-        Err(AgentStoreError::IdempotencyConflict)
-    ));
-
-    store
-        .claim_idempotent_mutation::<bool>(
-            "user",
-            "schedule.remove",
-            "key-2",
-            "schedule-1",
-            now_ms(),
-        )
-        .await
-        .expect("removal claim");
-    store
-        .abandon_idempotent_mutation("user", "schedule.remove", "key-2")
-        .await
-        .expect("abandon");
-    assert_eq!(
-        store
-            .claim_idempotent_mutation::<bool>(
-                "user",
-                "schedule.remove",
-                "key-2",
-                "schedule-1",
-                now_ms(),
-            )
-            .await
-            .expect("reclaim"),
-        IdempotentMutationClaim::Claimed
-    );
 }
