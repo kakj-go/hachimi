@@ -22,6 +22,7 @@
     "test": "corepack pnpm -r --if-present test && node --test scripts/desktop-e2e/support/*.test.mjs scripts/release/*.test.mjs && node scripts/run-with-rust.mjs cargo test --workspace",
     "test:desktop:e2e:prepare": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/prepare-desktop-e2e-tools.ps1",
     "test:desktop:e2e": "corepack pnpm test:desktop:e2e:prepare && node scripts/desktop-e2e/run.mjs",
+    "sidecars:prepare": "node scripts/prepare-workspace-worker.mjs dev",
     "test:p0-adversarial": "node scripts/test-p0-adversarial.mjs",
     "test:windows:release": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/test-windows-release.ps1",
     "test:windows:standard-user": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/test-windows-standard-user.ps1",
@@ -47,7 +48,7 @@
     "runtime:prepare": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/prepare-managed-git.ps1",
     "motions:sync": "node scripts/sync-avatar-motions-v4.mjs",
     "motions:check": "node scripts/sync-avatar-motions-v4.mjs --check",
-    "check": "corepack pnpm format:check && corepack pnpm typecheck && corepack pnpm lint && corepack pnpm test && corepack pnpm contracts:check && corepack pnpm provenance:check && corepack pnpm test:p0-adversarial && corepack pnpm storybook:build && corepack pnpm test:visual && corepack pnpm build && corepack pnpm test:desktop:e2e",
+    "check": "corepack pnpm sidecars:prepare && corepack pnpm format:check && corepack pnpm typecheck && corepack pnpm lint && corepack pnpm test && corepack pnpm contracts:check && corepack pnpm provenance:check && corepack pnpm test:p0-adversarial && corepack pnpm storybook:build && corepack pnpm test:visual && corepack pnpm build && corepack pnpm test:desktop:e2e",
     "tauri": "node scripts/run-with-rust.mjs tauri"
   },
   "devDependencies": {
