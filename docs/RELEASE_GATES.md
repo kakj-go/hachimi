@@ -10,15 +10,16 @@ OpenAI、Forge 与企业平台凭据只存 Windows Credential Manager。Staging 
 
 ## 命令与证据
 
-| 命令                                                                       | 用途                                                                          | 当前状态                         |
-| -------------------------------------------------------------------------- | ----------------------------------------------------------------------------- | -------------------------------- |
-| `corepack pnpm release:version-check`                                      | 校验 Cargo/package/Tauri 版本、Apache-2.0 元数据、NOTICE 边界及安装包资源声明 | 本地可执行                       |
-| `corepack pnpm release:artifact-manifest -- target/release-candidate`      | 对 MSI、NSIS、便携 ZIP、来源 registry、LICENSE/NOTICE 生成 SHA-256            | 本地可执行                       |
-| `corepack pnpm release:artifact-verify -- --root target/release-candidate` | 下载后重新哈希候选，拒绝 manifest、commit、version、来源或许可漂移            | 本地可执行                       |
-| `corepack pnpm test:staging:openai`                                        | 真实 OpenAI 与同次确定性故障 conformance                                      | 环境阻塞                         |
-| `corepack pnpm test:staging:forge`                                         | managed Git Host 与五个 Forge 环境                                            | 环境阻塞                         |
-| `corepack pnpm test:staging:enterprise`                                    | 三个外部企业组织的 REST/Stream/长连接验证                                     | 环境阻塞                         |
-| `corepack pnpm release:evidence:verify`                                    | 聚合五类原始 `summary.json`，fail closed                                      | 本地聚合逻辑已验证；真实证据缺失 |
+| 命令                                                                       | 用途                                                                            | 当前状态                         |
+| -------------------------------------------------------------------------- | ------------------------------------------------------------------------------- | -------------------------------- |
+| `corepack pnpm release:version-check`                                      | 校验 Cargo/package/Tauri 版本、Apache-2.0 元数据、NOTICE 边界及安装包资源声明   | 本地可执行                       |
+| `corepack pnpm release:artifact-manifest -- target/release-candidate`      | 对 MSI、NSIS、便携 ZIP、来源 registry、LICENSE/NOTICE 生成 SHA-256              | 本地可执行                       |
+| `corepack pnpm release:artifact-verify -- --root target/release-candidate` | 下载后重新哈希候选，拒绝 manifest、commit、version、来源或许可漂移              | 本地可执行                       |
+| `corepack pnpm test:staging:openai`                                        | 真实 OpenAI 与同次确定性故障 conformance                                        | 环境阻塞                         |
+| `corepack pnpm test:staging:forge`                                         | managed Git Host 与五个 Forge 环境                                              | 环境阻塞                         |
+| `corepack pnpm test:staging:enterprise`                                    | 三个外部企业组织的 REST/Stream/长连接验证                                       | 环境阻塞                         |
+| `corepack pnpm test:staging:channels`                                      | 钉钉、飞书、企微 AI Bot、企微自建应用、微信 iLink 五个平台的文本/媒体/恢复 Gate | 环境阻塞                         |
+| `corepack pnpm release:evidence:verify`                                    | 聚合六类原始 `summary.json`，fail closed                                        | 本地聚合逻辑已验证；真实证据缺失 |
 
 证据位于 `target/release-evidence/<run-id>/`。只保存 schema、Gate 状态、版本、commit、候选/来源哈希、脱敏环境指纹、稳定检查 ID、详情哈希、时间和稳定失败码；不保存 Secret、原始消息、隐藏 reasoning、附件正文、完整远端响应或本机敏感路径。
 
@@ -76,7 +77,7 @@ Git fetch/push 通过 `WorkspaceHostClient` 与固定 managed Git 执行，凭�
 
 ## 企业平台配置
 
-环境变量 `HACHIMI_STAGING_ENTERPRISE_CONFIG` 指向三个 `connections`：
+环境变量 `HACHIMI_STAGING_ENTERPRISE_CONFIG` 指向三个 API 组织 `connections`：
 
 ```json
 {
@@ -90,22 +91,28 @@ Git fetch/push 通过 `WorkspaceHostClient` 与固定 managed Git 执行，凭�
   ],
   "connections": [
     {
-      "platform": "wecom",
+      "platform": "wecom_app",
       "accountId": "release-wecom",
       "credentialRef": "keyring:connector:release-wecom",
       "departmentId": "<test-department>",
       "peerId": "<test-peer>",
       "groupId": "<test-group>",
       "expectInboundEvent": true,
-      "callbackPublicUrl": "https://<protected-reverse-proxy>/v1/channels/wecom/callback?account_id=release-wecom"
+      "callbackPublicUrl": "https://<protected-reverse-proxy>/v1/channels/wecom_app/release-wecom/callback"
     }
   ]
 }
 ```
 
-钉钉、飞书对应 `platform` 为 `ding_talk`、`feishu`，三个 connection 的 `expectInboundEvent` 都必须为 `true`。企业微信 HTTPS reverse proxy 只能转发到 `127.0.0.1:42371/v1/channels/wecom/callback`；query 必须保留 `msg_signature`、`timestamp`、`nonce` 并增加受控的 `account_id`。Gate 会启动同一便携候选的 `--gateway`，只有真实 callback 在其 ledger 中形成带结构化 mention 和附件 metadata 的 receipt 才通过。Gateway 支持官方 GET `echostr` 验证和 POST 加密 XML，解密、组织标识、重放窗口与事件内容仍由企业 Provider 验证。
+钉钉、飞书对应 `platform` 为 `dingtalk`、`feishu`，三个 connection 的 `expectInboundEvent` 都必须为 `true`。企微自建应用 callback 使用账户级 `/v1/channels/wecom_app/{accountId}/callback`，不接受 query 形式的旧路由。REST Gate 验证 API 和主动消息；五平台 Channel Gate 另外验证真实 callback/WS/长轮询事件、稳定地址、文本/图片/文件、重启恢复和凭据撤销。
 
 钉钉/飞书受保护入站 fixture 同样必须带结构化 mention 和允许类型附件；真实下载使用产品 `EnterpriseApiClient`、25 MiB 上限和远端 ID。MIME/magic、拒绝 HTML/可执行文件、Artifact fencing、重复下载和未知结果仍由同一 Gate 的确定性 `PluginHost` 测试验证，fixture 不替代真实传输。
+
+## 五平台 Channel 配置
+
+环境变量 `HACHIMI_STAGING_CHANNELS_CONFIG` 必须包含恰好五个 `connections`，`providerId` 为 `dingtalk`、`feishu`、`wecom_ai_bot`、`wecom_app`、`wechat_ilink`。每项的 `credentialRef` 固定为 `keyring:integration:{providerId}:{accountId}:primary`，图片和文件 fixture 只允许受保护 staging 路径，所有 `expect*` 能力必须显式为 `true`。iLink 只允许 DM，并额外提供按 Conversation 保存的 `conversationSecretRef`；企微自建应用提供账户级 callback URL 和反代捕获的加密 callback fixture。配置校验会拒绝 Secret、带凭据 URL、旧 `wecom` provider 和旧 callback path。
+
+`corepack pnpm test:staging:channels` 先运行五平台 deterministic fixture，再运行被 `#[ignore]` 保护的真实测试。测试通过产品 transport 发送文本、图片、文件，等待带结构化 parts 的真实入站，重建连接后再次投递，并短暂撤销/恢复临时 Credential Manager 项验证撤销行为。没有五平台受保护账号、外部消息和反代 fixture 时，Gate 必须失败并在证据中保持环境阻塞，不能用本地 fixture 标记真实通过。
 
 这里的三个 connection 是三个外部平台组织，不是 Hachimi 租户。真实入站 callback、mention、附件、限流、凭据撤销和重启 reconciliation 在受保护环境不存在时保持“真实环境待验证”。
 
@@ -117,4 +124,4 @@ Git fetch/push 通过 `WorkspaceHostClient` 与固定 managed Git 执行，凭�
 
 `publish-alpha-prerelease.yml` 只接受 `Windows Release Gate` 中已经成功的 `build-candidate` 作业产物，重新校验候选 commit/version/hash/source/license 后创建 alpha prerelease。alpha 发布说明固定声明不携带真实 OpenAI、Forge、企业组织或两类 Windows 身份 Gate 的通过结论，不能作为 RC/GA 证据；已有 tag 永不覆盖，失败后必须递增 alpha 序号。
 
-`publish-release.yml` 仅处理 RC/GA，需要成功的 Windows run ID、外部 staging run ID、全新 tag 和 channel。它下载五类原始 summary 与候选，验证同一 commit/version/artifact/source/license 和证据时效后才调用 `gh release create`。已有 tag 永不覆盖；Gate 失败需递增 RC 序号。发布页固定说明 Windows 二进制未签名，以及默认 VRM 使官方包只能非商业发行。
+`publish-release.yml` 仅处理 RC/GA，需要成功的 Windows run ID、外部 staging run ID、全新 tag 和 channel。它下载六类原始 summary 与候选，验证同一 commit/version/artifact/source/license 和证据时效后才调用 `gh release create`。已有 tag 永不覆盖；Gate 失败需递增 RC 序号。发布页固定说明 Windows 二进制未签名，以及默认 VRM 使官方包只能非商业发行。

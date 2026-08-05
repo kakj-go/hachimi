@@ -530,7 +530,10 @@ impl DesktopAppDomainHandler {
 }
 
 fn is_enterprise_plugin(plugin_id: &PluginId) -> bool {
-    matches!(plugin_id.as_str(), "wecom" | "dingtalk" | "feishu")
+    matches!(
+        plugin_id.as_str(),
+        "dingtalk" | "feishu" | "wecom_ai_bot" | "wecom_app" | "wechat_ilink"
+    )
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

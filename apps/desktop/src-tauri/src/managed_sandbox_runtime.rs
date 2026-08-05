@@ -7,7 +7,11 @@ use atomic_write_file::AtomicWriteFile;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::workbench_commands::set_managed_workspace_runtime;
+use hachimi_protocol::RuntimeComponentId;
+
+use crate::{
+    runtime_supervisor::RuntimeSupervisor, workbench_commands::set_managed_workspace_runtime,
+};
 
 #[derive(Debug, Clone)]
 pub(super) struct ManagedSandboxRuntime {
@@ -18,6 +22,7 @@ pub(super) struct ManagedSandboxRuntime {
     pub worker: PathBuf,
     pub managed_git: Option<PathBuf>,
     pub expected_integrity: Vec<(PathBuf, String)>,
+    pub issue_codes: Vec<&'static str>,
 }
 
 #[derive(Debug, Serialize)]
@@ -71,12 +76,15 @@ pub(super) fn stage(
             env!("HACHIMI_WORKSPACE_WORKER_SHA256"),
         ),
     ];
+    let mut issues = Vec::new();
     for (name, expected) in definitions {
-        stage_file(
-            &packaged_sidecar_path(name)?,
-            &root.join(executable_name(name)),
-            expected,
-        )?;
+        let result = packaged_sidecar_path(name)
+            .and_then(|source| stage_file(&source, &root.join(executable_name(name)), expected));
+        if let Err(error) = result {
+            let code = sidecar_error_code(name);
+            tracing::error!(code, %error, resource = name, "Packaged runtime resource staging failed");
+            issues.push(code);
+        }
     }
     let mut managed_git_candidates = vec![
         resource_root.join("managed-git"),
@@ -87,14 +95,22 @@ pub(super) fn stage(
     }
     let managed_git_source = managed_git_candidates
         .into_iter()
-        .find(|candidate| candidate.join("manifest.json").is_file())
-        .ok_or_else(|| {
-            format!(
-                "managed Git manifest is missing from packaged resources: {}",
-                resource_root.display()
-            )
-        })?;
-    let managed_git = stage_managed_git(&managed_git_source, &root.join("managed-git"))?;
+        .find(|candidate| candidate.join("manifest.json").is_file());
+    let managed_git = match managed_git_source {
+        Some(source) => match stage_managed_git(&source, &root.join("managed-git")) {
+            Ok(git) => git,
+            Err(error) => {
+                tracing::error!(code = "managed_git_invalid", %error, "Managed Git staging failed");
+                issues.push("managed_git_invalid");
+                None
+            }
+        },
+        None => {
+            tracing::error!(code = "managed_git_missing", root = %resource_root.display(), "Managed Git resource is missing");
+            issues.push("managed_git_missing");
+            None
+        }
+    };
     let runtime = ManagedSandboxRuntime {
         setup: root.join(executable_name("hachimi-sandbox-setup")),
         launcher: root.join(executable_name("hachimi-sandbox-launcher")),
@@ -114,13 +130,131 @@ pub(super) fn stage(
                 )
             })
             .collect(),
+        issue_codes: Vec::new(),
     };
-    write_manifest(&runtime, &definitions)?;
-    set_managed_workspace_runtime(runtime.root.clone(), runtime.worker.clone())?;
-    if let Some(git) = &runtime.managed_git {
-        hachimi_sandbox::set_managed_git_executable(git.clone())?;
+    if let Err(error) = write_manifest(&runtime, &definitions) {
+        tracing::error!(code = "runtime_manifest_write_failed", %error, "Runtime manifest write failed");
+        issues.push("runtime_manifest_write_failed");
     }
+    if runtime.worker.is_file()
+        && let Err(error) =
+            set_managed_workspace_runtime(runtime.root.clone(), runtime.worker.clone())
+    {
+        tracing::error!(code = "workspace_worker_registration_failed", %error, "Workspace Worker registration failed");
+        issues.push("workspace_worker_registration_failed");
+    }
+    if let Some(git) = &runtime.managed_git
+        && let Err(error) = hachimi_sandbox::set_managed_git_executable(git.clone())
+    {
+        tracing::error!(code = "managed_git_registration_failed", %error, "Managed Git registration failed");
+        issues.push("managed_git_registration_failed");
+    }
+    let mut runtime = runtime;
+    issues.sort_unstable();
+    issues.dedup();
+    runtime.issue_codes = issues;
     Ok(runtime)
+}
+
+pub(super) fn stage_or_degrade(
+    data_root: &Path,
+    resource_root: &Path,
+    supervisor: RuntimeSupervisor,
+) -> ManagedSandboxRuntime {
+    let runtime = stage(data_root, resource_root).unwrap_or_else(|error| {
+        tracing::error!(code = "internal_resource_storage_failed", %error, "Internal runtime staging root is unavailable");
+        let mut runtime = layout(data_root);
+        runtime.issue_codes.push("internal_resource_storage_failed");
+        runtime
+    });
+    publish_health(&supervisor, &runtime);
+    if !runtime.issue_codes.is_empty() {
+        let data_root = data_root.to_owned();
+        let resource_root = resource_root.to_owned();
+        let retry = supervisor.retry_signal(RuntimeComponentId::InternalResources);
+        tauri::async_runtime::spawn(async move {
+            loop {
+                retry.notified().await;
+                let next = stage(&data_root, &resource_root).unwrap_or_else(|error| {
+                    tracing::error!(code = "internal_resource_storage_failed", %error, "Internal runtime restaging failed");
+                    let mut runtime = layout(&data_root);
+                    runtime.issue_codes.push("internal_resource_storage_failed");
+                    runtime
+                });
+                publish_health(&supervisor, &next);
+                if next.issue_codes.is_empty() {
+                    break;
+                }
+            }
+        });
+    }
+    runtime
+}
+
+fn layout(data_root: &Path) -> ManagedSandboxRuntime {
+    let root = data_root
+        .join("sandbox/windows/runtime")
+        .join(hachimi_sandbox::SANDBOX_POLICY_VERSION);
+    let definitions = [
+        (
+            "hachimi-sandbox-setup",
+            env!("HACHIMI_SANDBOX_SETUP_SHA256"),
+        ),
+        (
+            "hachimi-sandbox-launcher",
+            env!("HACHIMI_SANDBOX_LAUNCHER_SHA256"),
+        ),
+        (
+            "hachimi-sandbox-canary",
+            env!("HACHIMI_SANDBOX_CANARY_SHA256"),
+        ),
+        (
+            "hachimi-sandbox-attest",
+            env!("HACHIMI_SANDBOX_ATTEST_SHA256"),
+        ),
+        (
+            "hachimi-workspace-worker",
+            env!("HACHIMI_WORKSPACE_WORKER_SHA256"),
+        ),
+    ];
+    ManagedSandboxRuntime {
+        setup: root.join(executable_name("hachimi-sandbox-setup")),
+        launcher: root.join(executable_name("hachimi-sandbox-launcher")),
+        canary: root.join(executable_name("hachimi-sandbox-canary")),
+        worker: root.join(executable_name("hachimi-workspace-worker")),
+        root,
+        managed_git: None,
+        expected_integrity: definitions
+            .into_iter()
+            .map(|(name, expected)| {
+                (
+                    data_root
+                        .join("sandbox/windows/runtime")
+                        .join(hachimi_sandbox::SANDBOX_POLICY_VERSION)
+                        .join(executable_name(name)),
+                    expected.to_owned(),
+                )
+            })
+            .collect(),
+        issue_codes: Vec::new(),
+    }
+}
+
+fn publish_health(supervisor: &RuntimeSupervisor, runtime: &ManagedSandboxRuntime) {
+    supervisor.replace_internal_resource_issues(
+        "sandbox_workspace_git",
+        runtime.issue_codes.iter().copied(),
+    );
+}
+
+fn sidecar_error_code(name: &str) -> &'static str {
+    match name {
+        "hachimi-workspace-worker" => "workspace_worker_invalid",
+        "hachimi-sandbox-setup" => "sandbox_setup_invalid",
+        "hachimi-sandbox-launcher" => "sandbox_launcher_invalid",
+        "hachimi-sandbox-canary" | "hachimi-sandbox-attest" => "sandbox_attestation_invalid",
+        _ => "internal_resource_invalid",
+    }
 }
 
 fn stage_file(source: &Path, destination: &Path, expected_hash: &str) -> Result<(), String> {

@@ -99,10 +99,6 @@ DELETE FROM browser_network_rules;
 DELETE FROM browser_site_permissions;
 DELETE FROM browser_sessions;
 
-UPDATE desktop_control_sessions
-SET active_browser_session_id = NULL,
-    control_state = CASE WHEN control_state IN ('observing', 'controlling') THEN 'stopped' ELSE control_state END;
-
 UPDATE browser_automation_leases
 SET status = 'expired', revision = revision + 1, updated_at_ms = 0
 WHERE status IN ('pending', 'active', 'suspended');

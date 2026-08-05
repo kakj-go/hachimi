@@ -5,7 +5,9 @@ use std::{
     time::{Duration, Instant},
 };
 
-use hachimi_protocol::{ComputerAction, ComputerWindowIdentity};
+use hachimi_protocol::{
+    ComputerAction, ComputerAppDescriptor, ComputerRuntimeHealth, ComputerWindowIdentity,
+};
 use parking_lot::Mutex;
 
 use crate::{
@@ -19,6 +21,24 @@ const FRAME_STORE_TTL: Duration = Duration::from_secs(30);
 const MAX_STORED_FRAMES: usize = 8;
 const MAX_STORED_FRAME_BYTES: usize = 64 * 1024 * 1024;
 static LEGACY_FRAME_CLEANUP: Once = Once::new();
+
+#[must_use]
+pub fn computer_runtime_health() -> ComputerRuntimeHealth {
+    #[cfg(windows)]
+    {
+        windows::runtime_health()
+    }
+    #[cfg(not(windows))]
+    {
+        ComputerRuntimeHealth {
+            os_supported: false,
+            graphics_capture_available: false,
+            input_desktop_available: false,
+            process_elevated: false,
+            error_code: Some("computer_unsupported_os".into()),
+        }
+    }
+}
 
 #[derive(Debug, Clone)]
 struct StoredFrame {
@@ -138,6 +158,18 @@ impl ComputerBroker for PlatformComputerBroker {
         })
     }
 
+    fn app_icon_png<'a>(
+        &'a self,
+        app: &'a ComputerAppDescriptor,
+    ) -> ComputerBrokerFuture<'a, Option<Vec<u8>>> {
+        let descriptor = app.clone();
+        Box::pin(async move {
+            tokio::task::spawn_blocking(move || app_icon_png(&descriptor))
+                .await
+                .map_err(|error| ComputerHostError::Broker(error.to_string()))?
+        })
+    }
+
     fn current_identity<'a>(
         &'a self,
         window_handle: &'a str,
@@ -205,6 +237,16 @@ fn platform_user_input_marker() -> Option<u64> {
 #[cfg(windows)]
 fn list_windows() -> Result<Vec<ComputerWindowIdentity>, ComputerHostError> {
     windows::list_windows()
+}
+
+#[cfg(windows)]
+fn app_icon_png(app: &ComputerAppDescriptor) -> Result<Option<Vec<u8>>, ComputerHostError> {
+    windows::app_icon_png(app)
+}
+
+#[cfg(not(windows))]
+fn app_icon_png(_app: &ComputerAppDescriptor) -> Result<Option<Vec<u8>>, ComputerHostError> {
+    Ok(None)
 }
 
 #[cfg(not(windows))]

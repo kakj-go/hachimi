@@ -3,11 +3,13 @@ import { Badge } from "@hachimi/ui";
 import { Show, createMemo } from "solid-js";
 
 import { timelineItemText } from "../timeline/timeline-text";
+import type { InspectorTab } from "../state/inspector-tabs";
 import type { InspectorResource } from "../state/workbench-layout";
 import type { WorkbenchCommandPort } from "../workbench-command-port";
 import { WorkspaceBrowser } from "../workspace-browser";
 import { AttachmentInspector } from "./attachment-inspector";
 import { BrowserInspector } from "./browser-inspector";
+import { ComputerInspector } from "./computer-inspector";
 import { InspectorShell } from "./inspector-shell";
 import { SourcesInspector } from "./sources-inspector";
 import { InspectorToolLauncher } from "./tool-launcher";
@@ -17,7 +19,12 @@ export function SessionInspector(props: {
   resource: InspectorResource | undefined;
   commandPort: WorkbenchCommandPort;
   locale: "zh-CN" | "en-US";
+  tabs: InspectorTab[];
+  activeTabId: string | undefined;
   onOpenInspector: (resource: InspectorResource) => void;
+  onSelectTab: (tabId: string) => void;
+  onCloseTab: (tabId: string) => void;
+  onOpenLauncher: () => void;
   onOpenTerminal: () => void;
 }) {
   const zh = () => props.locale === "zh-CN";
@@ -58,6 +65,12 @@ export function SessionInspector(props: {
     <InspectorShell
       title={title()}
       resourceKind={props.resource?.kind === "tools" ? "tools" : "resource"}
+      tabs={props.tabs}
+      activeTabId={props.activeTabId}
+      locale={props.locale}
+      onSelectTab={props.onSelectTab}
+      onCloseTab={props.onCloseTab}
+      onOpenLauncher={props.onOpenLauncher}
       wide={
         props.resource?.kind === "tools" ||
         props.resource?.kind === "review" ||
@@ -69,6 +82,15 @@ export function SessionInspector(props: {
       <Show when={props.resource?.kind === "tools"}>
         <InspectorToolLauncher
           locale={props.locale}
+          {...(props.resource?.kind === "browser" && props.resource.leaseId
+            ? { leaseId: props.resource.leaseId }
+            : {})}
+          {...(props.resource?.kind === "browser" && props.resource.surface
+            ? { surfaceKind: props.resource.surface }
+            : {})}
+          {...(props.resource?.kind === "browser" && props.resource.browserSessionId
+            ? { browserSessionId: props.resource.browserSessionId }
+            : {})}
           hasProject={props.snapshot.session.context.kind === "project"}
           onOpenInspector={props.onOpenInspector}
           onOpenTerminal={props.onOpenTerminal}
@@ -135,6 +157,16 @@ export function SessionInspector(props: {
             : {})}
           {...(props.resource?.kind === "browser" && props.resource.initialUrl
             ? { initialUrl: props.resource.initialUrl }
+            : {})}
+        />
+      </Show>
+      <Show when={props.resource?.kind === "computer"}>
+        <ComputerInspector
+          snapshot={props.snapshot}
+          commandPort={props.commandPort}
+          locale={props.locale}
+          {...(props.resource?.kind === "computer" && props.resource.controlSessionId
+            ? { controlSessionId: props.resource.controlSessionId }
             : {})}
         />
       </Show>

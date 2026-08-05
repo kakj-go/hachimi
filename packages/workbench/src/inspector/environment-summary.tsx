@@ -6,7 +6,7 @@ import type {
 } from "@hachimi/contracts";
 import { commandFailure } from "@hachimi/contracts";
 import { Box, Button, Plus } from "@hachimi/ui";
-import { Show, createSignal } from "solid-js";
+import { Show, createSignal, untrack } from "solid-js";
 
 import { WorkbenchGitControls } from "../git/workbench-git-controls";
 import {
@@ -31,9 +31,22 @@ export function ConnectedEnvironmentSummary(props: {
   const [handoffFailure, setHandoffFailure] = createSignal<string>();
   const controller = createWorkbenchEnvironmentController({
     snapshot: () => props.snapshot,
-    commandPort: props.commandPort,
-    onHandoff: props.onHandoff,
+    commandPort: untrack(() => props.commandPort),
+    onHandoff: (response) => untrack(() => props.onHandoff(response)),
   });
+
+  async function handoff(kind: "local" | "managed_worktree") {
+    setHandoffBusy(true);
+    setHandoffFailure(undefined);
+    try {
+      await controller.handoff(kind);
+    } catch (error) {
+      setHandoffFailure(commandFailure(error).message);
+      throw error;
+    } finally {
+      setHandoffBusy(false);
+    }
+  }
 
   return (
     <Show
@@ -53,18 +66,7 @@ export function ConnectedEnvironmentSummary(props: {
           remotePushEnabled={props.remotePushEnabled}
           handoffBusy={handoffBusy()}
           handoffFailure={handoffFailure()}
-          onHandoff={async (kind) => {
-            setHandoffBusy(true);
-            setHandoffFailure(undefined);
-            try {
-              await controller.handoff(kind);
-            } catch (error) {
-              setHandoffFailure(commandFailure(error).message);
-              throw error;
-            } finally {
-              setHandoffBusy(false);
-            }
-          }}
+          onHandoff={handoff}
           onOpenInspector={props.onOpenInspector}
         />
       )}
@@ -109,6 +111,7 @@ export function EnvironmentSummary(props: {
           <strong>{zh() ? "环境信息" : "Environment"}</strong>
           <Button
             aria-label={zh() ? "打开文件" : "Open files"}
+            data-testid="workbench-summary-files"
             onClick={() => props.onOpenInspector({ kind: "files" })}
           >
             <Plus size={16} />
@@ -160,16 +163,34 @@ export function EnvironmentSummary(props: {
                   ? zh()
                     ? "浏览器"
                     : "Browser"
-                  : zh()
-                    ? "计划"
-                    : "Plan"}
+                  : activity().kind === "computer"
+                    ? "Computer Use"
+                    : zh()
+                      ? "计划"
+                      : "Plan"}
               </strong>
             </header>
             <EnvironmentActivityRow
               activity={activity()}
               locale={props.locale}
               onOpenPlan={(planId) => props.onOpenInspector({ kind: "plan", planId })}
-              onOpenBrowser={() => props.onOpenInspector({ kind: "browser" })}
+              onOpenBrowser={(browser) =>
+                props.onOpenInspector({
+                  kind: "browser",
+                  leaseId: browser.lease_id,
+                  surface: browser.surface,
+                  ...(browser.browser_tab_id ? { browserTabId: browser.browser_tab_id } : {}),
+                  ...(browser.browser_session_id
+                    ? { browserSessionId: browser.browser_session_id }
+                    : {}),
+                })
+              }
+              onOpenComputer={(computer) =>
+                props.onOpenInspector({
+                  kind: "computer",
+                  controlSessionId: computer.control_session_id,
+                })
+              }
             />
           </section>
         )}

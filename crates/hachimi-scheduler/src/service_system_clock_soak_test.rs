@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 #[tokio::test]
 #[ignore = "real SystemClock release soak"]
 async fn system_clock_at_every_and_six_field_cron_soak_without_duplicate_invocations() {

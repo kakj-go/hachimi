@@ -191,6 +191,43 @@ impl MotionCatalog {
         Ok(catalog)
     }
 
+    /// Opens the user catalog without bundled motions so the desktop can keep
+    /// running when a packaged catalog is missing or invalid.
+    pub fn load_degraded(root: impl Into<PathBuf>) -> Result<Self, MotionError> {
+        let root = root.into();
+        fs::create_dir_all(root.join("blobs"))?;
+        let state_path = root.join(STATE_FILE);
+        let state_exists = state_path.is_file();
+        let state = if state_exists {
+            let state: MotionStateDocument = serde_json::from_slice(&fs::read(&state_path)?)?;
+            if state.schema_version != STATE_SCHEMA_VERSION {
+                return Err(MotionError::InvalidBinding);
+            }
+            state
+        } else {
+            MotionStateDocument::default()
+        };
+        let mut catalog = Self {
+            root,
+            builtin_root: PathBuf::new(),
+            builtin_entries: Vec::new(),
+            state,
+        };
+        catalog.state.schema_version = STATE_SCHEMA_VERSION;
+        catalog.state.entries.retain(|entry| {
+            entry.source == MotionSource::User
+                && catalog
+                    .root
+                    .join("blobs")
+                    .join(&entry.sha256)
+                    .join(USER_BLOB_FILE)
+                    .is_file()
+        });
+        catalog.sanitize_bindings();
+        catalog.save_state()?;
+        Ok(catalog)
+    }
+
     #[must_use]
     pub fn snapshot(&self) -> MotionCatalogSnapshot {
         MotionCatalogSnapshot {
@@ -960,6 +997,16 @@ mod tests {
                 .unwrap_or_else(|| panic!("missing {name}"));
             assert!(entry.finger_bone_count >= 28, "{name} lost finger tracks");
         }
+    }
+
+    #[test]
+    fn degraded_catalog_starts_without_bundled_resources() {
+        let root = tempfile::tempdir().expect("temporary catalog");
+        let catalog = MotionCatalog::load_degraded(root.path()).expect("degraded catalog");
+        let snapshot = catalog.snapshot();
+        assert!(snapshot.entries.is_empty());
+        assert!(snapshot.bindings.is_empty());
+        assert!(root.path().join(STATE_FILE).is_file());
     }
 
     #[test]

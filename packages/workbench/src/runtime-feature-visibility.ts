@@ -8,7 +8,6 @@ export type RuntimeFeatureVisibility = {
   gitRemoteMutations: boolean;
   pluginRuntime: boolean;
   enterpriseIntegrations: boolean;
-  desktopControl: boolean;
 };
 
 export function runtimeFeatureVisibility(flags: FeatureFlags): RuntimeFeatureVisibility {
@@ -22,6 +21,5 @@ export function runtimeFeatureVisibility(flags: FeatureFlags): RuntimeFeatureVis
     gitRemoteMutations: runtime.gitRemoteMutations,
     pluginRuntime,
     enterpriseIntegrations: pluginRuntime && runtime.enterpriseIntegrations,
-    desktopControl: runtime.desktopControl,
   };
 }

@@ -31,24 +31,24 @@ fn write_sample_plugin(root: &Path) {
     .expect("manifest file");
 }
 
-fn write_builtin_wecom_channel_plugin(root: &Path) {
+fn write_builtin_wecom_app_channel_plugin(root: &Path) {
     fs::create_dir_all(root.join(".codex-plugin")).expect("manifest directory");
     fs::create_dir_all(root.join("channels")).expect("channels directory");
     fs::write(
-        root.join("channels/wecom.json"),
-        br#"{"protocolVersion":1,"providerId":"wecom","transport":"builtin_enterprise"}"#,
+        root.join("channels/wecom_app.json"),
+        br#"{"protocolVersion":1,"providerId":"wecom_app","transport":"builtin_enterprise"}"#,
     )
     .expect("channel descriptor");
     let manifest = PluginManifest {
         manifest_version: 1,
-        id: PluginId::from("wecom"),
-        name: "WeCom".into(),
+        id: PluginId::from("wecom_app"),
+        name: "WeCom App".into(),
         version: "1.0.0".into(),
         description: "Built-in enterprise channel fixture".into(),
         contributions: vec![PluginContribution {
             kind: hachimi_protocol::PluginContributionKind::Channel,
-            id: "wecom-channel".into(),
-            relative_path: "channels/wecom.json".into(),
+            id: "wecom-app-channel".into(),
+            relative_path: "channels/wecom_app.json".into(),
             required_scopes: vec!["channel.receive".into(), "channel.send".into()],
         }],
     };
@@ -63,7 +63,7 @@ fn write_builtin_wecom_channel_plugin(root: &Path) {
 async fn builtin_enterprise_channel_follows_plugin_lifecycle_without_sidecar_discovery() {
     let source = tempfile::tempdir().expect("source");
     let installs = tempfile::tempdir().expect("installs");
-    write_builtin_wecom_channel_plugin(source.path());
+    write_builtin_wecom_app_channel_plugin(source.path());
     let store = AgentStore::connect_in_memory().await.expect("store");
     let host = PluginHost::new(store, installs.path());
 
@@ -81,9 +81,9 @@ async fn builtin_enterprise_channel_follows_plugin_lifecycle_without_sidecar_dis
         ContributionRuntimeState::Disabled
     );
     assert_eq!(
-        host.builtin_enterprise_channel_provider_id(&installed, "wecom-channel")
+        host.builtin_enterprise_channel_provider_id(&installed, "wecom-app-channel")
             .expect("built-in descriptor"),
-        Some("wecom".into())
+        Some("wecom_app".into())
     );
 
     let enabled = host

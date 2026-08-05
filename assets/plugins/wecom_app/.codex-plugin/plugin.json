@@ -1,0 +1,27 @@
+{
+  "manifestVersion": 1,
+  "id": "wecom_app",
+  "name": "企微自建应用",
+  "version": "1.0.0",
+  "description": "Hachimi 企微自建应用 Connector、Channel 与事件源",
+  "contributions": [
+    {
+      "kind": "connector",
+      "id": "wecom_app",
+      "relativePath": "connectors/wecom_app.json",
+      "requiredScopes": ["connectors.invoke", "contacts.read", "channel.send"]
+    },
+    {
+      "kind": "event_source",
+      "id": "wecom-app-events",
+      "relativePath": "events/wecom_app.json",
+      "requiredScopes": ["channel.receive"]
+    },
+    {
+      "kind": "channel",
+      "id": "wecom-app-channel",
+      "relativePath": "channels/wecom_app.json",
+      "requiredScopes": ["channel.receive", "channel.send"]
+    }
+  ]
+}

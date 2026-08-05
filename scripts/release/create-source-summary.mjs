@@ -69,6 +69,60 @@ export function buildSourceSummary(workspaceRoot) {
       }),
     };
   }
+  const channelRegistry = JSON.parse(
+    readFileSync(resolve(workspaceRoot, "docs", "references", "channels", "registry.json"), "utf8"),
+  );
+  if (
+    channelRegistry.schemaVersion !== 1 ||
+    !Array.isArray(channelRegistry.sources) ||
+    !channelRegistry.sources.length
+  ) {
+    throw new Error("release_source_registry_invalid:channels");
+  }
+  const channelNames = new Set();
+  registries.channels = {
+    sha256: registryDigests.channels,
+    sources: channelRegistry.sources.map((source) => {
+      for (const key of [
+        "name",
+        "repository",
+        "commit",
+        "license",
+        "classification",
+        "implementationStatus",
+      ]) {
+        required(source[key], `release_source_reference_missing:channels:${key}`);
+      }
+      if (channelNames.has(source.name)) {
+        throw new Error("release_source_reference_duplicate:channels");
+      }
+      channelNames.add(source.name);
+      if (!/^[a-f0-9]{40}$/i.test(source.commit)) {
+        throw new Error(`release_source_reference_commit_invalid:channels:${source.name}`);
+      }
+      let repository;
+      try {
+        repository = new URL(source.repository);
+      } catch {
+        throw new Error(`release_source_reference_url_invalid:channels:${source.name}`);
+      }
+      if (repository.protocol !== "https:" || repository.hostname !== "github.com") {
+        throw new Error(`release_source_reference_url_invalid:channels:${source.name}`);
+      }
+      if (!Array.isArray(source.files) || !source.files.length) {
+        throw new Error(`release_source_reference_files_missing:channels:${source.name}`);
+      }
+      return {
+        name: source.name,
+        repository: source.repository,
+        commit: source.commit,
+        license: source.license,
+        classification: source.classification,
+        files: source.files,
+        implementationStatus: source.implementationStatus,
+      };
+    }),
+  };
   return { schemaVersion: 1, registries };
 }
 

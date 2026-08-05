@@ -1,6 +1,6 @@
 These packages are an installable alpha preview and are not a GA release.
 
-This alpha release does not include claims that the real OpenAI, five Forge environments, three external enterprise organizations, or both Windows identity gates have passed. Those gates remain tracked separately and are required again for RC and GA. Fixture, mock, loopback, and deterministic-host tests are local implementation evidence only.
+This alpha release does not include claims that the real OpenAI, five Forge environments, three external enterprise organizations, five Channel platforms, or both Windows identity gates have passed. Those gates remain tracked separately and are required again for RC and GA. Fixture, mock, loopback, and deterministic-host tests are local implementation evidence only.
 
 The attached artifact manifest binds the MSI, NSIS, and portable ZIP to this exact source commit and the registered protocol sources. The Windows binaries are currently unsigned.
 

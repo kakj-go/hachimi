@@ -6,7 +6,8 @@ use specta::Type;
 
 use super::{
     BrowserAutomationLeaseId, BrowserObservationId, BrowserPairingId, BrowserSessionId,
-    BrowserTabId, BrowserWorkspaceId, ComputerFrameId, ItemId, RunId, SessionId,
+    BrowserTabId, BrowserWorkspaceId, ComputerControlSessionId, ComputerFrameId, ItemId, RunId,
+    SessionId,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type)]
@@ -21,6 +22,103 @@ pub enum BrowserProfileKind {
 pub enum BrowserAutomationSurfaceKind {
     Embedded,
     ExternalChrome,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum BrowserAutomationPreference {
+    #[default]
+    Auto,
+    Embedded,
+    ExternalChrome,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum HostPolicyDecision {
+    #[default]
+    Ask,
+    Allow,
+    Block,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct BrowserSitePolicy {
+    pub origin: String,
+    pub decision: HostPolicyDecision,
+    pub capabilities: Vec<BrowserCapability>,
+    pub private_network: bool,
+    #[specta(type = specta_typescript::Number)]
+    pub revision: u64,
+    #[specta(type = specta_typescript::Number)]
+    pub updated_at_ms: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct BrowserSitePolicyUpdate {
+    pub origin: String,
+    pub decision: HostPolicyDecision,
+    pub capabilities: Vec<BrowserCapability>,
+    #[specta(type = Option<specta_typescript::Number>)]
+    pub expected_revision: Option<u64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum HostAccessRequestStatus {
+    Pending,
+    Allowed,
+    Denied,
+    Expired,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum HostAccessTarget {
+    Browser {
+        origin: String,
+        surface: BrowserAutomationSurfaceKind,
+        private_network: bool,
+    },
+    Computer {
+        app: ComputerAppDescriptor,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct HostAccessRequestRecord {
+    pub id: ItemId,
+    pub owner_session_id: SessionId,
+    pub owner_run_id: RunId,
+    #[specta(type = specta_typescript::Number)]
+    pub run_generation: u64,
+    pub target: HostAccessTarget,
+    pub capabilities: Vec<String>,
+    pub status: HostAccessRequestStatus,
+    #[specta(type = specta_typescript::Number)]
+    pub created_at_ms: i64,
+    #[specta(type = specta_typescript::Number)]
+    pub expires_at_ms: i64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum HostAccessDecision {
+    Deny,
+    AllowOnce,
+    AllowSession,
+    AlwaysAllow,
+    AlwaysBlock,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct HostAccessDecisionRequest {
+    pub request_id: ItemId,
+    pub decision: HostAccessDecision,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type)]
@@ -518,6 +616,13 @@ pub struct BrowserObservation {
     pub created_at_ms: i64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ExternalBrowserLeaseObservation {
+    pub lease_id: BrowserAutomationLeaseId,
+    pub observation: BrowserObservation,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Type)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum BrowserAction {
@@ -707,14 +812,42 @@ pub struct BrowserPairing {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct BrowserHostSettings {
-    pub preferred_profile_kind: BrowserProfileKind,
+    pub automation_enabled: bool,
+    pub automation_preference: BrowserAutomationPreference,
     pub latest_pairing: Option<BrowserPairing>,
+    pub pending_authorization: Option<BrowserPairing>,
+    pub detected_browsers: Vec<SystemBrowserInstallation>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum SystemBrowserKind {
+    Chrome,
+    Edge,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct SystemBrowserInstallation {
+    pub kind: SystemBrowserKind,
+    pub executable_path: String,
+    pub version: Option<String>,
+    pub supported: bool,
+    pub extension_store_url: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct BrowserHostSettingsUpdate {
+    pub automation_enabled: bool,
+    pub automation_preference: BrowserAutomationPreference,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct ComputerWindowIdentity {
     pub app_id: String,
+    pub app: ComputerAppDescriptor,
     pub process_id: u32,
     pub window_handle: String,
     pub fingerprint: String,
@@ -722,6 +855,72 @@ pub struct ComputerWindowIdentity {
     pub elevated: bool,
     pub protected_desktop: bool,
     pub hachimi_owned: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ComputerAppDescriptor {
+    pub app_id: String,
+    pub display_name: String,
+    pub executable_name: String,
+    pub executable_path: Option<String>,
+    pub publisher: Option<String>,
+    pub publisher_verified: bool,
+    pub package_family_name: Option<String>,
+    pub app_user_model_id: Option<String>,
+    pub file_identity: Option<String>,
+    pub identity_hash: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ComputerAppCandidate {
+    pub app: ComputerAppDescriptor,
+    /// A bounded PNG included only in this response. It must never be persisted.
+    pub icon_png_base64: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ComputerAppPolicy {
+    pub app: ComputerAppDescriptor,
+    pub decision: HostPolicyDecision,
+    #[specta(type = specta_typescript::Number)]
+    pub revision: u64,
+    #[specta(type = specta_typescript::Number)]
+    pub updated_at_ms: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ComputerAppPolicyUpdate {
+    pub identity_hash: String,
+    pub decision: HostPolicyDecision,
+    #[specta(type = Option<specta_typescript::Number>)]
+    pub expected_revision: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ComputerHostSettings {
+    pub automation_enabled: bool,
+    pub runtime_health: ComputerRuntimeHealth,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ComputerRuntimeHealth {
+    pub os_supported: bool,
+    pub graphics_capture_available: bool,
+    pub input_desktop_available: bool,
+    pub process_elevated: bool,
+    pub error_code: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ComputerHostSettingsUpdate {
+    pub automation_enabled: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
@@ -742,6 +941,44 @@ pub struct ComputerFrame {
     pub created_at_ms: i64,
     #[specta(type = specta_typescript::Number)]
     pub expires_at_ms: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ComputerFramePreview {
+    pub frame_id: ComputerFrameId,
+    pub media_type: String,
+    pub data_base64: String,
+    pub sha256: String,
+    #[specta(type = specta_typescript::Number)]
+    pub expires_at_ms: i64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum ComputerControlStatus {
+    Active,
+    Suspended,
+    Stopped,
+    Expired,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ComputerControlSession {
+    pub id: ComputerControlSessionId,
+    pub owner_session_id: SessionId,
+    pub owner_run_id: Option<RunId>,
+    #[specta(type = Option<specta_typescript::Number>)]
+    pub run_generation: Option<u64>,
+    pub app: Option<ComputerAppDescriptor>,
+    pub window: Option<ComputerWindowIdentity>,
+    pub latest_frame: Option<ComputerFrame>,
+    pub status: ComputerControlStatus,
+    #[specta(type = specta_typescript::Number)]
+    pub revision: u64,
+    #[specta(type = specta_typescript::Number)]
+    pub updated_at_ms: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]

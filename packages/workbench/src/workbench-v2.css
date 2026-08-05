@@ -1602,6 +1602,66 @@
   color: var(--color-text-muted);
 }
 
+.browser-external-inspector {
+  grid-template-rows: auto minmax(0, 1fr) auto auto;
+  padding: 0;
+  background: var(--color-bg-base);
+}
+
+.browser-external-header {
+  min-width: 0;
+  min-height: 54px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 9px 12px;
+  border-bottom: 1px solid var(--color-border-muted);
+}
+
+.browser-external-header > div {
+  min-width: 0;
+  flex: 1;
+  display: grid;
+  gap: 3px;
+}
+
+.browser-external-header strong,
+.browser-external-header div > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.browser-external-header div > span {
+  color: var(--color-text-muted);
+  font-size: var(--font-size-xs);
+}
+
+.browser-external-header > span {
+  flex: none;
+  color: var(--color-text-muted);
+  font-size: var(--font-size-xs);
+}
+
+.browser-external-header > span[data-status="healthy"] {
+  color: var(--color-state-success);
+}
+
+.browser-external-screenshot {
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  object-fit: contain;
+  background: var(--color-bg-canvas);
+}
+
+.browser-external-empty {
+  min-height: 280px;
+  display: grid;
+  place-items: center;
+  color: var(--color-text-muted);
+}
+
 .inspector-empty-state {
   min-height: 100%;
   display: grid;

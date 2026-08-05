@@ -18,6 +18,27 @@ import { fileURLToPath } from "node:url";
 import { createOfficeArtifact } from "./support/office-artifacts.mjs";
 import { cleanupExecutableProcesses, terminateProcessTree } from "./support/processes.mjs";
 
+async function allocateLoopbackPorts(count) {
+  const reservations = [];
+  try {
+    for (let index = 0; index < count; index += 1) {
+      const reservation = createServer();
+      await new Promise((resolveListen, rejectListen) => {
+        reservation.once("error", rejectListen);
+        reservation.listen(0, "127.0.0.1", resolveListen);
+      });
+      reservations.push(reservation);
+    }
+    return reservations.map((reservation) => reservation.address().port);
+  } finally {
+    await Promise.all(
+      reservations.map(
+        (reservation) => new Promise((resolveClose) => reservation.close(resolveClose)),
+      ),
+    );
+  }
+}
+
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const corepackCli = join(
   dirname(process.execPath),
@@ -454,6 +475,7 @@ if (!mcpAddress || typeof mcpAddress === "string")
 const mcpUrl = `http://127.0.0.1:${mcpAddress.port}/mcp`;
 const browserFixtureUrl = `http://127.0.0.1:${mcpAddress.port}/browser-fixture`;
 const browserFixtureOrigin = `http://127.0.0.1:${mcpAddress.port}`;
+const [gatewayPort, gatewayWakePort] = await allocateLoopbackPorts(2);
 
 function checked(command, args, options = {}) {
   const result = spawnSync(command, args, {
@@ -503,6 +525,8 @@ const testEnvironment = {
   HACHIMI_DESKTOP_E2E_PROVIDER: "deterministic",
   HACHIMI_DESKTOP_E2E_ARTIFACTS: artifacts,
   HACHIMI_DESKTOP_E2E_LOOPBACK_TOKEN: loopbackToken,
+  HACHIMI_DESKTOP_E2E_GATEWAY_PORT: String(gatewayPort),
+  HACHIMI_DESKTOP_E2E_GATEWAY_WAKE_PORT: String(gatewayWakePort),
   HACHIMI_DESKTOP_E2E_MCP_URL: mcpUrl,
   HACHIMI_DESKTOP_E2E_MCP_STDIO_COMMAND: process.execPath,
   HACHIMI_DESKTOP_E2E_MCP_STDIO_ARGS: officeStdioServer,

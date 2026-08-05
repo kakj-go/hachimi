@@ -39,7 +39,7 @@ import { timelineActivityLabel, timelineItemText, timelineKindLabel } from "./ti
 
 export function SessionTimeline(props: {
   snapshot: WorkbenchSessionSnapshot;
-  pendingGate: "approval" | "plan" | "user_input" | undefined;
+  pendingGate: "approval" | "host_access" | "plan" | "user_input" | undefined;
   recoveries: RunRecoverySnapshot[];
   liveItemDeltas: LiveItemDeltas;
   resolvingRecoveryId: string | undefined;
@@ -62,6 +62,11 @@ export function SessionTimeline(props: {
     <section
       ref={props.onContentMount}
       class="session-timeline"
+      data-testid="workbench-session-timeline"
+      data-run-id={latestRun()?.id}
+      data-run-status={latestRun()?.status}
+      data-agent-task-count={props.snapshot.agentTasks.length}
+      data-agent-task-statuses={props.snapshot.agentTasks.map((task) => task.status).join(",")}
       aria-label={i18n.t("workbench.timeline")}
     >
       <RecoveryStack
@@ -119,7 +124,9 @@ export function SessionTimeline(props: {
   );
 }
 
-export function PendingGateStatus(props: { kind: "approval" | "plan" | "user_input" }) {
+export function PendingGateStatus(props: {
+  kind: "approval" | "host_access" | "plan" | "user_input";
+}) {
   const i18n = useI18n();
   const zh = () => i18n.locale() === "zh-CN";
   const copy = () => {
@@ -127,6 +134,11 @@ export function PendingGateStatus(props: { kind: "approval" | "plan" | "user_inp
       return zh()
         ? ["等待批准", "Agent 已暂停，批准或拒绝后继续"]
         : ["Waiting for approval", "The agent is paused until you allow or deny the request"];
+    }
+    if (props.kind === "host_access") {
+      return zh()
+        ? ["等待访问授权", "Agent 已暂停，请选择目标访问范围"]
+        : ["Waiting for access", "The agent is paused until you choose an access scope"];
     }
     if (props.kind === "plan") {
       return zh()
@@ -138,7 +150,9 @@ export function PendingGateStatus(props: { kind: "approval" | "plan" | "user_inp
       : ["Waiting for your answer", "The agent will continue after you answer"];
   };
   const icon = () => {
-    if (props.kind === "approval") return <ShieldCheck size={16} />;
+    if (props.kind === "approval" || props.kind === "host_access") {
+      return <ShieldCheck size={16} />;
+    }
     if (props.kind === "plan") return <Lightbulb size={16} />;
     return <CircleHelp size={16} />;
   };

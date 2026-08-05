@@ -1,6 +1,6 @@
 import type { EmbeddedBrowserSettings, FeatureFlags } from "@hachimi/contracts";
 import { I18nProvider } from "@hachimi/i18n";
-import type { JSX } from "solid-js";
+import { Show, type JSX } from "solid-js";
 import { render } from "solid-js/web";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -21,6 +21,13 @@ vi.mock("@hachimi/contracts", () => ({
 
 vi.mock("@hachimi/ui", () => ({
   Badge: (props: { children?: JSX.Element }) => <span>{props.children}</span>,
+  Dialog: (props: { open: boolean; title: string; children?: JSX.Element }) => (
+    <Show when={props.open}>
+      <section role="dialog" aria-label={props.title}>
+        {props.children}
+      </section>
+    </Show>
+  ),
   Button: (props: {
     children?: JSX.Element;
     disabled?: boolean;
@@ -147,7 +154,7 @@ describe("BrowserSettingsSection", () => {
     mounted.dispose();
   });
 
-  it("updates ask-before-save and disables full CDP without Developer mode", async () => {
+  it("updates ask-before-save and hides full CDP without Developer mode", async () => {
     const mounted = mount();
     await vi.waitFor(() =>
       expect(
@@ -155,8 +162,9 @@ describe("BrowserSettingsSection", () => {
       ).toBe(false),
     );
     const ask = mounted.host.querySelector<HTMLButtonElement>('[aria-label="每次询问"]')!;
-    const cdp = mounted.host.querySelector<HTMLButtonElement>('[aria-label="启用完整 CDP 访问"]')!;
-    expect(cdp.disabled).toBe(true);
+    expect(
+      mounted.host.querySelector<HTMLButtonElement>('[aria-label="启用完整 CDP 访问"]'),
+    ).toBeNull();
     ask.click();
     await vi.waitFor(() =>
       expect(commandMocks.updateEmbeddedBrowserSettings).toHaveBeenCalledWith({
@@ -178,9 +186,13 @@ describe("BrowserSettingsSection", () => {
       ).toBe(false),
     );
     mounted.host.querySelector<HTMLButtonElement>('[aria-label="Cookie"]')?.click();
-    mounted.host.querySelector<HTMLButtonElement>('[aria-label="缓存"]')?.click();
     mounted.host
       .querySelector<HTMLButtonElement>('[data-testid="embedded-browser-clear-data"]')
+      ?.click();
+    mounted.host.querySelector<HTMLButtonElement>('[aria-label="Cookie 与站点数据"]')?.click();
+    mounted.host.querySelector<HTMLButtonElement>('[aria-label="缓存文件"]')?.click();
+    mounted.host
+      .querySelector<HTMLButtonElement>('[data-testid="embedded-browser-clear-confirm"]')
       ?.click();
     await vi.waitFor(() =>
       expect(commandMocks.clearEmbeddedBrowserData).toHaveBeenCalledWith({ data: ["history"] }),

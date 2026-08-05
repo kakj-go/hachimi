@@ -29,6 +29,7 @@ import {
   X,
 } from "@hachimi/ui";
 import { For, Show, type JSX } from "solid-js";
+import { skillDisplayName } from "./skill-display";
 
 export type ComposerPopoverId = "project" | "execution" | "branch" | "options" | "approval";
 
@@ -358,7 +359,7 @@ export function ComposerOptionsPopover(
           {(skill, index) => {
             const hasErrors = () => skill.diagnostics.some((item) => item.severity === "error");
             const unavailable = () => !skill.enabled || hasErrors();
-            const displayName = () => skill.qualifiedName || skill.name;
+            const displayName = () => skillDisplayName(skill, i18n.locale() === "zh-CN");
             const description = () =>
               unavailable()
                 ? !skill.enabled
@@ -504,7 +505,7 @@ export function SkillReferenceList(props: {
       <div class="composer-skill-references" aria-label={i18n.t("workbench.skillReferences")}>
         <For each={props.skills}>
           {(skill, index) => {
-            const displayName = skill.qualifiedName || skill.name;
+            const displayName = skillDisplayName(skill, i18n.locale() === "zh-CN");
             return (
               <Button
                 type="button"

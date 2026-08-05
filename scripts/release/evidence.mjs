@@ -169,7 +169,7 @@ function validateStagingShape(config, gateKind) {
       throw new Error("staging_config_enterprise_connection_set_invalid");
     }
     const platforms = new Set(config.connections.map((entry) => entry?.platform));
-    for (const platform of ["wecom", "ding_talk", "feishu"]) {
+    for (const platform of ["wecom_app", "dingtalk", "feishu"]) {
       if (!platforms.has(platform)) {
         throw new Error(`staging_config_enterprise_platform_missing:${platform}`);
       }
@@ -190,7 +190,7 @@ function validateStagingShape(config, gateKind) {
       if (entry.expectInboundEvent !== true) {
         throw new Error("staging_config_enterprise_inbound_event_required");
       }
-      if (entry.platform === "wecom") {
+      if (entry.platform === "wecom_app") {
         validateHttpUrl(
           entry.callbackPublicUrl,
           "staging_config_enterprise_wecom_callback_url_invalid",
@@ -198,13 +198,92 @@ function validateStagingShape(config, gateKind) {
         const callback = new URL(entry.callbackPublicUrl);
         if (
           callback.protocol !== "https:" ||
-          callback.pathname !== "/v1/channels/wecom/callback" ||
-          callback.searchParams.get("account_id") !== entry.accountId
+          callback.pathname !== `/v1/channels/wecom_app/${entry.accountId}/callback` ||
+          callback.search !== ""
         ) {
           throw new Error("staging_config_enterprise_wecom_callback_url_invalid");
         }
       }
     }
+    return;
+  }
+  if (gateKind === "channels") {
+    if (!Array.isArray(config.connections) || config.connections.length !== 5) {
+      throw new Error("staging_config_channels_connection_set_invalid");
+    }
+    const providers = new Set(config.connections.map((entry) => entry?.providerId));
+    const expectedProviders = ["dingtalk", "feishu", "wecom_ai_bot", "wecom_app", "wechat_ilink"];
+    if (providers.size !== expectedProviders.length) {
+      throw new Error("staging_config_channels_connection_set_invalid");
+    }
+    for (const provider of expectedProviders) {
+      if (!providers.has(provider)) {
+        throw new Error(`staging_config_channels_provider_missing:${provider}`);
+      }
+    }
+    for (const entry of config.connections) {
+      for (const key of [
+        "accountId",
+        "tenantKey",
+        "credentialRef",
+        "dmPeerId",
+        "imageFixturePath",
+        "fileFixturePath",
+      ]) {
+        requiredString(entry?.[key], `staging_config_channels_${key}_missing`);
+      }
+      if (!config.secretRefs.includes(entry.credentialRef)) {
+        throw new Error("staging_config_channels_secret_ref_unregistered");
+      }
+      if (
+        entry.credentialRef !== `keyring:integration:${entry.providerId}:${entry.accountId}:primary`
+      ) {
+        throw new Error("staging_config_channels_credential_ref_invalid");
+      }
+      for (const expectation of [
+        "expectInboundEvent",
+        "expectText",
+        "expectImage",
+        "expectFile",
+        "expectRestartRecovery",
+        "expectCredentialRevocation",
+      ]) {
+        if (entry[expectation] !== true) {
+          throw new Error(`staging_config_channels_expectation_missing:${expectation}`);
+        }
+      }
+      if (entry.providerId === "wechat_ilink") {
+        if (entry.groupId !== null && entry.groupId !== undefined) {
+          throw new Error("staging_config_channels_ilink_group_unsupported");
+        }
+        requiredString(
+          entry.conversationSecretRef,
+          "staging_config_channels_conversation_ref_missing",
+        );
+        if (!config.secretRefs.includes(entry.conversationSecretRef)) {
+          throw new Error("staging_config_channels_secret_ref_unregistered");
+        }
+      } else if (["dingtalk", "feishu", "wecom_ai_bot"].includes(entry.providerId)) {
+        requiredString(entry.groupId, "staging_config_channels_group_missing");
+      }
+      if (entry.providerId === "wecom_app") {
+        requiredString(
+          entry.callbackFixturePath,
+          "staging_config_channels_callback_fixture_missing",
+        );
+        validateHttpUrl(entry.callbackPublicUrl, "staging_config_channels_callback_url_invalid");
+        const callback = new URL(entry.callbackPublicUrl);
+        if (
+          callback.protocol !== "https:" ||
+          callback.pathname !== `/v1/channels/wecom_app/${entry.accountId}/callback` ||
+          callback.search ||
+          callback.hash
+        ) {
+          throw new Error("staging_config_channels_callback_url_invalid");
+        }
+      }
+    }
+    return;
   }
 }
 
@@ -243,6 +322,7 @@ export function collectSourceRegistryDigests(workspaceRoot) {
     openai: "docs/references/openai/registry.json",
     forge: "docs/references/forge/registry.json",
     enterprise: "docs/references/enterprise/registry.json",
+    channels: "docs/references/channels/registry.json",
   };
   return Object.fromEntries(
     Object.entries(entries).map(([key, relative]) => [
@@ -323,7 +403,7 @@ function validateSummary(value) {
     }
   }
   const registries = value.sourceRegistrySha256;
-  for (const registry of ["openai", "forge", "enterprise"]) {
+  for (const registry of ["openai", "forge", "enterprise", "channels"]) {
     validateDigest(
       registries?.[registry],
       `release_evidence_source_registry_invalid:${value.gateKind}:${registry}`,
@@ -434,6 +514,7 @@ export function verifyEvidence(root, options = {}) {
     "openai",
     "forge",
     "enterprise",
+    "channels",
     "windows_standard_user",
     "windows_elevated",
   ];

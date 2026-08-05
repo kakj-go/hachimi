@@ -8,13 +8,8 @@ use super::*;
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Type)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum LocalHostCommandRequest {
-    BrowserBeginPairing,
-    BrowserGetHostSettings,
     BrowserListPermissions,
     BrowserListPermissionRequests,
-    BrowserSetPreferredProfile {
-        profile_kind: BrowserProfileKind,
-    },
     BrowserStart {
         session_id: SessionId,
         run_id: RunId,
@@ -100,7 +95,7 @@ pub enum LocalHostCommandRequest {
     PluginChooseAndInstall,
     PluginInstallBuiltinSampleCrm,
     PluginInstallBuiltinEnterprise {
-        platform: EnterprisePlatform,
+        provider_id: IntegrationProviderId,
     },
     PluginList,
     PluginListContributions {
@@ -158,17 +153,17 @@ pub enum LocalHostCommandRequest {
     },
     ChannelLoopbackReceive {
         bearer_token: String,
-        envelope: ChannelEnvelope,
+        message: VerifiedChannelMessage,
     },
     ChannelMockPollPush {
-        envelope: ChannelEnvelope,
+        message: VerifiedChannelMessage,
     },
     ChannelMockPollSetConnected {
         connected: bool,
     },
     ChannelMockPollDrain,
     ChannelEnqueueDelivery {
-        route: ChannelRouteKey,
+        address: ChannelConversationAddress,
         idempotency_key: String,
         text: String,
     },
@@ -179,9 +174,6 @@ pub enum LocalHostCommandRequest {
     GatewayUpsertProviderAccount {
         account: ChannelProviderAccountUpsert,
     },
-    GatewaySetStartupEnabled {
-        enabled: bool,
-    },
     GatewayReconcile,
 }
 
@@ -189,8 +181,6 @@ pub enum LocalHostCommandRequest {
 #[serde(tag = "kind", content = "value", rename_all = "snake_case")]
 pub enum LocalHostCommandResponse {
     Cancelled,
-    BrowserPairing(BrowserPairing),
-    BrowserHostSettings(BrowserHostSettings),
     BrowserSession(BrowserSession),
     BrowserPermission(BrowserSitePermission),
     BrowserPermissions(Vec<BrowserPermissionLedgerEntry>),

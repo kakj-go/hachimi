@@ -4,10 +4,15 @@ import { switchToWorkbench } from "../support/windows.mjs";
 /* global document */
 
 async function waitForRun(status, timeout = 60_000) {
-  await browser.waitUntil(async () => (await $(".run-status-actions").getText()).includes(status), {
-    timeout,
-    timeoutMsg: `Agent Run did not reach ${status}`,
-  });
+  await browser.waitUntil(
+    async () =>
+      (await $('[data-testid="workbench-session-timeline"]').getAttribute("data-run-status")) ===
+      status,
+    {
+      timeout,
+      timeoutMsg: `Agent Run did not reach ${status}`,
+    },
+  );
 }
 
 async function timelineText() {

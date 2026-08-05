@@ -40,7 +40,7 @@ try {
     }
 
     New-Item -ItemType Directory -Path $stageRoot -Force | Out-Null
-    Copy-Item -LiteralPath (Join-Path $releaseRoot "hachimi-desktop.exe") -Destination $stageRoot
+    Copy-Item -LiteralPath (Join-Path $releaseRoot "hachimi-desktop.exe") -Destination (Join-Path $stageRoot "Hachimi.exe")
     Copy-Item -LiteralPath (Join-Path $releaseRoot "hachimi-workspace-worker.exe") -Destination $stageRoot
     Copy-Item -LiteralPath (Join-Path $releaseRoot "hachimi-sandbox-launcher.exe") -Destination $stageRoot
     Copy-Item -LiteralPath (Join-Path $releaseRoot "hachimi-sandbox-canary.exe") -Destination $stageRoot
@@ -49,7 +49,9 @@ try {
     Copy-Item -LiteralPath (Join-Path $releaseRoot "DirectML.dll") -Destination $stageRoot
     Copy-Item -LiteralPath (Join-Path $releaseRoot "onnxruntime.dll") -Destination $stageRoot
     Copy-Item -LiteralPath (Join-Path $releaseRoot "sherpa-onnx-c-api.dll") -Destination $stageRoot
-    Copy-Item -LiteralPath (Join-Path $releaseRoot "resources") -Destination $stageRoot -Recurse
+    foreach ($resourceDirectory in @("resources", "cef-runtime", "browser-extension", "plugins")) {
+        Copy-Item -LiteralPath (Join-Path $releaseRoot $resourceDirectory) -Destination $stageRoot -Recurse
+    }
     Copy-Item -LiteralPath (Join-Path $repoRoot "apps\desktop\src-tauri\managed-git") -Destination $stageRoot -Recurse
     Copy-Item -LiteralPath (Join-Path $repoRoot "LICENSE") -Destination $stageRoot
     Copy-Item -LiteralPath (Join-Path $repoRoot "NOTICE.md") -Destination $stageRoot
@@ -78,6 +80,14 @@ try {
             [void]$entryNames.Add($entry.FullName.Replace('\', '/'))
         }
         foreach ($requiredEntry in @(
+            "Hachimi/Hachimi.exe",
+            "Hachimi/cef-runtime/hachimi-cef-host.exe",
+            "Hachimi/browser-extension/manifest.json",
+            "Hachimi/plugins/dingtalk/channels/dingtalk.json",
+            "Hachimi/plugins/feishu/channels/feishu.json",
+            "Hachimi/plugins/wecom_app/channels/wecom_app.json",
+            "Hachimi/plugins/wecom_ai_bot/channels/wecom_ai_bot.json",
+            "Hachimi/plugins/wechat_ilink/channels/wechat_ilink.json",
             "Hachimi/managed-git/manifest.json",
             "Hachimi/managed-git/cmd/git.exe"
         )) {

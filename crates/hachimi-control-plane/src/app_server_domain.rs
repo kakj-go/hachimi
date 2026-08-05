@@ -15,27 +15,27 @@ use std::{future::Future, pin::Pin};
 
 use hachimi_protocol::{
     BrowserActionRequest, BrowserActionResult, BrowserCapability, BrowserFileToken,
-    BrowserHostSettings, BrowserImportedDownload, BrowserObservation, BrowserPairing,
-    BrowserPairingId, BrowserPermissionDecision, BrowserProfileKind, BrowserSession,
-    BrowserSessionId, BrowserSitePermission, ChannelEnvelope, ChannelRouteKey,
-    ComputerActionRequest, ComputerActionResult, ComputerAppRule, ComputerFrame,
-    ComputerWindowIdentity, ConnectorAccount, ConnectorAccountId, ConnectorAccountUpsert,
-    ConnectorInvocationRequest, ConnectorInvocationResult, ControlMethod, DeliveryAttempt,
-    DiffReadFileRequest, DiffReadFileResponse, DiffScope, FsFileChunk, FsListPage, FsListRequest,
-    FsReadChunkRequest, FsSearchId, FsSearchSnapshot, FsSearchStartRequest, FsSearchUpdateRequest,
-    FsWatchId, FsWatchRegistration, FsWatchRequest, GatewayHealth, IngressReceipt, InstalledPlugin,
-    McpAuthStatusRecord, McpCallSummaryListRequest, McpCallSummaryRecord, McpInventorySnapshot,
-    McpOAuthLoginRequest, McpOAuthLoginResponse, McpPromptGetRequest, McpPromptResult,
-    McpResourceContent, McpResourceReadRequest, McpServerId, MutationContext, PluginId,
-    ProcessListRequest, ProcessReadRequest, ProcessReadSnapshot, ProcessResizeRequest,
-    ProcessSessionRecord, ProcessSpawnRequest, ProcessTerminateRequest, ProcessWriteRequest,
-    ProjectId, ReviewFinding, ReviewFindingUpdateRequest, ReviewId, ReviewSnapshot,
-    ReviewStartRequest, ReviewStartSnapshot, RunDiffSnapshot, ScheduleCreateRequest,
-    ScheduleDefinition, ScheduleEventIngressRequest, ScheduleEventReceipt, ScheduleGrantRecord,
-    ScheduleId, SchedulePreview, ScheduleSnapshot, ScheduleSpec, ScheduleUpdateRequest, SessionId,
-    SkillEntryCreateRequest, SkillEntryRenameRequest, SkillFileSnapshot, SkillFileWriteRequest,
-    SkillId, SkillPreviewResource, SkillPreviewResourceRequest, SkillRecord, SkillTreeNode,
-    TaskInteractiveContinuation, TaskRunId, TaskRunRecord,
+    BrowserImportedDownload, BrowserObservation, BrowserPairingId, BrowserPermissionDecision,
+    BrowserProfileKind, BrowserSession, BrowserSessionId, BrowserSitePermission,
+    ChannelConversationAddress, ComputerActionRequest, ComputerActionResult, ComputerAppRule,
+    ComputerFrame, ComputerWindowIdentity, ConnectorAccount, ConnectorAccountId,
+    ConnectorAccountUpsert, ConnectorInvocationRequest, ConnectorInvocationResult, ControlMethod,
+    DeliveryAttempt, DiffReadFileRequest, DiffReadFileResponse, DiffScope, FsFileChunk, FsListPage,
+    FsListRequest, FsReadChunkRequest, FsSearchId, FsSearchSnapshot, FsSearchStartRequest,
+    FsSearchUpdateRequest, FsWatchId, FsWatchRegistration, FsWatchRequest, GatewayHealth,
+    IngressReceipt, InstalledPlugin, McpAuthStatusRecord, McpCallSummaryListRequest,
+    McpCallSummaryRecord, McpInventorySnapshot, McpOAuthLoginRequest, McpOAuthLoginResponse,
+    McpPromptGetRequest, McpPromptResult, McpResourceContent, McpResourceReadRequest, McpServerId,
+    MutationContext, PluginId, ProcessListRequest, ProcessReadRequest, ProcessReadSnapshot,
+    ProcessResizeRequest, ProcessSessionRecord, ProcessSpawnRequest, ProcessTerminateRequest,
+    ProcessWriteRequest, ProjectId, ReviewFinding, ReviewFindingUpdateRequest, ReviewId,
+    ReviewSnapshot, ReviewStartRequest, ReviewStartSnapshot, RunDiffSnapshot,
+    ScheduleCreateRequest, ScheduleDefinition, ScheduleEventIngressRequest, ScheduleEventReceipt,
+    ScheduleGrantRecord, ScheduleId, SchedulePreview, ScheduleSnapshot, ScheduleSpec,
+    ScheduleUpdateRequest, SessionId, SkillEntryCreateRequest, SkillEntryRenameRequest,
+    SkillFileSnapshot, SkillFileWriteRequest, SkillId, SkillPreviewResource,
+    SkillPreviewResourceRequest, SkillRecord, SkillTreeNode, TaskInteractiveContinuation,
+    TaskRunId, TaskRunRecord, VerifiedChannelMessage,
 };
 
 use crate::AppServerContext;
@@ -100,11 +100,8 @@ pub enum AppServerDomainResponse {
 
 #[derive(Debug)]
 pub enum BrowserAppRequest {
-    BeginPairing,
-    GetHostSettings,
     ListPermissions,
     ListPermissionRequests,
-    SetPreferredProfile(BrowserProfileKind),
     Start {
         session_id: SessionId,
         run_id: hachimi_protocol::RunId,
@@ -164,8 +161,6 @@ pub enum BrowserAppRequest {
 
 #[derive(Debug)]
 pub enum BrowserAppResponse {
-    Pairing(BrowserPairing),
-    HostSettings(BrowserHostSettings),
     Session(BrowserSession),
     Permission(BrowserSitePermission),
     Permissions(Vec<hachimi_protocol::BrowserPermissionLedgerEntry>),
@@ -278,17 +273,17 @@ pub enum ChannelAppRequest {
     /// supervisor. The Gateway owns transport/claim state; the App Server
     /// owns Session/Run creation and execution.
     DispatchIngress {
-        envelope: ChannelEnvelope,
+        message: VerifiedChannelMessage,
     },
     LoopbackReceive {
         bearer_token: String,
-        envelope: ChannelEnvelope,
+        message: VerifiedChannelMessage,
     },
-    MockPollPush(ChannelEnvelope),
+    MockPollPush(VerifiedChannelMessage),
     MockPollSetConnected(bool),
     MockPollDrain,
     EnqueueDelivery {
-        route: ChannelRouteKey,
+        address: ChannelConversationAddress,
         idempotency_key: String,
         text: String,
     },
@@ -309,7 +304,6 @@ pub enum GatewayAppRequest {
     ProviderHealth,
     ListProviderAccounts,
     UpsertProviderAccount(hachimi_protocol::ChannelProviderAccountUpsert),
-    SetStartupEnabled(bool),
     Reconcile,
 }
 

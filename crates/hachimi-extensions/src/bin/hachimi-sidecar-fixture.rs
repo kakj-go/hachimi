@@ -56,7 +56,7 @@ fn main() {
         "revoke" | "configure" | "start" | "stop" | "reload" | "ack" => {
             json!({"ok":true,"method":method})
         }
-        "receive" => params.get("envelope").cloned().unwrap_or(Value::Null),
+        "accept_verified" => params.get("message").cloned().unwrap_or(Value::Null),
         "deliver" => json!({
             "delivered": true,
             "retryable": false,

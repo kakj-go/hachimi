@@ -6,8 +6,8 @@ use std::{
 };
 
 use hachimi_protocol::{
-    ChannelEnvelope, ChannelProviderAccount, ChannelProviderHealth, ChannelProviderManifest,
-    DeliveryAttempt, IngressReceipt,
+    ChannelProviderAccount, ChannelProviderHealth, ChannelProviderManifest, DeliveryAttempt,
+    IngressReceipt, VerifiedChannelMessage,
 };
 
 use crate::GatewayError;
@@ -19,7 +19,9 @@ pub type ChannelProviderFuture<'a, T> =
 pub struct ChannelDeliveryOutcome {
     pub delivered: bool,
     pub retryable: bool,
+    pub indeterminate: bool,
     pub result_code: String,
+    pub provider_receipt: Option<String>,
 }
 
 pub trait ChannelProvider: Send + Sync {
@@ -44,13 +46,18 @@ pub trait ChannelProvider: Send + Sync {
 
     fn health<'a>(&'a self) -> ChannelProviderFuture<'a, ChannelProviderHealth>;
 
-    fn receive<'a>(
+    fn account_health<'a>(&'a self) -> ChannelProviderFuture<'a, Vec<ChannelProviderHealth>> {
+        Box::pin(async move { Ok(vec![self.health().await?]) })
+    }
+
+    /// Transport adapters return this type only after authentication and replay checks.
+    fn accept_verified<'a>(
         &'a self,
         credential: Option<&'a str>,
-        envelope: ChannelEnvelope,
-    ) -> ChannelProviderFuture<'a, ChannelEnvelope>;
+        message: VerifiedChannelMessage,
+    ) -> ChannelProviderFuture<'a, VerifiedChannelMessage>;
 
-    fn claim_ingress<'a>(&'a self) -> ChannelProviderFuture<'a, Option<ChannelEnvelope>> {
+    fn claim_ingress<'a>(&'a self) -> ChannelProviderFuture<'a, Option<VerifiedChannelMessage>> {
         Box::pin(async { Ok(None) })
     }
 
@@ -59,11 +66,11 @@ pub trait ChannelProvider: Send + Sync {
         attempt: &'a DeliveryAttempt,
     ) -> ChannelProviderFuture<'a, ChannelDeliveryOutcome>;
 
-    fn ack<'a>(&'a self, delivery: &'a DeliveryAttempt) -> ChannelProviderFuture<'a, ()>;
+    fn ack_delivery<'a>(&'a self, delivery: &'a DeliveryAttempt) -> ChannelProviderFuture<'a, ()>;
 
     fn ack_ingress<'a>(
         &'a self,
-        _envelope: &'a ChannelEnvelope,
+        _message: &'a VerifiedChannelMessage,
         _receipt: &'a IngressReceipt,
     ) -> ChannelProviderFuture<'a, ()> {
         Box::pin(async { Ok(()) })
@@ -71,6 +78,10 @@ pub trait ChannelProvider: Send + Sync {
 
     fn reload<'a>(&'a self, account: &'a ChannelProviderAccount) -> ChannelProviderFuture<'a, ()> {
         self.configure(account)
+    }
+
+    fn remove_account<'a>(&'a self, _account_id: &'a str) -> ChannelProviderFuture<'a, ()> {
+        Box::pin(async { Ok(()) })
     }
 }
 

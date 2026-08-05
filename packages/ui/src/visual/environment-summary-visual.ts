@@ -59,6 +59,7 @@ export function installEnvironmentSummaryVisualTests(installTauriMocks: InstallT
     await page.clock.setFixedTime(new Date("2026-07-26T15:00:00.000Z"));
     await installTauriMocks(page, true, false, true);
     await page.goto("http://127.0.0.1:1420/workbench.html?route=home");
+    await page.getByTestId("project-select-project-hachimi").click();
     await page.getByTestId("session-select-session-ui-unification").click();
 
     await expect(page.getByTestId("workbench-conversation-title")).toContainText(
@@ -145,6 +146,7 @@ export function installEnvironmentSummaryVisualTests(installTauriMocks: InstallT
           await page.getByRole("button", { name: "Sidebar" }).click();
           await expect(page.locator(".project-sidebar")).toBeVisible();
         }
+        await page.getByTestId("project-select-project-hachimi").click();
         await page.getByTestId("session-select-session-ui-unification").click();
         if (viewport.width <= 720) {
           await page.getByRole("button", { name: "Sidebar" }).click();

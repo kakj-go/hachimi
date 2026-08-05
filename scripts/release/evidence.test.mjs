@@ -93,7 +93,7 @@ test("Forge staging schema requires all five distinct platforms and registered c
 test("enterprise staging schema requires each external organization and inbound evidence", () => {
   const root = mkdtempSync(join(tmpdir(), "hachimi-release-enterprise-config-"));
   const path = join(root, "enterprise.json");
-  const platforms = ["wecom", "ding_talk", "feishu"];
+  const platforms = ["wecom_app", "dingtalk", "feishu"];
   const config = {
     schemaVersion: 1,
     gateKind: "enterprise",
@@ -107,10 +107,10 @@ test("enterprise staging schema requires each external organization and inbound 
       peerId: "gate-peer",
       groupId: "gate-group",
       expectInboundEvent: true,
-      ...(platform === "wecom"
+      ...(platform === "wecom_app"
         ? {
             callbackPublicUrl:
-              "https://wecom-gate.example.test/v1/channels/wecom/callback?account_id=release-wecom",
+              "https://wecom-gate.example.test/v1/channels/wecom_app/release-wecom_app/callback",
           }
         : {}),
     })),
@@ -120,6 +120,57 @@ test("enterprise staging schema requires each external organization and inbound 
   config.connections[0].expectInboundEvent = false;
   writeFileSync(path, JSON.stringify(config));
   assert.throws(() => loadStagingConfig(path, "enterprise"), /inbound_event_required/);
+});
+
+test("Channel staging schema requires all five providers and formal capability expectations", () => {
+  const root = mkdtempSync(join(tmpdir(), "hachimi-release-channels-config-"));
+  const path = join(root, "channels.json");
+  const providers = ["dingtalk", "feishu", "wecom_ai_bot", "wecom_app", "wechat_ilink"];
+  const config = {
+    schemaVersion: 1,
+    gateKind: "channels",
+    environmentFingerprint: "protected-channel-accounts",
+    secretRefs: providers.flatMap((provider) => [
+      `keyring:integration:${provider}:release-${provider}:primary`,
+      ...(provider === "wechat_ilink"
+        ? ["keyring:integration:wechat_ilink:release-wechat_ilink:conversation:dm-peer"]
+        : []),
+    ]),
+    connections: providers.map((provider) => ({
+      providerId: provider,
+      accountId: `release-${provider}`,
+      tenantKey: `tenant-${provider}`,
+      credentialRef: `keyring:integration:${provider}:release-${provider}:primary`,
+      dmPeerId: "dm-peer",
+      groupId: provider === "wechat_ilink" || provider === "wecom_app" ? null : "group-peer",
+      imageFixturePath: "D:/staging/image.png",
+      fileFixturePath: "D:/staging/document.pdf",
+      expectInboundEvent: true,
+      expectText: true,
+      expectImage: true,
+      expectFile: true,
+      expectRestartRecovery: true,
+      expectCredentialRevocation: true,
+      ...(provider === "wechat_ilink"
+        ? {
+            conversationSecretRef:
+              "keyring:integration:wechat_ilink:release-wechat_ilink:conversation:dm-peer",
+          }
+        : {}),
+      ...(provider === "wecom_app"
+        ? {
+            callbackFixturePath: "D:/staging/wecom-callback.json",
+            callbackPublicUrl:
+              "https://wecom-gate.example.test/v1/channels/wecom_app/release-wecom_app/callback",
+          }
+        : {}),
+    })),
+  };
+  writeFileSync(path, JSON.stringify(config));
+  assert.equal(loadStagingConfig(path, "channels").connections.length, 5);
+  config.connections[4].groupId = "unsupported-group";
+  writeFileSync(path, JSON.stringify(config));
+  assert.throws(() => loadStagingConfig(path, "channels"), /ilink_group_unsupported/);
 });
 
 function summary(gateKind, overrides = {}) {
@@ -138,6 +189,7 @@ function summary(gateKind, overrides = {}) {
       openai: "c".repeat(64),
       forge: "d".repeat(64),
       enterprise: "e".repeat(64),
+      channels: "a".repeat(64),
     },
     environmentFingerprint: "f".repeat(64),
     checks: [{ id: "conformance", status: "passed", detailsHash: "a".repeat(64) }],
@@ -147,6 +199,24 @@ function summary(gateKind, overrides = {}) {
     ...overrides,
   };
 }
+
+test("evidence verification defaults to all six release gate classes", () => {
+  const root = mkdtempSync(join(tmpdir(), "hachimi-release-default-gates-"));
+  for (const gateKind of [
+    "openai",
+    "forge",
+    "enterprise",
+    "windows_standard_user",
+    "windows_elevated",
+  ]) {
+    writeFileSync(
+      join(root, `${gateKind}.summary.json`),
+      JSON.stringify(summary(gateKind)),
+    );
+  }
+
+  assert.throws(() => verifyEvidence(root), /release_evidence_missing:channels/);
+});
 
 test("evidence verification rejects missing, skipped, and mismatched gates", () => {
   const root = mkdtempSync(join(tmpdir(), "hachimi-release-evidence-"));
@@ -180,6 +250,7 @@ test("evidence verification rejects failed checks, stale evidence, and source dr
           openai: "f".repeat(64),
           forge: "d".repeat(64),
           enterprise: "e".repeat(64),
+          channels: "a".repeat(64),
         },
       }),
     ),
@@ -280,7 +351,8 @@ test("candidate verifier hashes downloaded files instead of trusting the manifes
   mkdirSync(join(root, "docs", "references", "openai"), { recursive: true });
   mkdirSync(join(root, "docs", "references", "forge"), { recursive: true });
   mkdirSync(join(root, "docs", "references", "enterprise"), { recursive: true });
-  for (const area of ["openai", "forge", "enterprise"]) {
+  mkdirSync(join(root, "docs", "references", "channels"), { recursive: true });
+  for (const area of ["openai", "forge", "enterprise", "channels"]) {
     writeFileSync(join(root, "docs", "references", area, "registry.json"), `{"area":"${area}"}`);
   }
   writeFileSync(join(root, "LICENSE"), "license");
@@ -299,7 +371,7 @@ test("candidate verifier hashes downloaded files instead of trusting the manifes
       sha256: sha256Bytes(readFileSync(path)),
     })),
     sourceRegistrySha256: Object.fromEntries(
-      ["openai", "forge", "enterprise"].map((area) => [
+      ["openai", "forge", "enterprise", "channels"].map((area) => [
         area,
         sha256Bytes(readFileSync(join(root, "docs", "references", area, "registry.json"))),
       ]),

@@ -5,13 +5,13 @@ import {
   Button,
   CalendarClock,
   Check,
+  ChevronDown,
   Dropdown,
   ExternalLink,
   Folder,
   FolderOpen,
   GitFork,
   MessageCircle,
-  Monitor,
   MoreHorizontal,
   Pin,
   Play,
@@ -22,8 +22,12 @@ import {
   Sidebar,
   Trash2,
 } from "@hachimi/ui";
-import { For, Show, createMemo, createSignal } from "solid-js";
+import { For, Show, createEffect, createMemo, createSignal } from "solid-js";
 import { compareSidebarSessions } from "./project-sidebar-order";
+import {
+  loadProjectSidebarExpansion,
+  persistProjectSidebarExpansion,
+} from "./state/project-sidebar-expansion";
 
 export type ProjectMenuAction =
   | "pin"
@@ -39,9 +43,7 @@ export type SessionMenuAction = "pin" | "rename" | "fork" | "archive" | "unarchi
 export function ProjectSidebar(props: {
   openSettings: () => void;
   openMotionLab: () => void;
-  openDesktopControl: () => void;
   motionLabEnabled: boolean;
-  desktopControlEnabled: boolean;
   schedulerEnabled: boolean;
   onNewTask: (projectId?: string) => void;
   onOpenTasks: () => void;
@@ -66,9 +68,17 @@ export function ProjectSidebar(props: {
   const [search, setSearch] = createSignal("");
   const [searchOpen, setSearchOpen] = createSignal(false);
   const [showArchived, setShowArchived] = createSignal(false);
+  const restoredExpansion = loadProjectSidebarExpansion();
+  const [projectsExpanded, setProjectsExpanded] = createSignal(restoredExpansion.projectsExpanded);
+  const [generalExpanded, setGeneralExpanded] = createSignal(restoredExpansion.generalExpanded);
+  const [expandedProjectIds, setExpandedProjectIds] = createSignal<ReadonlySet<string>>(
+    new Set(restoredExpansion.expandedProjectIds),
+  );
+  const normalizedSearch = createMemo(() => search().trim().toLocaleLowerCase());
+  let lastExpandedSessionId: string | undefined;
 
   const filteredProjects = createMemo(() => {
-    const query = search().trim().toLocaleLowerCase();
+    const query = normalizedSearch();
     if (!query) return props.projects;
     return props.projects.filter(
       (project) =>
@@ -82,16 +92,73 @@ export function ProjectSidebar(props: {
   });
 
   const visibleSessions = (projectId?: string) => {
-    const query = search().trim().toLocaleLowerCase();
+    const query = normalizedSearch();
+    const projectMatches = Boolean(
+      query &&
+      projectId &&
+      props.projects.some(
+        (project) =>
+          project.id === projectId && project.displayName.toLocaleLowerCase().includes(query),
+      ),
+    );
     return props.sessions
       .filter(
         (session) =>
           session.archived === showArchived() &&
           sessionProjectId(session) === projectId &&
-          (!query || session.title.toLocaleLowerCase().includes(query)),
+          (!query || projectMatches || session.title.toLocaleLowerCase().includes(query)),
       )
       .sort(compareSidebarSessions);
   };
+
+  const projectSectionVisible = () => projectsExpanded() || Boolean(normalizedSearch());
+  const generalSectionVisible = () => generalExpanded() || Boolean(normalizedSearch());
+  const projectSessionsVisible = (projectId: string) =>
+    expandedProjectIds().has(projectId) || Boolean(normalizedSearch());
+
+  function toggleProject(projectId: string) {
+    setExpandedProjectIds((entries) => {
+      const next = new Set(entries);
+      if (next.has(projectId)) next.delete(projectId);
+      else next.add(projectId);
+      return next;
+    });
+  }
+
+  createEffect(() => {
+    const validProjectIds = new Set(props.projects.map((project) => project.id));
+    setExpandedProjectIds((entries) => {
+      const next = new Set([...entries].filter((id) => validProjectIds.has(id)));
+      return next.size === entries.size ? entries : next;
+    });
+  });
+
+  createEffect(() => {
+    const selectedSessionId = props.selectedSessionId;
+    if (!selectedSessionId) {
+      lastExpandedSessionId = undefined;
+      return;
+    }
+    if (selectedSessionId === lastExpandedSessionId) return;
+    lastExpandedSessionId = selectedSessionId;
+    const selectedSession = props.sessions.find((session) => session.id === selectedSessionId);
+    if (!selectedSession) return;
+    const projectId = sessionProjectId(selectedSession);
+    if (projectId) {
+      setProjectsExpanded(true);
+      setExpandedProjectIds((entries) => new Set(entries).add(projectId));
+    } else {
+      setGeneralExpanded(true);
+    }
+  });
+
+  createEffect(() => {
+    persistProjectSidebarExpansion({
+      projectsExpanded: projectsExpanded(),
+      generalExpanded: generalExpanded(),
+      expandedProjectIds: [...expandedProjectIds()],
+    });
+  });
 
   const sessionRow = (session: SessionRecord) => (
     <div class="session-row-shell" classList={{ selected: props.selectedSessionId === session.id }}>
@@ -233,16 +300,6 @@ export function ProjectSidebar(props: {
             <span>{i18n.locale() === "zh-CN" ? "任务" : "Tasks"}</span>
           </Button>
         </Show>
-        <Show when={props.desktopControlEnabled}>
-          <Button
-            type="button"
-            data-testid="workbench-desktop-control"
-            onClick={props.openDesktopControl}
-          >
-            <Monitor size={17} />
-            <span>{i18n.locale() === "zh-CN" ? "桌面控制" : "Desktop Control"}</span>
-          </Button>
-        </Show>
         <Show when={props.motionLabEnabled}>
           <Button type="button" onClick={() => props.openMotionLab()}>
             <Play size={17} />
@@ -253,7 +310,31 @@ export function ProjectSidebar(props: {
       <div class="project-sidebar-scroll">
         <section class="project-list-section">
           <div class="project-list-heading">
-            <h2>{i18n.t("workbench.projects")}</h2>
+            <div class="project-list-heading-title">
+              <Button
+                type="button"
+                class="project-section-toggle"
+                data-testid="workbench-toggle-projects"
+                aria-label={
+                  projectsExpanded()
+                    ? i18n.locale() === "zh-CN"
+                      ? "收起项目"
+                      : "Collapse projects"
+                    : i18n.locale() === "zh-CN"
+                      ? "展开项目"
+                      : "Expand projects"
+                }
+                aria-expanded={projectSectionVisible()}
+                onClick={() => setProjectsExpanded((value) => !value)}
+              >
+                <ChevronDown
+                  class="project-section-chevron"
+                  classList={{ collapsed: !projectSectionVisible() }}
+                  size={14}
+                />
+              </Button>
+              <h2>{i18n.t("workbench.projects")}</h2>
+            </div>
             <Button
               type="button"
               data-testid="workbench-add-project"
@@ -265,131 +346,172 @@ export function ProjectSidebar(props: {
               <Plus size={14} />
             </Button>
           </div>
-          <Show
-            when={filteredProjects().length > 0}
-            fallback={
-              <p class="project-empty">
-                {props.loading
-                  ? i18n.t("workbench.loadingProjects")
-                  : i18n.t("workbench.noProjects")}
-              </p>
-            }
-          >
-            <For each={filteredProjects()}>
-              {(project) => (
-                <>
-                  <div class="project-row-shell">
-                    <Button
-                      type="button"
-                      class="project-row"
-                      aria-current={props.selectedProjectId === project.id ? "page" : undefined}
-                      title={project.displayName}
-                      onClick={() => props.onSelectProject(project.id)}
-                    >
-                      <span class="project-row-main">
-                        {props.selectedProjectId === project.id ? (
-                          <FolderOpen size={16} />
-                        ) : (
-                          <Folder size={16} />
-                        )}
-                        <span class="project-row-name">{project.displayName}</span>
-                      </span>
-                    </Button>
-                    <div class="project-row-actions">
-                      <Dropdown
-                        label={`${project.displayName} project actions`}
-                        triggerTestId={`project-more-${project.id}`}
-                        actions={[
-                          {
-                            id: "pin",
-                            label: props.pinnedProjectIds.includes(project.id)
-                              ? i18n.locale() === "zh-CN"
-                                ? "取消置顶项目"
-                                : "Unpin project"
-                              : i18n.locale() === "zh-CN"
-                                ? "置顶项目"
-                                : "Pin project",
-                            icon: <Pin size={16} />,
-                          },
-                          {
-                            id: "open",
-                            label:
-                              i18n.locale() === "zh-CN"
-                                ? "在资源管理器中打开"
-                                : "Open in file explorer",
-                            icon: <ExternalLink size={16} />,
-                          },
-                          {
-                            id: "create_permanent_worktree",
-                            label:
-                              i18n.locale() === "zh-CN"
-                                ? "创建永久工作树"
-                                : "Create permanent worktree",
-                            icon: <GitFork size={16} />,
-                            disabled: !project.gitRoot,
-                          },
-                          {
-                            id: "rename",
-                            label: i18n.locale() === "zh-CN" ? "重命名项目" : "Rename project",
-                            icon: <MoreHorizontal size={16} />,
-                          },
-                          {
-                            id: "mark_read",
-                            label: i18n.locale() === "zh-CN" ? "全部标为已读" : "Mark all read",
-                            icon: <Check size={16} />,
-                          },
-                          {
-                            id: "archive_tasks",
-                            label: i18n.locale() === "zh-CN" ? "归档任务" : "Archive tasks",
-                            icon: <Archive size={16} />,
-                            disabled: visibleSessions(project.id).length === 0,
-                          },
-                          {
-                            id: "remove",
-                            label: i18n.locale() === "zh-CN" ? "移除" : "Remove",
-                            icon: <Trash2 size={16} />,
-                            danger: true,
-                            separatorBefore: true,
-                          },
-                        ]}
-                        onSelect={(action) =>
-                          props.onProjectAction(project, action as ProjectMenuAction)
-                        }
-                      >
-                        <MoreHorizontal size={16} />
-                      </Dropdown>
+          <Show when={projectSectionVisible()}>
+            <Show
+              when={filteredProjects().length > 0}
+              fallback={
+                <p class="project-empty">
+                  {props.loading
+                    ? i18n.t("workbench.loadingProjects")
+                    : i18n.t("workbench.noProjects")}
+                </p>
+              }
+            >
+              <For each={filteredProjects()}>
+                {(project) => (
+                  <>
+                    <div class="project-row-shell">
                       <Button
                         type="button"
-                        class="project-new-task"
-                        data-testid={`project-new-task-${project.id}`}
-                        aria-label={`New task in ${project.displayName}`}
-                        onClick={() => props.onNewTask(project.id)}
+                        class="project-row"
+                        data-testid={`project-select-${project.id}`}
+                        aria-current={props.selectedProjectId === project.id ? "page" : undefined}
+                        aria-expanded={projectSessionsVisible(project.id)}
+                        title={project.displayName}
+                        onClick={() => {
+                          props.onSelectProject(project.id);
+                          toggleProject(project.id);
+                        }}
                       >
-                        <Plus size={16} />
+                        <span class="project-row-main">
+                          {projectSessionsVisible(project.id) ? (
+                            <FolderOpen size={16} />
+                          ) : (
+                            <Folder size={16} />
+                          )}
+                          <span class="project-row-name">{project.displayName}</span>
+                          <ChevronDown
+                            class="project-chevron"
+                            classList={{ collapsed: !projectSessionsVisible(project.id) }}
+                            size={13}
+                          />
+                        </span>
                       </Button>
+                      <div class="project-row-actions">
+                        <Dropdown
+                          label={`${project.displayName} project actions`}
+                          triggerTestId={`project-more-${project.id}`}
+                          actions={[
+                            {
+                              id: "pin",
+                              label: props.pinnedProjectIds.includes(project.id)
+                                ? i18n.locale() === "zh-CN"
+                                  ? "取消置顶项目"
+                                  : "Unpin project"
+                                : i18n.locale() === "zh-CN"
+                                  ? "置顶项目"
+                                  : "Pin project",
+                              icon: <Pin size={16} />,
+                            },
+                            {
+                              id: "open",
+                              label:
+                                i18n.locale() === "zh-CN"
+                                  ? "在资源管理器中打开"
+                                  : "Open in file explorer",
+                              icon: <ExternalLink size={16} />,
+                            },
+                            {
+                              id: "create_permanent_worktree",
+                              label:
+                                i18n.locale() === "zh-CN"
+                                  ? "创建永久工作树"
+                                  : "Create permanent worktree",
+                              icon: <GitFork size={16} />,
+                              disabled: !project.gitRoot,
+                            },
+                            {
+                              id: "rename",
+                              label: i18n.locale() === "zh-CN" ? "重命名项目" : "Rename project",
+                              icon: <MoreHorizontal size={16} />,
+                            },
+                            {
+                              id: "mark_read",
+                              label: i18n.locale() === "zh-CN" ? "全部标为已读" : "Mark all read",
+                              icon: <Check size={16} />,
+                            },
+                            {
+                              id: "archive_tasks",
+                              label: i18n.locale() === "zh-CN" ? "归档任务" : "Archive tasks",
+                              icon: <Archive size={16} />,
+                              disabled: visibleSessions(project.id).length === 0,
+                            },
+                            {
+                              id: "remove",
+                              label: i18n.locale() === "zh-CN" ? "移除" : "Remove",
+                              icon: <Trash2 size={16} />,
+                              danger: true,
+                              separatorBefore: true,
+                            },
+                          ]}
+                          onSelect={(action) =>
+                            props.onProjectAction(project, action as ProjectMenuAction)
+                          }
+                        >
+                          <MoreHorizontal size={16} />
+                        </Dropdown>
+                        <Button
+                          type="button"
+                          class="project-new-task"
+                          data-testid={`project-new-task-${project.id}`}
+                          aria-label={`New task in ${project.displayName}`}
+                          onClick={() => props.onNewTask(project.id)}
+                        >
+                          <Plus size={16} />
+                        </Button>
+                      </div>
                     </div>
-                  </div>
-                  <div class="project-sessions">
-                    <For each={visibleSessions(project.id)}>{sessionRow}</For>
-                    <Show when={visibleSessions(project.id).length === 0}>
-                      <p class="session-empty">{i18n.t("workbench.noSessions")}</p>
+                    <Show when={projectSessionsVisible(project.id)}>
+                      <div class="project-sessions">
+                        <For each={visibleSessions(project.id)}>{sessionRow}</For>
+                        <Show when={visibleSessions(project.id).length === 0}>
+                          <p class="session-empty">{i18n.t("workbench.noSessions")}</p>
+                        </Show>
+                      </div>
                     </Show>
-                  </div>
-                </>
-              )}
-            </For>
+                  </>
+                )}
+              </For>
+            </Show>
           </Show>
         </section>
-        <Show when={visibleSessions(undefined).length > 0}>
-          <section class="project-list-section">
-            <div class="project-list-heading">
-              <h2>{i18n.locale() === "zh-CN" ? "通用会话" : "General sessions"}</h2>
+        <section class="project-list-section">
+          <div class="project-list-heading">
+            <div class="project-list-heading-title">
+              <Button
+                type="button"
+                class="project-section-toggle"
+                data-testid="workbench-toggle-general"
+                aria-label={
+                  generalExpanded()
+                    ? i18n.locale() === "zh-CN"
+                      ? "收起通用对话"
+                      : "Collapse general chats"
+                    : i18n.locale() === "zh-CN"
+                      ? "展开通用对话"
+                      : "Expand general chats"
+                }
+                aria-expanded={generalSectionVisible()}
+                onClick={() => setGeneralExpanded((value) => !value)}
+              >
+                <ChevronDown
+                  class="project-section-chevron"
+                  classList={{ collapsed: !generalSectionVisible() }}
+                  size={14}
+                />
+              </Button>
+              <h2>{i18n.locale() === "zh-CN" ? "通用对话" : "General chats"}</h2>
             </div>
+          </div>
+          <Show when={generalSectionVisible()}>
             <div class="project-sessions general-sessions">
               <For each={visibleSessions(undefined)}>{sessionRow}</For>
+              <Show when={visibleSessions(undefined).length === 0}>
+                <p class="session-empty">{i18n.locale() === "zh-CN" ? "暂无对话" : "No chats"}</p>
+              </Show>
             </div>
-          </section>
-        </Show>
+          </Show>
+        </section>
       </div>
       <Button
         type="button"

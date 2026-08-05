@@ -422,6 +422,16 @@ html[data-translucent-sidebar="on"] .settings-sidebar {
   justify-content: space-between;
 }
 
+.project-list-heading-title {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+}
+
+.project-list-heading-title h2 {
+  margin-left: 2px;
+}
+
 .project-list-heading button {
   width: 28px;
   height: 28px;
@@ -439,6 +449,18 @@ html[data-translucent-sidebar="on"] .settings-sidebar {
 .project-list-heading button:hover:not(:disabled) {
   background: var(--color-overlay-hover);
   color: var(--color-text-base);
+}
+
+.project-list-heading .project-section-toggle {
+  margin-right: 0;
+}
+
+.project-section-chevron {
+  transition: transform var(--duration-normal) var(--ease-standard);
+}
+
+.project-section-chevron.collapsed {
+  transform: rotate(-90deg);
 }
 
 .project-empty,
@@ -1584,6 +1606,21 @@ html[data-translucent-sidebar="on"] .settings-sidebar {
 .settings-nav-group button:hover {
   background: var(--color-overlay-hover);
   color: var(--color-text-base);
+}
+
+.settings-nav-group button:disabled,
+.settings-nav-group button[aria-disabled="true"] {
+  cursor: not-allowed;
+  background: transparent;
+  color: var(--color-text-faint);
+  opacity: 0.62;
+}
+
+.settings-nav-status {
+  margin-left: auto;
+  color: inherit;
+  font-size: var(--font-size-xs);
+  font-weight: 500;
 }
 
 .settings-nav-group button.selected {

@@ -131,10 +131,7 @@ export function verifyReleaseVersion(root, expectedTag = "") {
   if (!workbench.includes(`<Badge>v${version}</Badge>`)) {
     throw new Error("release_about_version_mismatch");
   }
-  for (const path of [
-    "packages/workbench/src/home.tsx",
-    "packages/workbench/src/desktop-control.tsx",
-  ]) {
+  for (const path of ["packages/workbench/src/home.tsx"]) {
     if (!readFileSync(resolve(root, path), "utf8").includes(`hachimi-desktop/${version}`)) {
       throw new Error(`release_client_version_mismatch:${path}`);
     }

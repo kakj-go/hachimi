@@ -32,17 +32,18 @@ async function extensionIdentity() {
   return `${chrome.runtime.id}:${installId}`;
 }
 
-async function pair(nonce) {
-  if (!nonce) throw new Error("Enter the one-time pairing code shown by Hachimi.");
-  const response = await fetch(`${endpoint}/v1/pair`, {
+async function requestAuthorization() {
+  const response = await fetch(`${endpoint}/v1/pair/request`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ nonce, extensionIdentity: await extensionIdentity() }),
+    body: JSON.stringify({ extensionIdentity: await extensionIdentity() }),
   });
+  if (response.status === 202) return false;
+  if (!response.ok) return false;
   const body = await response.json();
-  if (!response.ok) throw new Error(body.message ?? body.error ?? "Pairing rejected");
+  if (!body.token) return false;
   await chrome.storage.local.set({ token: body.token });
-  void poll();
+  return true;
 }
 
 async function api(path, token, body = {}) {
@@ -57,8 +58,11 @@ async function poll() {
   if (polling) return;
   polling = true;
   try {
-    const { token } = await storageGet();
-    if (!token) return;
+    let { token } = await storageGet();
+    if (!token) {
+      if (!(await requestAuthorization())) return;
+      ({ token } = await storageGet());
+    }
     for (let count = 0; count < 8; count += 1) {
       const response = await api("/v1/commands/claim", token);
       if (response.status === 401) {
@@ -212,21 +216,67 @@ export async function execute(command) {
         title: document.title,
         text: document.body?.innerText ?? "",
         url: location.href,
+        viewportWidth: window.innerWidth,
+        viewportHeight: window.innerHeight,
       }),
     });
-    observation = injected[0]?.result ?? { title: tab.title ?? "", text: "", url: tab.url };
+    const screenshot = await withDebugger(tab.id, (send) =>
+      send("Page.captureScreenshot", {
+        format: "png",
+        fromSurface: true,
+        captureBeyondViewport: false,
+      }),
+    );
+    observation = {
+      ...(injected[0]?.result ?? { title: tab.title ?? "", text: "", url: tab.url }),
+      screenshotBase64: screenshot.data,
+    };
   } else if (command.kind === "act") {
     action = await executeAction(command.sessionId, command.expectedOrigin, command.action);
+  } else if (command.kind === "resume") {
+    const record = (await sessions())[command.sessionId];
+    if (!record || record.owned) throw new Error("extension_session_not_released");
+    const tab = await chrome.tabs.get(record.tabId).catch(() => null);
+    if (!tab || !Number.isInteger(tab.id)) throw new Error("extension_released_tab_missing");
+    const groupId = await chrome.tabs.group({ tabIds: [tab.id] });
+    await chrome.tabGroups.update(groupId, {
+      title: command.taskTabGroup,
+      color: "blue",
+      collapsed: false,
+    });
+    await setSession(command.sessionId, {
+      ...record,
+      groupId,
+      owned: true,
+      networkRuleIds: [],
+    });
+    try {
+      await applyNetworkPolicy(command.sessionId, command.networkPolicy);
+    } catch (error) {
+      await chrome.tabs.ungroup([tab.id]).catch(() => {});
+      await setSession(command.sessionId, {
+        ...record,
+        owned: false,
+        networkRuleIds: [],
+      });
+      throw error;
+    }
   } else if (command.kind === "take_over") {
     const { record, tabs } = await ownedTab(command.sessionId);
     await clearNetworkRules(record);
     await chrome.tabs.ungroup(tabs.map((tab) => tab.id)).catch(() => {});
     await setSession(command.sessionId, { ...record, owned: false, networkRuleIds: [] });
   } else if (command.kind === "stop") {
-    const { record, tabs } = await ownedTab(command.sessionId);
+    const record = (await sessions())[command.sessionId];
+    if (!record) throw new Error("extension_session_missing");
     await clearNetworkRules(record);
-    await setSession(command.sessionId, null);
-    await chrome.tabs.remove(tabs.map((tab) => tab.id));
+    if (record.owned) {
+      const { tabs } = await ownedTab(command.sessionId);
+      await setSession(command.sessionId, null);
+      await chrome.tabs.remove(tabs.map((tab) => tab.id));
+    } else {
+      await setSession(command.sessionId, null);
+    }
   } else {
     throw new Error("extension_command_unsupported");
   }
@@ -661,9 +711,9 @@ async function executeAction(sessionId, expectedOrigin, request) {
 }
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
-  if (message?.kind === "pair") {
-    pair(message.nonce)
-      .then(() => sendResponse({ ok: true }))
+  if (message?.kind === "request_authorization") {
+    requestAuthorization()
+      .then((approved) => sendResponse({ ok: true, approved }))
       .catch((error) => sendResponse({ ok: false, error: String(error.message ?? error) }));
     return true;
   }

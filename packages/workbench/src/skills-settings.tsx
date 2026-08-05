@@ -24,6 +24,7 @@ import {
   PageHeading,
   Plus,
   StatusBanner,
+  Tabs,
   TextField,
   Upload,
   Workspace,
@@ -31,6 +32,7 @@ import {
 import { For, Show, createMemo, createSignal, onCleanup, onMount } from "solid-js";
 
 import { TextEditor } from "./text-editor";
+import { skillDisplayName } from "./skill-display";
 
 type RenameTarget =
   | { kind: "skill"; skillId: string; currentName: string }
@@ -93,6 +95,7 @@ export function SkillsSettingsPage() {
   const [dropActive, setDropActive] = createSignal(false);
   const [dropTargetKey, setDropTargetKey] = createSignal<string>();
   const [dropNotice, setDropNotice] = createSignal<string>();
+  const [skillScope, setSkillScope] = createSignal<"built_in" | "custom">("built_in");
   let workspaceElement: HTMLElement | undefined;
   let stopChanges: (() => void) | undefined;
   let stopNativeDrag: (() => void) | undefined;
@@ -102,11 +105,28 @@ export function SkillsSettingsPage() {
   let externalRefreshGeneration = 0;
 
   const selectedSkill = createMemo(() => skills().find((skill) => skill.id === selectedSkillId()));
+  const visibleSkills = createMemo(() =>
+    skills().filter((skill) =>
+      skillScope() === "built_in" ? skill.scope === "built_in" : skill.scope !== "built_in",
+    ),
+  );
+
+  function changeSkillScope(scope: string) {
+    const nextScope = scope as "built_in" | "custom";
+    setSkillScope(nextScope);
+    const next = skills().find((skill) =>
+      nextScope === "built_in" ? skill.scope === "built_in" : skill.scope !== "built_in",
+    );
+    if (next && next.id !== selectedSkillId()) void selectSkill(next.id);
+  }
 
   async function loadSkills(selectId?: string) {
     const next = await commands.listSkills();
     setSkills(next);
     const id = selectId ?? selectedSkillId() ?? next[0]?.id;
+    const target = next.find((skill) => skill.id === id);
+    if (target) setSkillScope(target.scope === "built_in" ? "built_in" : "custom");
+    else if (!next.some((skill) => skill.scope === "built_in")) setSkillScope("custom");
     if (id && id !== selectedSkillId()) await selectSkill(id, true);
   }
 
@@ -604,6 +624,16 @@ export function SkillsSettingsPage() {
           <div class="extension-panel-toolbar">
             <strong>{copy("技能列表", "Skills")}</strong>
           </div>
+          <div class="skill-scope-tabs">
+            <Tabs
+              value={skillScope()}
+              onChange={changeSkillScope}
+              tabs={[
+                { value: "built_in", label: copy("内置技能", "Built-in"), content: <></> },
+                { value: "custom", label: copy("自定义技能", "Custom"), content: <></> },
+              ]}
+            />
+          </div>
           <div class="skill-tree" data-component="skill-tree" data-drop-active={dropActive()}>
             <Show
               when={!loading()}
@@ -611,7 +641,7 @@ export function SkillsSettingsPage() {
                 <div class="extension-empty">{copy("正在加载 Skills…", "Loading Skills…")}</div>
               }
             >
-              <For each={skills()}>
+              <For each={visibleSkills()}>
                 {(skill) => (
                   <section class="skill-tree-section">
                     <div
@@ -636,7 +666,7 @@ export function SkillsSettingsPage() {
                           <Folder size={15} />
                         )}
                         <span title={skill.qualifiedName}>
-                          {skill.interface?.displayName ?? skill.qualifiedName}
+                          {skillDisplayName(skill, i18n.locale() === "zh-CN")}
                         </span>
                         <Show when={!skill.editable}>
                           <span class="skill-disabled-indicator">{skill.scope}</span>

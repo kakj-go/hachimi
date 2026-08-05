@@ -2,6 +2,7 @@ import { MessageCircle, RefreshCw } from "@hachimi/ui";
 import { Show } from "solid-js";
 
 import type { WorkbenchCommandPort } from "../workbench-command-port";
+import type { InspectorTab } from "../state/inspector-tabs";
 import type { InspectorResource } from "../state/workbench-layout";
 import { AttachmentInspector } from "./attachment-inspector";
 import { InspectorShell } from "./inspector-shell";
@@ -13,7 +14,12 @@ export function DraftAttachmentInspector(props: {
   loading: boolean;
   commandPort: WorkbenchCommandPort;
   locale: "zh-CN" | "en-US";
+  tabs: InspectorTab[];
+  activeTabId: string | undefined;
   onOpenInspector: (resource: InspectorResource) => void;
+  onSelectTab: (tabId: string) => void;
+  onCloseTab: (tabId: string) => void;
+  onOpenLauncher: () => void;
   onOpenTerminal: () => void;
 }) {
   const attachment = () => (props.resource?.kind === "attachment" ? props.resource : undefined);
@@ -32,6 +38,12 @@ export function DraftAttachmentInspector(props: {
             : "Workspace tools")
       }
       resourceKind={tools() ? "tools" : "resource"}
+      tabs={props.tabs}
+      activeTabId={props.activeTabId}
+      locale={props.locale}
+      onSelectTab={props.onSelectTab}
+      onCloseTab={props.onCloseTab}
+      onOpenLauncher={props.onOpenLauncher}
       wide={tools()}
     >
       <Show

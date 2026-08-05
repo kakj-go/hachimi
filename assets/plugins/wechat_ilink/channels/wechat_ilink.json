@@ -1,0 +1,5 @@
+{
+  "protocolVersion": 1,
+  "providerId": "wechat_ilink",
+  "transport": "builtin_enterprise"
+}

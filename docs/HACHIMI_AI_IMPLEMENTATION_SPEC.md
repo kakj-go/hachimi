@@ -2,11 +2,11 @@
 
 更新时间：2026-07-31
 
-本规格与 `HARNESS_AGENT_ARCHITECTURE_AND_IMPLEMENTATION.md`、`HARNESS_AGENT_CODE_IMPLEMENTATION_PLAN.md` 和唯一状态源 `ROADMAP.md` 一致。当前实现包含活动 Run 安全续跑、三类公开 OpenAI Provider、Remote Compaction/公开 reasoning summary、Multi-Agent、Git/Forge、完整 Plugin contribution 生命周期、企业微信/钉钉/飞书 transport/mention/附件、DesktopControl 和扩展后的 Browser/Computer 原语。P1–P8 的代码与本地测试完成度和真实环境验证采用双状态；fixture 不能作为真实 Provider、Forge、外部企业组织或 Windows 发布证据。Memory 属于远期，Hachimi 不增加登录或租户体系。
+本规格与 `HARNESS_AGENT_ARCHITECTURE_AND_IMPLEMENTATION.md`、`HARNESS_AGENT_CODE_IMPLEMENTATION_PLAN.md` 和唯一状态源 `ROADMAP.md` 一致。当前实现包含活动 Run 安全续跑、三类公开 OpenAI Provider、Remote Compaction/公开 reasoning summary、Multi-Agent、Git/Forge、完整 Plugin contribution 生命周期、企业微信/钉钉/飞书 transport/mention/附件，以及统一 Workbench 会话中的 Browser/Computer Host 原语。P1–P8 的代码与本地测试完成度和真实环境验证采用双状态；fixture 不能作为真实 Provider、Forge、外部企业组织或 Windows 发布证据。Memory 属于远期，Hachimi 不增加登录或租户体系。
 
 ## 1. 产品边界
 
-Hachimi 支持 General、Coding、Office、DesktopControl、Scheduled Task 和父子 Agent Task。所有入口都调用同一个 `AgentRunExecutor`；办公知识来自用户选择或模型渐进激活的 Skill，第三方 API 来自受控 MCP/Connector。Kernel 不硬编码在线 Office 服务或应用 SOP。
+Hachimi 支持 General、Coding、Office、Scheduled Task 和父子 Agent Task；桌面控制能力属于 Workbench Session，不再是独立入口。所有入口都调用同一个 `AgentRunExecutor`；办公知识来自用户选择或模型渐进激活的 Skill，第三方 API 来自受控 MCP/Connector。Kernel 不硬编码在线 Office 服务或应用 SOP。
 
 总体参考原则：Codex 是 Agent Runtime、编程/办公、Skills、MCP、Plugins/Connectors、Session/Thread 恢复、Browser/Computer 和 Scheduled Tasks 产品语义的主基线；OpenClaw 只用于常驻 Gateway、Channels/消息路由、Cron/Heartbeat/事件触发、Task ledger、投递和后台任务重启 reconciliation；Claude Code Best 只影响 Compaction 的 clean-room 行为验收。
 
@@ -39,7 +39,7 @@ AppServer → AgentRunFactory → AgentRunExecutor → TurnRuntime
 ## 3. Entry/Workload
 
 - `EntryProfile::Workbench` 是编码/办公/General 入口；
-- `EntryProfile::DesktopControl` 是正式产品入口，提供独立 Session、Observe-first、授权、接管、审批与恢复 UI；
+- Browser/Computer 是 Workbench Session 的 Host 能力，提供 Observe-first、授权、接管、审批与恢复 UI；
 - `WorkloadKind::{General,Coding,Office}` 是行为 overlay；
 - `workload_override` 用户指定时优先级最高。
 
@@ -94,9 +94,9 @@ Event 入口只接受 source/type/subject/最多 16 个 exact labels 和可选 t
 - `0004_local_hosts.sql` 至 `0009_channel_provider_runtime.sql`；
 - `0010_schedule_events.sql`；
 - P1–P8 的 `0011_run_recovery.sql` 至 `0018_desktop_control_state.sql`；
-- v29 对齐 migration：`0019_recovery_alignment.sql`、`0020_agent_task_recovery.sql`、`0021_enterprise_content.sql`、`0022_desktop_generation_fencing.sql`。
+- v31 对齐 migration：`0019_recovery_alignment.sql` 至 `0031_plugin_builtin_channel_binding.sql`。
 
-`CONTROL_PROTOCOL_VERSION = 29`。文件数据库发现 pending migration 后使用共享 `<database>.migrate.lock`，以 SQLite Online Backup API 生成同级备份、manifest 和 SHA-256，只保留最近三份；30 秒未取得锁返回 `database_migration_busy`，失败回滚事务、保留备份并拒绝启动。内存数据库不创建备份。Desktop 与 Gateway 复用同一实现。
+`CONTROL_PROTOCOL_VERSION = 31`。文件数据库发现 pending migration 后使用共享 `<database>.migrate.lock`，以 SQLite Online Backup API 生成同级备份、manifest 和 SHA-256，只保留最近三份；30 秒未取得锁返回 `database_migration_busy`，失败回滚事务、保留备份并拒绝启动。内存数据库不创建备份。Desktop 与 Gateway 复用同一实现。
 
 不保留旧 `content_json`、旧 Profile 字段或 typed/untyped 双读。UUIDv7、append-only Transcript/Event、secret 不落盘和 TaskRun lineage 保持不变。
 
@@ -107,6 +107,9 @@ Event 入口只接受 source/type/subject/最多 16 个 exact labels 和可选 t
 - Computer Use：App-scoped Observe/Act、用户接管、Always-allow App 与系统权限边界只以 Codex 为主 [ref:OAI-PRODUCT-COMPUTER-20260730]，Windows Host 使用 Hachimi typed contract 独立实现，截图只保存在受 TTL/容量限制的内存 PNG 仓库。
 - Plugins/Connectors：采用 Codex Plugin bundle、Skills/Hooks/EventSource、Connectors/MCP、Browser extension、Scheduled task template、custom UI 和权限分层 [ref:OAI-PRODUCT-PLUGINS-20260730]；统一 lifecycle journal 覆盖 install/enable/disable/update/rollback/uninstall 和崩溃 reconciliation。企业微信 GET `echostr`/POST 加密 XML callback、钉钉 Stream、飞书 WebSocket/protobuf、结构化 mention 和受控附件 Artifact 已用 Rust 实现并通过确定性 fixture [ref:WECOM-API-20260730] [ref:DINGTALK-STREAM-SDK-GO-20260731] [ref:FEISHU-SDK-GO-20260731]；三个真实外部组织仍待验证。
 - Channels/Gateway：仅外部消息入口深度参考 OpenClaw 的 Channel plugin、Account/Peer/Thread 路由、pairing/allowlist、durable ingress/delivery 和常驻 Gateway；Gateway 只提交 authenticated AppServer request。
+- 平台集成设置：企业微信、钉钉、飞书由生产 manifest 生成品牌 Tab；同一企业账户独立选择 API 与消息能力，凭据使用平台字段并只写入 Windows Credential Manager。Gateway 随消息账户需求自动托管；fixture Provider 不进入正式 UI。
+- Plugins 产品状态：P6 lifecycle 代码与本地测试完成，Runtime 继续供官方 Bundle 使用；所有版本的用户管理入口当前置灰，第三方 Bundle 产品化属于后续计划，Marketplace 继续不实现。
+- Computer Use：只枚举当前可控制的可见窗口与已有策略；Windows 描述符包含产品名、规范路径、发布者验证状态、文件身份和 Shell 图标。策略写入只接受后端候选的 `identityHash`，不扫描全部已安装应用。
 - Scheduler：Codex 定义 Scheduled Tasks 产品语义，OpenClaw 只提供 Cron/Heartbeat/事件触发、Task ledger、投递和后台任务重启 reconciliation。OpenClaw standing orders 不能从 Prompt 或 `AGENTS.md` 直接生成永久授权，仍必须创建显式 ScheduleGrant。
 - Restart：Codex 式 Session/Thread resume 与 rollout reconstruction 用于恢复历史；活动 Run 依据 durable checkpoint、可信 Host recovery policy、revision 和 side-effect receipt 安全续跑。不得照搬 OpenClaw 对有副作用 turn 的自动重放；dispatch 后结果未知的动作必须由用户确认或放弃。
 
@@ -119,10 +122,10 @@ Event 入口只接受 source/type/subject/最多 16 个 exact labels 和可选 t
 ## 12. P1–P8 当前边界
 
 - 崩溃续跑只允许只读或能以同一幂等键证明回执的步骤；dispatch 后未知结果固定为 `indeterminate`。
-- Multi-Agent 使用父子 Task/Run 和统一 Projector；`agent.spawn/send/wait/cancel/collect` 只进入 Workbench General/Coding/Office，Scheduled 必须命中持久化精确 allowlist，Pet/DesktopControl 不开放；子 Agent 的 Tool/Skill/MCP/Host/预算只能继承后收窄，取消和审计向下传播。
+- Multi-Agent 使用父子 Task/Run 和统一 Projector；`agent.spawn/send/wait/cancel/collect` 只进入 Workbench General/Coding/Office，Scheduled 必须命中持久化精确 allowlist，Pet 不开放；子 Agent 的 Tool/Skill/MCP/Host/预算只能继承后收窄，取消和审计向下传播。
 - Git push 使用标准 Remote 与 GCM/SSH Agent。Agent 原生 `git.remotes/git.push/forge.change.query/forge.change.mutate` 只注册到交互式 Project Coding，并与 Workbench UI 复用同一 Host；Plan mode 只保留 remotes/query。当前 Project Remote 只为 Git/Forge 授权上下文产生精确 host/protocol Grant，不扩大其他 Host。Forge adapter 支持 GitHub、GitLab、Gitee、Gitea/Forgejo [ref:GITHUB-API-20260730] [ref:GITLAB-API-20260730] [ref:GITEE-API-20260730] [ref:GITEA-FORGEJO-API-20260730]；未知平台只完成 push 并生成草稿。mutation 响应未知时返回 executor error，使统一 side-effect ledger 保持 `Indeterminate`；只允许查询远端，source/target、可见字段、状态与 commit OID 全部匹配才把原操作确认为成功，否则不重放。官方 API 不支持原地替换源分支，因此更新操作把 source ref 作为不可变前置条件。
 - 企业附件工具只进入 Workbench General/Office；Scheduled 必须固定 Connector account、`download_attachment` action 与 contribution revision，授权缺失或 revision 漂移进入 `NeedsAttention`。通用 `connector_invoke` 明确拒绝保留动作，不能绕过 `enterprise.download_attachment` 的下载、校验和 Artifact fencing。
-- DesktopControl、Browser 与 Computer 继续绑定 Run generation、observation/frame、App/Window fingerprint、站点/能力授权和 Sandbox readiness；终态 Run 不能复用旧 generation。
+- Browser 与 Computer 继续绑定 Run generation、lease、observation/frame、App/Window fingerprint、站点/能力授权和 Sandbox readiness；终态 Run 不能复用旧 generation。
 - 八类 `RuntimeFeatureSet` 能力默认开启；关闭时 UI 隐藏入口、对应工具不注册，命令返回 `feature_disabled` 和 feature key。Provider Extensions 关闭后只保留 legacy Chat Completions，Git Remote Mutations 关闭后仍允许本地 stage/commit；migration 不受开关影响。
 - Office 产品边界是本地 DOCX/XLSX/PPTX/PDF 与文件整理，不增加在线 Office 服务依赖或 Office 专用 Kernel 分支。
 

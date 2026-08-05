@@ -9,7 +9,7 @@ use hachimi_protocol::{
     SandboxCapabilityReport, SessionContextBinding, SessionId, SessionRecord, SkillId,
     TranscriptItem, TranscriptItemKind, WorkloadKind,
 };
-use hachimi_storage::{AgentStore, AgentStoreError, CreatedAgentRun};
+use hachimi_storage::{AgentStore, AgentStoreError, ChannelRunBindingInput, CreatedAgentRun};
 use parking_lot::Mutex;
 use thiserror::Error;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
@@ -151,6 +151,82 @@ impl AgentRunFactory {
             .await?)
     }
 
+    pub async fn create_channel(
+        &self,
+        request: AgentRunCreateRequest,
+        binding: ChannelRunBindingInput,
+    ) -> Result<CreatedAgentRun, AgentRunFactoryError> {
+        validate_create_request(&request)?;
+        let session_id = SessionId::random();
+        let run_id = RunId::random();
+        let session = SessionRecord {
+            id: session_id.clone(),
+            context: request.context,
+            entry_profile: request.entry_profile,
+            title: request.title.trim().to_owned(),
+            archived: false,
+            pinned: false,
+            parent_session_id: request.parent_session_id,
+            source_run_id: request.source_run_id,
+            created_at_ms: request.created_at_ms,
+            updated_at_ms: request.created_at_ms,
+        };
+        let run = RunRecord {
+            id: run_id.clone(),
+            session_id: session_id.clone(),
+            status: RunStatus::Queued,
+            purpose: request.purpose,
+            origin: request.origin,
+            generation: 1,
+            configuration: RunConfiguration {
+                model_snapshot: request.model_snapshot,
+                driver: RunDriverKind::ToolLoop,
+                entry_profile: request.entry_profile,
+                workload_override: request.workload_override,
+                behavior_mode: request.behavior_mode,
+                execution_target: request.execution_target,
+                approval_policy: request.approval_policy,
+                permission_profile: request.permission_profile,
+                budget: request.budget,
+                accepted_plan_id: None,
+                accepted_plan_revision: None,
+            },
+            requested_capabilities: request.requested_capabilities,
+            negotiated_capabilities: ProviderCapabilities::default(),
+            provider_capability_probe: None,
+            capability_degradations: Vec::new(),
+            failure_code: None,
+            created_at_ms: request.created_at_ms,
+            updated_at_ms: request.created_at_ms,
+        };
+        let user_item = TranscriptItem {
+            id: ItemId::random(),
+            session_id: session_id.clone(),
+            run_id: Some(run_id),
+            sequence: 0,
+            kind: TranscriptItemKind::User,
+            status: ItemStatus::Completed,
+            payload: ItemPayload::User {
+                text: request.prompt.trim().to_owned(),
+                attachment_ids: request.attachment_ids.clone(),
+            },
+            relations: ItemRelations::default(),
+            created_at_ms: request.created_at_ms,
+        };
+        Ok(self
+            .store
+            .create_channel_agent_run_idempotent(
+                &request.principal,
+                &request.idempotency_key,
+                &session,
+                &run,
+                &user_item,
+                &request.attachment_ids,
+                &binding,
+            )
+            .await?)
+    }
+
     /// Creates a fresh Run in an existing Session without restoring any prior
     /// approval, user-input secret, capability grant, lease, or Host snapshot.
     pub async fn create_in_session(
@@ -252,18 +328,13 @@ fn validate_create_request(request: &AgentRunCreateRequest) -> Result<(), AgentR
             return Err(AgentRunFactoryError::CodingProjectRequired);
         }
         (
-            EntryProfile::PetConversation | EntryProfile::DesktopControl,
+            EntryProfile::PetConversation,
             Some(WorkloadKind::Coding | WorkloadKind::Office),
             _,
             _,
         )
-        | (
-            EntryProfile::PetConversation | EntryProfile::DesktopControl,
-            _,
-            SessionContextBinding::Project { .. },
-            _,
-        )
-        | (EntryProfile::PetConversation | EntryProfile::DesktopControl, _, _, Some(_)) => {
+        | (EntryProfile::PetConversation, _, SessionContextBinding::Project { .. }, _)
+        | (EntryProfile::PetConversation, _, _, Some(_)) => {
             return Err(AgentRunFactoryError::EntryContextMismatch);
         }
         (_, _, SessionContextBinding::General | SessionContextBinding::Avatar { .. }, Some(_)) => {
@@ -801,16 +872,17 @@ impl AgentRunExecutor {
 }
 
 fn validate_agent_run_request(request: &AgentRunRequest) -> Result<(), AgentExecutionError> {
-    let scheduled_origin = matches!(
-        request.run.origin,
-        hachimi_protocol::RunOrigin::Scheduled { .. }
-    );
+    let host_grant_origin_valid = match request.run.origin {
+        hachimi_protocol::RunOrigin::Scheduled { .. } => request.schedule_host_grant.is_some(),
+        hachimi_protocol::RunOrigin::Channel { .. } => true,
+        _ => request.schedule_host_grant.is_none(),
+    };
     if request.run.session_id != request.session.id
         || request.run.configuration.entry_profile != request.session.entry_profile
         || request.run.configuration.workload_override != request.workload_override
         || request.capability_grants.session_id != request.session.id
         || request.capability_grants.run_id.as_ref() != Some(&request.run.id)
-        || scheduled_origin != request.schedule_host_grant.is_some()
+        || !host_grant_origin_valid
         || request
             .recovery_checkpoint
             .as_ref()

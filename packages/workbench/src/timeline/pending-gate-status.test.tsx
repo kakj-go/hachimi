@@ -27,6 +27,7 @@ vi.mock("@hachimi/ui", () => {
 describe("PendingGateStatus", () => {
   it.each([
     ["approval", "等待批准", "批准或拒绝后继续"],
+    ["host_access", "等待访问授权", "选择目标访问范围"],
     ["plan", "等待确认计划", "实施、修改或跳过"],
     ["user_input", "等待回答", "回答问题后 Agent 将继续"],
   ] as const)("describes the %s wait state in the conversation", (kind, title, detail) => {

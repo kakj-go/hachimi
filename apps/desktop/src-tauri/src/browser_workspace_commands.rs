@@ -119,11 +119,6 @@ pub(super) async fn mutate_browser_workspace(
             Ok(updated)
         }
         BrowserWorkspaceMutation::CloseTab { tab_id } => {
-            state
-                .embedded_browser
-                .close_tab_runtime(&window, &tab_id)
-                .await
-                .map_err(browser_error)?;
             let updated = state
                 .agent_store
                 .close_browser_tab(&request.workspace_id, &tab_id, current.revision)
@@ -151,6 +146,11 @@ pub(super) async fn mutate_browser_workspace(
                         tab_id: active.id.clone(),
                     },
                 )
+                .await
+                .map_err(browser_error)?;
+            state
+                .embedded_browser
+                .close_tab_runtime(&window, &tab_id)
                 .await
                 .map_err(browser_error)?;
             Ok(updated)

@@ -1,0 +1,15 @@
+{
+  "manifestVersion": 1,
+  "id": "wecom_ai_bot",
+  "name": "企微 AI Bot",
+  "version": "1.0.0",
+  "description": "Hachimi 企微 AI Bot 长连接 Channel",
+  "contributions": [
+    {
+      "kind": "channel",
+      "id": "wecom-ai-bot-channel",
+      "relativePath": "channels/wecom_ai_bot.json",
+      "requiredScopes": ["channel.receive", "channel.send"]
+    }
+  ]
+}

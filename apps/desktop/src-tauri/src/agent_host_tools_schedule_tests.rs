@@ -62,7 +62,7 @@ impl Fixture {
             display_name: "Scheduled attachment fixture".into(),
             secret: Some(
                 json!({
-                    "platform": "wecom",
+                    "platform": "wecom_app",
                     "corpId": "fixture-corp",
                     "corpSecret": "fixture-secret",
                     "agentId": 1,
@@ -148,7 +148,7 @@ impl Fixture {
             id: ToolCallId::random(),
             name: crate::schedule_host_grants::ENTERPRISE_ATTACHMENT_TOOL.into(),
             arguments: json!({
-                "platform": "wecom",
+                "providerId": "wecom_app",
                 "accountId": INTEGRATION_ID,
                 "eventId": EVENT_ID,
                 "remoteId": REMOTE_ID,
@@ -174,6 +174,17 @@ impl Drop for Fixture {
     fn drop(&mut self) {
         if let Some(server) = self.server.take() {
             server.join().expect("enterprise server");
+        }
+        if let Ok(entry) = keyring::Entry::new(
+            "com.hachimi.integration",
+            &format!("wecom_app:{INTEGRATION_ID}:primary"),
+        ) {
+            let _ = entry.delete_credential();
+        }
+        if let Ok(entry) =
+            keyring::Entry::new("com.hachimi.connector", "scheduled-attachment-account")
+        {
+            let _ = entry.delete_credential();
         }
     }
 }
@@ -217,7 +228,7 @@ async fn scheduled_attachment_download_is_exactly_fenced_and_creates_an_artifact
         .execute(fixture.invocation("attachment-success"))
         .await
         .expect("tool execution");
-    assert_eq!(result.status, ToolResultStatus::Succeeded);
+    assert_eq!(result.status, ToolResultStatus::Succeeded, "{result:?}");
     assert_eq!(
         result
             .structured_content
@@ -299,13 +310,31 @@ fn write_plugin(root: &std::path::Path) {
 }
 
 async fn seed_attachment_metadata(store: &hachimi_storage::AgentStore) {
-    sqlx::query("INSERT INTO enterprise_integration_accounts(id, platform, connector_account_id, channel_account_id, tenant_identity_hash, ingress_mode, event_source_id, state, diagnostic, credential_revision, source_account_updated_at_ms, created_at_ms, updated_at_ms) VALUES(?, 'wecom', ?, NULL, 'tenant-hash', 'encrypted_callback', 'fixture-source', 'healthy', NULL, 1, 1, 1, 1)")
+    let credential = json!({
+        "providerId": "wecom_app",
+        "corpId": "fixture-corp",
+        "corpSecret": "fixture-secret",
+        "agentId": "1",
+        "callbackToken": "fixture-token",
+        "encodingAesKey": "fixture-encoding-key",
+        "externalHttpsUrl": "https://example.invalid"
+    })
+    .to_string();
+    keyring::Entry::new(
+        "com.hachimi.integration",
+        &format!("wecom_app:{INTEGRATION_ID}:primary"),
+    )
+    .expect("integration keyring entry")
+    .set_password(&credential)
+    .expect("integration credential");
+    sqlx::query("INSERT INTO integration_provider_accounts(id, provider_id, display_name, tenant_key, tenant_identity_hash, transport, state, diagnostic, connector_account_id, credential_ref, credential_fingerprint, api_access_enabled, messaging_enabled, config_json, credential_revision, config_revision, last_event_at_ms, last_delivery_at_ms, next_reconnect_at_ms, consecutive_failures, created_at_ms, updated_at_ms) VALUES(?, 'wecom_app', 'Scheduled attachment fixture', 'corp-1', 'tenant-hash', 'encrypted_callback', 'healthy', NULL, ?, ?, NULL, 1, 0, '{}', 1, 1, NULL, NULL, NULL, 0, 1, 1)")
         .bind(INTEGRATION_ID)
         .bind("scheduled-attachment-account")
+        .bind(format!("keyring:integration:wecom_app:{INTEGRATION_ID}:primary"))
         .execute(store.pool())
         .await
         .expect("integration account");
-    sqlx::query("INSERT INTO enterprise_attachment_metadata(platform, account_id, event_id, remote_id, file_name, mime_type, declared_size_bytes, metadata_hash, artifact_id, created_at_ms) VALUES('wecom', ?, ?, ?, 'scheduled.pdf', 'application/pdf', 24, ?, NULL, 1)")
+    sqlx::query("INSERT INTO channel_attachment_metadata(platform, account_id, event_id, remote_id, file_name, mime_type, declared_size_bytes, metadata_hash, artifact_id, created_at_ms) VALUES('wecom_app', ?, ?, ?, 'scheduled.pdf', 'application/pdf', 24, ?, NULL, 1)")
         .bind(INTEGRATION_ID)
         .bind(EVENT_ID)
         .bind(REMOTE_ID)
@@ -317,10 +346,23 @@ async fn seed_attachment_metadata(store: &hachimi_storage::AgentStore) {
 
 fn enterprise_server() -> (String, thread::JoinHandle<()>) {
     let listener = TcpListener::bind("127.0.0.1:0").expect("enterprise listener");
+    listener
+        .set_nonblocking(true)
+        .expect("nonblocking enterprise listener");
     let address = listener.local_addr().expect("enterprise address");
     let server = thread::spawn(move || {
-        for _ in 0..2 {
-            let (mut stream, _) = listener.accept().expect("enterprise request");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        let mut handled = 0;
+        while handled < 2 && std::time::Instant::now() < deadline {
+            let (mut stream, _) = match listener.accept() {
+                Ok(connection) => connection,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    thread::sleep(std::time::Duration::from_millis(10));
+                    continue;
+                }
+                Err(error) => panic!("enterprise request: {error}"),
+            };
+            handled += 1;
             let mut request = [0_u8; 4096];
             let size = stream.read(&mut request).expect("request bytes");
             let request = String::from_utf8_lossy(&request[..size]);

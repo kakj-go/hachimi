@@ -7,7 +7,7 @@ use std::{
 };
 
 use futures_util::StreamExt as _;
-use hachimi_protocol::EnterprisePlatform;
+use hachimi_protocol::IntegrationProviderId;
 use reqwest::{Client, Response, StatusCode};
 use serde_json::{Value, json};
 use sha2::Digest as _;
@@ -87,6 +87,12 @@ pub struct EnterpriseMessageTarget {
     pub peer: String,
     pub thread: Option<String>,
     pub group: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EnterpriseMediaKind {
+    Image,
+    File,
 }
 
 #[derive(Clone)]
@@ -205,12 +211,33 @@ impl EnterpriseApiClient {
         }))
     }
 
+    pub async fn probe_wecom_callback_endpoint(
+        external_base_url: &str,
+        account_id: &str,
+    ) -> Result<(), EnterpriseApiError> {
+        let url = wecom_callback_probe_url(external_base_url, account_id)?;
+        let client = Client::builder()
+            .connect_timeout(Duration::from_secs(5))
+            .timeout(Duration::from_secs(10))
+            .redirect(reqwest::redirect::Policy::none())
+            .user_agent("hachimi-agent/0.3 callback-probe")
+            .build()
+            .map_err(|_| EnterpriseApiError::Transport)?;
+        let response = client
+            .get(url)
+            .send()
+            .await
+            .map_err(|_| EnterpriseApiError::Transport)?;
+        classify_wecom_callback_probe_status(response.status())
+    }
+
     pub async fn download_attachment_to(
         &self,
         account_id: &str,
         credential: &EnterpriseCredential,
         event_id: &str,
         remote_id: &str,
+        resource_key: Option<&str>,
         destination: &Path,
         max_bytes: u64,
     ) -> Result<EnterpriseDownloadReceipt, EnterpriseApiError> {
@@ -222,14 +249,14 @@ impl EnterpriseApiClient {
         }
         let token = self.access_token(account_id, credential).await?;
         let response = match credential.platform() {
-            EnterprisePlatform::Wecom => self
+            IntegrationProviderId::WecomApp => self
                 .client
                 .get(format!("{}/cgi-bin/media/get", self.endpoints.wecom))
                 .query(&[("access_token", token.as_str()), ("media_id", remote_id)])
                 .send()
                 .await
                 .map_err(|_| EnterpriseApiError::Transport)?,
-            EnterprisePlatform::DingTalk => {
+            IntegrationProviderId::DingTalk => {
                 let robot_code = credential
                     .robot_code()
                     .ok_or(EnterpriseApiError::InvalidCredential)?;
@@ -261,7 +288,12 @@ impl EnterpriseApiClient {
                     .await
                     .map_err(|_| EnterpriseApiError::Transport)?
             }
-            EnterprisePlatform::Feishu => {
+            IntegrationProviderId::Feishu => {
+                let resource_type = match resource_key {
+                    Some("image") => "image",
+                    Some("file") | None => "file",
+                    Some(_) => return Err(EnterpriseApiError::InvalidRequest),
+                };
                 let mut url = reqwest::Url::parse(&format!(
                     "{}/open-apis/im/v1/messages",
                     self.endpoints.feishu
@@ -272,12 +304,13 @@ impl EnterpriseApiClient {
                     .extend([event_id, "resources", remote_id]);
                 self.client
                     .get(url)
-                    .query(&[("type", "file")])
+                    .query(&[("type", resource_type)])
                     .bearer_auth(&token)
                     .send()
                     .await
                     .map_err(|_| EnterpriseApiError::Transport)?
             }
+            _ => return Err(EnterpriseApiError::InvalidCredential),
         };
         stream_response_to_file(response, destination, max_bytes).await
     }
@@ -288,7 +321,7 @@ impl EnterpriseApiClient {
     ) -> Result<EnterpriseStreamEndpoint, EnterpriseApiError> {
         let (client_id, client_secret) = credential.auth_pair();
         let (url, body) = match credential.platform() {
-            EnterprisePlatform::DingTalk => (
+            IntegrationProviderId::DingTalk => (
                 format!(
                     "{}/v1.0/gateway/connections/open",
                     self.endpoints.dingtalk_openapi
@@ -303,11 +336,12 @@ impl EnterpriseApiClient {
                     ]
                 }),
             ),
-            EnterprisePlatform::Feishu => (
+            IntegrationProviderId::Feishu => (
                 format!("{}/callback/ws/endpoint", self.endpoints.feishu),
                 json!({"AppID": client_id, "AppSecret": client_secret}),
             ),
-            EnterprisePlatform::Wecom => return Err(EnterpriseApiError::InvalidRequest),
+            IntegrationProviderId::WecomApp => return Err(EnterpriseApiError::InvalidRequest),
+            _ => return Err(EnterpriseApiError::InvalidCredential),
         };
         let value = parse_http_response(
             self.client
@@ -338,7 +372,7 @@ impl EnterpriseApiClient {
         let response = self
             .execute_authenticated(account_id, credential, false, |token| {
                 match credential.platform() {
-                    EnterprisePlatform::Wecom => {
+                    IntegrationProviderId::WecomApp => {
                         let mut request = self
                             .client
                             .get(format!("{}/cgi-bin/department/list", self.endpoints.wecom));
@@ -348,7 +382,7 @@ impl EnterpriseApiClient {
                         }
                         request
                     }
-                    EnterprisePlatform::DingTalk => self
+                    IntegrationProviderId::DingTalk => self
                         .client
                         .post(format!(
                             "{}/topapi/v2/department/listsub",
@@ -356,7 +390,7 @@ impl EnterpriseApiClient {
                         ))
                         .query(&[("access_token", token)])
                         .json(&json!({"dept_id": parent_id.unwrap_or("1")})),
-                    EnterprisePlatform::Feishu => {
+                    IntegrationProviderId::Feishu => {
                         let parent_id = parent_id.unwrap_or("0");
                         let mut request = self
                             .client
@@ -371,6 +405,7 @@ impl EnterpriseApiClient {
                         }
                         request
                     }
+                    _ => unreachable!("enterprise credentials only contain API providers"),
                 }
             })
             .await?;
@@ -395,7 +430,7 @@ impl EnterpriseApiClient {
         let response = self
             .execute_authenticated(account_id, credential, false, |token| {
                 match credential.platform() {
-                    EnterprisePlatform::Wecom => self
+                    IntegrationProviderId::WecomApp => self
                         .client
                         .get(format!("{}/cgi-bin/user/list", self.endpoints.wecom))
                         .query(&[
@@ -403,7 +438,7 @@ impl EnterpriseApiClient {
                             ("department_id", department_id),
                             ("fetch_child", "0"),
                         ]),
-                    EnterprisePlatform::DingTalk => self
+                    IntegrationProviderId::DingTalk => self
                         .client
                         .post(format!(
                             "{}/topapi/v2/user/list",
@@ -415,7 +450,7 @@ impl EnterpriseApiClient {
                             "cursor": page_token.and_then(|value| value.parse::<u64>().ok()).unwrap_or(0),
                             "size": page_size,
                         })),
-                    EnterprisePlatform::Feishu => {
+                    IntegrationProviderId::Feishu => {
                         let mut request = self
                             .client
                             .get(format!(
@@ -432,6 +467,7 @@ impl EnterpriseApiClient {
                         }
                         request
                     }
+                    _ => unreachable!("enterprise credentials only contain API providers"),
                 }
             })
             .await?;
@@ -452,7 +488,7 @@ impl EnterpriseApiClient {
             .map_err(|_| EnterpriseApiError::InvalidRequest)?;
         let dingtalk_content = serde_json::to_string(&json!({"content": text}))
             .map_err(|_| EnterpriseApiError::InvalidRequest)?;
-        let agent_id = if credential.platform() == EnterprisePlatform::Wecom {
+        let agent_id = if credential.platform() == IntegrationProviderId::WecomApp {
             Some(
                 credential
                     .agent_id()
@@ -461,7 +497,7 @@ impl EnterpriseApiClient {
         } else {
             None
         };
-        let robot_code = if credential.platform() == EnterprisePlatform::DingTalk {
+        let robot_code = if credential.platform() == IntegrationProviderId::DingTalk {
             Some(
                 credential
                     .robot_code()
@@ -473,7 +509,7 @@ impl EnterpriseApiClient {
         };
         let response = self
             .execute_authenticated(account_id, credential, true, |token| match credential.platform() {
-            EnterprisePlatform::Wecom => {
+            IntegrationProviderId::WecomApp => {
                 let (path, body) = if target.group {
                     (
                         "/cgi-bin/appchat/send",
@@ -503,7 +539,7 @@ impl EnterpriseApiClient {
                     .header("X-Hachimi-Idempotency-Key", idempotency_key)
                     .json(&body)
             }
-            EnterprisePlatform::DingTalk => {
+            IntegrationProviderId::DingTalk => {
                 let (path, body) = if target.group {
                     (
                         "/v1.0/robot/groupMessages/send",
@@ -531,7 +567,7 @@ impl EnterpriseApiClient {
                     .header("X-Hachimi-Idempotency-Key", idempotency_key)
                     .json(&body)
             }
-            EnterprisePlatform::Feishu => {
+            IntegrationProviderId::Feishu => {
                 let receive_id_type = if target.group { "chat_id" } else { "open_id" };
                 let receive_id = target
                     .thread
@@ -553,9 +589,199 @@ impl EnterpriseApiClient {
                         "uuid": idempotency_key,
                     }))
             }
+            _ => unreachable!("enterprise credentials only contain API providers"),
         })
             .await?;
         validate_provider_response(credential.platform(), response)
+    }
+
+    pub async fn send_media(
+        &self,
+        account_id: &str,
+        credential: &EnterpriseCredential,
+        target: &EnterpriseMessageTarget,
+        kind: EnterpriseMediaKind,
+        file_name: &str,
+        mime_type: &str,
+        bytes: &[u8],
+        idempotency_key: &str,
+    ) -> Result<Value, EnterpriseApiError> {
+        validate_account_id(account_id)?;
+        validate_media(target, file_name, mime_type, bytes, idempotency_key)?;
+        let platform = credential.platform();
+        let file_name = file_name.to_owned();
+        let bytes = bytes.to_vec();
+        let upload = self
+            .execute_authenticated(account_id, credential, true, |token| {
+                let part =
+                    reqwest::multipart::Part::bytes(bytes.clone()).file_name(file_name.clone());
+                match platform {
+                    IntegrationProviderId::WecomApp => self
+                        .client
+                        .post(format!("{}/cgi-bin/media/upload", self.endpoints.wecom))
+                        .query(&[
+                            ("access_token", token),
+                            (
+                                "type",
+                                match kind {
+                                    EnterpriseMediaKind::Image => "image",
+                                    EnterpriseMediaKind::File => "file",
+                                },
+                            ),
+                        ])
+                        .multipart(reqwest::multipart::Form::new().part("media", part)),
+                    IntegrationProviderId::DingTalk => self
+                        .client
+                        .post(format!("{}/media/upload", self.endpoints.dingtalk_legacy))
+                        .query(&[
+                            ("access_token", token),
+                            (
+                                "type",
+                                match kind {
+                                    EnterpriseMediaKind::Image => "image",
+                                    EnterpriseMediaKind::File => "file",
+                                },
+                            ),
+                        ])
+                        .multipart(reqwest::multipart::Form::new().part("media", part)),
+                    IntegrationProviderId::Feishu => {
+                        let (path, field, form) = match kind {
+                            EnterpriseMediaKind::Image => (
+                                "/open-apis/im/v1/images",
+                                "image",
+                                reqwest::multipart::Form::new().text("image_type", "message"),
+                            ),
+                            EnterpriseMediaKind::File => (
+                                "/open-apis/im/v1/files",
+                                "file",
+                                reqwest::multipart::Form::new()
+                                    .text("file_type", "stream")
+                                    .text("file_name", file_name.clone()),
+                            ),
+                        };
+                        self.client
+                            .post(format!("{}{path}", self.endpoints.feishu))
+                            .bearer_auth(token)
+                            .multipart(form.part(field, part))
+                    }
+                    _ => unreachable!("enterprise credentials only contain API providers"),
+                }
+            })
+            .await?;
+        let media_id = match (platform, kind) {
+            (IntegrationProviderId::Feishu, EnterpriseMediaKind::Image) => {
+                upload.pointer("/data/image_key")
+            }
+            (IntegrationProviderId::Feishu, EnterpriseMediaKind::File) => {
+                upload.pointer("/data/file_key")
+            }
+            _ => upload.get("media_id"),
+        }
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty() && value.len() <= 2048)
+        .ok_or(EnterpriseApiError::MalformedResponse)?
+        .to_owned();
+        let robot_code = (platform == IntegrationProviderId::DingTalk)
+            .then(|| credential.robot_code())
+            .flatten()
+            .ok_or(EnterpriseApiError::InvalidCredential)
+            .or_else(|error| {
+                (platform != IntegrationProviderId::DingTalk)
+                    .then_some("")
+                    .ok_or(error)
+            })?;
+        let agent_id = (platform == IntegrationProviderId::WecomApp)
+            .then(|| credential.agent_id())
+            .flatten()
+            .unwrap_or_default();
+        let extension = Path::new(&file_name)
+            .extension()
+            .and_then(|value| value.to_str())
+            .unwrap_or("file");
+        let feishu_content = serde_json::to_string(&match kind {
+            EnterpriseMediaKind::Image => json!({"image_key": media_id}),
+            EnterpriseMediaKind::File => json!({"file_key": media_id}),
+        })
+        .map_err(|_| EnterpriseApiError::InvalidRequest)?;
+        self.execute_authenticated(account_id, credential, true, |token| match platform {
+            IntegrationProviderId::WecomApp => {
+                let content = match kind {
+                    EnterpriseMediaKind::Image => json!({"media_id": media_id}),
+                    EnterpriseMediaKind::File => json!({"media_id": media_id}),
+                };
+                let (path, body) = if target.group {
+                    (
+                        "/cgi-bin/appchat/send",
+                        json!({
+                            "chatid": target.thread.as_deref().unwrap_or(&target.peer),
+                            "msgtype": match kind { EnterpriseMediaKind::Image => "image", EnterpriseMediaKind::File => "file" },
+                            match kind { EnterpriseMediaKind::Image => "image", EnterpriseMediaKind::File => "file" }: content,
+                            "safe": 0,
+                        }),
+                    )
+                } else {
+                    (
+                        "/cgi-bin/message/send",
+                        json!({
+                            "touser": target.peer,
+                            "msgtype": match kind { EnterpriseMediaKind::Image => "image", EnterpriseMediaKind::File => "file" },
+                            "agentid": agent_id,
+                            match kind { EnterpriseMediaKind::Image => "image", EnterpriseMediaKind::File => "file" }: content,
+                            "safe": 0,
+                        }),
+                    )
+                };
+                self.client
+                    .post(format!("{}{path}", self.endpoints.wecom))
+                    .query(&[("access_token", token)])
+                    .header("X-Hachimi-Idempotency-Key", idempotency_key)
+                    .json(&body)
+            }
+            IntegrationProviderId::DingTalk => {
+                let msg_param = serde_json::to_string(&match kind {
+                    EnterpriseMediaKind::Image => json!({"mediaId": media_id}),
+                    EnterpriseMediaKind::File => json!({"mediaId": media_id, "fileName": file_name, "fileType": extension}),
+                })
+                .expect("media message parameters serialize");
+                let mut body = json!({
+                    "robotCode": robot_code,
+                    "msgKey": match kind { EnterpriseMediaKind::Image => "sampleImageMsg", EnterpriseMediaKind::File => "sampleFile" },
+                    "msgParam": msg_param,
+                });
+                let path = if target.group {
+                    body["openConversationId"] = json!(target.thread.as_deref().unwrap_or(&target.peer));
+                    "/v1.0/robot/groupMessages/send"
+                } else {
+                    body["userIds"] = json!([target.peer.as_str()]);
+                    "/v1.0/robot/oToMessages/batchSend"
+                };
+                self.client
+                    .post(format!("{}{path}", self.endpoints.dingtalk_openapi))
+                    .header("x-acs-dingtalk-access-token", token)
+                    .header("X-Hachimi-Idempotency-Key", idempotency_key)
+                    .json(&body)
+            }
+            IntegrationProviderId::Feishu => {
+                let receive_id_type = if target.group { "chat_id" } else { "open_id" };
+                let receive_id = target
+                    .thread
+                    .as_deref()
+                    .filter(|_| target.group)
+                    .unwrap_or(&target.peer);
+                self.client
+                    .post(format!("{}/open-apis/im/v1/messages", self.endpoints.feishu))
+                    .bearer_auth(token)
+                    .query(&[("receive_id_type", receive_id_type)])
+                    .json(&json!({
+                        "receive_id": receive_id,
+                        "msg_type": match kind { EnterpriseMediaKind::Image => "image", EnterpriseMediaKind::File => "file" },
+                        "content": feishu_content,
+                        "uuid": idempotency_key,
+                    }))
+            }
+            _ => unreachable!("enterprise credentials only contain API providers"),
+        })
+        .await
     }
 
     pub fn revoke(&self, account_id: &str) {
@@ -585,7 +811,7 @@ impl EnterpriseApiClient {
             return Err(EnterpriseApiError::InvalidCredential);
         }
         let response = match credential.platform() {
-            EnterprisePlatform::Wecom => {
+            IntegrationProviderId::WecomApp => {
                 self.execute_json(
                     self.client
                         .get(format!("{}/cgi-bin/gettoken", self.endpoints.wecom))
@@ -594,7 +820,7 @@ impl EnterpriseApiClient {
                 )
                 .await?
             }
-            EnterprisePlatform::DingTalk => {
+            IntegrationProviderId::DingTalk => {
                 self.execute_json(
                     self.client
                         .get(format!("{}/gettoken", self.endpoints.dingtalk_legacy))
@@ -603,7 +829,7 @@ impl EnterpriseApiClient {
                 )
                 .await?
             }
-            EnterprisePlatform::Feishu => {
+            IntegrationProviderId::Feishu => {
                 self.execute_json(
                     self.client
                         .post(format!(
@@ -615,6 +841,7 @@ impl EnterpriseApiClient {
                 )
                 .await?
             }
+            _ => return Err(EnterpriseApiError::InvalidCredential),
         };
         let response = validate_provider_response(credential.platform(), response)?;
         let token = response
@@ -683,6 +910,39 @@ impl EnterpriseApiClient {
         }
         Err(EnterpriseApiError::Authentication)
     }
+}
+
+fn wecom_callback_probe_url(
+    external_base_url: &str,
+    account_id: &str,
+) -> Result<reqwest::Url, EnterpriseApiError> {
+    validate_account_id(account_id)?;
+    let mut url =
+        reqwest::Url::parse(external_base_url).map_err(|_| EnterpriseApiError::InvalidRequest)?;
+    if url.scheme() != "https"
+        || url.host_str().is_none()
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        return Err(EnterpriseApiError::InvalidRequest);
+    }
+    url.path_segments_mut()
+        .map_err(|_| EnterpriseApiError::InvalidRequest)?
+        .pop_if_empty()
+        .extend(["v1", "channels", "wecom_app", account_id, "callback"]);
+    Ok(url)
+}
+
+fn classify_wecom_callback_probe_status(status: StatusCode) -> Result<(), EnterpriseApiError> {
+    if status == StatusCode::NOT_FOUND || status.is_server_error() {
+        return Err(EnterpriseApiError::Provider {
+            code: format!("http_{}", status.as_u16()),
+            retryable: status.is_server_error(),
+        });
+    }
+    Ok(())
 }
 
 fn validate_remote_identity(value: &str) -> Result<(), EnterpriseApiError> {
@@ -801,6 +1061,30 @@ fn validate_message(
     Ok(())
 }
 
+fn validate_media(
+    target: &EnterpriseMessageTarget,
+    file_name: &str,
+    mime_type: &str,
+    bytes: &[u8],
+    idempotency_key: &str,
+) -> Result<(), EnterpriseApiError> {
+    if target.peer.trim().is_empty()
+        || target.peer.len() > 512
+        || file_name.trim().is_empty()
+        || file_name.chars().count() > 255
+        || file_name.contains(['/', '\\', '\0', '\r', '\n'])
+        || mime_type.trim().is_empty()
+        || mime_type.len() > 255
+        || bytes.is_empty()
+        || bytes.len() > 25 * 1024 * 1024
+        || idempotency_key.trim().is_empty()
+        || idempotency_key.len() > 128
+    {
+        return Err(EnterpriseApiError::InvalidRequest);
+    }
+    Ok(())
+}
+
 async fn parse_http_response(response: Response) -> Result<Value, EnterpriseApiError> {
     let status = response.status();
     if status == StatusCode::TOO_MANY_REQUESTS {
@@ -828,18 +1112,19 @@ async fn parse_http_response(response: Response) -> Result<Value, EnterpriseApiE
 }
 
 fn validate_provider_response(
-    platform: EnterprisePlatform,
+    platform: IntegrationProviderId,
     value: Value,
 ) -> Result<Value, EnterpriseApiError> {
     let (code, message) = match platform {
-        EnterprisePlatform::Wecom | EnterprisePlatform::DingTalk => (
+        IntegrationProviderId::WecomApp | IntegrationProviderId::DingTalk => (
             value.get("errcode").and_then(Value::as_i64).unwrap_or(0),
             value.get("errmsg").and_then(Value::as_str),
         ),
-        EnterprisePlatform::Feishu => (
+        IntegrationProviderId::Feishu => (
             value.get("code").and_then(Value::as_i64).unwrap_or(0),
             value.get("msg").and_then(Value::as_str),
         ),
+        _ => return Err(EnterpriseApiError::InvalidCredential),
     };
     if code == 0 {
         return Ok(value);
@@ -857,18 +1142,19 @@ fn validate_provider_response(
 }
 
 fn parse_directory_page(
-    platform: EnterprisePlatform,
+    platform: IntegrationProviderId,
     response: Value,
     kind: &str,
 ) -> Result<EnterpriseDirectoryPage, EnterpriseApiError> {
     let response = validate_provider_response(platform, response)?;
     let root = response.get("result").or_else(|| response.get("data"));
     let candidates = match (platform, kind) {
-        (EnterprisePlatform::Wecom, "department") => response.get("department"),
-        (EnterprisePlatform::Wecom, _) => response.get("userlist"),
-        (EnterprisePlatform::DingTalk, "department") => root.and_then(|root| root.get("result")),
-        (EnterprisePlatform::DingTalk, _) => root.and_then(|root| root.get("list")),
-        (EnterprisePlatform::Feishu, _) => root.and_then(|root| root.get("items")),
+        (IntegrationProviderId::WecomApp, "department") => response.get("department"),
+        (IntegrationProviderId::WecomApp, _) => response.get("userlist"),
+        (IntegrationProviderId::DingTalk, "department") => root.and_then(|root| root.get("result")),
+        (IntegrationProviderId::DingTalk, _) => root.and_then(|root| root.get("list")),
+        (IntegrationProviderId::Feishu, _) => root.and_then(|root| root.get("items")),
+        _ => return Err(EnterpriseApiError::InvalidCredential),
     };
     let items = candidates
         .and_then(Value::as_array)
@@ -909,7 +1195,13 @@ fn now_ms() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::{io::Read as _, net::TcpListener, thread};
+    use std::{
+        io::Read as _,
+        net::{TcpListener, TcpStream},
+        sync::mpsc,
+        thread,
+        time::Duration,
+    };
 
     fn chunked_fixture(chunks: Vec<Vec<u8>>, complete: bool) -> (String, thread::JoinHandle<()>) {
         let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
@@ -937,6 +1229,110 @@ mod tests {
         (format!("http://{address}/download"), server)
     }
 
+    fn read_http_request(stream: &mut TcpStream) -> Vec<u8> {
+        stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .expect("read timeout");
+        let mut request = Vec::new();
+        let mut buffer = [0_u8; 4096];
+        loop {
+            let read = stream.read(&mut buffer).expect("request bytes");
+            if read == 0 {
+                break;
+            }
+            request.extend_from_slice(&buffer[..read]);
+            let Some(headers_end) = request.windows(4).position(|value| value == b"\r\n\r\n")
+            else {
+                continue;
+            };
+            let headers = String::from_utf8_lossy(&request[..headers_end]);
+            let content_length = headers
+                .lines()
+                .find_map(|line| {
+                    let (name, value) = line.split_once(':')?;
+                    name.eq_ignore_ascii_case("content-length")
+                        .then(|| value.trim().parse::<usize>().ok())
+                        .flatten()
+                })
+                .unwrap_or(0);
+            if request.len() >= headers_end + 4 + content_length {
+                break;
+            }
+        }
+        request
+    }
+
+    fn json_fixture(
+        responses: Vec<Value>,
+    ) -> (String, mpsc::Receiver<Vec<Vec<u8>>>, thread::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
+        let address = listener.local_addr().expect("address");
+        let (sender, receiver) = mpsc::channel();
+        let server = thread::spawn(move || {
+            let mut requests = Vec::new();
+            for response in responses {
+                let (mut stream, _) = listener.accept().expect("accept");
+                requests.push(read_http_request(&mut stream));
+                let body = response.to_string();
+                stream
+                    .write_all(
+                        format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                            body.len()
+                        )
+                        .as_bytes(),
+                    )
+                    .expect("response");
+            }
+            sender.send(requests).expect("captured requests");
+        });
+        (format!("http://{address}"), receiver, server)
+    }
+
+    async fn assert_media_fixture(
+        credential: EnterpriseCredential,
+        responses: Vec<Value>,
+        upload_path: &str,
+        send_path: &str,
+    ) {
+        let (endpoint, requests, server) = json_fixture(responses);
+        let client = EnterpriseApiClient::with_single_endpoint(&endpoint);
+        let target = EnterpriseMessageTarget {
+            peer: "user-1".into(),
+            thread: None,
+            group: false,
+        };
+        client
+            .send_media(
+                "account-1",
+                &credential,
+                &target,
+                EnterpriseMediaKind::Image,
+                "image.png",
+                "image/png",
+                b"image-bytes",
+                "run-1:item-1:0",
+            )
+            .await
+            .expect("media delivery");
+        server.join().expect("server");
+        let requests = requests.recv().expect("requests");
+        assert_eq!(requests.len(), 3);
+        let upload = String::from_utf8_lossy(&requests[1]);
+        assert!(upload.starts_with(&format!("POST {upload_path}")));
+        assert!(upload.contains("name=\"media\"") || upload.contains("name=\"image\""));
+        assert!(upload.contains("filename=\"image.png\""));
+        assert!(upload.contains("image-bytes"));
+        let send = String::from_utf8_lossy(&requests[2]);
+        assert!(send.starts_with(&format!("POST {send_path}")));
+        assert!(send.contains("media-1") || send.contains("image-1"));
+        assert!(
+            send.contains("\"msgtype\":\"image\"")
+                || send.contains("\"msg_type\":\"image\"")
+                || send.contains("\"msgKey\":\"sampleImageMsg\"")
+        );
+    }
+
     #[test]
     fn messages_are_bounded_before_network_dispatch() {
         let target = EnterpriseMessageTarget {
@@ -947,6 +1343,58 @@ mod tests {
         assert!(validate_message(&target, "hello", "key").is_ok());
         assert!(validate_message(&target, "", "key").is_err());
         assert!(validate_message(&target, "hello", "").is_err());
+    }
+
+    #[test]
+    fn media_is_bounded_before_network_dispatch() {
+        let target = EnterpriseMessageTarget {
+            peer: "peer".into(),
+            thread: None,
+            group: false,
+        };
+        assert!(validate_media(&target, "report.pdf", "application/pdf", b"data", "key").is_ok());
+        assert!(
+            validate_media(&target, "../report.pdf", "application/pdf", b"data", "key").is_err()
+        );
+        assert!(validate_media(&target, "report.pdf", "application/pdf", &[], "key").is_err());
+        assert!(validate_media(&target, "report.pdf", "application/pdf", b"data", "").is_err());
+    }
+
+    #[tokio::test]
+    async fn enterprise_media_upload_and_send_contracts_use_provider_specific_paths() {
+        assert_media_fixture(
+            EnterpriseCredential::parse(r#"{"providerId":"wecom_app","corpId":"corp","corpSecret":"secret","agentId":"7","callbackToken":"token","encodingAesKey":"key"}"#).expect("credential"),
+            vec![
+                json!({"errcode":0,"access_token":"token","expires_in":7200}),
+                json!({"errcode":0,"media_id":"media-1"}),
+                json!({"errcode":0,"errmsg":"ok"}),
+            ],
+            "/cgi-bin/media/upload?",
+            "/cgi-bin/message/send?",
+        )
+        .await;
+        assert_media_fixture(
+            EnterpriseCredential::parse(r#"{"providerId":"dingtalk","clientId":"app","clientSecret":"secret","agentId":"7","robotCode":"robot"}"#).expect("credential"),
+            vec![
+                json!({"errcode":0,"access_token":"token","expires_in":7200}),
+                json!({"errcode":0,"media_id":"media-1"}),
+                json!({"errcode":0,"errmsg":"ok"}),
+            ],
+            "/media/upload?",
+            "/v1.0/robot/oToMessages/batchSend",
+        )
+        .await;
+        assert_media_fixture(
+            EnterpriseCredential::parse(r#"{"providerId":"feishu","appId":"app","appSecret":"secret","verificationToken":null,"encryptKey":null}"#).expect("credential"),
+            vec![
+                json!({"code":0,"tenant_access_token":"token","expire":7200}),
+                json!({"code":0,"data":{"image_key":"image-1"}}),
+                json!({"code":0,"msg":"ok","data":{"message_id":"message-1"}}),
+            ],
+            "/open-apis/im/v1/images",
+            "/open-apis/im/v1/messages?",
+        )
+        .await;
     }
 
     #[test]
@@ -962,6 +1410,54 @@ mod tests {
             EnterpriseApiClient::with_loopback_endpoint("file:///tmp/fixture"),
             Err(EnterpriseApiError::InvalidRequest)
         ));
+    }
+
+    #[test]
+    fn wecom_callback_probe_requires_a_clean_https_base_url() {
+        assert!(matches!(
+            wecom_callback_probe_url("http://bot.example.com", "account-1"),
+            Err(EnterpriseApiError::InvalidRequest)
+        ));
+        assert!(matches!(
+            wecom_callback_probe_url("https://user@bot.example.com", "account-1"),
+            Err(EnterpriseApiError::InvalidRequest)
+        ));
+        assert!(matches!(
+            wecom_callback_probe_url("https://bot.example.com?token=secret", "account-1"),
+            Err(EnterpriseApiError::InvalidRequest)
+        ));
+        let url = wecom_callback_probe_url("https://bot.example.com/hachimi/", "account-1")
+            .expect("valid callback base");
+        assert_eq!(
+            url.as_str(),
+            "https://bot.example.com/hachimi/v1/channels/wecom_app/account-1/callback"
+        );
+    }
+
+    #[test]
+    fn wecom_callback_probe_classifies_reverse_proxy_responses() {
+        for reachable in [
+            StatusCode::BAD_REQUEST,
+            StatusCode::UNAUTHORIZED,
+            StatusCode::FORBIDDEN,
+            StatusCode::METHOD_NOT_ALLOWED,
+        ] {
+            assert!(classify_wecom_callback_probe_status(reachable).is_ok());
+        }
+        assert_eq!(
+            classify_wecom_callback_probe_status(StatusCode::NOT_FOUND),
+            Err(EnterpriseApiError::Provider {
+                code: "http_404".into(),
+                retryable: false,
+            })
+        );
+        assert_eq!(
+            classify_wecom_callback_probe_status(StatusCode::BAD_GATEWAY),
+            Err(EnterpriseApiError::Provider {
+                code: "http_502".into(),
+                retryable: true,
+            })
+        );
     }
 
     #[tokio::test]

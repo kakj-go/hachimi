@@ -59,7 +59,7 @@ impl DesktopDomainRunLauncher for DesktopDomainRunLauncherAdapter {
     fn dispatch_channel_ingress(
         &self,
         principal: String,
-        envelope: hachimi_protocol::ChannelEnvelope,
+        message: hachimi_protocol::VerifiedChannelMessage,
     ) -> DesktopDomainLaunchFuture<hachimi_protocol::IngressReceipt> {
         let app = self.app.clone();
         Box::pin(async move {
@@ -68,7 +68,7 @@ impl DesktopDomainRunLauncher for DesktopDomainRunLauncherAdapter {
                 &app,
                 &state.gateway,
                 &principal,
-                &envelope,
+                &message,
             )
             .await
             .map_err(|error| {

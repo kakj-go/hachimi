@@ -1,8 +1,7 @@
 PRAGMA foreign_keys = ON;
 
-CREATE TABLE desktop_control_sessions (
+CREATE TABLE computer_control_sessions (
     session_id TEXT PRIMARY KEY NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
-    active_browser_session_id TEXT REFERENCES browser_sessions(id) ON DELETE SET NULL,
     selected_app_id TEXT,
     selected_window_fingerprint TEXT,
     input_epoch INTEGER NOT NULL DEFAULT 0 CHECK(input_epoch >= 0),
@@ -13,11 +12,11 @@ CREATE TABLE desktop_control_sessions (
     updated_at_ms INTEGER NOT NULL
 );
 
-CREATE INDEX desktop_control_state_idx
-ON desktop_control_sessions(control_state, updated_at_ms);
+CREATE INDEX computer_control_state_idx
+ON computer_control_sessions(control_state, updated_at_ms);
 
-CREATE TABLE desktop_control_action_ledger (
-    session_id TEXT NOT NULL REFERENCES desktop_control_sessions(session_id) ON DELETE CASCADE,
+CREATE TABLE host_action_ledger (
+    session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
     run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
     generation INTEGER NOT NULL CHECK(generation > 0),
     action_id TEXT NOT NULL,
@@ -33,5 +32,5 @@ CREATE TABLE desktop_control_action_ledger (
     PRIMARY KEY(session_id, action_id)
 );
 
-CREATE INDEX desktop_control_action_reconcile_idx
-ON desktop_control_action_ledger(status, updated_at_ms, session_id);
+CREATE INDEX host_action_reconcile_idx
+ON host_action_ledger(status, updated_at_ms, session_id);

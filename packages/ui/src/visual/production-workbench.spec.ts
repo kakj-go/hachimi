@@ -4,6 +4,7 @@ import { resolve } from "node:path";
 import {
   appearance,
   directTerminalFixture,
+  hostSettingsMocks,
   initialSettings,
   installMotionLabAssets,
   motionEntry,
@@ -17,8 +18,8 @@ import {
   workspaceGitFixture,
 } from "./production-workbench-fixtures";
 import { installEnvironmentSummaryVisualTests } from "./environment-summary-visual";
+import { assertPlatformIntegrationsVisualMatrix } from "./platform-integrations-visual";
 import { assertApprovalPolicyTones, installSessionScrollVisualTest } from "./session-scroll-visual";
-
 export async function installTauriMocks(
   page: Page,
   withComposerData = false,
@@ -31,6 +32,7 @@ export async function installTauriMocks(
     ({
       appearance,
       directTerminalFixture,
+      hostSettingsMocks,
       initialSettings,
       motionEntry,
       runtimeAssessment,
@@ -325,6 +327,10 @@ export async function installTauriMocks(
             createdAtMs: 1_774_184_500_000,
           },
         ],
+        browserAutomationLeases: [],
+        externalBrowserObservations: [],
+        hostAccessRequests: [],
+        computerControlSessions: [],
         sources: workbenchEnvironmentFixture.sources,
       };
       let nextCallbackId = 1;
@@ -349,7 +355,7 @@ export async function installTauriMocks(
           calls.push({ command, args });
           if (command === "initialize_agent_control") {
             return {
-              protocolVersion: 29,
+              protocolVersion: 31,
               acceptedFeatures: ["workbench", "workspace_tools"],
               sandbox: { osEnforced: true },
             };
@@ -452,12 +458,9 @@ export async function installTauriMocks(
               generation: 1,
             };
           }
-          if (command === "get_workspace_git") {
-            return workspaceGitFixture;
-          }
-          if (command === "get_workspace_diff") {
+          if (command === "get_workspace_git") return workspaceGitFixture;
+          if (command === "get_workspace_diff")
             return { ...workspaceDiffFixture, scope: args.scope };
-          }
           if (command === "list_schedules") return schedulerEnabled ? taskSchedules : [];
           if (command === "list_task_runs") return schedulerEnabled ? taskRuns : [];
           if (
@@ -468,9 +471,7 @@ export async function installTauriMocks(
           ) {
             return [];
           }
-          if (command === "spawn_process") {
-            return directTerminalFixture;
-          }
+          if (command === "spawn_process") return directTerminalFixture;
           if (command === "read_process") {
             return {
               process: directTerminalFixture,
@@ -480,13 +481,8 @@ export async function installTauriMocks(
             };
           }
           if (command === "resize_process") return null;
-          if (command === "local_host_command") {
-            const request = args.request as { kind?: string };
-            if (request.kind === "connector_list_accounts") {
-              return { kind: "connector_accounts", value: [] };
-            }
-            if (request.kind === "plugin_list") return { kind: "plugins", value: [] };
-          }
+          const hostSettingsMock = (hostSettingsMocks as Record<string, unknown>)[command];
+          if (hostSettingsMock !== undefined) return hostSettingsMock;
           if (command === "list_mcp_servers") return [];
           if (command === "inspect_project_git" || command === "refresh_project_git") {
             return {
@@ -558,7 +554,7 @@ export async function installTauriMocks(
           }
           if (command === "get_bootstrap_state") {
             return {
-              protocolVersion: 29,
+              protocolVersion: 31,
               windowKind: "workbench",
               locale: "zh-CN",
               theme: themeMode,
@@ -585,7 +581,6 @@ export async function installTauriMocks(
                   gitRemoteMutations: true,
                   pluginRuntime: true,
                   enterpriseIntegrations: true,
-                  desktopControl: true,
                 },
               },
             };
@@ -1005,6 +1000,7 @@ export async function installTauriMocks(
     {
       appearance,
       directTerminalFixture,
+      hostSettingsMocks,
       initialSettings,
       motionEntry,
       runtimeAssessment,
@@ -1173,7 +1169,6 @@ test("production composer popovers dismiss outside and create visual Skill refer
     });
   }
 });
-
 for (const viewport of [
   { name: "1855x1343", width: 1855, height: 1343 },
   { name: "1440x900", width: 1440, height: 900 },
@@ -1339,6 +1334,8 @@ test("project tools open before the first message and preserve the responsive in
   });
   await page.getByTestId("workbench-toggle-inspector").click();
   await page.getByTestId("workbench-toggle-inspector").click();
+  await expect(page.locator('[data-component="workspace"][data-mode="review"]')).toBeVisible();
+  await page.getByTestId("workbench-inspector-new-tab").click();
   menu = page.getByTestId("workbench-resource-menu");
   await menu.getByRole("button", { name: "终端" }).click();
   await expect(
@@ -1378,6 +1375,7 @@ test("production plan confirmation replaces the composer with a compact revision
   await page.clock.setFixedTime(new Date("2026-07-26T15:00:00.000Z"));
   await installTauriMocks(page, true, false, true, "dark", "plan");
   await page.goto("http://127.0.0.1:1420/workbench.html?route=home");
+  await page.getByTestId("project-select-project-hachimi").click();
   await page.getByTestId("session-select-session-ui-unification").click();
 
   await expect(page.getByTestId("workbench-execute-plan")).toBeVisible();
@@ -1398,6 +1396,7 @@ test("production UserInput questions replace the composer with direct choices", 
   await page.clock.setFixedTime(new Date("2026-07-26T15:00:00.000Z"));
   await installTauriMocks(page, true, false, true, "dark", "user_input");
   await page.goto("http://127.0.0.1:1420/workbench.html?route=home");
+  await page.getByTestId("project-select-project-hachimi").click();
   await page.getByTestId("session-select-session-ui-unification").click();
 
   await expect(page.locator('[data-component="user-input-card"]')).toBeVisible();
@@ -1502,9 +1501,15 @@ test("production menus contain only implemented entries and legacy routes normal
     await expect(page.getByRole("button", { name: removed, exact: true })).toHaveCount(0);
   }
 
-  await page.goto("http://127.0.0.1:1420/workbench.html?route=settings/plugins");
-  await expect(page.getByRole("heading", { name: "通用", exact: true, level: 1 })).toBeVisible();
-  await expect(page.locator(".settings-nav button")).toHaveCount(9);
+  await page.goto("http://127.0.0.1:1420/workbench.html?route=settings/integrations");
+  await expect(page.locator(".settings-page-heading h1")).toHaveText("平台集成");
+  for (const provider of ["钉钉", "飞书", "企微 AI Bot", "企微自建应用", "微信 iLink / ClawBot"]) {
+    await expect(page.getByRole("tab", { name: provider })).toBeVisible();
+  }
+  await page.getByRole("tab", { name: "企微自建应用" }).click();
+  await expect(page.getByText("客户支持", { exact: true })).toBeVisible();
+  await page.getByRole("tab", { name: "钉钉" }).click();
+  await expect(page.locator(".settings-nav button")).toHaveCount(14);
   for (const entry of [
     "通用",
     "外观",
@@ -1512,12 +1517,19 @@ test("production menus contain only implemented entries and legacy routes normal
     "配置",
     "宠物",
     "交互",
+    "平台集成",
+    "浏览器",
+    "Computer Use",
     "Skills",
     "MCP",
-    "本地 Hosts",
+    "Plugins",
+    "Runtime & Security",
+    "诊断",
   ]) {
     await expect(page.locator(".settings-nav").getByRole("button", { name: entry })).toBeVisible();
   }
+  await expect(page.getByTestId("settings-nav-plugins")).toBeDisabled();
+  await assertPlatformIntegrationsVisualMatrix(page);
 });
 
 test("appearance controls update runtime tokens and support wheel and keyboard", async ({
@@ -1951,16 +1963,14 @@ test("Motion Library Lab previews a catalog VRMA with finger diagnostics", async
     maskColor: "#313236",
   });
 });
-
 test("resetting all local data requires explicit confirmation", async ({ page }) => {
   await installTauriMocks(page);
-  await page.goto("http://127.0.0.1:1420/workbench.html?route=settings/general");
+  await page.goto("http://127.0.0.1:1420/workbench.html?route=settings/diagnostics");
   await page.getByRole("button", { name: "重置全部本地数据" }).click();
   const dialog = page.getByRole("dialog", { name: "重置 Hachimi" });
   await expect(dialog).toBeVisible();
   await dialog.getByRole("button", { name: "取消" }).click();
   await expect(dialog).not.toBeVisible();
-
   await page.getByRole("button", { name: "重置全部本地数据" }).click();
   await dialog.getByRole("button", { name: "确认" }).click();
   await expect
@@ -1975,7 +1985,6 @@ test("resetting all local data requires explicit confirmation", async ({ page })
     )
     .toBe(true);
 });
-
 test("production home and appearance have no new WCAG A or AA violations", async ({ page }) => {
   await installTauriMocks(page);
   for (const route of ["home", "settings/appearance"]) {

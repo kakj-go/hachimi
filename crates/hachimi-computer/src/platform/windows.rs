@@ -1,8 +1,21 @@
-use std::{path::Path, process::Command, sync::Arc};
+use std::{
+    collections::HashMap,
+    fs::File,
+    io::Read,
+    os::windows::ffi::OsStrExt,
+    path::{Path, PathBuf},
+    process::Command,
+    sync::{Arc, OnceLock},
+    time::UNIX_EPOCH,
+};
 
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 use hachimi_process_policy::ProcessPolicy;
-use hachimi_protocol::{ComputerAction, ComputerWindowIdentity};
+use hachimi_protocol::{
+    ComputerAction, ComputerAppDescriptor, ComputerRuntimeHealth, ComputerWindowIdentity,
+};
 use parking_lot::Mutex;
+use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use windows_capture::{
     capture::{Context, GraphicsCaptureApiHandler},
@@ -19,13 +32,16 @@ use windows_capture::{
 use crate::ComputerHostError;
 
 use ::windows::{
+    Graphics::Capture::GraphicsCaptureSession,
     Win32::{
-        Foundation::{HANDLE, HWND, LPARAM, RECT, WPARAM},
+        Foundation::{HANDLE, HWND, LPARAM, PROPERTYKEY, RECT, WPARAM},
         Security::{
             GetSidSubAuthority, GetSidSubAuthorityCount, GetTokenInformation,
             TOKEN_MANDATORY_LABEL, TOKEN_QUERY, TokenIntegrityLevel,
         },
+        Storage::FileSystem::{GetFileVersionInfoSizeW, GetFileVersionInfoW, VerQueryValueW},
         System::{
+            Com::StructuredStorage::PropVariantToString,
             StationsAndDesktops::{
                 DESKTOP_CONTROL_FLAGS, DESKTOP_READOBJECTS, GetThreadDesktop,
                 GetUserObjectInformationW, OpenInputDesktop, UOI_NAME,
@@ -46,6 +62,7 @@ use ::windows::{
                 VK_LEFT, VK_MENU, VK_NEXT, VK_PRIOR, VK_RETURN, VK_RIGHT, VK_SHIFT, VK_SPACE,
                 VK_TAB, VK_UP,
             },
+            Shell::PropertiesSystem::{IPropertyStore, SHGetPropertyStoreForWindow},
             WindowsAndMessaging::{
                 EnumWindows, GetClassNameW, GetForegroundWindow, GetWindowRect, GetWindowTextW,
                 GetWindowThreadProcessId, IsWindow, IsWindowVisible, MoveWindow, PostMessageW,
@@ -54,10 +71,47 @@ use ::windows::{
             },
         },
     },
-    core::{BOOL, Owned, PWSTR},
+    core::{BOOL, GUID, Owned, PCWSTR, PWSTR},
 };
 
 const MAX_CAPTURE_DIMENSION: u32 = 16_384;
+const MAX_APP_ICON_PNG_BYTES: usize = 256 * 1024;
+const PKEY_APP_USER_MODEL_ID: PROPERTYKEY = PROPERTYKEY {
+    fmtid: GUID::from_u128(0x9f4c2855_9f79_4b39_a8d0_e1d42de1d5f3),
+    pid: 5,
+};
+static APP_DESCRIPTOR_CACHE: OnceLock<Mutex<HashMap<String, CachedAppDescriptor>>> =
+    OnceLock::new();
+
+pub(super) fn runtime_health() -> ComputerRuntimeHealth {
+    let graphics_capture_available = GraphicsCaptureSession::IsSupported().unwrap_or(false);
+    let input_desktop_available =
+        input_desktop_name().is_ok_and(|name| name.eq_ignore_ascii_case("default"));
+    // SAFETY: GetCurrentProcess returns a valid pseudo-handle which must not be closed.
+    let process_elevated = process_integrity(unsafe { GetCurrentProcess() })
+        .is_ok_and(|level| level >= SECURITY_MANDATORY_HIGH_RID as u32);
+    let error_code = if !graphics_capture_available {
+        Some("computer_capture_unavailable".into())
+    } else if !input_desktop_available {
+        Some("computer_protected_desktop".into())
+    } else {
+        None
+    };
+    ComputerRuntimeHealth {
+        os_supported: true,
+        graphics_capture_available,
+        input_desktop_available,
+        process_elevated,
+        error_code,
+    }
+}
+
+#[derive(Clone)]
+struct CachedAppDescriptor {
+    len: u64,
+    modified_ms: u128,
+    descriptor: ComputerAppDescriptor,
+}
 
 pub(super) fn list_windows() -> Result<Vec<ComputerWindowIdentity>, ComputerHostError> {
     unsafe extern "system" fn collect(hwnd: HWND, parameter: LPARAM) -> BOOL {
@@ -85,6 +139,7 @@ pub(super) fn list_windows() -> Result<Vec<ComputerWindowIdentity>, ComputerHost
         .into_iter()
         .filter_map(|hwnd| read_identity(&format!("0x{:x}", hwnd.0 as usize)).ok())
         .filter(|identity| !identity.title.trim().is_empty())
+        .filter(|identity| is_user_application(&identity.app_id))
         .collect())
 }
 
@@ -109,7 +164,9 @@ pub(super) fn read_identity(
         .map_err(|error| broker(format!("open_process:{error}")))?;
     // SAFETY: process is a newly owned kernel handle.
     let process = unsafe { Owned::new(process) };
-    let app_id = process_image_name(*process)?;
+    let executable_path = process_image_path(*process)?;
+    let app = app_descriptor(hwnd, &executable_path)?;
+    let app_id = app.app_id.clone();
     let title = window_text(hwnd);
     let class_name = window_class(hwnd);
     let rect = window_rect(hwnd)?;
@@ -137,6 +194,7 @@ pub(super) fn read_identity(
 
     Ok(ComputerWindowIdentity {
         app_id,
+        app,
         process_id,
         window_handle: format!("0x{handle:x}"),
         fingerprint,
@@ -400,7 +458,7 @@ impl GraphicsCaptureApiHandler for OneFrameCapture {
     }
 }
 
-fn process_image_name(process: HANDLE) -> Result<String, ComputerHostError> {
+fn process_image_path(process: HANDLE) -> Result<PathBuf, ComputerHostError> {
     let mut buffer = vec![0_u16; 32_768];
     let mut length = u32::try_from(buffer.len()).map_err(|_| broker("process_name_too_long"))?;
     // SAFETY: the mutable UTF-16 buffer and its length are valid for the call.
@@ -413,13 +471,440 @@ fn process_image_name(process: HANDLE) -> Result<String, ComputerHostError> {
         )
     }
     .map_err(|error| broker(format!("process_name:{error}")))?;
-    let path = String::from_utf16_lossy(&buffer[..length as usize]);
-    Path::new(&path)
+    let path = PathBuf::from(String::from_utf16_lossy(&buffer[..length as usize]));
+    std::fs::canonicalize(&path)
+        .or_else(|_| {
+            path.is_absolute()
+                .then_some(path)
+                .ok_or_else(|| std::io::Error::other("process path is not absolute"))
+        })
+        .map_err(|error| broker(format!("process_path:{error}")))
+}
+
+fn app_descriptor(hwnd: HWND, path: &Path) -> Result<ComputerAppDescriptor, ComputerHostError> {
+    let metadata =
+        std::fs::metadata(path).map_err(|error| broker(format!("process_metadata:{error}")))?;
+    let modified_ms = metadata
+        .modified()
+        .ok()
+        .and_then(|value| value.duration_since(UNIX_EPOCH).ok())
+        .map(|value| value.as_millis())
+        .unwrap_or_default();
+    let normalized_path = path.to_string_lossy().replace('/', "\\");
+    let app_user_model_id = window_app_user_model_id(hwnd);
+    let cache_key = format!(
+        "{}|{}",
+        normalized_path.to_lowercase(),
+        app_user_model_id.as_deref().unwrap_or_default()
+    );
+    let cache = APP_DESCRIPTOR_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Some(cached) = cache.lock().get(&cache_key)
+        && cached.len == metadata.len()
+        && cached.modified_ms == modified_ms
+    {
+        return Ok(cached.descriptor.clone());
+    }
+
+    let executable_name = path
         .file_name()
         .and_then(|value| value.to_str())
         .filter(|value| !value.trim().is_empty())
-        .map(|value| value.to_ascii_lowercase())
-        .ok_or_else(|| broker("process_name_invalid"))
+        .ok_or_else(|| broker("process_name_invalid"))?
+        .to_owned();
+    if let Some(packaged) = app_user_model_id.as_deref().and_then(packaged_app_metadata) {
+        let publisher_verified = packaged.publisher.is_some();
+        let identity_hash = packaged_identity_hash(
+            &packaged.package_family_name,
+            &packaged.app_user_model_id,
+            packaged.publisher.as_deref(),
+        );
+        let descriptor = ComputerAppDescriptor {
+            app_id: packaged.app_user_model_id.clone(),
+            display_name: packaged
+                .display_name
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or_else(|| executable_name.clone()),
+            executable_name,
+            executable_path: Some(normalized_path),
+            publisher: packaged.publisher,
+            publisher_verified,
+            package_family_name: Some(packaged.package_family_name),
+            app_user_model_id: Some(packaged.app_user_model_id),
+            file_identity: None,
+            identity_hash,
+        };
+        cache.lock().insert(
+            cache_key,
+            CachedAppDescriptor {
+                len: metadata.len(),
+                modified_ms,
+                descriptor: descriptor.clone(),
+            },
+        );
+        return Ok(descriptor);
+    }
+    let app_id = executable_name.to_ascii_lowercase();
+    let version = version_strings(path);
+    let display_name = version
+        .product_name
+        .or(version.file_description)
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| executable_name.clone());
+    let verified_publisher = verified_publisher(path);
+    let publisher_verified = verified_publisher.is_some();
+    let publisher = verified_publisher.or_else(|| {
+        version
+            .company_name
+            .filter(|value| !value.trim().is_empty())
+    });
+    let file_identity = sha256_file(path)?;
+    let normalized_identity_path = normalized_path.to_lowercase();
+    let identity_hash = win32_identity_hash(
+        &normalized_identity_path,
+        &file_identity,
+        publisher.as_deref(),
+        publisher_verified,
+    );
+    let descriptor = ComputerAppDescriptor {
+        app_id,
+        display_name,
+        executable_name,
+        executable_path: Some(normalized_path),
+        publisher,
+        publisher_verified,
+        package_family_name: None,
+        app_user_model_id,
+        file_identity: Some(file_identity),
+        identity_hash,
+    };
+    cache.lock().insert(
+        cache_key,
+        CachedAppDescriptor {
+            len: metadata.len(),
+            modified_ms,
+            descriptor: descriptor.clone(),
+        },
+    );
+    Ok(descriptor)
+}
+
+pub(super) fn app_icon_png(
+    app: &ComputerAppDescriptor,
+) -> Result<Option<Vec<u8>>, ComputerHostError> {
+    if let (Some(package_family_name), Some(app_user_model_id)) = (
+        app.package_family_name.as_deref(),
+        app.app_user_model_id.as_deref(),
+    ) && let Some(bytes) = packaged_icon_png(package_family_name, app_user_model_id)?
+    {
+        return Ok(Some(bytes));
+    }
+    let Some(path) = app.executable_path.as_deref() else {
+        return Ok(None);
+    };
+    let script = r#"Add-Type -AssemblyName System.Drawing; $icon = [System.Drawing.Icon]::ExtractAssociatedIcon($args[0]); if ($null -eq $icon) { exit 0 }; $bitmap = $icon.ToBitmap(); $stream = New-Object System.IO.MemoryStream; try { $bitmap.Save($stream, [System.Drawing.Imaging.ImageFormat]::Png); [Console]::Out.Write([Convert]::ToBase64String($stream.ToArray())) } finally { $stream.Dispose(); $bitmap.Dispose(); $icon.Dispose() }"#;
+    let Some(output) = powershell_text(script, Path::new(path)) else {
+        return Ok(None);
+    };
+    let bytes = STANDARD
+        .decode(output.trim())
+        .map_err(|error| broker(format!("app_icon_decode:{error}")))?;
+    if bytes.len() > MAX_APP_ICON_PNG_BYTES
+        || !bytes.starts_with(&[137, 80, 78, 71, 13, 10, 26, 10])
+    {
+        return Err(broker("app_icon_invalid"));
+    }
+    Ok(Some(bytes))
+}
+
+#[derive(Debug, Deserialize)]
+struct PackagedAppMetadata {
+    #[serde(rename = "family")]
+    package_family_name: String,
+    #[serde(rename = "aumid")]
+    app_user_model_id: String,
+    #[serde(rename = "displayName")]
+    display_name: Option<String>,
+    publisher: Option<String>,
+}
+
+fn window_app_user_model_id(hwnd: HWND) -> Option<String> {
+    // The Shell property store is the reliable source for both packaged
+    // windows hosted by ApplicationFrameHost and classic windows with an
+    // explicit AppUserModelID.
+    let store = unsafe { SHGetPropertyStoreForWindow::<IPropertyStore>(hwnd) }.ok()?;
+    let value = unsafe { store.GetValue(&PKEY_APP_USER_MODEL_ID) }.ok()?;
+    let mut buffer = [0_u16; 512];
+    unsafe { PropVariantToString(std::ptr::addr_of!(value), &mut buffer) }.ok()?;
+    let end = buffer
+        .iter()
+        .position(|unit| *unit == 0)
+        .unwrap_or(buffer.len());
+    let value = String::from_utf16_lossy(&buffer[..end]).trim().to_owned();
+    (!value.is_empty()).then_some(value)
+}
+
+fn packaged_app_metadata(app_user_model_id: &str) -> Option<PackagedAppMetadata> {
+    let package_family_name = package_family_from_aumid(app_user_model_id)?;
+    let script = r#"
+$OutputEncoding = New-Object System.Text.UTF8Encoding($false)
+$package = Get-AppxPackage -PackageFamilyName $args[0] | Select-Object -First 1
+if ($null -eq $package) { exit 0 }
+$manifest = Get-AppxPackageManifest -Package $package
+$applicationId = $args[1].Substring($args[1].IndexOf('!') + 1)
+$application = @($manifest.Package.Applications.Application) | Where-Object { $_.Id -eq $applicationId } | Select-Object -First 1
+$startApp = @(Get-StartApps -ErrorAction SilentlyContinue) | Where-Object { $_.AppID -eq $args[1] } | Select-Object -First 1
+$displayName = if ($null -ne $startApp) { $startApp.Name } elseif ($null -ne $application.VisualElements.DisplayName) { $application.VisualElements.DisplayName } else { $package.Name }
+[Console]::Out.Write(( [pscustomobject]@{ family = $package.PackageFamilyName; aumid = $args[1]; displayName = $displayName; publisher = $package.Publisher } | ConvertTo-Json -Compress ))
+"#;
+    let output = powershell_args(
+        script,
+        &[
+            std::ffi::OsStr::new(package_family_name),
+            std::ffi::OsStr::new(app_user_model_id),
+        ],
+    )?;
+    serde_json::from_str(output.trim()).ok()
+}
+
+fn package_family_from_aumid(app_user_model_id: &str) -> Option<&str> {
+    let (package_family_name, application_id) = app_user_model_id.split_once('!')?;
+    let package_family_name = package_family_name.trim();
+    (!package_family_name.is_empty() && !application_id.trim().is_empty())
+        .then_some(package_family_name)
+}
+
+fn packaged_icon_png(
+    package_family_name: &str,
+    app_user_model_id: &str,
+) -> Result<Option<Vec<u8>>, ComputerHostError> {
+    let script = r#"
+$OutputEncoding = New-Object System.Text.UTF8Encoding($false)
+Add-Type -AssemblyName System.Drawing
+$package = Get-AppxPackage -PackageFamilyName $args[0] | Select-Object -First 1
+if ($null -eq $package) { exit 0 }
+$manifest = Get-AppxPackageManifest -Package $package
+$applicationId = $args[1].Substring($args[1].IndexOf('!') + 1)
+$application = @($manifest.Package.Applications.Application) | Where-Object { $_.Id -eq $applicationId } | Select-Object -First 1
+$relative = if ($null -ne $application.VisualElements.Square44x44Logo) { $application.VisualElements.Square44x44Logo } else { $manifest.Package.Properties.Logo }
+if ([string]::IsNullOrWhiteSpace($relative) -or $relative.StartsWith('ms-resource:')) { exit 0 }
+$candidate = Join-Path $package.InstallLocation $relative
+if (-not (Test-Path -LiteralPath $candidate)) {
+  $base = [System.IO.Path]::GetFileNameWithoutExtension($candidate)
+  $directory = [System.IO.Path]::GetDirectoryName($candidate)
+  $candidate = Get-ChildItem -LiteralPath $directory -File -ErrorAction SilentlyContinue | Where-Object { $_.BaseName -like "$base*" } | Sort-Object Name | Select-Object -First 1 -ExpandProperty FullName
+}
+if ([string]::IsNullOrWhiteSpace($candidate) -or -not (Test-Path -LiteralPath $candidate)) { exit 0 }
+$image = [System.Drawing.Image]::FromFile($candidate)
+$stream = New-Object System.IO.MemoryStream
+try { $image.Save($stream, [System.Drawing.Imaging.ImageFormat]::Png); [Console]::Out.Write([Convert]::ToBase64String($stream.ToArray())) } finally { $stream.Dispose(); $image.Dispose() }
+"#;
+    let Some(output) = powershell_args(
+        script,
+        &[
+            std::ffi::OsStr::new(package_family_name),
+            std::ffi::OsStr::new(app_user_model_id),
+        ],
+    ) else {
+        return Ok(None);
+    };
+    let bytes = STANDARD
+        .decode(output.trim())
+        .map_err(|error| broker(format!("package_icon_decode:{error}")))?;
+    if bytes.len() > MAX_APP_ICON_PNG_BYTES
+        || !bytes.starts_with(&[137, 80, 78, 71, 13, 10, 26, 10])
+    {
+        return Err(broker("package_icon_invalid"));
+    }
+    Ok(Some(bytes))
+}
+
+fn packaged_identity_hash(
+    package_family_name: &str,
+    app_user_model_id: &str,
+    publisher: Option<&str>,
+) -> String {
+    fingerprint(&(
+        "packaged",
+        package_family_name,
+        app_user_model_id,
+        publisher.unwrap_or_default(),
+    ))
+}
+
+fn win32_identity_hash(
+    normalized_path: &str,
+    file_identity: &str,
+    publisher: Option<&str>,
+    publisher_verified: bool,
+) -> String {
+    if publisher_verified {
+        fingerprint(&(
+            "signed_win32",
+            normalized_path,
+            publisher.unwrap_or_default(),
+        ))
+    } else {
+        fingerprint(&("unsigned_win32", normalized_path, file_identity))
+    }
+}
+
+fn verified_publisher(path: &Path) -> Option<String> {
+    let script = r#"$signature = Get-AuthenticodeSignature -LiteralPath $args[0]; if ($signature.Status -eq 'Valid' -and $null -ne $signature.SignerCertificate) { [Console]::Out.Write($signature.SignerCertificate.GetNameInfo('SimpleName', $false)) }"#;
+    powershell_text(script, path).filter(|value| !value.trim().is_empty())
+}
+
+fn powershell_text(script: &str, path: &Path) -> Option<String> {
+    powershell_args(script, &[path.as_os_str()])
+}
+
+fn powershell_args(script: &str, args: &[&std::ffi::OsStr]) -> Option<String> {
+    let mut command = hachimi_process_policy::std_command(
+        "powershell.exe",
+        hachimi_process_policy::ProcessPolicy::HiddenBackground,
+    );
+    let output = command
+        .args([
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            script,
+        ])
+        .args(args)
+        .output()
+        .ok()?;
+    if !output.status.success() || output.stdout.len() > 512 * 1024 {
+        return None;
+    }
+    String::from_utf8(output.stdout).ok()
+}
+
+#[derive(Default)]
+struct VersionStrings {
+    file_description: Option<String>,
+    product_name: Option<String>,
+    company_name: Option<String>,
+}
+
+fn version_strings(path: &Path) -> VersionStrings {
+    let path_wide = wide_null(path.as_os_str());
+    // SAFETY: path_wide is NUL-terminated and remains alive for both calls.
+    let size = unsafe { GetFileVersionInfoSizeW(PCWSTR(path_wide.as_ptr()), None) };
+    if size == 0 || size > 16 * 1024 * 1024 {
+        return VersionStrings::default();
+    }
+    let mut data = vec![0_u8; size as usize];
+    // SAFETY: data has exactly the size requested by Windows.
+    if unsafe {
+        GetFileVersionInfoW(
+            PCWSTR(path_wide.as_ptr()),
+            None,
+            size,
+            data.as_mut_ptr().cast(),
+        )
+    }
+    .is_err()
+    {
+        return VersionStrings::default();
+    }
+    let translation = version_translation(&data).unwrap_or((0x0409, 0x04b0));
+    VersionStrings {
+        file_description: version_string(&data, translation, "FileDescription"),
+        product_name: version_string(&data, translation, "ProductName"),
+        company_name: version_string(&data, translation, "CompanyName"),
+    }
+}
+
+fn version_translation(data: &[u8]) -> Option<(u16, u16)> {
+    let query = wide_null(std::ffi::OsStr::new("\\VarFileInfo\\Translation"));
+    let mut value = std::ptr::null_mut();
+    let mut len = 0_u32;
+    // SAFETY: data is a successful version resource buffer and output pointers are writable.
+    let ok = unsafe {
+        VerQueryValueW(
+            data.as_ptr().cast(),
+            PCWSTR(query.as_ptr()),
+            &mut value,
+            &mut len,
+        )
+    };
+    if !ok.as_bool() || value.is_null() || len < 4 {
+        return None;
+    }
+    // SAFETY: Windows reported at least two u16 values.
+    let values = unsafe { std::slice::from_raw_parts(value.cast::<u16>(), 2) };
+    Some((values[0], values[1]))
+}
+
+fn version_string(data: &[u8], translation: (u16, u16), key: &str) -> Option<String> {
+    let query = format!(
+        "\\StringFileInfo\\{:04x}{:04x}\\{key}",
+        translation.0, translation.1
+    );
+    let query = wide_null(std::ffi::OsStr::new(&query));
+    let mut value = std::ptr::null_mut();
+    let mut len = 0_u32;
+    // SAFETY: data is a successful version resource buffer and output pointers are writable.
+    let ok = unsafe {
+        VerQueryValueW(
+            data.as_ptr().cast(),
+            PCWSTR(query.as_ptr()),
+            &mut value,
+            &mut len,
+        )
+    };
+    if !ok.as_bool() || value.is_null() || len <= 1 {
+        return None;
+    }
+    // SAFETY: Windows reports the UTF-16 element count, including the trailing NUL.
+    let units = unsafe { std::slice::from_raw_parts(value.cast::<u16>(), len as usize) };
+    let end = units
+        .iter()
+        .position(|unit| *unit == 0)
+        .unwrap_or(units.len());
+    let value = String::from_utf16_lossy(&units[..end]).trim().to_owned();
+    (!value.is_empty()).then_some(value)
+}
+
+fn wide_null(value: &std::ffi::OsStr) -> Vec<u16> {
+    value.encode_wide().chain(std::iter::once(0)).collect()
+}
+
+fn sha256_file(path: &Path) -> Result<String, ComputerHostError> {
+    let mut file =
+        File::open(path).map_err(|error| broker(format!("process_hash_open:{error}")))?;
+    let mut digest = Sha256::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .map_err(|error| broker(format!("process_hash_read:{error}")))?;
+        if read == 0 {
+            break;
+        }
+        digest.update(&buffer[..read]);
+    }
+    Ok(digest
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect())
+}
+
+fn is_user_application(app_id: &str) -> bool {
+    !matches!(
+        app_id,
+        "ctfmon.exe"
+            | "dllhost.exe"
+            | "dwm.exe"
+            | "fontdrvhost.exe"
+            | "searchhost.exe"
+            | "shellexperiencehost.exe"
+            | "sihost.exe"
+            | "startmenuexperiencehost.exe"
+            | "taskhostw.exe"
+            | "textinputhost.exe"
+    )
 }
 
 fn process_integrity(process: HANDLE) -> Result<u32, ComputerHostError> {
@@ -755,6 +1240,61 @@ mod tests {
     };
 
     use super::*;
+
+    #[test]
+    fn packaged_identity_is_scoped_to_family_aumid_and_publisher() {
+        let family = "Contoso.Notes_abcd1234";
+        let aumid = "Contoso.Notes_abcd1234!App";
+        assert_eq!(package_family_from_aumid(aumid), Some(family));
+        assert_eq!(package_family_from_aumid("not-packaged"), None);
+        assert_eq!(package_family_from_aumid("family!"), None);
+
+        let identity = packaged_identity_hash(family, aumid, Some("CN=Contoso"));
+        assert_eq!(
+            identity,
+            packaged_identity_hash(family, aumid, Some("CN=Contoso"))
+        );
+        assert_ne!(
+            identity,
+            packaged_identity_hash(family, "Contoso.Notes_abcd1234!Admin", Some("CN=Contoso"))
+        );
+        assert_ne!(
+            identity,
+            packaged_identity_hash(family, aumid, Some("CN=Other"))
+        );
+    }
+
+    #[test]
+    fn win32_identity_separates_paths_and_reprompts_only_unsigned_file_changes() {
+        let first_path = win32_identity_hash(
+            r"c:\apps\first\tool.exe",
+            "content-a",
+            Some("Contoso"),
+            true,
+        );
+        let second_path = win32_identity_hash(
+            r"c:\apps\second\tool.exe",
+            "content-a",
+            Some("Contoso"),
+            true,
+        );
+        assert_ne!(first_path, second_path);
+        assert_eq!(
+            first_path,
+            win32_identity_hash(
+                r"c:\apps\first\tool.exe",
+                "content-b",
+                Some("Contoso"),
+                true,
+            )
+        );
+
+        let unsigned = win32_identity_hash(r"c:\apps\tool.exe", "content-a", None, false);
+        assert_ne!(
+            unsigned,
+            win32_identity_hash(r"c:\apps\tool.exe", "content-b", None, false)
+        );
+    }
 
     struct TestProcessGuard {
         child: Child,

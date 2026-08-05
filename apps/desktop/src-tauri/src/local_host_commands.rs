@@ -11,7 +11,7 @@ use hachimi_protocol::{
     LocalHostCommandResponse, RunId, SessionId, SessionSourceOrigin,
     WorkbenchEnvironmentChangeReason,
 };
-use tauri::{Manager, State, WebviewWindow};
+use tauri::{Manager, WebviewWindow};
 
 use super::{CommandError, DesktopState};
 
@@ -86,34 +86,21 @@ async fn request_to_domain(
                 resource_dir.join("plugins").join("sample-crm"),
             ))
         }
-        LocalHostCommandRequest::PluginInstallBuiltinEnterprise { platform } => {
+        LocalHostCommandRequest::PluginInstallBuiltinEnterprise { provider_id } => {
             let resource_dir =
                 window.app_handle().path().resource_dir().map_err(|error| {
                     CommandError::operation("plugin_resource_dir_failed", error)
                 })?;
-            let bundle_name = match platform {
-                hachimi_protocol::EnterprisePlatform::Wecom => "wecom",
-                hachimi_protocol::EnterprisePlatform::DingTalk => "dingtalk",
-                hachimi_protocol::EnterprisePlatform::Feishu => "feishu",
-            };
+            let bundle_name = provider_id.as_str();
             AppServerDomainRequest::Plugin(PluginAppRequest::InstallLocal(
                 resource_dir.join("plugins").join(bundle_name),
             ))
-        }
-        LocalHostCommandRequest::BrowserBeginPairing => {
-            AppServerDomainRequest::Browser(BrowserAppRequest::BeginPairing)
-        }
-        LocalHostCommandRequest::BrowserGetHostSettings => {
-            AppServerDomainRequest::Browser(BrowserAppRequest::GetHostSettings)
         }
         LocalHostCommandRequest::BrowserListPermissions => {
             AppServerDomainRequest::Browser(BrowserAppRequest::ListPermissions)
         }
         LocalHostCommandRequest::BrowserListPermissionRequests => {
             AppServerDomainRequest::Browser(BrowserAppRequest::ListPermissionRequests)
-        }
-        LocalHostCommandRequest::BrowserSetPreferredProfile { profile_kind } => {
-            AppServerDomainRequest::Browser(BrowserAppRequest::SetPreferredProfile(profile_kind))
         }
         LocalHostCommandRequest::BrowserStart {
             session_id,
@@ -323,13 +310,13 @@ async fn request_to_domain(
         }
         LocalHostCommandRequest::ChannelLoopbackReceive {
             bearer_token,
-            envelope,
+            message,
         } => AppServerDomainRequest::Channel(ChannelAppRequest::LoopbackReceive {
             bearer_token,
-            envelope,
+            message,
         }),
-        LocalHostCommandRequest::ChannelMockPollPush { envelope } => {
-            AppServerDomainRequest::Channel(ChannelAppRequest::MockPollPush(envelope))
+        LocalHostCommandRequest::ChannelMockPollPush { message } => {
+            AppServerDomainRequest::Channel(ChannelAppRequest::MockPollPush(message))
         }
         LocalHostCommandRequest::ChannelMockPollSetConnected { connected } => {
             AppServerDomainRequest::Channel(ChannelAppRequest::MockPollSetConnected(connected))
@@ -338,11 +325,11 @@ async fn request_to_domain(
             AppServerDomainRequest::Channel(ChannelAppRequest::MockPollDrain)
         }
         LocalHostCommandRequest::ChannelEnqueueDelivery {
-            route,
+            address,
             idempotency_key,
             text,
         } => AppServerDomainRequest::Channel(ChannelAppRequest::EnqueueDelivery {
-            route,
+            address,
             idempotency_key,
             text,
         }),
@@ -361,9 +348,6 @@ async fn request_to_domain(
         LocalHostCommandRequest::GatewayUpsertProviderAccount { account } => {
             AppServerDomainRequest::Gateway(GatewayAppRequest::UpsertProviderAccount(account))
         }
-        LocalHostCommandRequest::GatewaySetStartupEnabled { enabled } => {
-            AppServerDomainRequest::Gateway(GatewayAppRequest::SetStartupEnabled(enabled))
-        }
         LocalHostCommandRequest::GatewayReconcile => {
             AppServerDomainRequest::Gateway(GatewayAppRequest::Reconcile)
         }
@@ -374,12 +358,6 @@ fn domain_to_response(
     response: AppServerDomainResponse,
 ) -> Result<LocalHostCommandResponse, CommandError> {
     Ok(match response {
-        AppServerDomainResponse::Browser(BrowserAppResponse::Pairing(value)) => {
-            LocalHostCommandResponse::BrowserPairing(value)
-        }
-        AppServerDomainResponse::Browser(BrowserAppResponse::HostSettings(value)) => {
-            LocalHostCommandResponse::BrowserHostSettings(value)
-        }
         AppServerDomainResponse::Browser(BrowserAppResponse::Session(value)) => {
             LocalHostCommandResponse::BrowserSession(value)
         }
@@ -512,19 +490,15 @@ fn domain_to_response(
     })
 }
 
-#[tauri::command]
-pub(super) async fn local_host_command(
-    window: WebviewWindow,
-    state: State<'_, DesktopState>,
+pub(super) async fn execute_local_host_command(
+    window: &WebviewWindow,
+    state: &DesktopState,
     request: LocalHostCommandRequest,
 ) -> Result<LocalHostCommandResponse, CommandError> {
     let browser_source = browser_source_candidate(&request);
     let runtime = state.control_plane.feature_flags().runtime_features;
     if is_plugin_command(&request) && !runtime.plugin_runtime {
         return Err(CommandError::new("feature_disabled", "plugin_runtime"));
-    }
-    if is_desktop_control_command(&request) && !runtime.desktop_control {
-        return Err(CommandError::new("feature_disabled", "desktop_control"));
     }
     if matches!(
         &request,
@@ -536,10 +510,10 @@ pub(super) async fn local_host_command(
             "enterprise_integrations",
         ));
     }
-    let Some(request) = request_to_domain(&window, request).await? else {
+    let Some(request) = request_to_domain(window, request).await? else {
         return Ok(LocalHostCommandResponse::Cancelled);
     };
-    let response = domain_to_response(dispatch(&window, &state, request).await?)?;
+    let response = domain_to_response(dispatch(window, state, request).await?)?;
     if let Some(candidate) = browser_source
         && browser_source_succeeded(&response)
     {
@@ -727,33 +701,5 @@ fn is_plugin_command(request: &LocalHostCommandRequest) -> bool {
             | LocalHostCommandRequest::PluginSetEnabled { .. }
             | LocalHostCommandRequest::PluginRollback { .. }
             | LocalHostCommandRequest::PluginUninstall { .. }
-    )
-}
-
-fn is_desktop_control_command(request: &LocalHostCommandRequest) -> bool {
-    matches!(
-        request,
-        LocalHostCommandRequest::BrowserBeginPairing
-            | LocalHostCommandRequest::BrowserGetHostSettings
-            | LocalHostCommandRequest::BrowserListPermissions
-            | LocalHostCommandRequest::BrowserListPermissionRequests
-            | LocalHostCommandRequest::BrowserSetPreferredProfile { .. }
-            | LocalHostCommandRequest::BrowserStart { .. }
-            | LocalHostCommandRequest::BrowserGrantSitePermission { .. }
-            | LocalHostCommandRequest::BrowserRevokeSitePermission { .. }
-            | LocalHostCommandRequest::BrowserObserve { .. }
-            | LocalHostCommandRequest::BrowserAct { .. }
-            | LocalHostCommandRequest::BrowserChooseUpload { .. }
-            | LocalHostCommandRequest::BrowserImportDownload { .. }
-            | LocalHostCommandRequest::BrowserTakeOver { .. }
-            | LocalHostCommandRequest::BrowserStop { .. }
-            | LocalHostCommandRequest::ComputerSetAppRule { .. }
-            | LocalHostCommandRequest::ComputerListWindows
-            | LocalHostCommandRequest::ComputerListGlobalAppRules
-            | LocalHostCommandRequest::ComputerSetGlobalAppRule { .. }
-            | LocalHostCommandRequest::ComputerRemoveGlobalAppRule { .. }
-            | LocalHostCommandRequest::ComputerObserve { .. }
-            | LocalHostCommandRequest::ComputerAct { .. }
-            | LocalHostCommandRequest::ComputerTakeOver { .. }
     )
 }

@@ -34,9 +34,12 @@ export function TaskHistoryDialog(props: {
   onContinue: (run: TaskRunRecord) => void;
 }) {
   const [tab, setTab] = createSignal("runs");
+  let selectedScheduleId: string | undefined;
 
   createEffect(() => {
-    if (props.schedule) setTab("runs");
+    const scheduleId = props.schedule?.id;
+    if (scheduleId && scheduleId !== selectedScheduleId) setTab("runs");
+    selectedScheduleId = scheduleId;
   });
 
   const runContent = () => (
@@ -47,7 +50,12 @@ export function TaskHistoryDialog(props: {
       >
         <For each={props.runs}>
           {(run) => (
-            <div class="task-history-row" data-testid="task-run-row">
+            <div
+              class="task-history-row"
+              data-testid="task-run-row"
+              data-run-id={run.id}
+              data-run-status={run.status}
+            >
               <Button
                 type="button"
                 class="task-history-main"
@@ -144,7 +152,7 @@ export function TaskHistoryDialog(props: {
       >
         <For each={props.events}>
           {(receipt) => (
-            <div class="task-event-row">
+            <div class="task-event-row" data-receipt-status={receipt.status}>
               <Badge tone={eventReceiptTone(receipt.status)}>
                 {eventReceiptLabel(receipt.status, props.zh)}
               </Badge>

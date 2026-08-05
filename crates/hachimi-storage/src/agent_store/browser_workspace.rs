@@ -1,10 +1,10 @@
 use hachimi_protocol::{
     BrowserAutomationLease, BrowserAutomationLeaseId, BrowserAutomationLeaseStatus,
     BrowserAutomationSurfaceKind, BrowserCapability, BrowserDownloadSnapshot,
-    BrowserDownloadStatus, BrowserHistoryEntry, BrowserNavigationError, BrowserSessionId,
-    BrowserTabId, BrowserTabSnapshot, BrowserWorkspace, BrowserWorkspaceId,
-    BrowserWorkspaceRuntimeState, EmbeddedBrowserSettings, EmbeddedBrowserSettingsUpdate, RunId,
-    SessionId,
+    BrowserDownloadStatus, BrowserHistoryEntry, BrowserNavigationError, BrowserObservation,
+    BrowserSessionId, BrowserTabId, BrowserTabSnapshot, BrowserWorkspace, BrowserWorkspaceId,
+    BrowserWorkspaceRuntimeState, EmbeddedBrowserSettings, EmbeddedBrowserSettingsUpdate,
+    ExternalBrowserLeaseObservation, RunId, SessionId,
 };
 use sha2::{Digest, Sha256};
 use sqlx::{Row, Sqlite, Transaction};
@@ -178,6 +178,57 @@ impl AgentStore {
         .fetch_optional(&self.pool)
         .await?;
         row.as_ref().map(decode_lease).transpose()
+    }
+
+    pub async fn list_session_browser_automation_leases(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Vec<BrowserAutomationLease>, AgentStoreError> {
+        let rows = sqlx::query(
+            "SELECT * FROM browser_automation_leases WHERE owner_session_id = ? ORDER BY updated_at_ms DESC, id ASC",
+        )
+        .bind(session_id.as_str())
+        .fetch_all(&self.pool)
+        .await?;
+        rows.iter().map(decode_lease).collect()
+    }
+
+    pub async fn store_external_browser_lease_observation(
+        &self,
+        lease_id: &BrowserAutomationLeaseId,
+        owner_session_id: &SessionId,
+        observation: &BrowserObservation,
+    ) -> Result<(), AgentStoreError> {
+        sqlx::query(
+            "INSERT INTO external_browser_lease_observations(lease_id, owner_session_id, observation_json, updated_at_ms) VALUES(?, ?, ?, ?) ON CONFLICT(lease_id) DO UPDATE SET observation_json = excluded.observation_json, updated_at_ms = excluded.updated_at_ms",
+        )
+        .bind(lease_id.as_str())
+        .bind(owner_session_id.as_str())
+        .bind(serde_json::to_string(observation)?)
+        .bind(now_ms())
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn list_session_external_browser_observations(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Vec<ExternalBrowserLeaseObservation>, AgentStoreError> {
+        let rows = sqlx::query(
+            "SELECT lease_id, observation_json FROM external_browser_lease_observations WHERE owner_session_id = ? ORDER BY updated_at_ms DESC",
+        )
+        .bind(session_id.as_str())
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter()
+            .map(|row| {
+                Ok(ExternalBrowserLeaseObservation {
+                    lease_id: BrowserAutomationLeaseId::new(row.get::<String, _>("lease_id")),
+                    observation: serde_json::from_str(&row.get::<String, _>("observation_json"))?,
+                })
+            })
+            .collect()
     }
 
     pub async fn set_browser_automation_lease_status(

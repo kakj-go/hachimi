@@ -1,9 +1,9 @@
 use std::{collections::BTreeSet, path::Path};
 
 use hachimi_protocol::{
-    CheckoutKind, EnvironmentActivity, EnvironmentChangeSummary, EnvironmentGitSummary,
-    EnvironmentHandoffState, ForgeKind, GitRefRecord, GitRemoteRecord, PlanStepStatus,
-    SessionContextBinding, SessionId, WorkbenchEnvironmentSnapshot,
+    CheckoutKind, ComputerControlStatus, EnvironmentActivity, EnvironmentChangeSummary,
+    EnvironmentGitSummary, EnvironmentHandoffState, ForgeKind, GitRefRecord, GitRemoteRecord,
+    PlanStepStatus, SessionContextBinding, SessionId, WorkbenchEnvironmentSnapshot,
 };
 use sha2::{Digest, Sha256};
 
@@ -93,6 +93,10 @@ impl WorkbenchService {
             .await?;
         let runs = self.store.list_runs(session_id).await?;
         let plans = self.store.list_proposed_plans(session_id).await?;
+        let computer_controls = self
+            .store
+            .list_session_computer_control_sessions(session_id)
+            .await?;
         let activity = if let Some(lease) = browser_lease {
             if let (Some(workspace_id), Some(browser_tab_id)) =
                 (lease.workspace_id.as_ref(), lease.tab_id.as_ref())
@@ -104,16 +108,62 @@ impl WorkbenchService {
                     .into_iter()
                     .find(|tab| tab.id == *browser_tab_id)
                     .map(|tab| EnvironmentActivity::Browser {
-                        browser_tab_id: browser_tab_id.clone(),
+                        lease_id: lease.id.clone(),
+                        surface: lease.surface,
+                        browser_tab_id: Some(browser_tab_id.clone()),
+                        browser_session_id: None,
                         run_id: lease.owner_run_id,
                         domain: display_domain(&tab.url),
                     })
             } else {
-                None
+                let external_session_id = self
+                    .store
+                    .external_browser_session_for_lease(&lease.id)
+                    .await?;
+                self.store
+                    .list_session_browser_sessions(session_id)
+                    .await?
+                    .into_iter()
+                    .find(|session| Some(&session.id) == external_session_id.as_ref())
+                    .map(|session| EnvironmentActivity::Browser {
+                        lease_id: lease.id,
+                        surface: lease.surface,
+                        browser_tab_id: None,
+                        browser_session_id: Some(session.id),
+                        run_id: lease.owner_run_id,
+                        domain: display_domain(
+                            session
+                                .current_url
+                                .as_deref()
+                                .or(session.origin.as_deref())
+                                .unwrap_or(""),
+                        ),
+                    })
             }
         } else {
             None
         }
+        .or_else(|| {
+            computer_controls
+                .iter()
+                .find(|control| {
+                    matches!(
+                        control.status,
+                        ComputerControlStatus::Active | ComputerControlStatus::Suspended
+                    )
+                })
+                .and_then(|control| {
+                    control
+                        .app
+                        .as_ref()
+                        .map(|app| EnvironmentActivity::Computer {
+                            control_session_id: control.id.clone(),
+                            run_id: control.owner_run_id.clone(),
+                            app_id: app.app_id.clone(),
+                            app_name: app.display_name.clone(),
+                        })
+                })
+        })
         .or_else(|| {
             runs.iter()
                 .rev()

@@ -6,6 +6,8 @@ import {
   type ApprovalStatus,
   type BehaviorMode,
   type ControlInitializeResponse,
+  type HostAccessDecision,
+  type HostAccessRequestRecord,
   type ProjectRecord,
   type ProposedPlan,
   type RunRecord,
@@ -73,11 +75,20 @@ import {
   inspectorNeedsProjectTools,
   type InspectorResource,
 } from "./state/workbench-layout";
+import {
+  EMPTY_INSPECTOR_TABS,
+  closeInspectorTab,
+  openInspectorTab,
+  selectInspectorTab,
+  showInspectorLauncher,
+  showInspectorTabs,
+} from "./state/inspector-tabs";
 import { createProjectToolContext } from "./state/project-tool-context";
 import "./composer-attachments.css";
 import "./composer-popovers.css";
 import "./workbench-v2.css";
 import "./inspector/browser-inspector.css";
+import "./inspector/workspace-tabs.css";
 import { DraftAttachmentInspector } from "./inspector/draft-attachment-inspector";
 import { ConnectedEnvironmentSummary } from "./inspector/environment-summary";
 import { SessionInspector } from "./inspector/session-inspector";
@@ -101,7 +112,6 @@ import {
 export function HomePage(props: {
   navigate: (route: WorkbenchRoute) => void;
   motionLabEnabled: boolean;
-  desktopControlEnabled: boolean;
   runRecoveryEnabled: boolean;
   multiAgentEnabled: boolean;
   gitRemoteMutationsEnabled: boolean;
@@ -145,11 +155,33 @@ export function HomePage(props: {
       Math.max(140, Math.min(520, window.innerHeight - 260)),
       Math.max(140, Math.round(bottomPanelHeight())),
     );
-  const [inspectorResource, setInspectorResource] = createSignal<InspectorResource>();
+  const [inspectorTabs, setInspectorTabs] = createSignal(EMPTY_INSPECTOR_TABS);
+  const inspectorResource = () => inspectorTabs().resource;
   const openInspector = (resource: InspectorResource) => {
-    setInspectorResource(resource);
+    setInspectorTabs((current) =>
+      openInspectorTab(
+        current,
+        resource,
+        () => globalThis.crypto?.randomUUID?.() ?? `inspector-${Date.now()}-${Math.random()}`,
+      ),
+    );
     setInspectorVisible(true);
-    if (inspectorNeedsProjectTools(resource)) void ensureProjectToolSnapshot();
+    if (!sessionSnapshot() && inspectorNeedsProjectTools(resource))
+      void ensureProjectToolSnapshot();
+  };
+  const selectInspector = (tabId: string) => {
+    setInspectorTabs((current) => selectInspectorTab(current, tabId));
+  };
+  const closeInspector = (tabId: string) => {
+    setInspectorTabs((current) => {
+      const next = closeInspectorTab(current, tabId);
+      if (next.tabs.length === 0) setInspectorVisible(false);
+      return next;
+    });
+  };
+  const openInspectorLauncher = () => {
+    setInspectorTabs((current) => showInspectorLauncher(current));
+    setInspectorVisible(true);
   };
   const [dismissedPlanId, setDismissedPlanId] = createSignal<string>();
   const [selectedProjectId, setSelectedProjectId] = createSignal<string | undefined>(
@@ -195,6 +227,7 @@ export function HomePage(props: {
   const [runRecoveries, setRunRecoveries] = createSignal<RunRecoverySnapshot[]>([]);
   const [agentControl, setAgentControl] = createSignal<ControlInitializeResponse>();
   const [resolvingApprovalId, setResolvingApprovalId] = createSignal<string>();
+  const [resolvingHostAccessId, setResolvingHostAccessId] = createSignal<string>();
   const [resolvingUserInputId, setResolvingUserInputId] = createSignal<string>();
   const [acceptingPlanId, setAcceptingPlanId] = createSignal<string>();
   const [revisingPlanId, setRevisingPlanId] = createSignal<string>();
@@ -209,10 +242,10 @@ export function HomePage(props: {
   const [removeTarget, setRemoveTarget] = createSignal<ProjectRecord>();
   const projectTools = createProjectToolContext(commandPort, setFailure);
   const toolSnapshot = createMemo(() => projectTools.snapshot(selectedProjectId()));
-  const inspectorSnapshot = createMemo(() =>
-    inspectorNeedsProjectTools(inspectorResource())
-      ? toolSnapshot()
-      : (sessionSnapshot() ?? toolSnapshot()),
+  const inspectorSnapshot = createMemo(
+    () =>
+      sessionSnapshot() ??
+      (inspectorNeedsProjectTools(inspectorResource()) ? toolSnapshot() : undefined),
   );
   const visibleProjects = createMemo(() => {
     const removed = new Set(removedProjectIds());
@@ -286,20 +319,26 @@ export function HomePage(props: {
       .find((run) => !isTerminalRunStatus(run.status)),
   );
   const activeApproval = createMemo(() => sessionSnapshot()?.pendingApprovals[0]);
+  const activeHostAccess = createMemo(() =>
+    sessionSnapshot()?.hostAccessRequests.find((request) => request.status === "pending"),
+  );
   const activePlan = createMemo(() =>
     sessionSnapshot()
       ?.proposedPlans.toReversed()
       .find((plan) => plan.status === "proposed" && plan.id !== dismissedPlanId()),
   );
   const hasComposerGate = createMemo(() =>
-    Boolean(pendingUserInputs()[0] || activeApproval() || activePlan()),
+    Boolean(pendingUserInputs()[0] || activeHostAccess() || activeApproval() || activePlan()),
   );
-  const activeGateKind = createMemo<"approval" | "plan" | "user_input" | undefined>(() => {
-    if (pendingUserInputs()[0]) return "user_input";
-    if (activeApproval()) return "approval";
-    if (activePlan()) return "plan";
-    return undefined;
-  });
+  const activeGateKind = createMemo<"approval" | "host_access" | "plan" | "user_input" | undefined>(
+    () => {
+      if (pendingUserInputs()[0]) return "user_input";
+      if (activeHostAccess()) return "host_access";
+      if (activeApproval()) return "approval";
+      if (activePlan()) return "plan";
+      return undefined;
+    },
+  );
   const selectedRunRecoveries = createMemo(() =>
     runRecoveries().filter((value) => value.recovery.sessionId === selectedSessionId()),
   );
@@ -477,6 +516,7 @@ export function HomePage(props: {
     let lastSequence = 0;
     let projectionRequestId = 0;
     let stopEvents: (() => void) | undefined;
+    let stopEnvironment: (() => void) | undefined;
     const loadProjection = async () => {
       const requestId = ++projectionRequestId;
       try {
@@ -520,6 +560,15 @@ export function HomePage(props: {
       }
     };
     const connect = async () => {
+      stopEnvironment = await commandPort.onEnvironmentChange((event) => {
+        if (!disposed && event.sessionId === sessionId && event.reasons.includes("browser")) {
+          void loadProjection();
+        }
+      });
+      if (disposed) {
+        stopEnvironment();
+        return;
+      }
       // eslint-disable-next-line solid/reactivity -- this external event callback intentionally updates the current Session signals.
       stopEvents = await commandPort.onAgentEvents((batch) => {
         if (
@@ -577,6 +626,7 @@ export function HomePage(props: {
     onCleanup(() => {
       disposed = true;
       stopEvents?.();
+      stopEnvironment?.();
       if (subscriptionId)
         void commandPort.unsubscribeAgentEvents(subscriptionId).catch(() => false);
     });
@@ -1020,6 +1070,31 @@ export function HomePage(props: {
     }
   }
 
+  async function resolveHostAccess(request: HostAccessRequestRecord, decision: HostAccessDecision) {
+    setResolvingHostAccessId(request.id);
+    setFailure(undefined);
+    try {
+      const resolved = await commandPort.resolveHostAccessRequest({
+        requestId: request.id,
+        decision,
+      });
+      setSessionSnapshot((current) =>
+        current
+          ? {
+              ...current,
+              hostAccessRequests: current.hostAccessRequests.map((candidate) =>
+                candidate.id === resolved.id ? resolved : candidate,
+              ),
+            }
+          : current,
+      );
+    } catch (error) {
+      setFailure(commandFailure(error).message);
+    } finally {
+      setResolvingHostAccessId(undefined);
+    }
+  }
+
   async function resolveRecovery(snapshot: RunRecoverySnapshot, action: RunRecoveryDecisionAction) {
     setResolvingRecoveryId(snapshot.recovery.id);
     setFailure(undefined);
@@ -1134,9 +1209,7 @@ export function HomePage(props: {
       <ProjectSidebar
         openSettings={() => props.navigate("settings/general")}
         openMotionLab={() => props.navigate("developer/motion-lab")}
-        openDesktopControl={() => props.navigate("desktop-control")}
         motionLabEnabled={props.motionLabEnabled}
-        desktopControlEnabled={props.desktopControlEnabled}
         schedulerEnabled={props.schedulerEnabled}
         onNewTask={newTask}
         onOpenTasks={() => setActiveView("tasks")}
@@ -1211,7 +1284,8 @@ export function HomePage(props: {
                 setInspectorVisible(false);
                 return;
               }
-              openInspector({ kind: "tools" });
+              setInspectorTabs((current) => showInspectorTabs(current));
+              setInspectorVisible(true);
             }}
           />
         </Show>
@@ -1260,7 +1334,12 @@ export function HomePage(props: {
                         loading={projectTools.loading(selectedProjectId())}
                         commandPort={commandPort}
                         locale={i18n.locale()}
+                        tabs={inspectorTabs().tabs}
+                        activeTabId={inspectorTabs().activeTabId}
                         onOpenInspector={openInspector}
+                        onSelectTab={selectInspector}
+                        onCloseTab={closeInspector}
+                        onOpenLauncher={openInspectorLauncher}
                         onOpenTerminal={openBottomTerminal}
                       />
                     }
@@ -1271,7 +1350,12 @@ export function HomePage(props: {
                         resource={inspectorResource()}
                         commandPort={commandPort}
                         locale={i18n.locale()}
+                        tabs={inspectorTabs().tabs}
+                        activeTabId={inspectorTabs().activeTabId}
                         onOpenInspector={openInspector}
+                        onSelectTab={selectInspector}
+                        onCloseTab={closeInspector}
+                        onOpenLauncher={openInspectorLauncher}
                         onOpenTerminal={openBottomTerminal}
                       />
                     )}
@@ -1365,7 +1449,12 @@ export function HomePage(props: {
                         loading={projectTools.loading(selectedProjectId())}
                         commandPort={commandPort}
                         locale={i18n.locale()}
+                        tabs={inspectorTabs().tabs}
+                        activeTabId={inspectorTabs().activeTabId}
                         onOpenInspector={openInspector}
+                        onSelectTab={selectInspector}
+                        onCloseTab={closeInspector}
+                        onOpenLauncher={openInspectorLauncher}
                         onOpenTerminal={openBottomTerminal}
                       />
                     }
@@ -1376,7 +1465,12 @@ export function HomePage(props: {
                         resource={inspectorResource()}
                         commandPort={commandPort}
                         locale={i18n.locale()}
+                        tabs={inspectorTabs().tabs}
+                        activeTabId={inspectorTabs().activeTabId}
                         onOpenInspector={openInspector}
+                        onSelectTab={selectInspector}
+                        onCloseTab={closeInspector}
+                        onOpenLauncher={openInspectorLauncher}
                         onOpenTerminal={openBottomTerminal}
                       />
                     )}
@@ -1423,9 +1517,11 @@ export function HomePage(props: {
               <WorkbenchGate
                 locale={i18n.locale()}
                 userInput={pendingUserInputs()[0]}
+                hostAccess={activeHostAccess()}
                 approval={activeApproval()}
                 plan={activePlan()}
                 resolvingUserInput={Boolean(resolvingUserInputId())}
+                resolvingHostAccess={Boolean(resolvingHostAccessId())}
                 resolvingApproval={Boolean(resolvingApprovalId())}
                 acceptingPlan={Boolean(acceptingPlanId())}
                 revisingPlan={Boolean(revisingPlanId())}
@@ -1433,6 +1529,9 @@ export function HomePage(props: {
                   void resolveUserInput(request, answers, action)
                 }
                 onResolveApproval={(approval, decision) => void resolveApproval(approval, decision)}
+                onResolveHostAccess={(request, decision) =>
+                  void resolveHostAccess(request, decision)
+                }
                 onAcceptPlan={(plan) => void acceptPlan(plan)}
                 onRevisePlan={(plan, instructions) => void revisePlan(plan, instructions)}
                 onDismissPlan={(plan) => setDismissedPlanId(plan.id)}

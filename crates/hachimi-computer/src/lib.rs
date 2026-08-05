@@ -11,15 +11,15 @@ use std::{
 use hachimi_core::FeatureAvailability;
 use hachimi_protocol::{
     CapabilityGrantSet, ComputerAction, ComputerActionRequest, ComputerActionResult,
-    ComputerAppRule, ComputerFrame, ComputerFrameId, ComputerWindowIdentity, RunId,
-    SandboxCapabilityReport, SandboxReadiness, SessionId,
+    ComputerAppDescriptor, ComputerAppRule, ComputerFrame, ComputerFrameId, ComputerWindowIdentity,
+    RunId, SandboxCapabilityReport, SandboxReadiness, SessionId,
 };
 use parking_lot::Mutex;
 use sha2::Digest as _;
 use thiserror::Error;
 
 mod platform;
-pub use platform::PlatformComputerBroker;
+pub use platform::{PlatformComputerBroker, computer_runtime_health};
 
 const FRAME_TTL_MS: i64 = 15_000;
 pub(crate) const MAX_FRAME_IMAGE_BYTES: usize = 20 * 1024 * 1024;
@@ -61,6 +61,56 @@ pub enum ComputerHostError {
     InvalidAction,
 }
 
+impl ComputerHostError {
+    #[must_use]
+    pub fn stable_code(&self) -> &'static str {
+        match self {
+            Self::SandboxNotReady => "computer_sandbox_not_ready",
+            Self::ObserveNotGranted => "computer_observe_not_granted",
+            Self::ActNotGranted => "computer_control_not_granted",
+            Self::AppNotAllowed => "computer_app_not_allowed",
+            Self::ProtectedTarget => "computer_protected_or_elevated_target",
+            Self::SelfTarget => "computer_self_target_denied",
+            Self::FrameNotFound | Self::StaleFrame => "computer_frame_stale",
+            Self::StaleRunGeneration => "computer_run_stale",
+            Self::TargetChanged => "computer_target_changed",
+            Self::UserTakeover => "computer_user_takeover",
+            Self::ActionLimitReached => "computer_action_limit_reached",
+            Self::Broker(message)
+                if message.contains("graphics_capture") || message.contains("not_capturable") =>
+            {
+                "computer_capture_unavailable"
+            }
+            Self::Broker(message)
+                if message.contains("input_desktop") || message.contains("thread_desktop") =>
+            {
+                "computer_protected_desktop"
+            }
+            Self::Broker(message) if message.contains("send_input") => "computer_input_rejected",
+            Self::Broker(_) => "computer_broker_unavailable",
+            Self::InvalidAction => "computer_action_invalid",
+        }
+    }
+}
+
+#[derive(Debug, Error, Clone, PartialEq, Eq)]
+pub enum ComputerTargetResolutionError {
+    #[error("no eligible window matches application '{app_name}'")]
+    NoApplicationMatch { app_name: String },
+    #[error("multiple application identities match '{app_name}': {candidates:?}")]
+    AmbiguousApplication {
+        app_name: String,
+        candidates: Vec<String>,
+    },
+    #[error("no window title matches '{window_title}' for application '{app_id}'")]
+    NoWindowMatch {
+        app_id: String,
+        window_title: String,
+    },
+    #[error("multiple windows match application '{app_id}': {titles:?}")]
+    AmbiguousWindow { app_id: String, titles: Vec<String> },
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CapturedWindow {
     pub target: ComputerWindowIdentity,
@@ -89,6 +139,13 @@ pub trait ComputerBroker: Send + Sync {
     }
 
     fn capture<'a>(&'a self, window_handle: &'a str) -> ComputerBrokerFuture<'a, CapturedWindow>;
+
+    fn app_icon_png<'a>(
+        &'a self,
+        _app: &'a ComputerAppDescriptor,
+    ) -> ComputerBrokerFuture<'a, Option<Vec<u8>>> {
+        Box::pin(async { Ok(None) })
+    }
 
     fn current_identity<'a>(
         &'a self,
@@ -190,6 +247,13 @@ impl ComputerHost {
         });
         windows.dedup_by(|left, right| left.window_handle == right.window_handle);
         Ok(windows)
+    }
+
+    pub async fn app_icon_png(
+        &self,
+        app: &ComputerAppDescriptor,
+    ) -> Result<Option<Vec<u8>>, ComputerHostError> {
+        self.broker.app_icon_png(app).await
     }
 
     pub async fn observe(
@@ -399,6 +463,31 @@ impl ComputerHost {
         {
             return Err(ComputerHostError::StaleFrame);
         }
+        self.read_frame_image(&frame).await
+    }
+
+    pub async fn frame_image_for_session(
+        &self,
+        session_id: &SessionId,
+        frame_id: &ComputerFrameId,
+    ) -> Result<ComputerFrameImage, ComputerHostError> {
+        let frame = self
+            .state
+            .lock()
+            .frames
+            .get(frame_id)
+            .map(|state| state.frame.clone())
+            .ok_or(ComputerHostError::FrameNotFound)?;
+        if frame.expires_at_ms <= self.clock.now_ms() || &frame.session_id != session_id {
+            return Err(ComputerHostError::StaleFrame);
+        }
+        self.read_frame_image(&frame).await
+    }
+
+    async fn read_frame_image(
+        &self,
+        frame: &ComputerFrame,
+    ) -> Result<ComputerFrameImage, ComputerHostError> {
         let bytes = match self.broker.read_frame(&frame.image_token).await {
             Ok(bytes) => bytes,
             Err(error) => {
@@ -406,8 +495,8 @@ impl ComputerHost {
                 return Err(error);
             }
         };
-        self.broker.release_frame(&frame.image_token);
         if bytes.is_empty() || bytes.len() > MAX_FRAME_IMAGE_BYTES {
+            self.broker.release_frame(&frame.image_token);
             return Err(ComputerHostError::Broker(
                 "computer_frame_image_size_invalid".into(),
             ));
@@ -456,6 +545,105 @@ impl ComputerHost {
         }
         next
     }
+}
+
+pub fn resolve_window_target(
+    windows: &[ComputerWindowIdentity],
+    app_name: &str,
+    window_title: Option<&str>,
+) -> Result<ComputerWindowIdentity, ComputerTargetResolutionError> {
+    let app_name = app_name.trim();
+    let query = app_name.to_lowercase();
+    let mut exact = windows
+        .iter()
+        .filter(|window| application_labels(window).any(|label| label == query))
+        .cloned()
+        .collect::<Vec<_>>();
+    if exact.is_empty() {
+        exact = windows
+            .iter()
+            .filter(|window| {
+                application_labels(window).any(|label| label.contains(&query))
+                    || window.title.to_lowercase().contains(&query)
+            })
+            .cloned()
+            .collect();
+    }
+    if exact.is_empty() {
+        return Err(ComputerTargetResolutionError::NoApplicationMatch {
+            app_name: app_name.to_owned(),
+        });
+    }
+
+    let mut identities = exact
+        .iter()
+        .map(|window| window.app.identity_hash.clone())
+        .collect::<Vec<_>>();
+    identities.sort();
+    identities.dedup();
+    if identities.len() != 1 {
+        let mut candidates = exact
+            .iter()
+            .map(|window| {
+                format!(
+                    "{} ({})",
+                    window.app.display_name, window.app.executable_name
+                )
+            })
+            .collect::<Vec<_>>();
+        candidates.sort_by_key(|value| value.to_lowercase());
+        candidates.dedup_by(|left, right| left.eq_ignore_ascii_case(right));
+        return Err(ComputerTargetResolutionError::AmbiguousApplication {
+            app_name: app_name.to_owned(),
+            candidates,
+        });
+    }
+    let identity_hash = identities.remove(0);
+    exact.retain(|window| window.app.identity_hash == identity_hash);
+    let app_id = exact
+        .first()
+        .map(|window| window.app_id.clone())
+        .unwrap_or_else(|| app_name.to_owned());
+
+    if let Some(window_title) = window_title
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        let title_query = window_title.to_lowercase();
+        exact.retain(|window| window.title.to_lowercase().contains(&title_query));
+        if exact.is_empty() {
+            return Err(ComputerTargetResolutionError::NoWindowMatch {
+                app_id,
+                window_title: window_title.to_owned(),
+            });
+        }
+    }
+    if exact.len() != 1 {
+        let mut titles = exact
+            .iter()
+            .map(|window| window.title.clone())
+            .collect::<Vec<_>>();
+        titles.sort_by_key(|value| value.to_lowercase());
+        titles.dedup_by(|left, right| left.eq_ignore_ascii_case(right));
+        return Err(ComputerTargetResolutionError::AmbiguousWindow { app_id, titles });
+    }
+    Ok(exact.remove(0))
+}
+
+fn application_labels(window: &ComputerWindowIdentity) -> impl Iterator<Item = String> + '_ {
+    let normalized = window.app_id.trim().to_lowercase();
+    let basename = normalized
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(normalized.as_str())
+        .to_owned();
+    let stem = basename
+        .strip_suffix(".exe")
+        .unwrap_or(&basename)
+        .to_owned();
+    let display_name = window.app.display_name.trim().to_lowercase();
+    let executable_name = window.app.executable_name.trim().to_lowercase();
+    [normalized, basename, stem, display_name, executable_name].into_iter()
 }
 
 trait ComputerGrantLimit {
@@ -627,6 +815,7 @@ mod tests {
     fn target() -> ComputerWindowIdentity {
         ComputerWindowIdentity {
             app_id: "notepad.exe".into(),
+            app: test_app("notepad.exe"),
             process_id: 42,
             window_handle: "0x1234".into(),
             fingerprint: "window-fingerprint".into(),
@@ -635,6 +824,88 @@ mod tests {
             protected_desktop: false,
             hachimi_owned: false,
         }
+    }
+
+    fn target_window(app_id: &str, handle: &str, title: &str) -> ComputerWindowIdentity {
+        ComputerWindowIdentity {
+            app_id: app_id.into(),
+            app: test_app(app_id),
+            window_handle: handle.into(),
+            title: title.into(),
+            ..target()
+        }
+    }
+
+    fn test_app(app_id: &str) -> hachimi_protocol::ComputerAppDescriptor {
+        hachimi_protocol::ComputerAppDescriptor {
+            app_id: app_id.into(),
+            display_name: app_id.into(),
+            executable_name: app_id.into(),
+            executable_path: None,
+            publisher: None,
+            publisher_verified: false,
+            package_family_name: None,
+            app_user_model_id: None,
+            file_identity: None,
+            identity_hash: format!("identity:{app_id}"),
+        }
+    }
+
+    #[test]
+    fn semantic_target_resolution_accepts_app_name_and_optional_title() {
+        let windows = vec![
+            target_window("chrome.exe", "0x1", "Inbox - Google Chrome"),
+            target_window("chrome.exe", "0x2", "Calendar - Google Chrome"),
+            target_window("notepad.exe", "0x3", "Notes"),
+        ];
+
+        assert_eq!(
+            resolve_window_target(&windows, "Notepad", None)
+                .expect("unique application")
+                .window_handle,
+            "0x3"
+        );
+        assert_eq!(
+            resolve_window_target(&windows, "Chrome", Some("Calendar"))
+                .expect("title-disambiguated window")
+                .window_handle,
+            "0x2"
+        );
+    }
+
+    #[test]
+    fn semantic_target_resolution_reports_application_identity_ambiguity() {
+        let windows = vec![
+            target_window("teams-work.exe", "0x1", "Microsoft Teams Work"),
+            target_window("teams-classic.exe", "0x2", "Microsoft Teams Classic"),
+        ];
+
+        assert_eq!(
+            resolve_window_target(&windows, "Teams", None),
+            Err(ComputerTargetResolutionError::AmbiguousApplication {
+                app_name: "Teams".into(),
+                candidates: vec![
+                    "teams-classic.exe (teams-classic.exe)".into(),
+                    "teams-work.exe (teams-work.exe)".into(),
+                ],
+            })
+        );
+    }
+
+    #[test]
+    fn semantic_target_resolution_never_selects_one_of_multiple_windows_implicitly() {
+        let windows = vec![
+            target_window("chrome.exe", "0x1", "Inbox"),
+            target_window("chrome.exe", "0x2", "Calendar"),
+        ];
+
+        assert_eq!(
+            resolve_window_target(&windows, "Chrome", None),
+            Err(ComputerTargetResolutionError::AmbiguousWindow {
+                app_id: "chrome.exe".into(),
+                titles: vec!["Calendar".into(), "Inbox".into()],
+            })
+        );
     }
 
     fn grants(session_id: &SessionId, run_id: &RunId) -> CapabilityGrantSet {
@@ -779,7 +1050,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn frame_backing_storage_is_released_after_model_consumption() {
+    async fn frame_backing_storage_survives_preview_reads_until_takeover() {
         let released = Arc::new(Mutex::new(Vec::new()));
         let host = ComputerHost::new(
             Arc::new(TestBroker {
@@ -803,12 +1074,24 @@ mod tests {
         );
         let active_grants = grants(&session_id, &run_id);
         let frame = host
-            .observe(session_id, run_id, 7, "0x1234", &active_grants, &sandbox())
+            .observe(
+                session_id.clone(),
+                run_id,
+                7,
+                "0x1234",
+                &active_grants,
+                &sandbox(),
+            )
             .await
             .expect("frame");
         host.frame_image(&frame.id, &active_grants)
             .await
             .expect("image");
+        host.frame_image_for_session(&session_id, &frame.id)
+            .await
+            .expect("inspector image");
+        assert!(released.lock().is_empty());
+        host.take_over(&session_id);
         assert_eq!(released.lock().as_slice(), ["ephemeral:image"]);
     }
 

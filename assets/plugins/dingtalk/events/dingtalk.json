@@ -1,4 +1,4 @@
 {
-  "sourceId": "enterprise:ding_talk",
+  "sourceId": "enterprise:dingtalk",
   "eventTypes": ["chat.message", "conversation.changed"]
 }

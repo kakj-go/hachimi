@@ -1,10 +1,22 @@
 use super::*;
-use hachimi_protocol::{ComputerAction, ComputerWindowIdentity};
+use hachimi_protocol::{ComputerAction, ComputerAppDescriptor, ComputerWindowIdentity};
 
 #[test]
 fn computer_summary_contains_only_hashed_identity_and_action_category() {
     let target = ComputerWindowIdentity {
         app_id: "C:\\Sensitive\\secret-app.exe".into(),
+        app: ComputerAppDescriptor {
+            app_id: "secret-app.exe".into(),
+            display_name: "Secret App".into(),
+            executable_name: "secret-app.exe".into(),
+            executable_path: Some("C:\\Sensitive\\secret-app.exe".into()),
+            publisher: None,
+            publisher_verified: false,
+            package_family_name: None,
+            app_user_model_id: None,
+            file_identity: Some("file-hash".into()),
+            identity_hash: "app-hash".into(),
+        },
         process_id: 42,
         window_handle: "0x1234".into(),
         fingerprint: "window-title-and-process-fingerprint".into(),

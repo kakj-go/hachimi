@@ -199,10 +199,15 @@ async function startProjectTask(prompt) {
 }
 
 async function waitForRun(status, timeout = 60_000) {
-  await browser.waitUntil(async () => (await $(".run-status-actions").getText()).includes(status), {
-    timeout,
-    timeoutMsg: `Agent Run did not reach ${status}`,
-  });
+  await browser.waitUntil(
+    async () =>
+      (await $('[data-testid="workbench-session-timeline"]').getAttribute("data-run-status")) ===
+      status,
+    {
+      timeout,
+      timeoutMsg: `Agent Run did not reach ${status}`,
+    },
+  );
 }
 
 async function timelineText() {
@@ -252,17 +257,13 @@ describe("Hachimi Agent product tool reachability", () => {
 
   it("runs spawn, wait, and collect through the real Coding ToolPlan", async () => {
     await startProjectTask("[desktop-e2e:multi-agent-tools] run one bounded child task");
-    await waitForDisplayed(".agent-task-card", 30_000);
-    await browser.waitUntil(
-      async () => (await $(".agent-task-card").getText()).includes("succeeded"),
-      { timeout: 30_000, timeoutMsg: "child Agent Task did not reconcile to succeeded" },
-    );
     await waitForRun("succeeded");
     await browser.refresh();
     await waitForTimeline("Desktop E2E Coding Multi-Agent completed");
-    const text = await timelineText();
-    expect(text.match(/Desktop E2E child/g)?.length ?? 0).toBeGreaterThanOrEqual(3);
-    expect(text).toContain("Desktop E2E Coding Multi-Agent completed");
+    const timeline = await $('[data-testid="workbench-session-timeline"]');
+    expect(Number(await timeline.getAttribute("data-agent-task-count"))).toBe(1);
+    expect(await timeline.getAttribute("data-agent-task-statuses")).toContain("succeeded");
+    expect(await timelineText()).toContain("Desktop E2E Coding Multi-Agent completed");
   });
 
   it("pushes a local Remote successfully, then fences Remote drift", async () => {
@@ -353,7 +354,7 @@ describe("Hachimi Agent product tool reachability", () => {
     await clickWhenReady('[data-testid="workbench-git-commit-trigger"]');
     await waitForDisplayed(".workbench-git-popover.commit", 20_000);
     expect(await $(".workbench-git-popover.commit").getText()).toContain("提交并推送");
-    await clickWhenReady(".run-status-actions button");
+    await clickWhenReady('[data-testid="workbench-start-task"]');
     await waitForRun("cancelled", 60_000);
   });
 

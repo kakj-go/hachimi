@@ -1,0 +1,14 @@
+{
+  "hostIdentity": "hachimi.enterprise.wecom_app.v1",
+  "transport": "local",
+  "actions": [
+    "account_identity",
+    "department_list",
+    "member_list",
+    "message_send",
+    "event_subscribe"
+  ],
+  "webhook": true,
+  "poll": false,
+  "externalNetwork": false
+}

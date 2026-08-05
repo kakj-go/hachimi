@@ -23,7 +23,7 @@ Workbench 提供模型、动作、互动区域和语音等运行时配置，并�
 - 仅接受通过 Detector 4 严格检测的 Runtime Ready VRM 0.x/1.0；普通 GLB 不会进入 V4 Catalog，加载失败时回退到内置 SVG 故障角色。
 - Avatar Motion Runtime V4 提供 163 个去重内置 VRMA、用户 VRMA 两阶段导入、Humanoid 重定向、手指保留、惯性化、平衡/接触/IK/关节/碰撞约束，以及独立的口型、注视与 SpringBone 通道。
 - Pet 与 Workbench 复用同一持久化 Session/Run/Item Agent Runtime，支持历史恢复、Tool、Skills、MCP、Approval/UserInput、Compaction、Review 和后台任务；API Key 保存在系统 Keyring。
-- Workbench 已实现 General/Project/DesktopControl Session、新 Run、活动 Run Steer、终态 Run Fork、rename/pin/archive/search、Monaco、Terminal、通用 Git push、Forge PR/MR、Browser 和 Computer 产品入口。
+- Workbench 已实现 General/Project Session、新 Run、活动 Run Steer、终态 Run Fork、rename/pin/archive/search、Monaco、Terminal、通用 Git push、Forge PR/MR，以及统一会话内的 Browser/Computer Host Inspector。
 - Scheduled Tasks 支持 At/Every/Cron/Event、Standalone/Session continuation、Worktree、ScheduleGrant、NeedsAttention、retry、停止条件、通知、事件去重 ledger 和重启 reconciliation。
 - Plugin contribution 的 install/enable/disable/update/rollback/uninstall、known-good revision、进程崩溃 reconciliation 和跨产品清理已实现；不建设 Marketplace。
 - 企业微信、钉钉、飞书的 REST Connector、Channel/EventSource、结构化 mention、受控附件下载与 Gateway ledger 已实现；企业微信 Gateway 支持官方 GET `echostr` 与 POST 加密 XML callback，钉钉使用 Stream WebSocket，飞书使用 WebSocket/protobuf supervisor [ref:WECOM-API-20260730] [ref:DINGTALK-STREAM-SDK-GO-20260731] [ref:FEISHU-SDK-GO-20260731]。三个真实外部企业组织仍待验证，不能把 fixture 宣传为真实连通。
@@ -34,25 +34,29 @@ Workbench 提供模型、动作、互动区域和语音等运行时配置，并�
 
 当前实现分支已接入 capability-driven Provider registry，以及公开 OpenAI `/v1/chat/completions`、`/v1/responses`、`/v1/embeddings` 三类协议；Responses-only Remote Compaction 会在失败或 capability drift 时回退本地 checkpoint，reasoning summary 只接受 Provider 明确标记为可展示的有界输出 [ref:OAI-PRODUCT-RESPONSES-20260730]。真实 OpenAI staging Gate 尚无凭据，版本发布仍为环境阻塞。
 
-Run crash recovery、Multi-Agent、通用 Git push、GitHub/GitLab/Gitee/Gitea/Forgejo PR/MR、完整 Plugin 生命周期、DesktopControl 与扩展后的 Browser/Computer 原语已完成本地实现。多数 Forge API 不支持原地更换 PR/MR 源分支，因此源分支在更新时是不可变前置条件；更换源分支必须新建 PR/MR [ref:GITHUB-API-20260730] [ref:GITLAB-API-20260730] [ref:GITEE-API-20260730] [ref:GITEA-FORGEJO-API-20260730]。
+Run crash recovery、Multi-Agent、通用 Git push、GitHub/GitLab/Gitee/Gitea/Forgejo PR/MR、完整 Plugin 生命周期，以及统一 Workbench 的 Browser/Computer 原语已完成本地实现。多数 Forge API 不支持原地更换 PR/MR 源分支，因此源分支在更新时是不可变前置条件；更换源分支必须新建 PR/MR [ref:GITHUB-API-20260730] [ref:GITLAB-API-20260730] [ref:GITEE-API-20260730] [ref:GITEA-FORGEJO-API-20260730]。
 
-当前控制协议已统一为 v29，并追加 `0019`–`0022` migration、共享迁移锁/Online Backup、Multi-Agent 启动 reconciliation、企业内容 Artifact fencing 和 Desktop generation fencing。八类发布能力默认开启并提供本地停用开关；关闭时 UI 隐藏入口、相关工具不注册，命令稳定返回 `feature_disabled` 和 feature key。
+当前控制协议已统一为 v31，migration 已到 `0031_plugin_builtin_channel_binding.sql`，包含共享迁移锁/Online Backup、Multi-Agent 启动 reconciliation、统一企业账户编排、官方内置 Channel 绑定、持久 CEF Workspace/Tab/Lease 和统一 Browser/Computer Host policy。运行时能力提供本地停用开关；关闭时 UI 隐藏入口、相关工具不注册，命令稳定返回 `feature_disabled` 和 feature key。
+
+设置中的“平台集成”统一管理企业微信、钉钉和飞书的 API 与消息账户；正式 UI 不展示 `sample-crm`、`mock-poll` 或 `loopback-webhook`。Gateway 根据已启用消息账户自动启动和停止，不再提供用户总开关。Plugins Runtime 继续承载官方 Bundle，但用户管理入口当前统一置灰为“规划中”；第三方 Bundle 产品化与用户管理界面属于后续计划，Marketplace 仍不实现。
+
+桌面 Host 按当前 Windows 用户保持单实例；重复启动只恢复并聚焦已有工作台或桌宠，不会重复初始化 Agent、调度器、托盘和本地状态。启用平台消息后允许独立的 `hachimi-desktop.exe --gateway` 后台进程继续承担登录启动和消息恢复。
 
 Memory 保持远期，不采用 Codex Memory 方案。macOS/Linux 尚未验证；`v0.2.1` 已取消，alpha.8、RC 与 GA 均未发布。每项能力的“实现状态”和“真实环境验证”双状态见 [路线图](docs/ROADMAP.md)。
 
 ## 功能状态与后置验证
 
-| 项目                  | 实现状态           | 真实环境验证   | 结论                                                                                                                          |
-| --------------------- | ------------------ | -------------- | ----------------------------------------------------------------------------------------------------------------------------- |
-| P1 Run Recovery       | 代码与本地测试完成 | 真实环境待验证 | 六阶段 crash injection、generation/lease fencing 与人工恢复决策已覆盖                                                         |
-| P2–P3 Provider        | 代码与本地测试完成 | 真实环境待验证 | 三类公开协议、Remote Compaction 回退与公开 summary 过滤已覆盖；未执行真实 OpenAI staging                                      |
-| P4 Multi-Agent        | 代码与本地测试完成 | 真实环境待验证 | execution lease、启动 reconciliation、权限/预算/取消/Usage/Artifact lineage 已覆盖                                            |
-| P5 Git/Forge          | 代码与本地测试完成 | 真实环境待验证 | 标准 Git、四类 Forge adapter、未知响应只读 reconciliation 与 supplied Approval 精确 fencing 已覆盖；未执行真实 Forge mutation |
-| P6 Plugin lifecycle   | 代码与本地测试完成 | 真实环境待验证 | 十类 contribution lifecycle 和无残留矩阵已覆盖                                                                                |
-| P7 企业平台           | 代码与本地测试完成 | 真实环境待验证 | transport、mention、附件下载与企业微信原始 callback 均已实现；未执行三个真实外部组织 Gate                                     |
-| P8 DesktopControl     | 代码与本地测试完成 | 真实环境待验证 | 产品入口、Browser/Computer 原语与 stale generation fencing 已覆盖；未执行 standard-user Windows smoke                         |
-| `v0.3.0-alpha.8` 发布 | 部分完成           | 真实环境待验证 | 版本/许可/Gate/证据与发布 workflow 已实现；未构建候选、未执行外部 Gate、未 tag 或发布                                         |
-| `v0.2.1`              | 取消               | 不适用         | 不再发布；跨版本升级基线固定为 `v0.2.0`                                                                                       |
+| 项目                    | 实现状态           | 真实环境验证   | 结论                                                                                                                          |
+| ----------------------- | ------------------ | -------------- | ----------------------------------------------------------------------------------------------------------------------------- |
+| P1 Run Recovery         | 代码与本地测试完成 | 真实环境待验证 | 六阶段 crash injection、generation/lease fencing 与人工恢复决策已覆盖                                                         |
+| P2–P3 Provider          | 代码与本地测试完成 | 真实环境待验证 | 三类公开协议、Remote Compaction 回退与公开 summary 过滤已覆盖；未执行真实 OpenAI staging                                      |
+| P4 Multi-Agent          | 代码与本地测试完成 | 真实环境待验证 | execution lease、启动 reconciliation、权限/预算/取消/Usage/Artifact lineage 已覆盖                                            |
+| P5 Git/Forge            | 代码与本地测试完成 | 真实环境待验证 | 标准 Git、四类 Forge adapter、未知响应只读 reconciliation 与 supplied Approval 精确 fencing 已覆盖；未执行真实 Forge mutation |
+| P6 Plugin lifecycle     | 代码与本地测试完成 | 真实环境待验证 | 十类 contribution lifecycle 和无残留矩阵已覆盖                                                                                |
+| P7 企业平台             | 代码与本地测试完成 | 真实环境待验证 | transport、mention、附件下载与企业微信原始 callback 均已实现；未执行三个真实外部组织 Gate                                     |
+| P8 Unified Host control | 代码与本地测试完成 | 真实环境待验证 | Workbench 会话、Browser/Computer Inspector、lease 与 stale generation fencing 已覆盖；未执行 standard-user Windows smoke      |
+| `v0.3.0-alpha.8` 发布   | 部分完成           | 真实环境待验证 | 版本/许可/Gate/证据与发布 workflow 已实现；未构建候选、未执行外部 Gate、未 tag 或发布                                         |
+| `v0.2.1`                | 取消               | 不适用         | 不再发布；跨版本升级基线固定为 `v0.2.0`                                                                                       |
 
 fixture、mock、loopback transport 和确定性 Host 只证明本地实现，不构成真实 OpenAI、Forge、外部企业组织或 standard-user/elevated Windows 发布证据。Hachimi 本身保持本机单用户运行，不提供登录或租户体系；企业配置中的 tenant/corp 仅是外部平台组织标识。
 
@@ -168,7 +172,7 @@ corepack pnpm release:artifact-verify -- --root target/release-candidate
 corepack pnpm release:evidence:verify -- --root target/release-evidence
 ```
 
-真实 OpenAI、Forge 与企业平台 Gate 分别使用 `test:staging:openai`、`test:staging:forge`、`test:staging:enterprise`；缺少受保护配置和 Credential Manager 引用时会 fail closed。alpha prerelease 只复用 Windows workflow 的候选构建产物并明确声明真实 Gate 尚未完成；RC/GA 必须聚合全部五类真实证据。完整配置与发布边界见 [0.3.0 发布 Gate](docs/RELEASE_GATES.md)。
+真实 OpenAI、Forge、企业 API 与五平台 Channel Gate 分别使用 `test:staging:openai`、`test:staging:forge`、`test:staging:enterprise`、`test:staging:channels`；缺少受保护配置和 Credential Manager 引用时会 fail closed。alpha prerelease 只复用 Windows workflow 的候选构建产物并明确声明真实 Gate 尚未完成；RC/GA 必须聚合全部六类真实证据。完整配置与发布边界见 [0.3.0 发布 Gate](docs/RELEASE_GATES.md)。
 
 Windows 人工验收表见：
 

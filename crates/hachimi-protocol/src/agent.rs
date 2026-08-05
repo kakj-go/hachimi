@@ -20,6 +20,7 @@ mod process;
 mod project_git;
 mod recovery;
 mod review;
+mod runtime;
 mod sandbox_runtime;
 mod schedule;
 mod skills;
@@ -39,6 +40,7 @@ pub use process::*;
 pub use project_git::*;
 pub use recovery::*;
 pub use review::*;
+pub use runtime::*;
 pub use sandbox_runtime::*;
 pub use schedule::*;
 pub use skills::*;
@@ -88,7 +90,6 @@ pub enum EntryProfile {
     #[default]
     Workbench,
     PetConversation,
-    DesktopControl,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type, Default)]
@@ -1233,6 +1234,9 @@ pub struct McpServerHealthRecord {
     pub tool_count: u32,
     /// Stable, non-sensitive error category. Transport payloads and stderr are never persisted.
     pub error_code: Option<String>,
+    pub failure_count: u32,
+    #[specta(type = Option<specta_typescript::Number>)]
+    pub next_retry_at_ms: Option<i64>,
     #[specta(type = specta_typescript::Number)]
     pub checked_at_ms: i64,
 }

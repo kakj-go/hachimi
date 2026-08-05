@@ -50,6 +50,7 @@ import { directUserMutationContext } from "./mutation-context";
 import { TaskCard } from "./task-card";
 import { TaskHistoryDialog } from "./task-history-dialog";
 import { TaskEventForm } from "./task-event-form";
+import { RuntimeHealthBanner } from "./runtime-health";
 import "./task-center.css";
 
 type ScheduleFrequency = "once" | "daily" | "weekly" | "cron" | "event";
@@ -145,6 +146,7 @@ export function TaskCenter(props: {
   const [browserResourceOrigins, setBrowserResourceOrigins] = createSignal("");
   const [browserCapabilities, setBrowserCapabilities] = createSignal<BrowserCapability[]>([
     "observe",
+    "act",
   ]);
   const [browserPrivateNetwork, setBrowserPrivateNetwork] = createSignal(false);
   const [maxOccurrences, setMaxOccurrences] = createSignal("");
@@ -231,29 +233,22 @@ export function TaskCenter(props: {
   }
 
   async function refreshConnectors() {
-    const [accountsResponse, pluginsResponse] = await Promise.all([
-      commandPort.localHostCommand({ kind: "connector_list_accounts" }),
-      commandPort.localHostCommand({ kind: "plugin_list" }),
+    const [accounts, plugins] = await Promise.all([
+      commandPort.listConnectorAccounts(),
+      commandPort.listPlugins(),
     ]);
-    if (accountsResponse.kind !== "connector_accounts" || pluginsResponse.kind !== "plugins") {
-      throw new Error("local Host returned an unexpected Connector catalog response");
-    }
-    const activeAccounts = accountsResponse.value.filter((account) => account.health === "healthy");
+    const activeAccounts = accounts.filter((account) => account.health === "healthy");
     const catalog = await Promise.all(
       activeAccounts.map(async (account) => {
-        const response = await commandPort.localHostCommand({
-          kind: "connector_get_driver_descriptor",
-          plugin_id: account.pluginId,
-          connector_id: account.connectorId,
-        });
-        if (response.kind !== "connector_driver_descriptor") return undefined;
-        const plugin = pluginsResponse.value.find(
-          (value) => value.manifest.id === account.pluginId,
+        const descriptor = await commandPort.getConnectorDriverDescriptor(
+          account.pluginId,
+          account.connectorId,
         );
+        const plugin = plugins.find((value) => value.manifest.id === account.pluginId);
         if (!plugin) return undefined;
         return {
           account,
-          descriptor: response.value,
+          descriptor,
           contentHash: plugin.contentHash,
         } satisfies TaskConnector;
       }),
@@ -332,7 +327,7 @@ export function TaskCenter(props: {
     setBrowserUnattended(false);
     setBrowserDocumentOrigins("");
     setBrowserResourceOrigins("");
-    setBrowserCapabilities(["observe"]);
+    setBrowserCapabilities(["observe", "act"]);
     setBrowserPrivateNetwork(false);
     setMaxOccurrences("");
     setEndAt("");
@@ -525,7 +520,9 @@ export function TaskCenter(props: {
     setBrowserUnattended(Boolean(browser?.enabled));
     setBrowserDocumentOrigins(browser?.documentOrigins.join("\n") ?? "");
     setBrowserResourceOrigins(browser?.resourceOrigins.join("\n") ?? "");
-    setBrowserCapabilities(browser?.capabilities.length ? [...browser.capabilities] : ["observe"]);
+    setBrowserCapabilities(
+      browser?.capabilities.length ? [...browser.capabilities] : ["observe", "act"],
+    );
     setBrowserPrivateNetwork(Boolean(browser?.allowPrivateNetwork));
     setMaxOccurrences(schedule.stopConditions?.maxOccurrences?.toString() ?? "");
     setEndAt(
@@ -777,6 +774,8 @@ export function TaskCenter(props: {
           </Button>
         }
       />
+
+      <RuntimeHealthBanner component="scheduler" zh={zh()} />
 
       <Show when={failure()}>
         {(message) => (
@@ -1186,12 +1185,12 @@ export function TaskCenter(props: {
               </Show>
               <div class="task-extension-heading">
                 <strong>
-                  {zh() ? "隔离 Browser（无人值守）" : "Isolated Browser (unattended)"}
+                  {zh() ? "内置 Browser（无人值守）" : "Embedded Browser (unattended)"}
                 </strong>
                 <small>
                   {zh()
-                    ? "默认关闭；只支持 isolated profile。Origin 和能力会固定到 ScheduleGrant，Computer 无人值守始终不支持。"
-                    : "Off by default and isolated-profile only. Origins and capabilities are pinned to the ScheduleGrant; unattended Computer remains unsupported."}
+                    ? "默认关闭；定时任务只使用内置 Browser。Origin 和能力会固定到 ScheduleGrant，Computer 无人值守始终不支持。"
+                    : "Off by default; scheduled tasks use only the embedded Browser. Origins and capabilities are pinned to the ScheduleGrant; unattended Computer remains unsupported."}
                 </small>
               </div>
               <Checkbox

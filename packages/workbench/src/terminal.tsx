@@ -9,7 +9,7 @@ import {
 } from "@hachimi/contracts";
 import { useI18n } from "@hachimi/i18n";
 import { Button, Plus, Square, TerminalSquare, X } from "@hachimi/ui";
-import { For, Show, createEffect, createSignal, onCleanup, onMount, untrack } from "solid-js";
+import { For, Show, createEffect, createSignal, on, onCleanup, onMount, untrack } from "solid-js";
 
 import { directUserMutationContext } from "./mutation-context";
 import type { WorkbenchCommandPort } from "./workbench-command-port";
@@ -154,6 +154,7 @@ export function TerminalPanel(props: {
     if (untrack(activeId) === record.id) {
       setActiveId(remaining[Math.min(index, remaining.length - 1)]?.record.id);
     }
+    if (remaining.length === 0) props.onClose?.();
     if (!isLive(record)) return;
     try {
       await props.commandPort.terminateProcess({
@@ -185,24 +186,27 @@ export function TerminalPanel(props: {
     }
   }
 
-  createEffect(() => {
-    props.projectId;
-    props.snapshot.session.id;
-    let disposed = false;
-    initialized = false;
-    setTabs([]);
-    setActiveId(undefined);
-    hiddenProcessIds.clear();
-    const refresh = () => {
-      if (!disposed) void refreshProcesses();
-    };
-    refresh();
-    const timer = window.setInterval(refresh, 1_500);
-    onCleanup(() => {
-      disposed = true;
-      window.clearInterval(timer);
-    });
-  });
+  createEffect(
+    on(
+      () => [props.projectId, props.snapshot.session.id] as const,
+      () => {
+        let disposed = false;
+        initialized = false;
+        setTabs([]);
+        setActiveId(undefined);
+        hiddenProcessIds.clear();
+        const refresh = () => {
+          if (!disposed) void refreshProcesses();
+        };
+        refresh();
+        const timer = window.setInterval(refresh, 1_500);
+        onCleanup(() => {
+          disposed = true;
+          window.clearInterval(timer);
+        });
+      },
+    ),
+  );
 
   return (
     <section class="terminal-panel" aria-label={i18n.locale() === "zh-CN" ? "终端" : "Terminal"}>

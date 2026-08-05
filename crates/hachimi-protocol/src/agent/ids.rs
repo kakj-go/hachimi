@@ -85,6 +85,7 @@ string_id!(BrowserWorkspaceId);
 string_id!(BrowserTabId);
 string_id!(BrowserAutomationLeaseId);
 string_id!(ComputerFrameId);
+string_id!(ComputerControlSessionId);
 string_id!(PluginId);
 string_id!(ConnectorAccountId);
 string_id!(ChannelMessageId);

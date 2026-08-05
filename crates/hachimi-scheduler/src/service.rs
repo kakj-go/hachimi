@@ -4,7 +4,15 @@
 // Commit: f6d456235cf011004f7cffc71a95acf6fbf1fa0a
 // Modified for Hachimi: SQLite invocation claims, fresh Session/Run execution, grants, and Tokio timers.
 
-use std::{collections::BTreeMap, future::Future, pin::Pin, sync::Arc, time::Duration};
+use std::{
+    collections::BTreeMap,
+    future::Future,
+    pin::Pin,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+};
 
 use hachimi_protocol::{
     ArtifactId, DeliveryPolicy, DeliveryStatus, EntryProfile, MisfirePolicy, PermissionProfile,
@@ -20,7 +28,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::service_helpers::{
     apply_stop_conditions, authorization_scope, build_grant, next_occurrence,
-    required_next_occurrence, task_record, tracing_fallback,
+    required_next_occurrence, task_record,
 };
 use crate::{TimeZoneResolver, preview_schedule};
 
@@ -108,6 +116,8 @@ pub enum SchedulerError {
     NoFutureOccurrence,
     #[error("schedule permission scope serialization failed: {0}")]
     Serialization(#[from] serde_json::Error),
+    #[error("scheduler is temporarily unavailable")]
+    Unavailable,
 }
 
 #[derive(Clone)]
@@ -117,7 +127,8 @@ pub struct SchedulerService {
     timezone: Arc<dyn TimeZoneResolver>,
     launcher: Arc<dyn ScheduleRunLauncher>,
     notifications: Arc<dyn NotificationAdapter>,
-    wake: Arc<Notify>,
+    pub(crate) wake: Arc<Notify>,
+    pub(crate) accepting: Arc<AtomicBool>,
     active_launches: Arc<Mutex<BTreeMap<TaskRunId, CancellationToken>>>,
 }
 
@@ -145,12 +156,17 @@ impl SchedulerService {
             launcher,
             notifications,
             wake: Arc::new(Notify::new()),
+            accepting: Arc::new(AtomicBool::new(true)),
             active_launches: Arc::new(Mutex::new(BTreeMap::new())),
         }
     }
 
     pub fn preview(&self, schedule: &ScheduleSpec, count: usize) -> SchedulePreview {
         preview_schedule(self.timezone.as_ref(), schedule, self.clock.now_ms(), count)
+    }
+
+    pub fn suspend(&self) {
+        self.accepting.store(false, Ordering::SeqCst);
     }
 
     pub async fn create(
@@ -173,6 +189,7 @@ impl SchedulerService {
         mut definition: ScheduleDefinition,
         grant_scope: Option<ScheduleAuthorizationScope>,
     ) -> Result<ScheduleSnapshot, SchedulerError> {
+        self.ensure_accepting()?;
         normalize_definition(&mut definition);
         validate_definition(&definition)?;
         definition.config_revision = 1;
@@ -225,6 +242,7 @@ impl SchedulerService {
         mut definition: ScheduleDefinition,
         expected_config_revision: u64,
     ) -> Result<ScheduleDefinition, SchedulerError> {
+        self.ensure_accepting()?;
         let current = self
             .store
             .get_schedule(&definition.id)
@@ -273,6 +291,7 @@ impl SchedulerService {
         enabled: bool,
         expected_config_revision: u64,
     ) -> Result<ScheduleDefinition, SchedulerError> {
+        self.ensure_accepting()?;
         let schedule = self
             .store
             .get_schedule(schedule_id)
@@ -297,6 +316,7 @@ impl SchedulerService {
     }
 
     pub async fn remove(&self, schedule_id: &ScheduleId) -> Result<bool, SchedulerError> {
+        self.ensure_accepting()?;
         let removed = self.store.remove_schedule(schedule_id).await?;
         self.wake.notify_one();
         Ok(removed)
@@ -323,6 +343,7 @@ impl SchedulerService {
         principal: &str,
         scope: ScheduleAuthorizationScope,
     ) -> Result<ScheduleGrantRecord, SchedulerError> {
+        self.ensure_accepting()?;
         let schedule = self
             .store
             .get_schedule(schedule_id)
@@ -338,6 +359,7 @@ impl SchedulerService {
         &self,
         schedule_id: &ScheduleId,
     ) -> Result<Option<ScheduleGrantRecord>, SchedulerError> {
+        self.ensure_accepting()?;
         let grant = self
             .store
             .revoke_schedule_grant(schedule_id, self.clock.now_ms())
@@ -347,6 +369,7 @@ impl SchedulerService {
     }
 
     pub async fn run_now(&self, schedule_id: &ScheduleId) -> Result<TaskRunRecord, SchedulerError> {
+        self.ensure_accepting()?;
         let schedule = self
             .store
             .get_schedule(schedule_id)
@@ -374,6 +397,7 @@ impl SchedulerService {
     }
 
     pub async fn retry(&self, task_run_id: &TaskRunId) -> Result<TaskRunRecord, SchedulerError> {
+        self.ensure_accepting()?;
         let previous = self
             .store
             .get_task_run(task_run_id)
@@ -589,36 +613,6 @@ impl SchedulerService {
         Ok(tasks)
     }
 
-    #[must_use]
-    pub fn start(self: Arc<Self>) -> SchedulerHandle {
-        let cancellation = CancellationToken::new();
-        let task_cancellation = cancellation.clone();
-        let service = Arc::clone(&self);
-        let join = tokio::spawn(async move {
-            loop {
-                if task_cancellation.is_cancelled() {
-                    break;
-                }
-                let now = service.clock.now_ms();
-                let wake_at = service.store.next_schedule_wakeup().await.ok().flatten();
-                let delay = Duration::from_millis(scheduler_delay_ms(wake_at, now));
-                tokio::select! {
-                    () = task_cancellation.cancelled() => break,
-                    () = service.wake.notified() => continue,
-                    () = tokio::time::sleep(delay) => {
-                        if let Err(error) = service.trigger_due().await {
-                            tracing_fallback(&error);
-                        }
-                    }
-                }
-            }
-        });
-        SchedulerHandle {
-            cancellation,
-            join: Some(join),
-        }
-    }
-
     pub(crate) fn launch_claim(
         &self,
         schedule: ScheduleDefinition,
@@ -765,30 +759,16 @@ impl SchedulerService {
             active_launches.lock().remove(&task_id);
         });
     }
-}
 
-#[derive(Debug)]
-pub struct SchedulerHandle {
-    cancellation: CancellationToken,
-    join: Option<tokio::task::JoinHandle<()>>,
-}
-
-impl SchedulerHandle {
-    pub async fn stop(mut self) {
-        self.cancellation.cancel();
-        if let Some(join) = self.join.take() {
-            let _ = join.await;
-        }
+    pub(crate) fn ensure_accepting(&self) -> Result<(), SchedulerError> {
+        self.accepting
+            .load(Ordering::SeqCst)
+            .then_some(())
+            .ok_or(SchedulerError::Unavailable)
     }
 }
 
-impl Drop for SchedulerHandle {
-    fn drop(&mut self) {
-        self.cancellation.cancel();
-    }
-}
-
-fn scheduler_delay_ms(wake_at_ms: Option<i64>, now_ms: i64) -> u64 {
+pub(crate) fn scheduler_delay_ms(wake_at_ms: Option<i64>, now_ms: i64) -> u64 {
     let raw_delay = wake_at_ms
         .map(|timestamp| u64::try_from(timestamp.saturating_sub(now_ms).max(0)).unwrap_or(0))
         .unwrap_or(MAX_SCHEDULER_SLEEP_MS);

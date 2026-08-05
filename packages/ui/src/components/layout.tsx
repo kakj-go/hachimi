@@ -94,7 +94,7 @@ export function SettingsSection(props: SettingsSectionProps) {
 }
 
 export interface SettingsRowProps {
-  label: string;
+  label: JSX.Element;
   description?: string;
   children: JSX.Element;
   variant?: ComponentStateProps["variant"];

@@ -1,31 +1,97 @@
 use hachimi_protocol::{
-    BrowserAction, BrowserCapability, CapabilityGrantSet, PermissionProfile, ScheduleHostGrant,
+    BrowserAction, BrowserAutomationSurfaceKind, BrowserCapability, CapabilityGrantSet,
+    HostPolicyDecision, RunId, ScheduleHostGrant, SessionId,
 };
 
-#[allow(clippy::too_many_arguments)]
-pub(super) async fn require_embedded_navigation_permission(
-    embedded: &crate::embedded_browser_agent::EmbeddedAgentBrowser,
-    schedule_host_grant: Option<&ScheduleHostGrant>,
-    session_id: &hachimi_protocol::SessionId,
-    run_id: &hachimi_protocol::RunId,
+pub(super) async fn require_interactive_browser_access(
+    store: &hachimi_storage::AgentStore,
+    session_id: &SessionId,
+    run_id: &RunId,
     run_generation: u64,
     url: &str,
-    allow_private_network: bool,
-    lease_id: Option<&hachimi_protocol::BrowserAutomationLeaseId>,
-) -> Result<(), crate::embedded_browser_agent::EmbeddedAgentBrowserError> {
-    if schedule_host_grant.is_some() {
+    surface: BrowserAutomationSurfaceKind,
+    capabilities: &[BrowserCapability],
+) -> Result<bool, String> {
+    let origin = hachimi_browser::normalized_origin(url).map_err(|error| error.to_string())?;
+    let private_network = match hachimi_browser::validate_agent_browser_target(url, false).await {
+        Ok(()) => false,
+        Err(hachimi_browser::BrowserHostError::PrivateNetworkDenied) => true,
+        Err(error) => return Err(error.to_string()),
+    };
+    match store
+        .browser_host_policy_decision(&origin, session_id, run_id, capabilities, private_network)
+        .await
+        .map_err(|error| error.to_string())?
+    {
+        HostPolicyDecision::Allow => Ok(private_network),
+        HostPolicyDecision::Block => Err(format!(
+            "Browser site access is blocked by policy for {origin}"
+        )),
+        HostPolicyDecision::Ask => {
+            let request = store
+                .create_browser_host_access_request(
+                    session_id,
+                    run_id,
+                    run_generation,
+                    &origin,
+                    surface,
+                    capabilities,
+                    private_network,
+                )
+                .await
+                .map_err(|error| error.to_string())?;
+            let _ = store
+                .append_event(
+                    session_id,
+                    Some(run_id),
+                    "host.access_required",
+                    serde_json::to_value(&request).map_err(|error| error.to_string())?,
+                )
+                .await;
+            Err(format!(
+                "Browser site access requires user confirmation: {}",
+                request.id
+            ))
+        }
+    }
+}
+
+pub(super) async fn require_external_session_access(
+    store: &hachimi_storage::AgentStore,
+    session: &hachimi_protocol::BrowserSession,
+    schedule_host_grant: Option<&ScheduleHostGrant>,
+    run_generation: u64,
+    capabilities: &[BrowserCapability],
+) -> Result<(), String> {
+    let Some(url) = session.current_url.as_deref().or(session.origin.as_deref()) else {
+        return Err("External Chrome has no current Origin".into());
+    };
+    if url.eq_ignore_ascii_case("about:blank") {
         return Ok(());
     }
-    embedded
-        .require_site_permission(
-            session_id,
-            run_id,
-            run_generation,
-            url,
-            allow_private_network,
-            lease_id,
-        )
-        .await
+    let origin = hachimi_browser::normalized_origin(url).map_err(|error| error.to_string())?;
+    if let Some(browser) = schedule_host_grant.and_then(|grant| grant.browser.as_ref()) {
+        if !browser.enabled || !browser.document_origins.contains(&origin) {
+            return Err("External Chrome Origin is outside the scheduled Browser grant".into());
+        }
+        return hachimi_browser::validate_agent_browser_target(url, browser.allow_private_network)
+            .await
+            .map_err(|error| error.to_string());
+    }
+    if schedule_host_grant.is_some() {
+        return Err("Scheduled Browser access is not authorized".into());
+    }
+    require_interactive_browser_access(
+        store,
+        &session.owner_session_id,
+        &session.owner_run_id,
+        run_generation,
+        url,
+        BrowserAutomationSurfaceKind::ExternalChrome,
+        capabilities,
+    )
+    .await
+    .map(|_| ())
 }
 
 pub(super) fn embedded_origin_policy<'a>(
@@ -42,8 +108,7 @@ pub(super) fn embedded_origin_policy<'a>(
     } else {
         crate::embedded_browser_agent::EmbeddedBrowserOriginPolicy {
             allowed_origins: &grants.browser.origins,
-            allow_unlisted_origin: grants.profile == PermissionProfile::ExternalSandbox
-                && grants.browser.origins.is_empty(),
+            allow_unlisted_origin: true,
             allow_private_network: true,
             require_site_permission: true,
         }

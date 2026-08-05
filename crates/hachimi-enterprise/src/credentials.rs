@@ -1,29 +1,31 @@
-use hachimi_protocol::{EnterpriseIngressMode, EnterprisePlatform};
+use hachimi_protocol::{IntegrationProviderId, IntegrationTransport};
 use serde::Deserialize;
 use zeroize::Zeroize;
 
 #[derive(Deserialize)]
-#[serde(tag = "platform", rename_all = "snake_case")]
+#[serde(tag = "providerId", rename_all = "snake_case")]
 pub enum EnterpriseCredential {
-    Wecom {
+    #[serde(rename = "wecom_app")]
+    WecomApp {
         #[serde(rename = "corpId")]
         corp_id: String,
         #[serde(rename = "corpSecret")]
         corp_secret: String,
         #[serde(rename = "agentId")]
-        agent_id: Option<i64>,
+        agent_id: String,
         #[serde(rename = "callbackToken")]
         callback_token: String,
         #[serde(rename = "encodingAesKey")]
         encoding_aes_key: String,
     },
+    #[serde(rename = "dingtalk")]
     DingTalk {
-        #[serde(rename = "appKey")]
-        app_key: String,
-        #[serde(rename = "appSecret")]
-        app_secret: String,
+        #[serde(rename = "clientId")]
+        client_id: String,
+        #[serde(rename = "clientSecret")]
+        client_secret: String,
         #[serde(rename = "agentId")]
-        agent_id: Option<i64>,
+        agent_id: Option<String>,
         #[serde(rename = "robotCode")]
         robot_code: Option<String>,
     },
@@ -54,53 +56,54 @@ impl EnterpriseCredential {
     }
 
     #[must_use]
-    pub const fn platform(&self) -> EnterprisePlatform {
+    pub const fn platform(&self) -> IntegrationProviderId {
         match self {
-            Self::Wecom { .. } => EnterprisePlatform::Wecom,
-            Self::DingTalk { .. } => EnterprisePlatform::DingTalk,
-            Self::Feishu { .. } => EnterprisePlatform::Feishu,
+            Self::WecomApp { .. } => IntegrationProviderId::WecomApp,
+            Self::DingTalk { .. } => IntegrationProviderId::DingTalk,
+            Self::Feishu { .. } => IntegrationProviderId::Feishu,
         }
     }
 
     #[must_use]
-    pub const fn ingress_mode(&self) -> EnterpriseIngressMode {
+    pub const fn ingress_mode(&self) -> IntegrationTransport {
         match self {
-            Self::Wecom { .. } => EnterpriseIngressMode::EncryptedCallback,
-            Self::DingTalk { .. } => EnterpriseIngressMode::Stream,
-            Self::Feishu { .. } => EnterpriseIngressMode::LongConnection,
+            Self::WecomApp { .. } => IntegrationTransport::EncryptedCallback,
+            Self::DingTalk { .. } => IntegrationTransport::Stream,
+            Self::Feishu { .. } => IntegrationTransport::LongConnection,
         }
     }
 
     #[must_use]
     pub fn tenant_id(&self) -> &str {
         match self {
-            Self::Wecom { corp_id, .. } => corp_id,
-            Self::DingTalk { app_key, .. } => app_key,
+            Self::WecomApp { corp_id, .. } => corp_id,
+            Self::DingTalk { client_id, .. } => client_id,
             Self::Feishu { app_id, .. } => app_id,
         }
     }
 
     pub(crate) fn auth_pair(&self) -> (&str, &str) {
         match self {
-            Self::Wecom {
+            Self::WecomApp {
                 corp_id,
                 corp_secret,
                 ..
             } => (corp_id, corp_secret),
             Self::DingTalk {
-                app_key,
-                app_secret,
+                client_id,
+                client_secret,
                 ..
-            } => (app_key, app_secret),
+            } => (client_id, client_secret),
             Self::Feishu {
                 app_id, app_secret, ..
             } => (app_id, app_secret),
         }
     }
 
-    pub(crate) const fn agent_id(&self) -> Option<i64> {
+    pub(crate) fn agent_id(&self) -> Option<i64> {
         match self {
-            Self::Wecom { agent_id, .. } | Self::DingTalk { agent_id, .. } => *agent_id,
+            Self::WecomApp { agent_id, .. } => agent_id.parse().ok(),
+            Self::DingTalk { agent_id, .. } => agent_id.as_deref()?.parse().ok(),
             Self::Feishu { .. } => None,
         }
     }
@@ -114,7 +117,7 @@ impl EnterpriseCredential {
 
     pub(crate) fn wecom_callback(&self) -> Option<(&str, &str)> {
         match self {
-            Self::Wecom {
+            Self::WecomApp {
                 callback_token,
                 encoding_aes_key,
                 ..
@@ -136,7 +139,7 @@ impl EnterpriseCredential {
 impl Drop for EnterpriseCredential {
     fn drop(&mut self) {
         match self {
-            Self::Wecom {
+            Self::WecomApp {
                 corp_id,
                 corp_secret,
                 callback_token,
@@ -149,13 +152,13 @@ impl Drop for EnterpriseCredential {
                 encoding_aes_key.zeroize();
             }
             Self::DingTalk {
-                app_key,
-                app_secret,
+                client_id,
+                client_secret,
                 robot_code,
                 ..
             } => {
-                app_key.zeroize();
-                app_secret.zeroize();
+                client_id.zeroize();
+                client_secret.zeroize();
                 robot_code.zeroize();
             }
             Self::Feishu {

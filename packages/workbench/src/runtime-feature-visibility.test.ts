@@ -11,7 +11,6 @@ const enabledRuntime: RuntimeFeatureSet = {
   gitRemoteMutations: true,
   pluginRuntime: true,
   enterpriseIntegrations: true,
-  desktopControl: true,
 };
 
 function flags(runtimeFeatures: RuntimeFeatureSet = enabledRuntime): FeatureFlags {
@@ -42,7 +41,6 @@ describe("runtimeFeatureVisibility", () => {
       gitRemoteMutations: true,
       pluginRuntime: true,
       enterpriseIntegrations: true,
-      desktopControl: true,
     });
   });
 

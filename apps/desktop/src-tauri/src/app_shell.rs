@@ -17,7 +17,6 @@ pub(super) const fn release_runtime_feature_set(disabled: RuntimeFeatureSet) -> 
         git_remote_mutations: !disabled.git_remote_mutations,
         plugin_runtime: !disabled.plugin_runtime,
         enterprise_integrations: !disabled.enterprise_integrations,
-        desktop_control: !disabled.desktop_control,
     }
 }
 
@@ -51,6 +50,65 @@ pub(super) fn absolute_path(path: PathBuf) -> PathBuf {
     }
 }
 
+#[cfg(any(not(feature = "desktop-e2e"), test))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum SingleInstanceActivationTarget {
+    Workbench,
+    Pet,
+    StartupPending,
+}
+
+#[cfg(any(not(feature = "desktop-e2e"), test))]
+pub(super) const fn single_instance_activation_target(
+    has_workbench: bool,
+    has_pet: bool,
+) -> SingleInstanceActivationTarget {
+    if has_workbench {
+        SingleInstanceActivationTarget::Workbench
+    } else if has_pet {
+        SingleInstanceActivationTarget::Pet
+    } else {
+        SingleInstanceActivationTarget::StartupPending
+    }
+}
+
+#[cfg(not(feature = "desktop-e2e"))]
+pub(super) fn activate_existing_instance<R: Runtime>(app: &AppHandle<R>) {
+    let workbench = app.get_webview_window("workbench");
+    let pet = app.get_webview_window("pet");
+    match single_instance_activation_target(workbench.is_some(), pet.is_some()) {
+        SingleInstanceActivationTarget::Workbench => {
+            let workbench = workbench.expect("workbench target requires a window");
+            reveal_existing_window(&workbench, "workbench");
+        }
+        SingleInstanceActivationTarget::Pet => {
+            if let Some(state) = app.try_state::<DesktopState>() {
+                state.pet_hidden_by_user.store(false, Ordering::SeqCst);
+            }
+            let pet = pet.expect("pet target requires a window");
+            reveal_existing_window(&pet, "pet");
+            let _ = app.emit_to("pet", PET_VISIBILITY_EVENT, true);
+            refresh_tray_menu(app);
+        }
+        SingleInstanceActivationTarget::StartupPending => {
+            tracing::info!("secondary launch received while the desktop window is starting");
+        }
+    }
+}
+
+#[cfg(not(feature = "desktop-e2e"))]
+fn reveal_existing_window<R: Runtime>(window: &WebviewWindow<R>, label: &'static str) {
+    if let Err(error) = window.unminimize() {
+        tracing::warn!(window = label, %error, "failed to restore the existing instance window");
+    }
+    if let Err(error) = window.show() {
+        tracing::warn!(window = label, %error, "failed to show the existing instance window");
+    }
+    if let Err(error) = window.set_focus() {
+        tracing::warn!(window = label, %error, "failed to focus the existing instance window");
+    }
+}
+
 #[tauri::command]
 pub(super) fn exit_app(
     window: WebviewWindow,
@@ -67,10 +125,7 @@ pub(super) fn exit_application(app: &AppHandle, state: &DesktopState) -> Result<
         capture_pet_placement(&pet, state)?;
     }
     state.save_settings()?;
-    // Match Codex's process-session shutdown semantics: terminate all owned
-    // process trees before handing control to the platform exit path.
-    tauri::async_runtime::block_on(state.process_registry.shutdown());
-    state.scheduler_handle.lock().take();
+    tauri::async_runtime::block_on(crate::shutdown_coordinator::shutdown(state));
     app.exit(0);
     Ok(())
 }

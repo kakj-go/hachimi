@@ -11,7 +11,8 @@ const args = namedCliArguments(process.argv.slice(2));
 const root = resolve(workspaceRoot, args.get("--root") ?? "target/release-evidence");
 const output = resolve(root, args.get("--output") ?? "release-manifest.json");
 const required = (
-  args.get("--required") ?? "openai,forge,enterprise,windows_standard_user,windows_elevated"
+  args.get("--required") ??
+  "openai,forge,enterprise,channels,windows_standard_user,windows_elevated"
 )
   .split(",")
   .filter(Boolean);

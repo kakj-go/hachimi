@@ -20,8 +20,8 @@ use hachimi_storage::StoredSkillRecord;
 
 use crate::{
     ENTRY_FILE, MAX_DEPTH, MAX_FILES, ScanBudget, SkillHost, SkillHostError, SkillRunSelection,
-    diagnostic, flatten_tree, hash_tree, now_ms, parse_frontmatter, reject_reparse,
-    reject_reparse_chain, scan_tree,
+    diagnostic, flatten_tree, hash_tree, now_ms, parse_frontmatter, parse_frontmatter_display_name,
+    reject_reparse, reject_reparse_chain, scan_tree,
 };
 
 const AGENTS_SKILLS_PATH: [&str; 2] = [".agents", "skills"];
@@ -326,8 +326,11 @@ impl SkillHost {
         }
         let (dependencies, dependency_diagnostics) = read_dependencies(skill_dir)?;
         diagnostics.extend(dependency_diagnostics);
-        let (interface, policy, metadata_diagnostics) =
+        let (mut interface, policy, metadata_diagnostics) =
             crate::metadata::read_interface_and_policy(skill_dir)?;
+        if let Some(display_name) = parse_frontmatter_display_name(&entry) {
+            interface.get_or_insert_default().display_name = Some(display_name);
+        }
         diagnostics.extend(metadata_diagnostics);
         let tree = scan_tree(skill_dir, skill_dir, 0, &mut ScanBudget::default())?;
         let mut index = Vec::new();

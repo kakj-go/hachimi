@@ -8,7 +8,7 @@ on:
         required: true
         type: string
       external_staging_run_id:
-        description: External Staging Gate run id containing OpenAI, Forge, and enterprise summaries
+        description: External Staging Gate run id containing OpenAI, Forge, enterprise, and Channel summaries
         required: true
         type: string
       release_tag:
@@ -104,13 +104,13 @@ jobs:
             echo "release_tag_already_exists"
             exit 1
           fi
-      - name: Aggregate all five fail-closed release gates
+      - name: Aggregate all six fail-closed release gates
         env:
           RELEASE_VERSION: ${{ inputs.release_tag }}
         run: |
           node scripts/release/verify-evidence.mjs \
             --root target/release-evidence \
-            --required openai,forge,enterprise,windows_standard_user,windows_elevated \
+            --required openai,forge,enterprise,channels,windows_standard_user,windows_elevated \
             --artifact-manifest target/release-candidate/artifact-manifest.json \
             --expected-version "${RELEASE_VERSION#v}" \
             --expected-commit "$GITHUB_SHA" \

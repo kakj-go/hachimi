@@ -8,9 +8,17 @@ export type InspectorResource =
       diffBranches?: string[];
       diffScope?: "run" | "checkout" | "branch" | "session";
     }
+  | { kind: "computer"; controlSessionId?: string }
   | { kind: "files"; path?: string }
   | { kind: "plan"; planId: string }
-  | { kind: "browser"; browserTabId?: string; initialUrl?: string }
+  | {
+      kind: "browser";
+      leaseId?: string;
+      surface?: "embedded" | "external_chrome";
+      browserTabId?: string;
+      browserSessionId?: string;
+      initialUrl?: string;
+    }
   | { kind: "sources" }
   | { kind: "attachment"; attachmentId: string; name: string }
   | { kind: "artifact"; artifactId: string; name: string };

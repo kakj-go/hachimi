@@ -48,15 +48,85 @@ impl AgentStore {
         run_id: &RunId,
     ) -> Result<Vec<String>, AgentStoreError> {
         let now = now_ms();
-        let rows = sqlx::query(
-            "SELECT DISTINCT origin FROM embedded_browser_site_permissions WHERE (scope = 'persisted' OR (scope = 'session' AND owner_session_id = ?) OR (scope = 'once' AND owner_run_id = ?)) AND (expires_at_ms IS NULL OR expires_at_ms > ?)",
+        let mut candidates = std::collections::BTreeMap::new();
+        let mut embedded_grants = std::collections::BTreeSet::new();
+        let legacy_rows = sqlx::query(
+            "SELECT origin, capabilities_json, allow_private_network FROM embedded_browser_site_permissions WHERE (scope = 'session' AND owner_session_id = ? OR scope = 'once' AND owner_run_id = ?) AND (expires_at_ms IS NULL OR expires_at_ms > ?)",
         )
         .bind(session_id.as_str())
         .bind(run_id.as_str())
         .bind(now)
         .fetch_all(&self.pool)
         .await?;
-        Ok(rows.into_iter().map(|row| row.get("origin")).collect())
+        for row in legacy_rows {
+            let capabilities = serde_json::from_str::<Vec<BrowserCapability>>(
+                &row.get::<String, _>("capabilities_json"),
+            )?;
+            if !capabilities.contains(&BrowserCapability::Observe)
+                || !capabilities.contains(&BrowserCapability::Act)
+            {
+                continue;
+            }
+            let origin = row.get::<String, _>("origin");
+            embedded_grants.insert(origin.clone());
+            let private_network = row.get::<i64, _>("allow_private_network") != 0;
+            candidates
+                .entry(origin)
+                .and_modify(|current| *current |= private_network)
+                .or_insert(private_network);
+        }
+
+        let policy_rows = sqlx::query(
+            "SELECT origin, private_network FROM browser_site_policies WHERE decision = 'allow'",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        for row in policy_rows {
+            let private_network = row.get::<i64, _>("private_network") != 0;
+            candidates
+                .entry(row.get::<String, _>("origin"))
+                .and_modify(|current| *current |= private_network)
+                .or_insert(private_network);
+        }
+
+        let grant_rows = sqlx::query(
+            "SELECT target_key, MAX(allow_private_network) AS private_network FROM host_access_grants WHERE target_kind = 'browser' AND ((scope = 'run' AND owner_run_id = ?) OR (scope = 'session' AND owner_session_id = ?)) AND (expires_at_ms IS NULL OR expires_at_ms > ?) GROUP BY target_key",
+        )
+        .bind(run_id.as_str())
+        .bind(session_id.as_str())
+        .bind(now)
+        .fetch_all(&self.pool)
+        .await?;
+        for row in grant_rows {
+            let private_network = row.get::<i64, _>("private_network") != 0;
+            candidates
+                .entry(row.get::<String, _>("target_key"))
+                .and_modify(|current| *current |= private_network)
+                .or_insert(private_network);
+        }
+
+        let mut allowed = Vec::new();
+        for (origin, private_network) in candidates {
+            let decision = self
+                .browser_host_policy_decision(
+                    &origin,
+                    session_id,
+                    run_id,
+                    &[
+                        hachimi_protocol::BrowserCapability::Observe,
+                        hachimi_protocol::BrowserCapability::Act,
+                    ],
+                    private_network,
+                )
+                .await?;
+            if decision == hachimi_protocol::HostPolicyDecision::Allow
+                || (decision != hachimi_protocol::HostPolicyDecision::Block
+                    && embedded_grants.contains(&origin))
+            {
+                allowed.push(origin);
+            }
+        }
+        Ok(allowed)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -215,30 +285,44 @@ impl AgentStore {
                 ),
                 BrowserPermissionDecision::AllowPersisted => (
                     EmbeddedBrowserPermissionScope::Persisted,
-                    "profile:embedded-default".to_owned(),
+                    "profile:global-policy".to_owned(),
                     None,
                     None,
                     None,
                 ),
                 BrowserPermissionDecision::Deny => unreachable!(),
             };
-            let permission_id = ItemId::random().to_string();
-            sqlx::query(
-                "INSERT INTO embedded_browser_site_permissions(id, origin, scope, scope_key, owner_session_id, owner_run_id, capabilities_json, allow_private_network, created_at_ms, expires_at_ms, updated_at_ms) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(origin, scope_key) DO UPDATE SET capabilities_json = excluded.capabilities_json, allow_private_network = excluded.allow_private_network, expires_at_ms = excluded.expires_at_ms, updated_at_ms = excluded.updated_at_ms",
-            )
-            .bind(permission_id)
-            .bind(&request.origin)
-            .bind(permission_scope_text(scope))
-            .bind(scope_key)
-            .bind(owner_session_id)
-            .bind(owner_run_id)
-            .bind(serde_json::to_string(&request.capabilities)?)
-            .bind(i64::from(request.private_network))
-            .bind(now)
-            .bind(expires_at_ms)
-            .bind(now)
-            .execute(&mut *transaction)
-            .await?;
+            if scope == EmbeddedBrowserPermissionScope::Persisted {
+                if request.private_network {
+                    return Err(AgentStoreError::PersistentPrivateHostPolicyDenied);
+                }
+                sqlx::query(
+                    "INSERT INTO browser_site_policies(origin, decision, capabilities_json, private_network, revision, updated_at_ms) VALUES(?, 'allow', ?, 0, 1, ?) ON CONFLICT(origin) DO UPDATE SET decision = 'allow', capabilities_json = excluded.capabilities_json, private_network = 0, revision = browser_site_policies.revision + 1, updated_at_ms = excluded.updated_at_ms",
+                )
+                .bind(&request.origin)
+                .bind(serde_json::to_string(&request.capabilities)?)
+                .bind(now)
+                .execute(&mut *transaction)
+                .await?;
+            } else {
+                let permission_id = ItemId::random().to_string();
+                sqlx::query(
+                    "INSERT INTO embedded_browser_site_permissions(id, origin, scope, scope_key, owner_session_id, owner_run_id, capabilities_json, allow_private_network, created_at_ms, expires_at_ms, updated_at_ms) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(origin, scope_key) DO UPDATE SET capabilities_json = excluded.capabilities_json, allow_private_network = excluded.allow_private_network, expires_at_ms = excluded.expires_at_ms, updated_at_ms = excluded.updated_at_ms",
+                )
+                .bind(permission_id)
+                .bind(&request.origin)
+                .bind(permission_scope_text(scope))
+                .bind(scope_key)
+                .bind(owner_session_id)
+                .bind(owner_run_id)
+                .bind(serde_json::to_string(&request.capabilities)?)
+                .bind(i64::from(request.private_network))
+                .bind(now)
+                .bind(expires_at_ms)
+                .bind(now)
+                .execute(&mut *transaction)
+                .await?;
+            }
             BrowserPermissionRequestStatus::Allowed
         };
         sqlx::query(

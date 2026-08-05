@@ -64,9 +64,10 @@ CREATE TABLE computer_global_app_rules (
 
 CREATE TABLE browser_host_settings (
     singleton INTEGER PRIMARY KEY NOT NULL CHECK(singleton = 1),
-    preferred_profile_kind TEXT NOT NULL CHECK(preferred_profile_kind IN ('isolated', 'chrome_extension')),
+    automation_enabled INTEGER NOT NULL DEFAULT 1 CHECK(automation_enabled IN (0, 1)),
+    automation_preference TEXT NOT NULL DEFAULT 'auto' CHECK(automation_preference IN ('auto', 'embedded', 'external_chrome')),
     updated_at_ms INTEGER NOT NULL
 );
 
-INSERT INTO browser_host_settings(singleton, preferred_profile_kind, updated_at_ms)
-VALUES(1, 'isolated', 0);
+INSERT INTO browser_host_settings(singleton, automation_enabled, automation_preference, updated_at_ms)
+VALUES(1, 1, 'auto', 0);

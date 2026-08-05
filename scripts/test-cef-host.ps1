@@ -26,7 +26,7 @@ using System;
 using System.Runtime.InteropServices;
 using System.Threading;
 public sealed class HachimiCefSmokeWindow : IDisposable {
-    private readonly ManualResetEventSlim ready = new(false);
+    private readonly ManualResetEventSlim ready = new ManualResetEventSlim(false);
     private readonly Thread thread;
     private uint threadId;
     public IntPtr Handle { get; private set; }
@@ -34,9 +34,9 @@ public sealed class HachimiCefSmokeWindow : IDisposable {
     public int Top { get; private set; }
     public int PhysicalLeft { get; private set; }
     public int PhysicalTop { get; private set; }
-    public int PhysicalWidth { get; private set; } = 800;
-    public int PhysicalHeight { get; private set; } = 600;
-    public uint Dpi { get; private set; } = 96;
+    public int PhysicalWidth { get; private set; }
+    public int PhysicalHeight { get; private set; }
+    public uint Dpi { get; private set; }
 
     [StructLayout(LayoutKind.Sequential)]
     private struct Point { public int X; public int Y; }
@@ -109,6 +109,9 @@ public sealed class HachimiCefSmokeWindow : IDisposable {
     private static extern bool PostThreadMessageW(uint threadId, uint message, UIntPtr wParam, IntPtr lParam);
 
     public HachimiCefSmokeWindow(bool visible) {
+        PhysicalWidth = 800;
+        PhysicalHeight = 600;
+        Dpi = 96;
         thread = new Thread(() => {
             SetThreadDpiAwarenessContext(new IntPtr(-4));
             threadId = GetCurrentThreadId();
@@ -122,13 +125,15 @@ public sealed class HachimiCefSmokeWindow : IDisposable {
                 ShowWindow(Handle, 5);
                 UpdateWindow(Handle);
                 SetForegroundWindow(Handle);
-                if (GetWindowRect(Handle, out Rect rect)) {
+                Rect rect;
+                if (GetWindowRect(Handle, out rect)) {
                     Left = rect.Left;
                     Top = rect.Top;
                 }
                 uint dpi = GetDpiForWindow(Handle);
                 if (dpi > 0) Dpi = dpi;
-                if (DwmGetWindowAttribute(Handle, 9, out Rect physical, Marshal.SizeOf<Rect>()) == 0) {
+                Rect physical;
+                if (DwmGetWindowAttribute(Handle, 9, out physical, Marshal.SizeOf<Rect>()) == 0) {
                     PhysicalLeft = physical.Left;
                     PhysicalTop = physical.Top;
                     PhysicalWidth = physical.Right - physical.Left;
@@ -178,9 +183,15 @@ $start.UseShellExecute = $false
 $start.RedirectStandardInput = $true
 $start.RedirectStandardOutput = $true
 $start.RedirectStandardError = $true
-$start.ArgumentList.Add("--hachimi-parent-hwnd=$parentHwnd")
-$start.ArgumentList.Add("--hachimi-profile-dir=$profilePath")
-$start.ArgumentList.Add("--hachimi-log-file=$(Join-Path $profilePath 'cef.log')")
+$cefArguments = @(
+    "--hachimi-parent-hwnd=$parentHwnd",
+    "--hachimi-profile-dir=$profilePath",
+    "--hachimi-log-file=$(Join-Path $profilePath 'cef.log')"
+)
+if ($cefArguments.Where({ $_.Contains('"') }).Count -gt 0) {
+    throw "CEF smoke paths must not contain quotes"
+}
+$start.Arguments = '"' + ($cefArguments -join '" "') + '"'
 
 $process = [System.Diagnostics.Process]::Start($start)
 $messages = [System.Collections.Generic.List[string]]::new()

@@ -11,6 +11,11 @@
 | `codex-4c434651`                | OpenAI Codex `4c43465133428898aa84f0bfc02c306ed65fb66a`           | Apache-2.0；选择性移植，保留 SPDX、commit、源路径和修改说明                                        |
 | `openclaw-f6d45623`             | OpenClaw `f6d456235cf011004f7cffc71a95acf6fbf1fa0a`               | MIT；选择性移植，保留版权、commit、源路径和修改说明                                                |
 | `claude-clean-room-34b3dc99`    | Claude Code Best `34b3dc99bf40c57c0b78f3b5b1d70471ebc2d06d`       | 只研究公开可观察 Compaction 行为；不复制源码、提示词、注释、测试或内部标识符                       |
+| `deerflow-11bb8ddc`             | DeerFlow `11bb8ddcd95f41e673783b7e20c4ab4cd5ee7e24`               | MIT；只参考一次性连接码与 Connection/Conversation 分表行为，不复制实现                             |
+| `cc-connect-f2e4ed83`           | cc-connect `f2e4ed83c6953297a92d66d49114196fc4402206`             | NOASSERTION；只参考外部 Conversation 与 Agent Session 分离行为，不复制实现                         |
+| `langbot-7820949d`              | LangBot `7820949d3a3d8ca0b6f07d060deab40cb86807ff`                | Apache-2.0；只参考消息对象分层、企微 AI Bot 与 iLink 可观察行为，不复制实现                        |
+| `astrbot-03a6edb2`              | AstrBot `03a6edb29e7e742fb97d5926949c03c3214a31e5`                | AGPL-3.0；只参考 typed message parts 行为，Rust 实现保持 clean-room，不复制 AGPL 源码              |
+| `cowagent-848a1a4e`             | CowAgent `848a1a4eb171f3d891304370f7d5ed42046f3280`               | MIT；只参考企微 AI Bot 与 iLink 公开 wire 行为，不采用 LinkAI 代建或非官方微信 Hook                |
 | `dingtalk-stream-sdk-go-v0.9.1` | DingTalk Stream SDK Go `d1cc841e6013c3f6513a5bb01dfe3219b9c37d17` | MIT；只保存握手、WebSocket、心跳、ACK 和重连的有界 wire 快照，不作为运行时依赖或源码移植           |
 | `feishu-sdk-go-v3.9.9`          | Feishu Go SDK `ff207b774541a195f0a98c5bfda1507905e45431`          | MIT；只保存长连接 WebSocket/protobuf、心跳、ACK 和重连的有界 wire 快照，不作为运行时依赖或源码移植 |
 
@@ -39,7 +44,7 @@ Memory 已调整为远期，当前不选择 Codex Memory 或其他实现方案�
 
 ## 动态产品文档快照 registry
 
-动态官方文档分别登记在 `docs/references/openai/registry.json`、`docs/references/forge/registry.json` 和 `docs/references/enterprise/registry.json`。每条记录包含稳定 reference ID、产品/版本、canonical URL、retrieved timestamp、原始/规范化快照与 SHA-256。普通 CI 只读本地文件并校验 hash，不访问网络。更新文档必须创建新的 reference ID，不能就地改变已登记快照。
+动态官方文档分别登记在 `docs/references/openai/registry.json`、`docs/references/forge/registry.json` 和 `docs/references/enterprise/registry.json`。Channel 行为参考单独登记在 `docs/references/channels/registry.json`，包含精确 commit、许可证、文件、使用边界和真实实现状态。普通 CI 只读本地文件并校验 hash，不访问网络。更新官方文档必须创建新的 reference ID；更新开源行为参考必须固定新的 commit，不能使用浮动分支。
 
 ## Codex 派生文件
 
@@ -166,13 +171,13 @@ Memory 已调整为远期，当前不选择 Codex Memory 或其他实现方案�
 - `crates/hachimi-gateway/**`、`apps/desktop/src-tauri/src/{gateway_process,gateway_runtime}.rs`；
 - `crates/hachimi-protocol/src/agent/{hosts,plugins,gateway,local_hosts}.rs`；
 - `apps/desktop/src-tauri/src/{agent_host_tools,browser_extension_server,local_host_commands,managed_sandbox_runtime}.rs` 与 `app_domain_handler/local_hosts.rs`；
-- `packages/workbench/src/local-hosts-settings.{tsx,css}`。
+- `packages/workbench/src/host-domain-settings.{tsx,css}`、`browser-site-policy-settings.tsx` 与 `computer-use-settings.tsx`。
 - `crates/hachimi-scheduler/src/event.rs`、`crates/hachimi-storage/src/agent_store/schedule_event.rs` 与 `packages/workbench/src/task-event-form.tsx`。
 - `crates/hachimi-agent/src/multi_agent.rs`、`crates/hachimi-protocol/src/agent/{agent_tasks,recovery,git_forge,enterprise}.rs`；
 - `crates/hachimi-llm/src/{responses,embeddings}.rs`、`crates/hachimi-model-runtime/src/lib.rs` 中的公开 Provider adapter；
 - `crates/hachimi-forge/**`、`apps/desktop/src-tauri/src/forge_commands.rs` 与 Git/Forge operation ledger；
 - `crates/hachimi-enterprise/**`、`crates/hachimi-extensions/src/enterprise_connector.rs`、`crates/hachimi-gateway/src/enterprise_provider.rs` 与 `assets/plugins/{wecom,dingtalk,feishu}/**`；
-- `packages/workbench/src/desktop-control.{tsx,css}` 与 DesktopControl durable state/action ledger。
+- `packages/workbench/src/inspector/{browser-inspector,computer-inspector}.tsx` 与统一 Host durable state/action ledger。
 
 OpenClaw 的 Channel/Gateway 文件用于确定性 route、durable ledger 和 reconciliation 行为对照；当前 `hachimi-gateway` 没有标记为 OpenClaw 派生文件。若后续实质改写候选实现，必须先把精确目标文件移入上方“OpenClaw 派生文件”清单并补齐 MIT SPDX/来源头。
 

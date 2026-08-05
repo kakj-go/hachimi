@@ -1,6 +1,8 @@
 import type {
   ApprovalRequestRecord,
   ApprovalStatus,
+  HostAccessDecision,
+  HostAccessRequestRecord,
   ProposedPlan,
   UserInputAnswer,
   UserInputRequestRecord,
@@ -12,6 +14,7 @@ import {
   Button,
   CircleHelp,
   Send,
+  ShieldAlert,
   ShieldCheck,
   TextArea,
 } from "@hachimi/ui";
@@ -21,9 +24,11 @@ import { UserInputCard } from "../user-input-card";
 
 export type WorkbenchGateProps = {
   userInput: UserInputRequestRecord | undefined;
+  hostAccess: HostAccessRequestRecord | undefined;
   approval: ApprovalRequestRecord | undefined;
   plan: ProposedPlan | undefined;
   resolvingUserInput: boolean;
+  resolvingHostAccess: boolean;
   resolvingApproval: boolean;
   acceptingPlan: boolean;
   revisingPlan: boolean;
@@ -34,6 +39,7 @@ export type WorkbenchGateProps = {
     action: UserInputResolutionAction,
   ) => void;
   onResolveApproval: (approval: ApprovalRequestRecord, decision: ApprovalStatus) => void;
+  onResolveHostAccess: (request: HostAccessRequestRecord, decision: HostAccessDecision) => void;
   onAcceptPlan: (plan: ProposedPlan) => void;
   onRevisePlan: (plan: ProposedPlan, instructions: string) => void;
   onDismissPlan: (plan: ProposedPlan) => void;
@@ -55,7 +61,83 @@ export function WorkbenchGate(props: WorkbenchGateProps) {
           />
         )}
       </Show>
-      <Show when={!props.userInput && props.approval}>
+      <Show when={!props.userInput && props.hostAccess}>
+        {(request) => (
+          <ApprovalCard
+            title={hostAccessTitle(request(), props.locale)}
+            description={
+              zh()
+                ? "此授权只允许 Agent 访问目标，不会跳过发送、删除、购买或下载等操作审批。"
+                : "This grant only allows target access. Send, delete, purchase, and download actions keep their own approvals."
+            }
+            icon={<ShieldAlert size={17} />}
+            actions={
+              <>
+                <Button
+                  data-testid="workbench-host-deny"
+                  disabled={props.resolvingHostAccess}
+                  onClick={() => props.onResolveHostAccess(request(), "deny")}
+                >
+                  {zh() ? "拒绝" : "Deny"}
+                </Button>
+                <Button
+                  data-testid="workbench-host-allow-once"
+                  disabled={props.resolvingHostAccess}
+                  onClick={() => props.onResolveHostAccess(request(), "allow_once")}
+                >
+                  {zh() ? "允许一次" : "Allow once"}
+                </Button>
+                <Button
+                  data-testid="workbench-host-allow-session"
+                  variant="primary"
+                  disabled={props.resolvingHostAccess}
+                  onClick={() => props.onResolveHostAccess(request(), "allow_session")}
+                >
+                  {zh() ? "本会话允许" : "Allow for session"}
+                </Button>
+                <Button
+                  data-testid="workbench-host-always-allow"
+                  disabled={props.resolvingHostAccess || isPrivateBrowserRequest(request())}
+                  onClick={() => props.onResolveHostAccess(request(), "always_allow")}
+                >
+                  {zh() ? "始终允许" : "Always allow"}
+                </Button>
+                <Button
+                  data-testid="workbench-host-always-block"
+                  disabled={props.resolvingHostAccess}
+                  onClick={() => props.onResolveHostAccess(request(), "always_block")}
+                >
+                  {zh() ? "始终阻止" : "Always block"}
+                </Button>
+              </>
+            }
+          >
+            <dl class="approval-request-details" data-testid="host-access-request-details">
+              <div>
+                <dt>{zh() ? "目标" : "Target"}</dt>
+                <dd>
+                  <code>{hostAccessTarget(request())}</code>
+                </dd>
+              </div>
+              <div>
+                <dt>{zh() ? "访问能力" : "Access"}</dt>
+                <dd class="approval-scope-list">
+                  <For each={request().capabilities}>
+                    {(capability) => <code>{capability}</code>}
+                  </For>
+                </dd>
+              </div>
+              <div>
+                <dt>{zh() ? "运行" : "Run"}</dt>
+                <dd>
+                  <code>{request().ownerRunId}</code>
+                </dd>
+              </div>
+            </dl>
+          </ApprovalCard>
+        )}
+      </Show>
+      <Show when={!props.userInput && !props.hostAccess && props.approval}>
         {(approval) => (
           <ApprovalCard
             title={
@@ -135,7 +217,7 @@ export function WorkbenchGate(props: WorkbenchGateProps) {
           </ApprovalCard>
         )}
       </Show>
-      <Show when={!props.userInput && !props.approval && props.plan}>
+      <Show when={!props.userInput && !props.hostAccess && !props.approval && props.plan}>
         {(plan) => (
           <article class="plan-confirmation-gate">
             <header>
@@ -215,6 +297,28 @@ export function WorkbenchGate(props: WorkbenchGateProps) {
       </Show>
     </section>
   );
+}
+
+function hostAccessTarget(request: HostAccessRequestRecord) {
+  return request.target.kind === "browser"
+    ? request.target.origin
+    : request.target.app.displayName || request.target.app.appId;
+}
+
+function isPrivateBrowserRequest(request: HostAccessRequestRecord) {
+  return request.target.kind === "browser" && request.target.private_network;
+}
+
+function hostAccessTitle(request: HostAccessRequestRecord, locale: WorkbenchGateProps["locale"]) {
+  const target = hostAccessTarget(request);
+  if (request.target.kind === "browser") {
+    return locale === "zh-CN"
+      ? `允许 Agent 访问网站「${target}」？`
+      : `Allow the agent to access ${target}?`;
+  }
+  return locale === "zh-CN"
+    ? `允许 Agent 控制应用「${target}」？`
+    : `Allow the agent to control ${target}?`;
 }
 
 function humanizeApprovalAction(action: string) {

@@ -69,10 +69,10 @@ vi.mock("@hachimi/ui", () => {
           data-testid={props.testId}
           value={props.value}
           placeholder={props.placeholder}
-          onFocus={props.onFocus}
-          onBlur={props.onBlur}
-          onInput={props.onInput}
-          onKeyDown={props.onKeyDown}
+          onFocus={(event) => props.onFocus?.(event)}
+          onBlur={(event) => props.onBlur?.(event)}
+          onInput={(event) => props.onInput?.(event)}
+          onKeyDown={(event) => props.onKeyDown?.(event)}
         />
       </label>
     ),
@@ -173,6 +173,7 @@ function createHarness(leaseStatus?: "active" | "suspended") {
     updateBrowserSurfaceLayout: vi.fn(async () => undefined),
     getBrowserHistory: vi.fn(async () => []),
     listEmbeddedBrowserPermissionRequests: vi.fn(async () => []),
+    listHostAccessRequests: vi.fn(async () => []),
     resolveEmbeddedBrowserPermission: vi.fn(async (request) => ({
       id: request.requestId,
       workspaceId: "workspace-1",
@@ -206,7 +207,13 @@ function createHarness(leaseStatus?: "active" | "suspended") {
     ),
     onBrowserRuntimeCrash: vi.fn(async () => () => undefined),
   } as unknown as WorkbenchCommandPort;
-  const snapshot = { session: { id: "session-1" } } as WorkbenchSessionSnapshot;
+  const snapshot = {
+    session: { id: "session-1" },
+    browserSessions: [],
+    browserAutomationLeases: leaseStatus ? [automationLease(leaseStatus)] : [],
+    externalBrowserObservations: [],
+    hostAccessRequests: [],
+  } as unknown as WorkbenchSessionSnapshot;
   return {
     commandPort,
     mutateBrowserWorkspace,
@@ -366,6 +373,93 @@ describe("BrowserInspector workspace", () => {
         "resume_automation",
       ]),
     );
+    dispose();
+  });
+
+  it("shows external Chrome observations and supports takeover, resume, and stop", async () => {
+    const activeLease = {
+      ...automationLease("active"),
+      surface: "external_chrome",
+      workspaceId: null,
+      tabId: null,
+    };
+    const takeOverBrowserAutomation = vi.fn(async () => ({
+      ...activeLease,
+      status: "suspended" as const,
+      revision: 2,
+    }));
+    const resumeBrowserAutomation = vi.fn(async () => ({
+      ...activeLease,
+      status: "active" as const,
+      revision: 3,
+    }));
+    const stopBrowserAutomation = vi.fn(async () => ({
+      ...activeLease,
+      status: "expired" as const,
+      revision: 4,
+    }));
+    const commandPort = {
+      getBrowserHostSettings: vi.fn(async () => ({
+        automationEnabled: true,
+        automationPreference: "external_chrome",
+        latestPairing: { confirmed: true },
+      })),
+      listHostAccessRequests: vi.fn(async () => []),
+      resolveHostAccessRequest: vi.fn(),
+      takeOverBrowserAutomation,
+      resumeBrowserAutomation,
+      stopBrowserAutomation,
+    } as unknown as WorkbenchCommandPort;
+    const snapshot = {
+      session: { id: "session-1" },
+      browserSessions: [
+        {
+          id: "browser-session-1",
+          currentUrl: "https://example.com/dashboard",
+        },
+      ],
+      browserAutomationLeases: [activeLease],
+      externalBrowserObservations: [
+        {
+          leaseId: "lease-1",
+          observation: {
+            browserSessionId: "browser-session-1",
+            title: "Dashboard",
+            url: "https://example.com/dashboard",
+            screenshotBase64: "iVBORw0KGgo=",
+            screenshotMimeType: "image/png",
+          },
+        },
+      ],
+      hostAccessRequests: [],
+    } as unknown as WorkbenchSessionSnapshot;
+    const host = document.createElement("div");
+    document.body.append(host);
+    const dispose = render(
+      () => (
+        <BrowserInspector
+          snapshot={snapshot}
+          commandPort={commandPort}
+          locale="zh-CN"
+          leaseId="lease-1"
+          surfaceKind="external_chrome"
+        />
+      ),
+      host,
+    );
+
+    await vi.waitFor(() =>
+      expect(host.querySelector("img")?.getAttribute("src")).toContain("iVBOR"),
+    );
+    host.querySelector<HTMLButtonElement>('[data-testid="external-browser-take-over"]')?.click();
+    await vi.waitFor(() =>
+      expect(host.querySelector('[data-testid="external-browser-resume-agent"]')).toBeTruthy(),
+    );
+    host.querySelector<HTMLButtonElement>('[data-testid="external-browser-resume-agent"]')?.click();
+    await vi.waitFor(() => expect(resumeBrowserAutomation).toHaveBeenCalledWith("lease-1"));
+    host.querySelector<HTMLButtonElement>('[data-testid="external-browser-stop-agent"]')?.click();
+    await vi.waitFor(() => expect(stopBrowserAutomation).toHaveBeenCalledWith("lease-1"));
+    expect(takeOverBrowserAutomation).toHaveBeenCalledWith("lease-1");
     dispose();
   });
 

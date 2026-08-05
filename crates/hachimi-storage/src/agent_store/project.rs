@@ -171,6 +171,63 @@ impl AgentStore {
         Ok(())
     }
 
+    pub async fn attach_to_run_input(
+        &self,
+        run_id: &RunId,
+        attachment_ids: &[AttachmentId],
+    ) -> Result<(), AgentStoreError> {
+        let mut transaction = self.pool.begin().await?;
+        let row = sqlx::query(
+            "SELECT id, payload_json FROM transcript_items WHERE run_id = ? AND kind = 'user' ORDER BY sequence ASC LIMIT 1",
+        )
+        .bind(run_id.as_str())
+        .fetch_optional(&mut *transaction)
+        .await?
+        .ok_or_else(|| AgentStoreError::InvalidPersistedValue {
+            kind: "run user input",
+            value: run_id.to_string(),
+        })?;
+        let mut payload: ItemPayload = serde_json::from_str(row.get("payload_json"))?;
+        let ItemPayload::User {
+            attachment_ids: persisted,
+            ..
+        } = &mut payload
+        else {
+            return Err(AgentStoreError::InvalidPersistedValue {
+                kind: "run user input",
+                value: run_id.to_string(),
+            });
+        };
+        for attachment_id in attachment_ids {
+            let exists =
+                sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM attachments WHERE id = ?")
+                    .bind(attachment_id.as_str())
+                    .fetch_one(&mut *transaction)
+                    .await?
+                    > 0;
+            if !exists {
+                return Err(AgentStoreError::AttachmentNotFound(attachment_id.clone()));
+            }
+            sqlx::query(
+                "INSERT OR IGNORE INTO run_attachments (run_id, attachment_id) VALUES (?, ?)",
+            )
+            .bind(run_id.as_str())
+            .bind(attachment_id.as_str())
+            .execute(&mut *transaction)
+            .await?;
+            if !persisted.contains(attachment_id) {
+                persisted.push(attachment_id.clone());
+            }
+        }
+        sqlx::query("UPDATE transcript_items SET payload_json = ? WHERE id = ?")
+            .bind(serde_json::to_string(&payload)?)
+            .bind(row.get::<String, _>("id"))
+            .execute(&mut *transaction)
+            .await?;
+        transaction.commit().await?;
+        Ok(())
+    }
+
     pub async fn list_run_managed_attachments(
         &self,
         run_id: &RunId,

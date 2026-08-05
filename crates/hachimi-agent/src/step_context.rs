@@ -529,17 +529,15 @@ mod tests {
         assert!(plan.allows("agent.wait"));
         assert!(!plan.allows("agent.spawn"));
 
-        for entry_profile in [EntryProfile::PetConversation, EntryProfile::DesktopControl] {
-            let denied = ToolPlan::build(
-                entry_profile,
-                WorkloadKind::General,
-                BehaviorMode::Default,
-                provider,
-                descriptors.clone(),
-                unconstrained_tool_plan(),
-            );
-            assert!(denied.descriptors().is_empty());
-        }
+        let denied = ToolPlan::build(
+            EntryProfile::PetConversation,
+            WorkloadKind::General,
+            BehaviorMode::Default,
+            provider,
+            descriptors.clone(),
+            unconstrained_tool_plan(),
+        );
+        assert!(denied.descriptors().is_empty());
     }
 
     #[test]
@@ -617,23 +615,21 @@ mod tests {
                 vec!["agent.collect", "agent.wait"]
             );
 
-            for entry_profile in [EntryProfile::PetConversation, EntryProfile::DesktopControl] {
-                assert!(
-                    ToolPlan::build(
-                        entry_profile,
-                        workload,
-                        BehaviorMode::Default,
-                        provider,
-                        descriptors.clone(),
-                        ToolPlanConstraints {
-                            capability_grants: Some(&full_grants),
-                            ..unconstrained_tool_plan()
-                        },
-                    )
-                    .descriptors()
-                    .is_empty()
-                );
-            }
+            assert!(
+                ToolPlan::build(
+                    EntryProfile::PetConversation,
+                    workload,
+                    BehaviorMode::Default,
+                    provider,
+                    descriptors.clone(),
+                    ToolPlanConstraints {
+                        capability_grants: Some(&full_grants),
+                        ..unconstrained_tool_plan()
+                    },
+                )
+                .descriptors()
+                .is_empty()
+            );
         }
 
         let narrowed = ToolPlan::build(

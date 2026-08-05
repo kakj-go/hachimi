@@ -155,6 +155,7 @@ function ReadOnlyCode(props: {
 interface MarkdownDocument {
   frontmatter: string[] | null;
   name: string;
+  displayName: string;
   description: string;
   body: string;
 }
@@ -235,19 +236,33 @@ function MarkdownWysiwyg(props: {
     <div class="skill-wysiwyg">
       <Show when={props.isEntry && documentState().frontmatter !== null}>
         <div class="skill-wysiwyg-metadata">
-          <div>
-            <span>{props.copy("Skill 名称", "Skill name")}</span>
-            <code>{documentState().name}</code>
-          </div>
           <TextField
-            label={props.copy("用途与触发条件", "Purpose and trigger conditions")}
-            value={documentState().description}
+            label={props.copy("名称", "Name")}
+            value={documentState().name}
+            disabled
+            description={props.copy("由技能目录名称决定", "Defined by the Skill directory")}
+          />
+          <TextField
+            label={props.copy("别名", "Alias")}
+            value={documentState().displayName}
+            placeholder={props.copy("面向用户显示的简洁名称", "Concise user-facing name")}
             onInput={(event) => {
-              const next = { ...documentState(), description: event.currentTarget.value };
+              const next = { ...documentState(), displayName: event.currentTarget.value };
               setDocumentState(next);
               emit(next);
             }}
           />
+          <div class="skill-wysiwyg-description">
+            <TextField
+              label={props.copy("描述", "Description")}
+              value={documentState().description}
+              onInput={(event) => {
+                const next = { ...documentState(), description: event.currentTarget.value };
+                setDocumentState(next);
+                emit(next);
+              }}
+            />
+          </div>
         </div>
       </Show>
       <div
@@ -349,10 +364,11 @@ function MarkdownWysiwyg(props: {
 function parseMarkdownDocument(source: string, parseEntryFrontmatter = true): MarkdownDocument {
   const normalized = source.replace(/\r\n?/g, "\n");
   if (!parseEntryFrontmatter || !normalized.startsWith("---\n")) {
-    return { frontmatter: null, name: "", description: "", body: normalized };
+    return { frontmatter: null, name: "", displayName: "", description: "", body: normalized };
   }
   const end = normalized.indexOf("\n---", 4);
-  if (end < 0) return { frontmatter: null, name: "", description: "", body: normalized };
+  if (end < 0)
+    return { frontmatter: null, name: "", displayName: "", description: "", body: normalized };
   const frontmatter = normalized.slice(4, end).split("\n");
   const body = normalized.slice(end + 4).replace(/^\n+/, "");
   const field = (name: string) =>
@@ -361,18 +377,29 @@ function parseMarkdownDocument(source: string, parseEntryFrontmatter = true): Ma
       ?.slice(name.length + 1)
       .trim()
       .replace(/^(['"])(.*)\1$/, "$2") ?? "";
-  return { frontmatter, name: field("name"), description: field("description"), body };
+  return {
+    frontmatter,
+    name: field("name"),
+    displayName: field("display_name"),
+    description: field("description"),
+    body,
+  };
 }
 
 function composeMarkdownDocument(value: MarkdownDocument): string {
   const body = value.body.trimEnd();
   if (!value.frontmatter) return body ? `${body}\n` : "";
   let hasName = false;
+  let hasDisplayName = false;
   let hasDescription = false;
   const frontmatter = value.frontmatter.map((line) => {
     if (line.startsWith("name:")) {
       hasName = true;
       return `name: ${value.name}`;
+    }
+    if (line.startsWith("display_name:")) {
+      hasDisplayName = true;
+      return `display_name: ${value.displayName.replace(/\s+/g, " ").trim()}`;
     }
     if (line.startsWith("description:")) {
       hasDescription = true;
@@ -381,6 +408,8 @@ function composeMarkdownDocument(value: MarkdownDocument): string {
     return line;
   });
   if (!hasName) frontmatter.push(`name: ${value.name}`);
+  if (!hasDisplayName && value.displayName.trim())
+    frontmatter.push(`display_name: ${value.displayName.replace(/\s+/g, " ").trim()}`);
   if (!hasDescription)
     frontmatter.push(`description: ${value.description.replace(/\s+/g, " ").trim()}`);
   return `---\n${frontmatter.join("\n")}\n---\n\n${body}${body ? "\n" : ""}`;

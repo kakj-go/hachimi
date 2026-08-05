@@ -21,10 +21,10 @@ use hachimi_agent::{AgentRunCreateRequest, AgentRunFactory, AgentRunFactoryError
 use hachimi_process_policy::{ProcessPolicy, tokio_command};
 use hachimi_protocol::{
     AttachmentId, AttachmentRecord, CheckoutId, CheckoutKind, CheckoutRecord, CheckoutStatus,
-    EntryProfile, ExecutionTarget, GitRefRecord, ItemId, ItemPayload, ItemRelations, ItemStatus,
-    LlmSettings, PermissionProfile, PlanAcceptanceRequest, PlanRevisionRequest, ProjectId,
-    ProjectRecord, ProviderCapabilities, RunBudget, RunId, RunOrigin, RunPurpose, RunRecord,
-    RunStatus, SessionContextBinding, SessionId, TranscriptItem, TranscriptItemKind,
+    ExecutionTarget, GitRefRecord, ItemId, ItemPayload, ItemRelations, ItemStatus, LlmSettings,
+    PermissionProfile, PlanAcceptanceRequest, PlanRevisionRequest, ProjectId, ProjectRecord,
+    ProviderCapabilities, RunBudget, RunId, RunOrigin, RunPurpose, RunRecord, RunStatus,
+    SessionContextBinding, SessionId, TranscriptItem, TranscriptItemKind,
     WorkbenchAttachmentPreview, WorkbenchGitAction, WorkbenchGitPhaseResult,
     WorkbenchGitPhaseStatus, WorkbenchGitRequest, WorkbenchGitResponse,
     WorkbenchPlanAcceptanceSnapshot, WorkbenchSessionListItem, WorkbenchSessionSnapshot,
@@ -310,6 +310,22 @@ impl WorkbenchService {
         let agent_tasks = self.store.list_agent_tasks_for_session(session_id).await?;
         let run_summaries = self.store.list_run_summaries(session_id).await?;
         let browser_sessions = self.store.list_session_browser_sessions(session_id).await?;
+        let browser_automation_leases = self
+            .store
+            .list_session_browser_automation_leases(session_id)
+            .await?;
+        let external_browser_observations = self
+            .store
+            .list_session_external_browser_observations(session_id)
+            .await?;
+        let host_access_requests = self
+            .store
+            .list_host_access_requests(Some(session_id))
+            .await?;
+        let computer_control_sessions = self
+            .store
+            .list_session_computer_control_sessions(session_id)
+            .await?;
         let sources = self.store.list_session_sources(session_id).await?;
         Ok(WorkbenchSessionSnapshot {
             session,
@@ -324,6 +340,10 @@ impl WorkbenchService {
             agent_tasks,
             run_summaries,
             browser_sessions,
+            browser_automation_leases,
+            external_browser_observations,
+            host_access_requests,
+            computer_control_sessions,
             sources,
         })
     }
@@ -907,11 +927,6 @@ impl WorkbenchService {
         if prompt.is_empty() || prompt.chars().count() > 32_000 {
             return Err(WorkbenchError::InvalidPrompt);
         }
-        if request.entry_profile == EntryProfile::DesktopControl
-            && (request.project_id.is_some() || request.execution_target.is_some())
-        {
-            return Err(WorkbenchError::SessionContextMismatch);
-        }
         for attachment_id in &request.attachment_ids {
             if self.store.get_attachment(attachment_id).await?.is_none() {
                 return Err(WorkbenchError::AttachmentNotFound(attachment_id.clone()));
@@ -1032,9 +1047,7 @@ impl WorkbenchService {
             behavior_mode: request.behavior_mode,
             execution_target,
             approval_policy: request.approval_policy,
-            permission_profile: if request.entry_profile == EntryProfile::DesktopControl {
-                PermissionProfile::ExternalSandbox
-            } else if request.behavior_mode == hachimi_protocol::BehaviorMode::Plan {
+            permission_profile: if request.behavior_mode == hachimi_protocol::BehaviorMode::Plan {
                 PermissionProfile::ReadOnly
             } else if project.is_none() {
                 PermissionProfile::ExternalSandbox
@@ -1051,11 +1064,6 @@ impl WorkbenchService {
         } else {
             factory.create(create_request).await?
         };
-        if request.entry_profile == EntryProfile::DesktopControl {
-            self.store
-                .upsert_desktop_control_session(&created.session.id, now)
-                .await?;
-        }
         if let Some(checkout) = checkout.as_ref() {
             self.store
                 .ensure_session_environment_state(
@@ -1309,7 +1317,7 @@ mod tests {
     use std::process::Command as StdCommand;
 
     use hachimi_protocol::{
-        ApprovalPolicy, BehaviorMode, PlanAcceptanceRequest, PlanId, ProposedPlan,
+        ApprovalPolicy, BehaviorMode, EntryProfile, PlanAcceptanceRequest, PlanId, ProposedPlan,
         ProposedPlanStatus, WorkbenchTaskStartRequest,
     };
 

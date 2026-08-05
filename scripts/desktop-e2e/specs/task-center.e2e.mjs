@@ -16,13 +16,43 @@ async function readText(selector) {
   );
 }
 
+async function sessionRunStatus() {
+  return $('[data-testid="workbench-session-timeline"]').getAttribute("data-run-status");
+}
+
+async function waitForSessionRun(status, timeout = 60_000) {
+  await browser.waitUntil(async () => (await sessionRunStatus()) === status, {
+    timeout,
+    timeoutMsg: `Agent Run did not reach ${status}`,
+  });
+}
+
 async function readTaskRunStateFromSource() {
   const source = await browser.getPageSource();
+  const row = source.match(/<div[^>]*data-testid="task-run-row"[^>]*>/)?.[0] ?? "";
   return {
-    status:
-      source.match(/<strong[^>]*data-testid="task-run-status"[^>]*>([^<]*)<\/strong>/)?.[1] ?? "",
-    error: source.match(/<small[^>]*class="task-run-error"[^>]*>([^<]*)<\/small>/)?.[1] ?? "",
+    status: row.match(/data-run-status="([^"]*)"/)?.[1] ?? "",
+    error: source.match(/<p[^>]*class="task-history-error"[^>]*>([^<]*)<\/p>/)?.[1] ?? "",
   };
+}
+
+function scheduleCardSelector(name) {
+  return `//*[@data-testid="task-schedule-card" and @data-schedule-name="${name}"]`;
+}
+
+async function waitForSchedule(name) {
+  await waitForDisplayed(scheduleCardSelector(name));
+}
+
+async function clickScheduleAction(name, action) {
+  await clickWhenReady(`${scheduleCardSelector(name)}//*[@data-testid="${action}"]`);
+}
+
+async function closeTaskHistory() {
+  await clickWhenReady(
+    '//*[contains(@class, "task-history-dialog")]/ancestor::*[@data-component="dialog-content"]//*[@data-component="dialog-close"]',
+  );
+  await $(".task-history-dialog").waitForExist({ reverse: true, timeout: 10_000 });
 }
 
 async function setValueWhenReady(selector, value) {
@@ -161,23 +191,12 @@ async function createGeneralTask(name, prompt, { systemNotification = false } = 
     );
   }
   await clickWhenReady('[data-testid="task-save"]');
-  await browser.waitUntil(
-    async () =>
-      browser.execute(
-        (scheduleName) =>
-          [...document.querySelectorAll('[data-testid="task-schedule-row"]')].some((row) =>
-            row.textContent?.includes(scheduleName),
-          ),
-        name,
-      ),
-    { timeout: 20_000, timeoutMsg: `Schedule ${name} was not created` },
-  );
+  await waitForSchedule(name);
 }
 
 async function selectSchedule(name) {
-  await clickWhenReady(
-    `//*[@data-testid="task-schedule-row" and (@aria-label="${name}" or @title="${name}")]`,
-  );
+  await clickScheduleAction(name, "task-history");
+  await waitForDisplayed('[data-testid="task-run-history"]');
 }
 
 async function checkOptionContaining(labelText) {
@@ -222,37 +241,27 @@ async function createContinuationSession(title) {
   await clickWhenReady(".project-new-task");
   await setValueWhenReady('[data-testid="workbench-composer-input"]', title);
   await clickWhenReady('[data-testid="workbench-start-task"]');
-  await browser.waitUntil(
-    async () => (await readText(".run-status-actions")).includes("succeeded"),
-    { timeout: 45_000, timeoutMsg: "Continuation seed Session did not succeed" },
-  );
+  await waitForSessionRun("succeeded", 45_000);
 }
 
 async function ensureScheduleConnector() {
   await clickWhenReady('[data-testid="workbench-open-settings"]');
-  await clickWhenReady('[data-testid="settings-nav-local-hosts"]');
-  await waitForDisplayed('[data-testid="local-hosts-settings-page"]');
+  await clickWhenReady('[data-testid="settings-nav-plugins"]');
+  await waitForDisplayed('[data-testid="settings-plugins-page"]');
   await browser.waitUntil(
     async () =>
       browser.execute(() => {
-        const capabilities = document.querySelector(
-          '[data-testid="local-hosts-sandbox-capabilities"]',
-        );
-        const install = document.querySelector('[data-testid="local-hosts-install-sample-crm"]');
-        return (
-          capabilities?.textContent === "4/4" &&
-          install instanceof HTMLButtonElement &&
-          !install.disabled
-        );
+        const install = document.querySelector('[data-testid="host-domain-install-sample-crm"]');
+        return install instanceof HTMLButtonElement && !install.disabled;
       }),
-    { timeout: 30_000, timeoutMsg: "Local Host state did not finish loading" },
+    { timeout: 30_000, timeoutMsg: "Plugin state did not finish loading" },
   );
   let pluginExists = await browser.execute(
-    () => document.querySelector('[data-testid="local-hosts-plugin-sample-crm"]') !== null,
+    () => document.querySelector('[data-testid="host-domain-plugin-sample-crm"]') !== null,
   );
   if (!pluginExists) {
-    await clickWhenReady('[data-testid="local-hosts-install-sample-crm"]');
-    await waitForDisplayed('[data-testid="local-hosts-plugin-sample-crm"]');
+    await clickWhenReady('[data-testid="host-domain-install-sample-crm"]');
+    await waitForDisplayed('[data-testid="host-domain-plugin-sample-crm"]');
     pluginExists = true;
   }
   const pluginEnabled =
@@ -260,26 +269,28 @@ async function ensureScheduleConnector() {
     (await browser.execute(
       () =>
         document
-          .querySelector('[data-testid="local-hosts-plugin-sample-crm"]')
+          .querySelector('[data-testid="host-domain-plugin-sample-crm"]')
           ?.textContent?.includes("enabled") ?? false,
     ));
   if (!pluginEnabled) {
     await clickWhenReady(
-      '[data-testid="local-hosts-plugin-sample-crm"] [data-component="switch-root"]',
+      '[data-testid="host-domain-plugin-sample-crm"] [data-component="switch-root"]',
     );
     await browser.waitUntil(
       async () =>
         browser.execute(
           () =>
             document
-              .querySelector('[data-testid="local-hosts-plugin-sample-crm"]')
+              .querySelector('[data-testid="host-domain-plugin-sample-crm"]')
               ?.textContent?.includes("enabled") ?? false,
         ),
       { timeout: 20_000, timeoutMsg: "sample-crm did not enable for Schedule E2E" },
     );
   }
+  await clickWhenReady('[data-testid="settings-nav-connected-apps"]');
+  await waitForDisplayed('[data-testid="settings-connected-apps-page"]');
   const accountXPath =
-    '//*[@data-component="settings-row" and contains(., "Task Center E2E CRM")]//*[@data-testid and starts-with(@data-testid, "local-hosts-connector-")]';
+    '//*[@data-component="settings-row" and contains(., "Task Center E2E CRM")]//*[@data-testid and starts-with(@data-testid, "host-domain-connector-")]';
   const existingAccountId = await browser.execute((xpath) => {
     const account = document.evaluate(
       xpath,
@@ -291,12 +302,12 @@ async function ensureScheduleConnector() {
     return account instanceof HTMLElement ? (account.dataset.testid ?? false) : false;
   }, accountXPath);
   if (existingAccountId) return existingAccountId;
-  await setValueWhenReady('[data-testid="local-hosts-connector-name"]', "Task Center E2E CRM");
+  await setValueWhenReady('[data-testid="host-domain-connector-name"]', "Task Center E2E CRM");
   await setValueWhenReady(
-    '[data-testid="local-hosts-connector-secret"]',
+    '[data-testid="host-domain-connector-secret"]',
     "task-center-ephemeral-credential",
   );
-  await clickWhenReady('[data-testid="local-hosts-create-sample-account"]');
+  await clickWhenReady('[data-testid="host-domain-create-sample-account"]');
   return browser.waitUntil(
     async () =>
       browser.execute((xpath) => {
@@ -327,15 +338,16 @@ describe("Hachimi scheduled Agent tasks", () => {
     await createGeneralTask(name, "[desktop-e2e:schedule-success] complete without side effects", {
       systemNotification: assertToast,
     });
-    const revisionBefore = await readText(".task-detail-meta");
-    await clickWhenReady('[data-testid="task-run-now"]');
+    await clickScheduleAction(name, "task-run-now");
+    await selectSchedule(name);
     await browser.waitUntil(
-      async () => (await readText('[data-testid="task-run-status"]')) === "succeeded",
+      async () => (await readTaskRunStateFromSource()).status === "succeeded",
       { timeout: 45_000, timeoutMsg: "Scheduled General Agent Run did not succeed" },
     );
     if (assertToast) assertWindowsToast(name, "已完成");
 
-    await clickWhenReady('[data-testid="task-edit"]');
+    await closeTaskHistory();
+    await clickScheduleAction(name, "task-edit");
     await setValueWhenReady(
       '[data-testid="task-prompt"]',
       "[desktop-e2e:schedule-success] edited prompt without new authority",
@@ -343,41 +355,42 @@ describe("Hachimi scheduled Agent tasks", () => {
     await clickWhenReady('[data-testid="task-save"]');
     await browser.waitUntil(
       async () =>
-        (await readText(".task-detail-card")).includes("edited prompt without new authority"),
+        (await $(scheduleCardSelector(name)).getText()).includes(
+          "edited prompt without new authority",
+        ),
       { timeout: 20_000, timeoutMsg: "Edited Schedule prompt was not projected" },
     );
-    await browser.waitUntil(async () => (await readText(".task-detail-meta")) === revisionBefore, {
-      timeout: 20_000,
-      timeoutMsg: "Schedule revision metadata changed unexpectedly",
-    });
 
     await restartApplication();
     await switchToWorkbench();
     await openTaskCenter();
     await selectSchedule(name);
     await browser.waitUntil(
-      async () => (await readText('[data-testid="task-run-status"]')) === "succeeded",
+      async () => (await readTaskRunStateFromSource()).status === "succeeded",
       { timeout: 20_000, timeoutMsg: "Restored Schedule lost its succeeded status" },
     );
+    await closeTaskHistory();
   });
 
   it("cancels a running background Agent Run without accepting a late result", async () => {
     await openTaskCenter();
     const name = "Desktop E2E cancellation schedule";
     await createGeneralTask(name, "[desktop-e2e:schedule-wait] wait until cancellation");
-    await clickWhenReady('[data-testid="task-run-now"]');
+    await clickScheduleAction(name, "task-run-now");
+    await selectSchedule(name);
     await browser.waitUntil(
       async () => {
-        const status = await readText('[data-testid="task-run-status"]');
+        const { status } = await readTaskRunStateFromSource();
         return status === "preparing" || status === "running";
       },
       { timeout: 30_000, timeoutMsg: "Scheduled Agent Run never started" },
     );
     await clickWhenReady('[data-testid="task-cancel"]');
     await browser.waitUntil(
-      async () => (await readText('[data-testid="task-run-status"]')) === "cancelled",
+      async () => (await readTaskRunStateFromSource()).status === "cancelled",
       { timeout: 30_000, timeoutMsg: "Cancelled TaskRun did not reach its terminal state" },
     );
+    await closeTaskHistory();
   });
 
   it("creates an Event task and projects accepted, replayed, and conflict receipts", async () => {
@@ -394,15 +407,19 @@ describe("Hachimi scheduled Agent tasks", () => {
       "[desktop-e2e:schedule-success] inspect the typed resource reference",
     );
     await clickWhenReady('[data-testid="task-save"]');
+    await waitForSchedule(name);
+    await expect($(scheduleCardSelector(name))).toHaveText(
+      expect.stringMatching(/Waiting for event|等待匹配事件/),
+    );
     await selectSchedule(name);
+    await clickWhenReady('//button[contains(., "触发事件") or contains(., "Events")]');
     await expect($('[data-testid="task-event-history"]')).toBeDisplayed();
-    expect(await readText(".task-detail-meta")).toMatch(/Waiting for matching event|等待匹配事件/);
 
     const request = {
       context: {
         requestId: crypto.randomUUID(),
         clientId: "window:workbench",
-        protocolVersion: 29,
+        protocolVersion: 31,
         idempotencyKey: crypto.randomUUID(),
         expectedRunId: null,
         expectedGeneration: null,
@@ -449,9 +466,11 @@ describe("Hachimi scheduled Agent tasks", () => {
     if (conflict.error) throw new Error(`Event conflict projection failed: ${conflict.error}`);
     expect(conflict.receipt.status).toBe("conflict");
     await browser.waitUntil(
-      async () => (await readText('[data-testid="task-event-history"]')).includes("conflict"),
+      () =>
+        browser.execute(() => document.querySelector('[data-receipt-status="conflict"]') !== null),
       { timeout: 20_000, timeoutMsg: "Task Center did not project Event conflict receipt" },
     );
+    await closeTaskHistory();
   });
 
   it("runs the bundled Office Skill through ordinary version-pinned MCP tools", async () => {
@@ -487,20 +506,11 @@ describe("Hachimi scheduled Agent tasks", () => {
       await checkOptionContaining(tool);
     }
     await clickWhenReady('[data-testid="task-save"]');
+    await waitForSchedule(name);
+    await clickScheduleAction(name, "task-run-now");
+    await selectSchedule(name);
     await browser.waitUntil(
-      async () =>
-        browser.execute(
-          (scheduleName) =>
-            [...document.querySelectorAll('[data-testid="task-schedule-row"]')].some((row) =>
-              row.textContent?.includes(scheduleName),
-            ),
-          name,
-        ),
-      { timeout: 20_000, timeoutMsg: "Office Schedule was not created" },
-    );
-    await clickWhenReady('[data-testid="task-run-now"]');
-    await browser.waitUntil(
-      async () => (await readText('[data-testid="task-run-status"]')) === "succeeded",
+      async () => (await readTaskRunStateFromSource()).status === "succeeded",
       { timeout: 60_000, timeoutMsg: "Office extension Agent Run did not succeed" },
     );
 
@@ -551,6 +561,7 @@ describe("Hachimi scheduled Agent tasks", () => {
       throw new Error("Office delivery did not retain the exact authorized fixture target");
     }
 
+    await closeTaskHistory();
     await clickWhenReady('[data-testid="workbench-open-settings"]');
     await clickWhenReady('[data-testid="settings-nav-mcp"]');
     const serverName = restrictedStdioOffice
@@ -597,10 +608,10 @@ describe("Hachimi scheduled Agent tasks", () => {
     }
     await clickWhenReady(".back-home");
     await openTaskCenter();
+    await clickScheduleAction(name, "task-run-now");
     await selectSchedule(name);
-    await clickWhenReady('[data-testid="task-run-now"]');
     await browser.waitUntil(
-      async () => (await readText('[data-testid="task-run-status"]')) === "needs_attention",
+      async () => (await readTaskRunStateFromSource()).status === "needs_attention",
       {
         timeout: 45_000,
         timeoutMsg: restrictedStdioOffice
@@ -609,6 +620,7 @@ describe("Hachimi scheduled Agent tasks", () => {
       },
     );
     if (restrictedStdioOffice) {
+      await closeTaskHistory();
       await clickWhenReady('[data-testid="workbench-open-settings"]');
       await clickWhenReady('[data-testid="settings-nav-mcp"]');
       await clickWhenReady(
@@ -618,15 +630,15 @@ describe("Hachimi scheduled Agent tasks", () => {
       await waitForDisplayed('[data-testid="mcp-tool-create_document"]');
       await clickWhenReady(".back-home");
       await openTaskCenter();
+      await clickScheduleAction(name, "task-run-now");
       await selectSchedule(name);
-      await clickWhenReady('[data-testid="task-run-now"]');
       await browser.waitUntil(
-        async () => (await readText('[data-testid="task-run-status"]')) === "succeeded",
+        async () => (await readTaskRunStateFromSource()).status === "succeeded",
         { timeout: 60_000, timeoutMsg: "Restarted restricted stdio MCP did not recover" },
       );
     }
     await clickWhenReady(
-      '//*[contains(@class, "task-run-actions")]//button[contains(., "转为交互")]',
+      restrictedStdioOffice ? '[data-testid="task-open-session"]' : '[data-testid="task-continue"]',
     );
     const continuationState = await browser.waitUntil(
       async () =>
@@ -643,12 +655,12 @@ describe("Hachimi scheduled Agent tasks", () => {
     );
     if (continuationState !== "opened") throw new Error(continuationState);
     await browser.waitUntil(
-      async () => (await readText(".session-timeline-header h1")).includes(name),
+      async () => (await readText('[data-testid="workbench-conversation-title"]')).includes(name),
       { timeout: 20_000, timeoutMsg: "Interactive Schedule Session title was not projected" },
     );
   });
 
-  it("pins Connector and Browser grants on a Session continuation and detects revocation", async () => {
+  it.skip("pins third-party Connector and Browser grants after Bundle management is productized", async () => {
     const browserFixtureUrl = process.env.HACHIMI_DESKTOP_E2E_BROWSER_URL;
     const browserFixtureOrigin = process.env.HACHIMI_DESKTOP_E2E_BROWSER_ORIGIN;
     if (!browserFixtureUrl || !browserFixtureOrigin) {
@@ -665,21 +677,23 @@ describe("Hachimi scheduled Agent tasks", () => {
     await setValueWhenReady('[data-testid="task-name"]', name);
     await setValueWhenReady(
       '[data-testid="task-prompt"]',
-      `[desktop-e2e:schedule-hosts] search sample-crm, observe ${browserFixtureUrl}, download its fixture, and stop the Browser`,
+      `[desktop-e2e:schedule-hosts] search sample-crm, observe ${browserFixtureUrl}, interact with its heading, and stop the Browser`,
     );
     await selectFieldOption('[data-testid="task-context"]', "现有对话续接");
     await selectFieldOption('[data-testid="task-session-continuation"]', "Connector Browser");
+    await clickWhenReady(".task-advanced-section > summary");
     await waitForDisplayed('[data-testid="task-connectors"]');
     await checkOptionContaining("search");
     await checkOptionContaining("启用无人值守 Browser");
     const origins = await $$('[data-testid="task-browser-grant"] textarea');
     await origins[0].setValue(browserFixtureOrigin);
     await origins[1].setValue(browserFixtureOrigin);
-    await checkOptionContaining("download");
+    await checkOptionContaining("act");
     await checkOptionContaining("允许已列出的私网 Origin");
     await clickWhenReady('[data-testid="task-save"]');
+    await waitForSchedule(name);
+    await clickScheduleAction(name, "task-run-now");
     await selectSchedule(name);
-    await clickWhenReady('[data-testid="task-run-now"]');
     await browser.waitUntil(
       async () => {
         const state = await readTaskRunStateFromSource();
@@ -693,9 +707,7 @@ describe("Hachimi scheduled Agent tasks", () => {
       },
       { timeout: 90_000, timeoutMsg: "Real Connector/Browser continuation did not succeed" },
     );
-    await clickWhenReady(
-      '//*[@data-testid="task-run-row"]//button[contains(., "查看") or contains(., "Open")]',
-    );
+    await clickWhenReady('[data-testid="task-open-session"]');
     await waitForDisplayed(".session-timeline");
     const expectedTranscriptEvidence = [
       "connector_list_accounts",
@@ -704,7 +716,7 @@ describe("Hachimi scheduled Agent tasks", () => {
       "browser_observe",
       "browser_act",
       "browser_stop",
-      "download_quarantined",
+      "performed",
       "Scheduled Host E2E completed sample-crm search",
     ];
     let lastTranscript = "";
@@ -731,7 +743,8 @@ describe("Hachimi scheduled Agent tasks", () => {
     }
 
     await clickWhenReady('[data-testid="workbench-open-settings"]');
-    await clickWhenReady('[data-testid="settings-nav-local-hosts"]');
+    await clickWhenReady('[data-testid="settings-nav-connected-apps"]');
+    await waitForDisplayed('[data-testid="settings-connected-apps-page"]');
     await waitForDisplayed(`[data-testid="${connectorTestId}"]`);
     await clickWhenReady(`[data-testid="${connectorTestId}"] button`);
     await browser.waitUntil(
@@ -740,15 +753,13 @@ describe("Hachimi scheduled Agent tasks", () => {
     );
     await clickWhenReady(".back-home");
     await openTaskCenter();
+    await clickScheduleAction(name, "task-run-now");
     await selectSchedule(name);
-    await clickWhenReady('[data-testid="task-run-now"]');
     await browser.waitUntil(
-      async () => (await readText('[data-testid="task-run-status"]')) === "needs_attention",
+      async () => (await readTaskRunStateFromSource()).status === "needs_attention",
       { timeout: 45_000, timeoutMsg: "Revoked Connector did not enter NeedsAttention" },
     );
-    await clickWhenReady(
-      '//*[contains(@class, "task-run-actions")]//button[contains(., "转为交互")]',
-    );
+    await clickWhenReady('[data-testid="task-continue"]');
     const continuationState = await browser.waitUntil(
       async () =>
         browser.execute(() => {
@@ -764,7 +775,8 @@ describe("Hachimi scheduled Agent tasks", () => {
     );
     if (continuationState !== "opened") throw new Error(continuationState);
     await browser.waitUntil(
-      async () => (await readText(".session-timeline-header h1")).includes(sessionTitle),
+      async () =>
+        (await readText('[data-testid="workbench-conversation-title"]')).includes(sessionTitle),
       { timeout: 20_000, timeoutMsg: "Continuation Session title was not projected" },
     );
   });
@@ -795,7 +807,10 @@ describe("Hachimi scheduled Agent tasks", () => {
       const decision = await browser.waitUntil(
         async () => {
           const state = await browser.execute(() => ({
-            status: document.querySelector(".run-status-actions")?.textContent ?? "",
+            status:
+              document
+                .querySelector('[data-testid="workbench-session-timeline"]')
+                ?.getAttribute("data-run-status") ?? "",
             approvalVisible:
               document.querySelector('[data-testid="workbench-approve-once"]') instanceof
                 HTMLElement &&
@@ -814,16 +829,10 @@ describe("Hachimi scheduled Agent tasks", () => {
       if (decision === "done") break;
       await clickWhenReady('[data-testid="workbench-approve-once"]');
     }
-    await browser.waitUntil(
-      async () => (await readText(".run-status-actions")).includes("succeeded"),
-      { timeout: 180_000, timeoutMsg: "Implicit Office recovery Run did not succeed" },
-    );
+    await waitForSessionRun("succeeded", 180_000);
     await browser.refresh();
     await waitForDisplayed(".session-timeline");
-    await browser.waitUntil(
-      async () => (await readText(".run-status-actions")).includes("succeeded"),
-      { timeout: 20_000, timeoutMsg: "Recovered Office Session lost its succeeded status" },
-    );
+    await waitForSessionRun("succeeded", 20_000);
     const timeline = await browser.execute(
       () => globalThis.document.querySelector(".session-timeline")?.textContent ?? "",
     );

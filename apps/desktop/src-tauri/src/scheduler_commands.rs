@@ -28,23 +28,6 @@ use super::{CommandError, ControlMethod, DesktopState, epoch_millis, require_win
 
 pub(super) const TASK_NOTIFICATION_EVENT: &str = "workbench-task-notification";
 
-pub(super) fn start_desktop_scheduler(
-    app: &AppHandle,
-    scheduler: Arc<hachimi_scheduler::SchedulerService>,
-    enabled: bool,
-) {
-    if !enabled {
-        return;
-    }
-    let app = app.clone();
-    tauri::async_runtime::spawn(async move {
-        if let Err(error) = scheduler.reconcile_startup().await {
-            tracing::warn!(%error, "Scheduler startup reconciliation failed");
-        }
-        *app.state::<DesktopState>().scheduler_handle.lock() = Some(scheduler.start());
-    });
-}
-
 #[derive(Clone)]
 pub(super) struct DesktopScheduleRunLauncher {
     app: AppHandle,
@@ -1874,6 +1857,8 @@ mod tests {
                 protocol_version: None,
                 tool_count: 1,
                 error_code: None,
+                failure_count: 0,
+                next_retry_at_ms: None,
                 checked_at_ms: 1,
             },
         }

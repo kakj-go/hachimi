@@ -4,6 +4,12 @@ use hachimi_agent::ModelRuntime;
 use hachimi_agent::ModelRuntimeError;
 use hachimi_control_plane::{AppServerContext, AppServerRequest, AppServerResponse};
 
+#[path = "workbench_mcp_settings_commands.rs"]
+mod mcp_settings_commands;
+pub(super) use mcp_settings_commands::*;
+#[path = "workbench_interactive_grants.rs"]
+mod interactive_grants;
+
 #[tauri::command]
 pub(super) async fn list_workbench_projects(
     window: WebviewWindow,
@@ -129,10 +135,7 @@ async fn launch_recovered_workbench_run(
         .await
         .map_err(|error| CommandError::operation("run_recovery_session_get_failed", error))?
         .ok_or_else(|| CommandError::new("session_not_found", "Recovered Session not found"))?;
-    if !matches!(
-        session.entry_profile,
-        hachimi_protocol::EntryProfile::Workbench | hachimi_protocol::EntryProfile::DesktopControl
-    ) {
+    if session.entry_profile != hachimi_protocol::EntryProfile::Workbench {
         return Err(CommandError::new(
             "run_recovery_profile_unsupported",
             "Automatic recovery currently requires a Workbench Session",
@@ -248,286 +251,6 @@ fn now_ms() -> i64 {
         .unwrap_or_default()
         .as_millis()
         .min(i64::MAX as u128) as i64
-}
-
-#[tauri::command]
-pub(super) fn get_mcp_echo_server_url(
-    window: WebviewWindow,
-    state: State<'_, DesktopState>,
-) -> Result<String, CommandError> {
-    state.authorize(&window, ControlMethod::ConnectorsManage)?;
-    require_window(&window, "workbench")?;
-    Ok(state.mcp_echo_server.url().to_owned())
-}
-
-#[tauri::command]
-pub(super) async fn list_mcp_servers(
-    window: WebviewWindow,
-    state: State<'_, DesktopState>,
-) -> Result<Vec<McpServerView>, CommandError> {
-    state.authorize(&window, ControlMethod::ConnectorsManage)?;
-    require_window(&window, "workbench")?;
-    state
-        .mcp_control
-        .list()
-        .await
-        .map_err(|error| CommandError::operation("mcp_list_failed", error))
-}
-
-#[tauri::command]
-pub(super) async fn get_mcp_server(
-    window: WebviewWindow,
-    state: State<'_, DesktopState>,
-    server_id: hachimi_protocol::McpServerId,
-) -> Result<McpServerView, CommandError> {
-    state.authorize(&window, ControlMethod::ConnectorsManage)?;
-    require_window(&window, "workbench")?;
-    state
-        .mcp_control
-        .get(&server_id)
-        .await
-        .map_err(|error| CommandError::operation("mcp_get_failed", error))
-}
-
-#[tauri::command]
-pub(super) async fn upsert_mcp_server(
-    window: WebviewWindow,
-    state: State<'_, DesktopState>,
-    request: McpServerUpsertRequest,
-) -> Result<McpServerView, CommandError> {
-    state.authorize(&window, ControlMethod::ConnectorsManage)?;
-    require_window(&window, "workbench")?;
-    if request.enabled {
-        require_mcp_runtime(&state)?;
-    }
-    let _sandbox_activity = request
-        .enabled
-        .then(|| enter_sandbox_activity(&state))
-        .transpose()?;
-    let now = i64::try_from(epoch_millis()).unwrap_or(i64::MAX);
-    let existing = state
-        .mcp_control
-        .list()
-        .await
-        .map_err(|error| CommandError::operation("mcp_list_failed", error))?
-        .into_iter()
-        .find(|view| view.configuration.id == request.id)
-        .map(|view| view.configuration);
-    let previous_headers = existing
-        .as_ref()
-        .map(|configuration| configuration.headers.as_slice())
-        .unwrap_or_default();
-    let (headers, created_references) =
-        state
-            .mcp_secrets
-            .prepare_headers(&request.id, &request.headers, previous_headers)?;
-    let mut read_only_tools = request.read_only_tools;
-    read_only_tools.sort();
-    read_only_tools.dedup();
-    let record = McpServerRecord {
-        id: request.id,
-        display_name: request.display_name,
-        enabled: request.enabled,
-        transport: request.transport,
-        headers,
-        read_only_tools,
-        startup_timeout_ms: request.startup_timeout_ms,
-        request_timeout_ms: request.request_timeout_ms,
-        max_message_bytes: request.max_message_bytes,
-        created_at_ms: existing.as_ref().map_or(now, |record| record.created_at_ms),
-        updated_at_ms: now,
-    };
-    let outcome = state
-        .mcp_control
-        .upsert(&record)
-        .await
-        .map_err(|error| CommandError::operation("mcp_upsert_failed", error));
-    match outcome {
-        Ok(view) => {
-            let cleanup_failures = state
-                .mcp_secrets
-                .cleanup_replaced(previous_headers, &record.headers);
-            defer_mcp_secret_cleanup_failures(&state.agent_store, cleanup_failures).await;
-            Ok(view)
-        }
-        Err(error) => {
-            let mut cleanup_failures = Vec::new();
-            for reference in created_references {
-                if state.mcp_secrets.clear(&reference).is_err() {
-                    cleanup_failures.push(reference);
-                }
-            }
-            defer_mcp_secret_cleanup_failures(&state.agent_store, cleanup_failures).await;
-            Err(error)
-        }
-    }
-}
-
-#[tauri::command]
-pub(super) async fn test_mcp_server(
-    window: WebviewWindow,
-    state: State<'_, DesktopState>,
-    request: McpServerUpsertRequest,
-) -> Result<hachimi_protocol::McpConnectionTestResult, CommandError> {
-    state.authorize(&window, ControlMethod::ConnectorsManage)?;
-    require_window(&window, "workbench")?;
-    require_mcp_runtime(&state)?;
-    let _sandbox_activity = enter_sandbox_activity(&state)?;
-    let existing = state
-        .mcp_control
-        .list()
-        .await
-        .map_err(|error| CommandError::operation("mcp_list_failed", error))?
-        .into_iter()
-        .find(|view| view.configuration.id == request.id)
-        .map(|view| view.configuration);
-    let previous_headers = existing
-        .as_ref()
-        .map(|configuration| configuration.headers.as_slice())
-        .unwrap_or_default();
-    let resolved_headers = state
-        .mcp_secrets
-        .resolve_inputs(&request.headers, previous_headers)?;
-    let now = i64::try_from(epoch_millis()).unwrap_or(i64::MAX);
-    let record = McpServerRecord {
-        id: request.id,
-        display_name: request.display_name,
-        enabled: true,
-        transport: request.transport,
-        headers: Vec::new(),
-        read_only_tools: request.read_only_tools,
-        startup_timeout_ms: request.startup_timeout_ms,
-        request_timeout_ms: request.request_timeout_ms,
-        max_message_bytes: request.max_message_bytes,
-        created_at_ms: now,
-        updated_at_ms: now,
-    };
-    Ok(state
-        .mcp_control
-        .test_connection(&record, resolved_headers)
-        .await)
-}
-
-#[tauri::command]
-pub(super) async fn list_mcp_tools(
-    window: WebviewWindow,
-    state: State<'_, DesktopState>,
-    server_id: hachimi_protocol::McpServerId,
-) -> Result<Vec<hachimi_protocol::McpToolView>, CommandError> {
-    state.authorize(&window, ControlMethod::ConnectorsManage)?;
-    require_window(&window, "workbench")?;
-    state
-        .mcp_control
-        .list_tools(&server_id)
-        .await
-        .map_err(|error| CommandError::operation("mcp_tools_failed", error))
-}
-
-#[tauri::command]
-pub(super) async fn discover_mcp_tools(
-    window: WebviewWindow,
-    state: State<'_, DesktopState>,
-    server_id: hachimi_protocol::McpServerId,
-) -> Result<hachimi_protocol::McpConnectionTestResult, CommandError> {
-    state.authorize(&window, ControlMethod::ConnectorsManage)?;
-    require_window(&window, "workbench")?;
-    require_mcp_runtime(&state)?;
-    let _sandbox_activity = enter_sandbox_activity(&state)?;
-    state
-        .mcp_control
-        .discover_tools(&server_id)
-        .await
-        .map_err(|error| CommandError::operation("mcp_discovery_failed", error))
-}
-
-#[tauri::command]
-pub(super) async fn set_mcp_tool_enabled(
-    window: WebviewWindow,
-    state: State<'_, DesktopState>,
-    server_id: hachimi_protocol::McpServerId,
-    tool_name: String,
-    enabled: bool,
-) -> Result<hachimi_protocol::McpToolView, CommandError> {
-    state.authorize(&window, ControlMethod::ConnectorsManage)?;
-    require_window(&window, "workbench")?;
-    state
-        .mcp_control
-        .set_tool_enabled(
-            &server_id,
-            &tool_name,
-            enabled,
-            i64::try_from(epoch_millis()).unwrap_or(i64::MAX),
-        )
-        .await
-        .map_err(|error| CommandError::operation("mcp_tool_enable_failed", error))
-}
-
-#[tauri::command]
-pub(super) async fn set_mcp_server_enabled(
-    window: WebviewWindow,
-    state: State<'_, DesktopState>,
-    server_id: hachimi_protocol::McpServerId,
-    enabled: bool,
-) -> Result<McpServerView, CommandError> {
-    state.authorize(&window, ControlMethod::ConnectorsManage)?;
-    require_window(&window, "workbench")?;
-    require_mcp_runtime(&state)?;
-    let _sandbox_activity = enter_sandbox_activity(&state)?;
-    state
-        .mcp_control
-        .set_enabled(
-            &server_id,
-            enabled,
-            i64::try_from(epoch_millis()).unwrap_or(i64::MAX),
-        )
-        .await
-        .map_err(|error| CommandError::operation("mcp_enable_failed", error))
-}
-
-#[tauri::command]
-pub(super) async fn refresh_mcp_server(
-    window: WebviewWindow,
-    state: State<'_, DesktopState>,
-    server_id: hachimi_protocol::McpServerId,
-) -> Result<McpServerHealthRecord, CommandError> {
-    state.authorize(&window, ControlMethod::ConnectorsManage)?;
-    require_window(&window, "workbench")?;
-    require_mcp_runtime(&state)?;
-    let _sandbox_activity = enter_sandbox_activity(&state)?;
-    state
-        .mcp_control
-        .refresh_health(&server_id)
-        .await
-        .map_err(|error| CommandError::operation("mcp_health_failed", error))
-}
-
-#[tauri::command]
-pub(super) async fn remove_mcp_server(
-    window: WebviewWindow,
-    state: State<'_, DesktopState>,
-    server_id: hachimi_protocol::McpServerId,
-) -> Result<bool, CommandError> {
-    state.authorize(&window, ControlMethod::ConnectorsManage)?;
-    require_window(&window, "workbench")?;
-    let previous = state
-        .mcp_control
-        .list()
-        .await
-        .map_err(|error| CommandError::operation("mcp_list_failed", error))?
-        .into_iter()
-        .find(|view| view.configuration.id == server_id)
-        .map(|view| view.configuration.headers)
-        .unwrap_or_default();
-    let removed = state
-        .mcp_control
-        .remove(&server_id)
-        .await
-        .map_err(|error| CommandError::operation("mcp_remove_failed", error))?;
-    if removed {
-        let cleanup_failures = state.mcp_secrets.cleanup_replaced(&previous, &[]);
-        defer_mcp_secret_cleanup_failures(&state.agent_store, cleanup_failures).await;
-    }
-    Ok(removed)
 }
 
 #[tauri::command]
@@ -886,15 +609,6 @@ pub(super) async fn start_workbench_task(
             "workspace tools are disabled in this build",
         ));
     }
-    if request.entry_profile == hachimi_protocol::EntryProfile::DesktopControl
-        && !state
-            .control_plane
-            .feature_flags()
-            .runtime_features
-            .desktop_control
-    {
-        return Err(CommandError::new("feature_disabled", "desktop_control"));
-    }
     if request.idempotency_key.trim().is_empty() || request.idempotency_key.len() > 128 {
         return Err(CommandError::new(
             "invalid_idempotency_key",
@@ -963,79 +677,55 @@ pub(super) fn spawn_workbench_run_with_recovery(
             .into_iter()
             .map(|attachment| attachment.attachment.id)
             .collect();
-        let capability_grants =
-            if snapshot.session.entry_profile == hachimi_protocol::EntryProfile::DesktopControl {
-                hachimi_protocol::CapabilityGrantSet {
-                    profile: hachimi_protocol::PermissionProfile::ExternalSandbox,
-                    session_id: snapshot.session.id.clone(),
-                    run_id: Some(snapshot.run.id.clone()),
-                    source: "desktop_control_interactive".into(),
-                    browser: hachimi_protocol::BrowserGrant {
-                        observe: true,
-                        act: true,
-                        upload: true,
-                        download: true,
-                        cookie_storage: true,
-                        cdp: true,
-                        origins: Vec::new(),
-                    },
-                    computer: hachimi_protocol::ComputerGrant {
-                        observe: true,
-                        act: true,
-                        target_windows: Vec::new(),
-                        max_actions: Some(100),
-                    },
-                    review_each_command: true,
-                    ..hachimi_protocol::CapabilityGrantSet::default()
-                }
-            } else {
-                snapshot.checkout.as_ref().map_or_else(
-                    || {
-                        let external = snapshot.run.configuration.permission_profile
-                            != hachimi_protocol::PermissionProfile::ReadOnly
-                            && snapshot.run.configuration.behavior_mode
-                                != hachimi_protocol::BehaviorMode::Plan;
-                        hachimi_protocol::CapabilityGrantSet {
-                            profile: snapshot.run.configuration.permission_profile,
-                            session_id: snapshot.session.id.clone(),
-                            run_id: Some(snapshot.run.id.clone()),
-                            source: "general_session".into(),
-                            file_system: vec![hachimi_protocol::FileSystemGrant {
-                                access: hachimi_protocol::FileSystemAccess::Read,
-                                roots: Vec::new(),
-                                globs: Vec::new(),
-                                special_roots: Vec::new(),
-                            }],
-                            network: hachimi_protocol::NetworkGrant {
-                                enabled: external,
-                                hosts: Vec::new(),
-                                protocols: vec!["managed-connector".into(), "model-runtime".into()],
-                            },
-                            review_each_command: true,
-                            ..hachimi_protocol::CapabilityGrantSet::default()
-                        }
-                    },
-                    |checkout| {
-                        let mut grants = expand_permission_profile(
-                            snapshot.run.configuration.permission_profile,
-                            snapshot.run.configuration.behavior_mode,
-                            snapshot.session.id.clone(),
-                            snapshot.run.id.clone(),
-                            checkout.path.clone(),
-                        );
-                        if snapshot.run.configuration.behavior_mode
-                            != hachimi_protocol::BehaviorMode::Plan
-                        {
-                            grants.network.enabled = true;
-                            grants
-                                .network
-                                .protocols
-                                .extend(["managed-connector".into(), "model-runtime".into()]);
-                        }
+        let capability_grants = interactive_grants::for_workbench_run(
+            snapshot.checkout.as_ref().map_or_else(
+                || {
+                    let external = snapshot.run.configuration.permission_profile
+                        != hachimi_protocol::PermissionProfile::ReadOnly
+                        && snapshot.run.configuration.behavior_mode
+                            != hachimi_protocol::BehaviorMode::Plan;
+                    hachimi_protocol::CapabilityGrantSet {
+                        profile: snapshot.run.configuration.permission_profile,
+                        session_id: snapshot.session.id.clone(),
+                        run_id: Some(snapshot.run.id.clone()),
+                        source: "general_session".into(),
+                        file_system: vec![hachimi_protocol::FileSystemGrant {
+                            access: hachimi_protocol::FileSystemAccess::Read,
+                            roots: Vec::new(),
+                            globs: Vec::new(),
+                            special_roots: Vec::new(),
+                        }],
+                        network: hachimi_protocol::NetworkGrant {
+                            enabled: external,
+                            hosts: Vec::new(),
+                            protocols: vec!["managed-connector".into(), "model-runtime".into()],
+                        },
+                        review_each_command: true,
+                        ..hachimi_protocol::CapabilityGrantSet::default()
+                    }
+                },
+                |checkout| {
+                    let mut grants = expand_permission_profile(
+                        snapshot.run.configuration.permission_profile,
+                        snapshot.run.configuration.behavior_mode,
+                        snapshot.session.id.clone(),
+                        snapshot.run.id.clone(),
+                        checkout.path.clone(),
+                    );
+                    if snapshot.run.configuration.behavior_mode
+                        != hachimi_protocol::BehaviorMode::Plan
+                    {
+                        grants.network.enabled = true;
                         grants
-                    },
-                )
-            };
+                            .network
+                            .protocols
+                            .extend(["managed-connector".into(), "model-runtime".into()]);
+                    }
+                    grants
+                },
+            ),
+            snapshot.run.configuration.behavior_mode,
+        );
         let execution = executor
             .execute(hachimi_agent::AgentRunRequest {
                 principal: client.client_id.0,
@@ -1439,49 +1129,76 @@ impl hachimi_agent::ModelRuntime for DesktopE2eModel {
                     name: "browser_start".into(),
                     arguments: serde_json::json!({
                         "initialUrl": initial_url,
-                        "profileKind": "isolated"
+                        "surface": "embedded"
                     }),
                 }),
                 Err(_) => desktop_e2e_model_failure("HACHIMI_DESKTOP_E2E_BROWSER_URL is missing"),
             }
-        } else if scheduled_hosts && !completed_tools.contains(&"browser_observe") {
+        } else if scheduled_hosts
+            && (!completed_tools.contains(&"browser_observe")
+                || !desktop_e2e_tool_json(&request.messages, "browser_observe").is_some_and(
+                    |observation| {
+                        observation
+                            .get("text")
+                            .and_then(serde_json::Value::as_str)
+                            .is_some_and(|text| text.contains("Managed Browser scheduled fixture"))
+                    },
+                ))
+        {
             match desktop_e2e_tool_json(&request.messages, "browser_start")
-                .and_then(|value| value.get("id").cloned())
+                .and_then(|value| value.pointer("/lease/id").cloned())
             {
-                Some(browser_session_id) => tool_call_events(ModelToolCall {
-                    id: ToolCallId::from("desktop-e2e-schedule-browser-observe"),
-                    name: "browser_observe".into(),
-                    arguments: serde_json::json!({
-                        "browserSessionId": browser_session_id
-                    }),
-                }),
+                Some(lease_id) => {
+                    let attempt = request
+                        .messages
+                        .iter()
+                        .filter(|message| {
+                            message.role == ModelRole::Tool
+                                && message.name.as_deref() == Some("browser_observe")
+                        })
+                        .count()
+                        + 1;
+                    tool_call_events(ModelToolCall {
+                        id: ToolCallId::new(format!(
+                            "desktop-e2e-schedule-browser-observe-{attempt}"
+                        )),
+                        name: "browser_observe".into(),
+                        arguments: serde_json::json!({
+                            "leaseId": lease_id
+                        }),
+                    })
+                }
                 None => desktop_e2e_model_failure(
-                    "Scheduled Host E2E Browser start did not return a Session ID",
+                    "Scheduled Host E2E Browser start did not return an automation lease",
                 ),
             }
         } else if scheduled_hosts && !completed_tools.contains(&"browser_act") {
             match desktop_e2e_tool_json(&request.messages, "browser_observe") {
                 Some(observation) => {
-                    let browser_session_id = observation.get("browserSessionId");
-                    let observation_id = observation.get("id");
-                    let revision = observation.get("browserRevision");
-                    match (browser_session_id, observation_id, revision) {
-                        (Some(browser_session_id), Some(observation_id), Some(revision)) => {
-                            tool_call_events(ModelToolCall {
-                                id: ToolCallId::from("desktop-e2e-schedule-browser-download"),
-                                name: "browser_act".into(),
-                                arguments: serde_json::json!({
-                                    "browserSessionId": browser_session_id,
-                                    "observationId": observation_id,
-                                    "expectedRevision": revision,
-                                    "action": {
-                                        "kind": "download",
-                                        "selector": "#download",
-                                        "allow_unknown_type": false
-                                    }
-                                }),
-                            })
-                        }
+                    let lease_id = observation.get("leaseId");
+                    let observation_id = observation.get("observationId");
+                    let tab_revision = observation.get("tabRevision");
+                    let input_epoch = observation.get("inputEpoch");
+                    match (lease_id, observation_id, tab_revision, input_epoch) {
+                        (
+                            Some(lease_id),
+                            Some(observation_id),
+                            Some(tab_revision),
+                            Some(input_epoch),
+                        ) => tool_call_events(ModelToolCall {
+                            id: ToolCallId::from("desktop-e2e-schedule-browser-click"),
+                            name: "browser_act".into(),
+                            arguments: serde_json::json!({
+                                "leaseId": lease_id,
+                                "observationId": observation_id,
+                                "expectedTabRevision": tab_revision,
+                                "expectedInputEpoch": input_epoch,
+                                "action": {
+                                    "kind": "click",
+                                    "selector": "h1"
+                                }
+                            }),
+                        }),
                         _ => desktop_e2e_model_failure(
                             "Browser observation omitted its fencing identifiers",
                         ),
@@ -1493,17 +1210,17 @@ impl hachimi_agent::ModelRuntime for DesktopE2eModel {
             }
         } else if scheduled_hosts && !completed_tools.contains(&"browser_stop") {
             match desktop_e2e_tool_json(&request.messages, "browser_start")
-                .and_then(|value| value.get("id").cloned())
+                .and_then(|value| value.pointer("/lease/id").cloned())
             {
-                Some(browser_session_id) => tool_call_events(ModelToolCall {
+                Some(lease_id) => tool_call_events(ModelToolCall {
                     id: ToolCallId::from("desktop-e2e-schedule-browser-stop"),
                     name: "browser_stop".into(),
                     arguments: serde_json::json!({
-                        "browserSessionId": browser_session_id
+                        "leaseId": lease_id
                     }),
                 }),
                 None => desktop_e2e_model_failure(
-                    "Scheduled Host E2E lost Browser Session ownership before Stop",
+                    "Scheduled Host E2E lost Browser lease ownership before Stop",
                 ),
             }
         } else if scheduled_hosts {
@@ -1524,7 +1241,7 @@ impl hachimi_agent::ModelRuntime for DesktopE2eModel {
                         .map(str::to_owned)
                 })
                 .is_some_and(|text| text.contains("Managed Browser scheduled fixture"));
-            let download_ok = desktop_e2e_tool_json(&request.messages, "browser_act")
+            let action_ok = desktop_e2e_tool_json(&request.messages, "browser_act")
                 .and_then(|value| {
                     value
                         .get("resultCode")
@@ -1532,14 +1249,14 @@ impl hachimi_agent::ModelRuntime for DesktopE2eModel {
                         .map(str::to_owned)
                 })
                 .as_deref()
-                == Some("download_quarantined");
-            if connector_ok && observation_ok && download_ok {
+                == Some("performed");
+            if connector_ok && observation_ok && action_ok {
                 desktop_e2e_text_response(
-                    "Scheduled Host E2E completed sample-crm search, managed Browser Observe, quarantined Download, and Stop on one fresh Run.",
+                    "Scheduled Host E2E completed sample-crm search, embedded Browser Observe and Act, and lease Stop on one fresh Run.",
                 )
             } else {
                 desktop_e2e_model_failure(
-                    "Scheduled Host E2E did not produce verified Connector, Observe, and Download results",
+                    "Scheduled Host E2E did not produce verified Connector, Observe, and Act results",
                 )
             }
         } else if scheduled_success {

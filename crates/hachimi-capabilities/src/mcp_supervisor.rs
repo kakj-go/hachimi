@@ -240,6 +240,8 @@ impl McpSupervisor {
                 protocol_version: Some(server_info.protocol_version.clone()),
                 tool_count: u32::try_from(tools.len()).unwrap_or(u32::MAX),
                 error_code: None,
+                failure_count: 0,
+                next_retry_at_ms: None,
                 checked_at_ms: now_ms(),
             };
             entry.tools = tools;
@@ -601,6 +603,8 @@ fn health(
         protocol_version: None,
         tool_count: 0,
         error_code: error_code.map(str::to_owned),
+        failure_count: 0,
+        next_retry_at_ms: None,
         checked_at_ms: now_ms(),
     }
 }

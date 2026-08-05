@@ -9,7 +9,7 @@ ADD COLUMN contribution_revisions_json TEXT NOT NULL DEFAULT '[]';
 CREATE TABLE session_permission_configs (
     scope_key TEXT PRIMARY KEY NOT NULL,
     session_id TEXT REFERENCES sessions(id) ON DELETE CASCADE,
-    entry_profile TEXT NOT NULL CHECK(entry_profile IN ('workbench', 'pet_conversation', 'desktop_control')),
+    entry_profile TEXT NOT NULL CHECK(entry_profile IN ('workbench', 'pet_conversation')),
     config_json TEXT NOT NULL,
     updated_at_ms INTEGER NOT NULL,
     CHECK(
@@ -121,12 +121,6 @@ CREATE TABLE channel_deliveries (
 
 CREATE INDEX channel_delivery_claim_idx
 ON channel_deliveries(status, next_attempt_at_ms, created_at_ms, id);
-
-CREATE TABLE channel_session_routes (
-    route_key TEXT PRIMARY KEY NOT NULL,
-    session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
-    updated_at_ms INTEGER NOT NULL
-);
 
 CREATE TABLE gateway_runtime_state (
     singleton INTEGER PRIMARY KEY NOT NULL CHECK(singleton = 1),

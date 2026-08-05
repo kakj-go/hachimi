@@ -42,6 +42,7 @@ use thiserror::Error;
 use url::Url;
 
 const PAIRING_TTL_MS: i64 = 5 * 60 * 1_000;
+const APPROVED_PAIRING_TTL_MS: i64 = 365 * 24 * 60 * 60 * 1_000;
 const MAX_PAGE_TEXT_CHARS: usize = 200_000;
 
 #[must_use]
@@ -210,6 +211,65 @@ impl BrowserHost {
             .filter(|pairing| pairing.confirmed && pairing.extension_identity.is_some())
             .max_by_key(|pairing| pairing.expires_at_ms)
             .cloned()
+    }
+
+    pub fn latest_pending_pairing(&self) -> Option<BrowserPairing> {
+        let now = self.clock.now_ms();
+        let mut state = self.state.lock();
+        state.pairings.retain(|_, value| value.expires_at_ms > now);
+        state
+            .pairings
+            .values()
+            .filter(|pairing| !pairing.confirmed && pairing.extension_identity.is_some())
+            .max_by_key(|pairing| pairing.expires_at_ms)
+            .cloned()
+    }
+
+    pub fn request_extension_authorization(
+        &self,
+        extension_identity: &str,
+    ) -> Result<BrowserPairing, BrowserHostError> {
+        let identity = extension_identity.trim();
+        if identity.is_empty() || identity.chars().count() > 256 {
+            return Err(BrowserHostError::InvalidInput);
+        }
+        let now = self.clock.now_ms();
+        let mut state = self.state.lock();
+        state.pairings.retain(|_, value| value.expires_at_ms > now);
+        if let Some(pairing) = state
+            .pairings
+            .values()
+            .filter(|pairing| pairing.extension_identity.as_deref() == Some(identity))
+            .max_by_key(|pairing| pairing.expires_at_ms)
+        {
+            return Ok(pairing.clone());
+        }
+        let pairing = BrowserPairing {
+            id: BrowserPairingId::random(),
+            nonce: String::new(),
+            extension_identity: Some(identity.to_owned()),
+            confirmed: false,
+            expires_at_ms: now.saturating_add(PAIRING_TTL_MS),
+        };
+        state.pairings.insert(pairing.id.clone(), pairing.clone());
+        Ok(pairing)
+    }
+
+    pub fn approve_extension_authorization(
+        &self,
+        pairing_id: &BrowserPairingId,
+    ) -> Result<BrowserPairing, BrowserHostError> {
+        let now = self.clock.now_ms();
+        let mut state = self.state.lock();
+        state.pairings.retain(|_, value| value.expires_at_ms > now);
+        let pairing = state
+            .pairings
+            .get_mut(pairing_id)
+            .filter(|pairing| pairing.extension_identity.is_some())
+            .ok_or(BrowserHostError::PairingInvalid)?;
+        pairing.confirmed = true;
+        pairing.expires_at_ms = now.saturating_add(APPROVED_PAIRING_TTL_MS);
+        Ok(pairing.clone())
     }
 
     pub fn confirm_pairing(
@@ -845,6 +905,38 @@ impl BrowserHost {
         )
     }
 
+    pub async fn resume(
+        &self,
+        browser_session_id: &BrowserSessionId,
+        owner_run_id: &RunId,
+    ) -> Result<BrowserSession, BrowserHostError> {
+        let (task_tab_group, network_policy) = {
+            let state = self.state.lock();
+            let session = state
+                .sessions
+                .get(browser_session_id)
+                .ok_or(BrowserHostError::SessionNotFound)?;
+            if &session.record.owner_run_id != owner_run_id {
+                return Err(BrowserHostError::SessionOwnershipMismatch);
+            }
+            if session.record.status != BrowserSessionStatus::TakenOver {
+                return Err(BrowserHostError::SessionInactive);
+            }
+            (
+                session.record.task_tab_group.clone(),
+                session.network_policy.clone(),
+            )
+        };
+        self.broker
+            .resume(browser_session_id, &task_tab_group, network_policy)
+            .await?;
+        self.set_status(
+            browser_session_id,
+            owner_run_id,
+            BrowserSessionStatus::Ready,
+        )
+    }
+
     pub async fn stage_upload(
         &self,
         browser_session_id: &BrowserSessionId,
@@ -873,7 +965,22 @@ impl BrowserHost {
         browser_session_id: &BrowserSessionId,
         owner_run_id: &RunId,
     ) -> Result<BrowserSession, BrowserHostError> {
-        self.verify_owner(browser_session_id, owner_run_id)?;
+        {
+            let state = self.state.lock();
+            let session = state
+                .sessions
+                .get(browser_session_id)
+                .ok_or(BrowserHostError::SessionNotFound)?;
+            if &session.record.owner_run_id != owner_run_id {
+                return Err(BrowserHostError::SessionOwnershipMismatch);
+            }
+            if !matches!(
+                session.record.status,
+                BrowserSessionStatus::Ready | BrowserSessionStatus::TakenOver
+            ) {
+                return Err(BrowserHostError::SessionInactive);
+            }
+        }
         self.broker.stop(browser_session_id).await?;
         self.set_status(
             browser_session_id,
@@ -1232,6 +1339,15 @@ mod tests {
             Box::pin(async { Ok(()) })
         }
 
+        fn resume<'a>(
+            &'a self,
+            _session_id: &'a BrowserSessionId,
+            _task_tab_group: &'a str,
+            _network_policy: BrowserNetworkPolicy,
+        ) -> BrowserBrokerFuture<'a, ()> {
+            Box::pin(async { Ok(()) })
+        }
+
         fn stop<'a>(&'a self, _session_id: &'a BrowserSessionId) -> BrowserBrokerFuture<'a, ()> {
             Box::pin(async { Ok(()) })
         }
@@ -1300,6 +1416,15 @@ mod tests {
             Box::pin(async { Ok(()) })
         }
 
+        fn resume<'a>(
+            &'a self,
+            _session_id: &'a BrowserSessionId,
+            _task_tab_group: &'a str,
+            _network_policy: BrowserNetworkPolicy,
+        ) -> BrowserBrokerFuture<'a, ()> {
+            Box::pin(async { Ok(()) })
+        }
+
         fn stop<'a>(&'a self, _session_id: &'a BrowserSessionId) -> BrowserBrokerFuture<'a, ()> {
             Box::pin(async { Ok(()) })
         }
@@ -1321,6 +1446,43 @@ mod tests {
             stable_error_code: None,
             diagnostics: Vec::new(),
         }
+    }
+
+    #[tokio::test]
+    async fn takeover_resume_and_suspended_stop_have_explicit_status_transitions() {
+        let host = host();
+        let run_id = RunId::from("run-control");
+        let session = host
+            .start_session(
+                BrowserProfileKind::Isolated,
+                SessionId::from("session-control"),
+                run_id.clone(),
+                1,
+                Some("https://example.com"),
+                &sandbox(),
+                None,
+            )
+            .await
+            .expect("session");
+
+        let taken_over = host
+            .take_over(&session.id, &run_id)
+            .await
+            .expect("take over");
+        assert_eq!(taken_over.status, BrowserSessionStatus::TakenOver);
+
+        let resumed = host.resume(&session.id, &run_id).await.expect("resume");
+        assert_eq!(resumed.status, BrowserSessionStatus::Ready);
+        assert!(resumed.revision > taken_over.revision);
+
+        host.take_over(&session.id, &run_id)
+            .await
+            .expect("second take over");
+        let stopped = host
+            .stop(&session.id, &run_id)
+            .await
+            .expect("stop suspended session");
+        assert_eq!(stopped.status, BrowserSessionStatus::Stopped);
     }
 
     #[tokio::test]

@@ -16,11 +16,12 @@ use hachimi_browser::{
 use hachimi_protocol::{
     BrowserTabId, BrowserWorkspace, BrowserWorkspaceChangeReason, BrowserWorkspaceChanged,
     BrowserWorkspaceId, BrowserWorkspaceRuntimeState, EmbeddedBrowserPermissionRequiredEvent,
-    SessionSourceOrigin, WorkbenchEnvironmentChangeReason, WorkbenchEnvironmentChanged,
+    RuntimeComponentId, RuntimeComponentState, SessionSourceOrigin,
+    WorkbenchEnvironmentChangeReason, WorkbenchEnvironmentChanged,
 };
 use hachimi_storage::{AgentStore, BrowserTabRuntimeUpdate};
 use parking_lot::Mutex;
-use tauri::{AppHandle, Emitter, Runtime, WebviewWindow};
+use tauri::{AppHandle, Emitter, Manager, Runtime, WebviewWindow};
 use thiserror::Error;
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
@@ -81,6 +82,7 @@ struct EmbeddedBrowserRuntime<R: Runtime> {
     profile_dir: PathBuf,
     log_file: PathBuf,
     connection: AsyncMutex<Option<Arc<RuntimeConnection>>>,
+    restart_lock: AsyncMutex<()>,
     pending: Mutex<BTreeMap<u64, oneshot::Sender<Result<CefHostResponse, EmbeddedBrowserError>>>>,
     tab_workspaces: Mutex<BTreeMap<BrowserTabId, BrowserWorkspaceId>>,
     loaded_tabs: Mutex<BTreeSet<BrowserTabId>>,
@@ -105,6 +107,7 @@ impl<R: Runtime> EmbeddedBrowserService<R> {
                 profile_dir: data_dir.join("browser/cef-profile"),
                 log_file: data_dir.join("logs/cef.log"),
                 connection: AsyncMutex::new(None),
+                restart_lock: AsyncMutex::new(()),
                 pending: Mutex::new(BTreeMap::new()),
                 tab_workspaces: Mutex::new(BTreeMap::new()),
                 loaded_tabs: Mutex::new(BTreeSet::new()),
@@ -230,6 +233,61 @@ impl<R: Runtime> EmbeddedBrowserService<R> {
 
     pub fn attest(&self) -> Result<(), EmbeddedBrowserError> {
         validate_runtime(&self.runtime.host_executable)
+    }
+
+    pub fn start_supervision(&self) {
+        let runtime = Arc::clone(&self.runtime);
+        let supervisor = runtime
+            .app
+            .state::<crate::DesktopState>()
+            .runtime_supervisor
+            .clone();
+        match validate_runtime(&runtime.host_executable) {
+            Ok(()) => supervisor.ready(RuntimeComponentId::Cef),
+            Err(error) => supervisor.update(
+                RuntimeComponentId::Cef,
+                RuntimeComponentState::Degraded,
+                Some(error.code()),
+                true,
+                0,
+                None,
+            ),
+        }
+        let retry = supervisor.retry_signal(RuntimeComponentId::Cef);
+        tauri::async_runtime::spawn(async move {
+            loop {
+                retry.notified().await;
+                if let Err(error) = validate_runtime(&runtime.host_executable) {
+                    supervisor.update(
+                        RuntimeComponentId::Cef,
+                        RuntimeComponentState::Degraded,
+                        Some(error.code()),
+                        true,
+                        0,
+                        None,
+                    );
+                    continue;
+                }
+                let workspace_ids = runtime
+                    .tab_workspaces
+                    .lock()
+                    .values()
+                    .cloned()
+                    .collect::<BTreeSet<_>>();
+                if workspace_ids.is_empty() {
+                    supervisor.ready(RuntimeComponentId::Cef);
+                } else {
+                    restart_runtime(Arc::clone(&runtime), workspace_ids).await;
+                }
+            }
+        });
+    }
+
+    pub async fn shutdown(&self) {
+        let connection = self.runtime.connection.lock().await.clone();
+        if let Some(connection) = connection {
+            let _ = self.send_on(&connection, CefHostCommand::Shutdown).await;
+        }
     }
 
     pub async fn close_tab_runtime(
@@ -391,6 +449,11 @@ impl<R: Runtime> EmbeddedBrowserService<R> {
             },
         )
         .await?;
+        self.runtime
+            .app
+            .state::<crate::DesktopState>()
+            .runtime_supervisor
+            .ready(RuntimeComponentId::Cef);
         Ok(connection)
     }
 
@@ -779,16 +842,24 @@ async fn runtime_crashed<R: Runtime>(
     runtime.loaded_tabs.lock().clear();
     runtime.layout_revisions.lock().clear();
     fail_all_pending(&runtime, EmbeddedBrowserError::RuntimeCrashed);
+    let supervisor = runtime
+        .app
+        .state::<crate::DesktopState>()
+        .runtime_supervisor
+        .clone();
+    if supervisor.is_shutting_down() {
+        return;
+    }
     let workspace_ids = runtime
         .tab_workspaces
         .lock()
         .values()
         .cloned()
         .collect::<BTreeSet<_>>();
-    for workspace_id in workspace_ids {
+    for workspace_id in &workspace_ids {
         if let Ok(workspace) = runtime
             .store
-            .set_browser_workspace_runtime(&workspace_id, BrowserWorkspaceRuntimeState::Failed)
+            .set_browser_workspace_runtime(workspace_id, BrowserWorkspaceRuntimeState::Failed)
             .await
         {
             emit_workspace(
@@ -802,6 +873,93 @@ async fn runtime_crashed<R: Runtime>(
         RUNTIME_CRASHED_EVENT,
         serde_json::json!({ "generation": generation, "message": message }),
     );
+    supervisor
+        .retry_signal(RuntimeComponentId::Cef)
+        .notify_one();
+}
+
+async fn restart_runtime<R: Runtime>(
+    runtime: Arc<EmbeddedBrowserRuntime<R>>,
+    workspace_ids: BTreeSet<BrowserWorkspaceId>,
+) {
+    let Ok(_restart_guard) = runtime.restart_lock.try_lock() else {
+        return;
+    };
+    if runtime.active_generation.load(Ordering::Acquire) != 0 {
+        return;
+    }
+    let supervisor = runtime
+        .app
+        .state::<crate::DesktopState>()
+        .runtime_supervisor
+        .clone();
+    let Some(window) = runtime.app.get_webview_window("workbench") else {
+        supervisor.update(
+            RuntimeComponentId::Cef,
+            RuntimeComponentState::Degraded,
+            Some("cef_window_unavailable"),
+            true,
+            0,
+            None,
+        );
+        return;
+    };
+    let service = EmbeddedBrowserService {
+        runtime: Arc::clone(&runtime),
+    };
+    for (index, delay) in [1_u64, 2, 5].into_iter().enumerate() {
+        if supervisor.is_shutting_down() {
+            return;
+        }
+        let attempt = (index + 1) as u32;
+        supervisor.update(
+            RuntimeComponentId::Cef,
+            RuntimeComponentState::Retrying,
+            Some("cef_runtime_crashed"),
+            false,
+            attempt,
+            Some(now_ms().saturating_add((delay * 1_000) as i64)),
+        );
+        tokio::time::sleep(Duration::from_secs(delay)).await;
+        let result = async {
+            service.ensure_started(&window).await?;
+            for workspace_id in &workspace_ids {
+                let workspace = runtime
+                    .store
+                    .browser_workspace(workspace_id)
+                    .await
+                    .map_err(|error| EmbeddedBrowserError::Ipc(error.to_string()))?;
+                service.open_workspace(&window, &workspace).await?;
+            }
+            Ok::<(), EmbeddedBrowserError>(())
+        }
+        .await;
+        match result {
+            Ok(()) => {
+                supervisor.ready(RuntimeComponentId::Cef);
+                return;
+            }
+            Err(error) => {
+                tracing::warn!(attempt, code = error.code(), %error, "CEF automatic recovery failed");
+            }
+        }
+    }
+    supervisor.update(
+        RuntimeComponentId::Cef,
+        RuntimeComponentState::Degraded,
+        Some("cef_restart_exhausted"),
+        true,
+        3,
+        None,
+    );
+}
+
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .and_then(|duration| i64::try_from(duration.as_millis()).ok())
+        .unwrap_or(i64::MAX)
 }
 
 fn fail_all_pending<R: Runtime>(

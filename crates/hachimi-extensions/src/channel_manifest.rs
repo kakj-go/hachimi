@@ -65,11 +65,15 @@ pub(crate) fn builtin_enterprise_channel_provider_id(
     }
     let descriptor: BuiltinEnterpriseChannelDescriptor = serde_json::from_value(value)?;
     let provider_id = plugin.manifest.id.as_str();
+    let expected_contribution_id = format!("{}-channel", provider_id.replace('_', "-"));
     if descriptor.protocol_version != 1
         || descriptor.transport != "builtin_enterprise"
         || descriptor.provider_id != provider_id
-        || contribution_id != format!("{provider_id}-channel")
-        || !matches!(provider_id, "wecom" | "dingtalk" | "feishu")
+        || contribution_id != expected_contribution_id
+        || !matches!(
+            provider_id,
+            "dingtalk" | "feishu" | "wecom_ai_bot" | "wecom_app" | "wechat_ilink"
+        )
     {
         return Err(ExtensionHostError::InvalidManifest(
             "builtin enterprise channel identity is invalid".into(),

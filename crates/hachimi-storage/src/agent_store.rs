@@ -27,15 +27,18 @@ mod agent_tasks;
 mod audit;
 mod browser_permissions;
 mod browser_workspace;
-mod desktop_control;
-#[cfg(test)]
-mod desktop_control_tests;
 mod environment;
 mod error;
 mod extensions;
 mod git_forge;
 #[cfg(test)]
 mod git_forge_tests;
+mod host_access;
+#[cfg(test)]
+mod host_access_tests;
+mod host_control;
+#[cfg(test)]
+mod host_control_tests;
 mod lifecycle;
 mod mcp_cache;
 mod migration_safety;
@@ -43,6 +46,8 @@ mod permissions;
 mod plugin_hooks;
 mod process;
 mod project;
+#[cfg(test)]
+mod project_tests;
 mod project_tools;
 mod provider_registry;
 mod recovery;
@@ -60,19 +65,19 @@ pub(crate) mod workspace_diff;
 pub use agent_tasks::AgentTaskExecutionClaim;
 pub use audit::AuditMetadataRecord;
 pub use browser_workspace::{BrowserDownloadRuntimeUpdate, BrowserTabRuntimeUpdate};
-pub use desktop_control::DesktopControlActionLedgerInput;
 pub use environment::{
     SessionCheckoutBindingUpdate, SessionEnvironmentState, WorkbenchHandoffJournalRecord,
     canonical_session_source_url,
 };
 pub use error::AgentStoreError;
 pub use extensions::{SkillFileIndexRecord, StoredSkillRecord};
+pub use host_control::HostActionLedgerInput;
 pub use plugin_hooks::{
     PluginHookEventRecord, PluginHookRuntime, PluginHookRuntimeFuture, PluginHookSubscription,
 };
 pub use recovery::RecoveryToolFence;
 use row_decode::*;
-pub use run_bundle::CreatedAgentRun;
+pub use run_bundle::{ChannelRunBindingInput, CreatedAgentRun};
 pub use schedule::{IdempotentMutationClaim, ScheduleInvocationClaim};
 pub use schedule_event::{ScheduleEventIngestClaim, ScheduleEventLaunchClaim};
 use transaction_helpers::*;
@@ -782,6 +787,29 @@ impl AgentStore {
             updated_at_ms,
         )
         .await?;
+        if next.is_terminal() {
+            sqlx::query(
+                "UPDATE browser_automation_leases SET status = 'expired', revision = revision + 1, updated_at_ms = ? WHERE owner_run_id = ? AND status IN ('pending', 'active', 'suspended')",
+            )
+            .bind(updated_at_ms)
+            .bind(run_id.as_str())
+            .execute(&mut *transaction)
+            .await?;
+            sqlx::query(
+                "UPDATE host_access_requests SET status = 'expired', updated_at_ms = ? WHERE owner_run_id = ? AND status = 'pending'",
+            )
+            .bind(updated_at_ms)
+            .bind(run_id.as_str())
+            .execute(&mut *transaction)
+            .await?;
+            sqlx::query(
+                "UPDATE computer_control_sessions SET control_state = 'stopped', revision = revision + 1, updated_at_ms = ? WHERE owner_run_id = ? AND control_state != 'stopped'",
+            )
+            .bind(updated_at_ms)
+            .bind(run_id.as_str())
+            .execute(&mut *transaction)
+            .await?;
+        }
         let updated = get_run_tx(&mut transaction, run_id)
             .await?
             .ok_or_else(|| AgentStoreError::RunNotFound(run_id.clone()))?;
@@ -1257,7 +1285,7 @@ impl AgentStore {
         health: &McpServerHealthRecord,
     ) -> Result<McpServerHealthRecord, AgentStoreError> {
         let result = sqlx::query(
-            "UPDATE mcp_server_health SET state = ?, server_name = ?, server_version = ?, protocol_version = ?, tool_count = ?, error_code = ?, checked_at_ms = ? WHERE server_id = ?",
+            "UPDATE mcp_server_health SET state = ?, server_name = ?, server_version = ?, protocol_version = ?, tool_count = ?, error_code = ?, failure_count = ?, next_retry_at_ms = ?, checked_at_ms = ? WHERE server_id = ?",
         )
         .bind(health.state.as_str())
         .bind(&health.server_name)
@@ -1265,6 +1293,8 @@ impl AgentStore {
         .bind(&health.protocol_version)
         .bind(i64::from(health.tool_count))
         .bind(&health.error_code)
+        .bind(i64::from(health.failure_count))
+        .bind(health.next_retry_at_ms)
         .bind(health.checked_at_ms)
         .bind(health.server_id.as_str())
         .execute(&self.pool)

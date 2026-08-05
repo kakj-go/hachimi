@@ -282,7 +282,7 @@ export const zhCn = {
   "settings.petOnly": "仅影响透明 Pet 窗口",
   "settings.securityBoundary": "安全边界",
   "settings.securityDescription":
-    "工作台目前只能读写设置、测试 LLM 连接、管理 3D 资源和配置内置语音；没有目录、终端、Git、浏览器或桌面控制权限。",
+    "工作台能力由运行时沙箱、精确 Host 授权和独立副作用审批共同约束。",
   "settings.connection": "连接配置",
   "settings.providerProtocol": "Provider 协议",
   "settings.providerProtocol.description":
@@ -685,7 +685,7 @@ export const enUs: Record<MessageKey, string> = {
   "settings.petOnly": "Only affects the transparent Pet window",
   "settings.securityBoundary": "Security boundary",
   "settings.securityDescription":
-    "The Workbench can only manage settings, test the LLM connection, manage 3D assets, and configure built-in speech. It has no workspace, terminal, Git, browser, or desktop-control access.",
+    "Workbench capabilities are jointly constrained by the runtime sandbox, exact Host grants, and separate side-effect approvals.",
   "settings.connection": "Connection",
   "settings.providerProtocol": "Provider protocol",
   "settings.providerProtocol.description":

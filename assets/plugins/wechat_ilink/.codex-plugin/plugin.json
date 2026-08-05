@@ -1,0 +1,15 @@
+{
+  "manifestVersion": 1,
+  "id": "wechat_ilink",
+  "name": "微信 iLink / ClawBot",
+  "version": "1.0.0",
+  "description": "Hachimi 微信 iLink / ClawBot 长轮询 Channel",
+  "contributions": [
+    {
+      "kind": "channel",
+      "id": "wechat-ilink-channel",
+      "relativePath": "channels/wechat_ilink.json",
+      "requiredScopes": ["channel.receive", "channel.send"]
+    }
+  ]
+}

@@ -5,10 +5,11 @@ use std::{
 
 use hachimi_gateway::{ChannelProvider, SandboxedStdioChannelProvider};
 use hachimi_protocol::{
-    ChannelDeliveryId, ChannelEnvelope, ChannelMessageId, ChannelProviderAccount,
-    ChannelProviderHealthState, ChannelProviderManifest, ChannelProviderRuntimeKind,
-    ChannelRouteKey, DeliveryAttempt, DeliveryAttemptStatus, PluginId, SandboxCapabilityReport,
-    SandboxReadiness,
+    ChannelAccountState, ChannelActor, ChannelChatKind, ChannelConversationAddress,
+    ChannelDeliveryId, ChannelEventKey, ChannelMessagePart, ChannelOutboundPayload,
+    ChannelProviderAccount, ChannelProviderHealthState, ChannelProviderManifest,
+    ChannelProviderRuntimeKind, DeliveryAttempt, DeliveryAttemptStatus, PluginId,
+    SandboxCapabilityReport, SandboxReadiness, VerifiedChannelMessage,
 };
 use hachimi_sandbox::{
     SandboxBackend, SandboxError, SandboxLaunchSpec, SandboxNetworkPolicy, SandboxSpawnFuture,
@@ -146,14 +147,12 @@ async fn channel_sidecar_fails_closed_when_the_sandbox_cannot_launch() {
             id: "local".into(),
             provider_id: "plugin.fixture.local".into(),
             display_name: "Fixture".into(),
-            secret_ref: None,
+            tenant_key: "local".into(),
+            credential_ref: None,
             enabled: true,
-            route_allowlist: vec![ChannelRouteKey {
-                channel: "plugin.fixture.local".into(),
-                account: "local".into(),
-                peer: "user".into(),
-                thread: "main".into(),
-            }],
+            state: ChannelAccountState::Starting,
+            config: serde_json::json!({}),
+            credential_revision: 1,
             config_revision: 1,
         })
         .await
@@ -183,19 +182,24 @@ async fn channel_sidecar_executes_full_lifecycle_and_passes_transport_secret_onl
         Vec::new(),
     )
     .expect("provider");
-    let route = ChannelRouteKey {
-        channel: "plugin.fixture.local".into(),
-        account: "local".into(),
-        peer: "user".into(),
-        thread: "main".into(),
+    let address = ChannelConversationAddress {
+        provider_id: "plugin.fixture.local".into(),
+        account_id: "local".into(),
+        tenant_key: "local".into(),
+        chat_kind: ChannelChatKind::Dm,
+        chat_id: "user".into(),
+        topic_id: None,
     };
     let account = ChannelProviderAccount {
         id: "local".into(),
         provider_id: "plugin.fixture.local".into(),
         display_name: "Fixture".into(),
-        secret_ref: None,
+        tenant_key: "local".into(),
+        credential_ref: None,
         enabled: true,
-        route_allowlist: vec![route.clone()],
+        state: ChannelAccountState::Starting,
+        config: serde_json::json!({}),
+        credential_revision: 1,
         config_revision: 1,
     };
     provider.configure(&account).await.expect("configure");
@@ -204,41 +208,55 @@ async fn channel_sidecar_executes_full_lifecycle_and_passes_transport_secret_onl
         provider.health().await.expect("health").state,
         ChannelProviderHealthState::Healthy
     );
-    let envelope = ChannelEnvelope {
-        message_id: ChannelMessageId::from("message-1"),
-        route: route.clone(),
-        sender: "user".into(),
-        text: "hello".into(),
-        metadata: serde_json::json!({"fixture":true}),
-        authenticated: true,
-        bot_generated: false,
+    let message = VerifiedChannelMessage {
+        event_key: ChannelEventKey {
+            provider_id: "plugin.fixture.local".into(),
+            account_id: "local".into(),
+            external_message_id: "message-1".into(),
+        },
+        address: address.clone(),
+        actor: ChannelActor {
+            external_id: "user".into(),
+            display_name: None,
+            is_bot: false,
+        },
+        parts: vec![ChannelMessagePart::Text {
+            text: "hello".into(),
+        }],
+        mentions: Vec::new(),
+        quote: None,
+        provider_context: serde_json::json!({"fixture":true}),
         received_at_ms: 1,
     };
     assert_eq!(
         provider
-            .receive(
-                Some("channel-secret-never-in-argv-or-env"),
-                envelope.clone(),
-            )
+            .accept_verified(Some("channel-secret-never-in-argv-or-env"), message.clone(),)
             .await
-            .expect("receive"),
-        envelope
+            .expect("accept verified"),
+        message
     );
     let delivery = DeliveryAttempt {
         id: ChannelDeliveryId::from("delivery-1"),
-        route,
+        address,
         idempotency_key: "delivery-key-1".into(),
-        text: "reply".into(),
+        payload: ChannelOutboundPayload {
+            parts: vec![ChannelMessagePart::Text {
+                text: "reply".into(),
+            }],
+            reply_to_external_message_id: Some("message-1".into()),
+        },
         status: DeliveryAttemptStatus::Claimed,
         attempt: 1,
+        claim_token: Some("claim-1".into()),
         next_attempt_at_ms: None,
         error_code: None,
+        provider_receipt: None,
     };
     let delivered = provider.deliver(&delivery).await.expect("deliver");
     assert!(delivered.delivered);
     assert!(!delivered.retryable);
     assert_eq!(delivered.result_code, "fixture_delivered");
-    provider.ack(&delivery).await.expect("ack");
+    provider.ack_delivery(&delivery).await.expect("ack");
     let mut reloaded = account;
     reloaded.config_revision = 2;
     provider.reload(&reloaded).await.expect("reload");

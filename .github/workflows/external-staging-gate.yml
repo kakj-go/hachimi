@@ -274,7 +274,7 @@ jobs:
           cargo build -p hachimi-llm --bin hachimi-staging-credential
           $config = Get-Content -LiteralPath target/staging-config/enterprise.json -Raw | ConvertFrom-Json
           $secretByPlatform = @{
-            wecom = $env:WECOM_SECRET; ding_talk = $env:DINGTALK_SECRET; feishu = $env:FEISHU_SECRET
+            wecom_app = $env:WECOM_SECRET; dingtalk = $env:DINGTALK_SECRET; feishu = $env:FEISHU_SECRET
           }
           $entries = @($config.connections | ForEach-Object {
             [pscustomobject]@{ Account = $_.accountId; Secret = $secretByPlatform[$_.platform] }
@@ -286,15 +286,6 @@ jobs:
             & target/debug/hachimi-staging-credential.exe assert-present com.hachimi.connector $entry.Account
             if ($LASTEXITCODE -ne 0) { throw "Enterprise staging credential verification failed for $($entry.Account)." }
           }
-          $wecomAccount = ($config.connections | Where-Object platform -eq 'wecom' | Select-Object -First 1).accountId
-          $env:WECOM_SECRET | & target/debug/hachimi-staging-credential.exe set com.hachimi.channel "wecom:$wecomAccount"
-          if ($LASTEXITCODE -ne 0) { throw 'WeCom Channel credential provisioning failed.' }
-          & target/debug/hachimi-staging-credential.exe assert-present com.hachimi.channel "wecom:$wecomAccount"
-          if ($LASTEXITCODE -ne 0) { throw 'WeCom Channel credential verification failed.' }
-          [guid]::NewGuid().ToString() | & target/debug/hachimi-staging-credential.exe set com.hachimi.channel loopback-webhook:local
-          if ($LASTEXITCODE -ne 0) { throw 'Gateway loopback credential provisioning failed.' }
-          & target/debug/hachimi-staging-credential.exe assert-present com.hachimi.channel loopback-webhook:local
-          if ($LASTEXITCODE -ne 0) { throw 'Gateway loopback credential verification failed.' }
           "HACHIMI_STAGING_ENTERPRISE_CONFIG=$((Resolve-Path target/staging-config/enterprise.json).Path)" | Out-File $env:GITHUB_ENV -Append
           "HACHIMI_STAGING_HACHIMI_EXE=$($candidateExe.FullName)" | Out-File $env:GITHUB_ENV -Append
           $artifacts = Get-ChildItem target/release-candidate -File | Where-Object { $_.Extension -in '.exe', '.msi', '.zip' }
@@ -322,24 +313,132 @@ jobs:
                 & target/debug/hachimi-staging-credential.exe assert-absent com.hachimi.connector $connection.accountId
                 if ($LASTEXITCODE -ne 0) { $cleanupFailed = $true }
               }
-              $wecomAccount = ($config.connections | Where-Object platform -eq 'wecom' | Select-Object -First 1).accountId
-              & target/debug/hachimi-staging-credential.exe clear com.hachimi.channel "wecom:$wecomAccount"
-              if ($LASTEXITCODE -ne 0) { $cleanupFailed = $true }
-              & target/debug/hachimi-staging-credential.exe assert-absent com.hachimi.channel "wecom:$wecomAccount"
-              if ($LASTEXITCODE -ne 0) { $cleanupFailed = $true }
             }
-            & target/debug/hachimi-staging-credential.exe clear com.hachimi.channel loopback-webhook:local
-            if ($LASTEXITCODE -ne 0) { $cleanupFailed = $true }
-            & target/debug/hachimi-staging-credential.exe assert-absent com.hachimi.channel loopback-webhook:local
-            if ($LASTEXITCODE -ne 0) { $cleanupFailed = $true }
           }
           if (Test-Path target/staging-config/enterprise.json) { Remove-Item -LiteralPath target/staging-config/enterprise.json -Force }
           if (Test-Path target/staging-config) { Remove-Item -LiteralPath target/staging-config -Force }
           cargo clean --target-dir ${{ github.workspace }}\target
           if ($cleanupFailed) { throw 'Enterprise staging credential cleanup failed.' }
 
+  channels:
+    needs: resolve-candidate
+    runs-on: [self-hosted, windows, x64, hachimi-channels-staging]
+    environment: hachimi-channels-staging
+    timeout-minutes: 120
+    env:
+      CONFIG_JSON: ${{ vars.HACHIMI_STAGING_CHANNELS_CONFIG_JSON }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve-candidate.outputs.commit_sha }}
+          lfs: true
+      - uses: actions/download-artifact@v4
+        with:
+          github-token: ${{ github.token }}
+          run-id: ${{ inputs.candidate_run_id }}
+          name: hachimi-release-candidate-${{ inputs.candidate_run_id }}
+          path: target/release-candidate
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24.10.0
+      - uses: dtolnay/rust-toolchain@stable
+      - run: corepack enable
+      - run: corepack prepare pnpm@11.15.1 --activate
+      - run: pnpm install --frozen-lockfile
+      - name: Verify disk and immutable candidate
+        shell: powershell
+        run: |
+          & scripts/release/check-disk-space.ps1 -MinimumFreeGiB 30
+          pnpm release:artifact-verify -- --root target/release-candidate --expected-commit ${{ needs.resolve-candidate.outputs.commit_sha }}
+      - name: Provision temporary five-platform credentials and config
+        shell: powershell
+        env:
+          DINGTALK_SECRET: ${{ secrets.HACHIMI_STAGING_DINGTALK_CREDENTIAL_JSON }}
+          FEISHU_SECRET: ${{ secrets.HACHIMI_STAGING_FEISHU_CREDENTIAL_JSON }}
+          WECOM_AI_SECRET: ${{ secrets.HACHIMI_STAGING_WECOM_AI_CREDENTIAL_JSON }}
+          WECOM_APP_SECRET: ${{ secrets.HACHIMI_STAGING_WECOM_CREDENTIAL_JSON }}
+          ILINK_SECRET: ${{ secrets.HACHIMI_STAGING_ILINK_CREDENTIAL_JSON }}
+          ILINK_CONTEXT_SECRET: ${{ secrets.HACHIMI_STAGING_ILINK_CONTEXT_TOKEN }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:CONFIG_JSON)) { throw 'Channel staging config is missing.' }
+          New-Item -ItemType Directory -Path target/staging-config -Force | Out-Null
+          [IO.File]::WriteAllText((Join-Path $pwd 'target/staging-config/channels.json'), $env:CONFIG_JSON, [Text.UTF8Encoding]::new($false))
+          cargo build -p hachimi-llm --bin hachimi-staging-credential
+          $config = Get-Content -LiteralPath target/staging-config/channels.json -Raw | ConvertFrom-Json
+          $secretByProvider = @{
+            dingtalk = $env:DINGTALK_SECRET
+            feishu = $env:FEISHU_SECRET
+            wecom_ai_bot = $env:WECOM_AI_SECRET
+            wecom_app = $env:WECOM_APP_SECRET
+            wechat_ilink = $env:ILINK_SECRET
+          }
+          foreach ($connection in $config.connections) {
+            $secret = $secretByProvider[$connection.providerId]
+            if ([string]::IsNullOrWhiteSpace($secret)) { throw "Channel staging credential missing for $($connection.providerId)." }
+            $prefix = 'keyring:integration:'
+            if (-not $connection.credentialRef.StartsWith($prefix)) { throw 'Invalid Channel credential reference.' }
+            $username = $connection.credentialRef.Substring($prefix.Length)
+            $secret | & target/debug/hachimi-staging-credential.exe set com.hachimi.integration $username
+            if ($LASTEXITCODE -ne 0) { throw "Channel credential provisioning failed for $($connection.providerId)." }
+            & target/debug/hachimi-staging-credential.exe assert-present com.hachimi.integration $username
+            if ($LASTEXITCODE -ne 0) { throw "Channel credential verification failed for $($connection.providerId)." }
+            if (-not (Test-Path -LiteralPath $connection.imageFixturePath -PathType Leaf)) { throw 'Channel image fixture is missing.' }
+            if (-not (Test-Path -LiteralPath $connection.fileFixturePath -PathType Leaf)) { throw 'Channel file fixture is missing.' }
+          }
+          $ilink = $config.connections | Where-Object providerId -eq 'wechat_ilink' | Select-Object -First 1
+          if (-not $ilink -or [string]::IsNullOrWhiteSpace($env:ILINK_CONTEXT_SECRET)) { throw 'iLink conversation credential is missing.' }
+          $contextPrefix = 'keyring:integration:'
+          if (-not $ilink.conversationSecretRef.StartsWith($contextPrefix)) { throw 'Invalid iLink conversation credential reference.' }
+          $contextUsername = $ilink.conversationSecretRef.Substring($contextPrefix.Length)
+          $env:ILINK_CONTEXT_SECRET | & target/debug/hachimi-staging-credential.exe set com.hachimi.integration $contextUsername
+          if ($LASTEXITCODE -ne 0) { throw 'iLink conversation credential provisioning failed.' }
+          & target/debug/hachimi-staging-credential.exe assert-present com.hachimi.integration $contextUsername
+          if ($LASTEXITCODE -ne 0) { throw 'iLink conversation credential verification failed.' }
+          "HACHIMI_STAGING_CHANNELS_CONFIG=$((Resolve-Path target/staging-config/channels.json).Path)" | Out-File $env:GITHUB_ENV -Append
+          $artifacts = Get-ChildItem target/release-candidate -File | Where-Object { $_.Extension -in '.exe', '.msi', '.zip' }
+          "HACHIMI_RELEASE_ARTIFACTS=$(($artifacts.FullName -join [System.IO.Path]::PathSeparator))" | Out-File $env:GITHUB_ENV -Append
+      - run: pnpm test:staging:channels
+      - name: Upload sanitized Channel evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: channels-staging-evidence-${{ github.run_id }}
+          path: target/release-evidence/**/channels.summary.json
+          if-no-files-found: error
+          retention-days: 90
+      - name: Revoke temporary Channel credentials and prune build output
+        if: always()
+        shell: powershell
+        run: |
+          $cleanupFailed = $false
+          if ((Test-Path target/debug/hachimi-staging-credential.exe) -and (Test-Path target/staging-config/channels.json)) {
+            $config = Get-Content -LiteralPath target/staging-config/channels.json -Raw | ConvertFrom-Json
+            foreach ($connection in $config.connections) {
+              $prefix = 'keyring:integration:'
+              if ($connection.credentialRef.StartsWith($prefix)) {
+                $username = $connection.credentialRef.Substring($prefix.Length)
+                & target/debug/hachimi-staging-credential.exe clear com.hachimi.integration $username
+                if ($LASTEXITCODE -ne 0) { $cleanupFailed = $true }
+                & target/debug/hachimi-staging-credential.exe assert-absent com.hachimi.integration $username
+                if ($LASTEXITCODE -ne 0) { $cleanupFailed = $true }
+              }
+            }
+            $ilink = $config.connections | Where-Object providerId -eq 'wechat_ilink' | Select-Object -First 1
+            if ($ilink -and $ilink.conversationSecretRef.StartsWith($prefix)) {
+              $contextUsername = $ilink.conversationSecretRef.Substring($prefix.Length)
+              & target/debug/hachimi-staging-credential.exe clear com.hachimi.integration $contextUsername
+              if ($LASTEXITCODE -ne 0) { $cleanupFailed = $true }
+              & target/debug/hachimi-staging-credential.exe assert-absent com.hachimi.integration $contextUsername
+              if ($LASTEXITCODE -ne 0) { $cleanupFailed = $true }
+            }
+          }
+          if (Test-Path target/staging-config/channels.json) { Remove-Item -LiteralPath target/staging-config/channels.json -Force }
+          if (Test-Path target/staging-config) { Remove-Item -LiteralPath target/staging-config -Force }
+          cargo clean --target-dir ${{ github.workspace }}\target
+          if ($cleanupFailed) { throw 'Channel staging credential cleanup failed.' }
+
   verify-evidence:
-    needs: [resolve-candidate, openai, forge, enterprise]
+    needs: [resolve-candidate, openai, forge, enterprise, channels]
     runs-on: windows-latest
     timeout-minutes: 15
     steps:
@@ -354,7 +453,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 24.10.0
-      - run: node scripts/release/verify-evidence.mjs --root target/release-evidence --required openai,forge,enterprise --output release-manifest.json
+      - run: node scripts/release/verify-evidence.mjs --root target/release-evidence --required openai,forge,enterprise,channels --output release-manifest.json
       - uses: actions/upload-artifact@v4
         with:
           name: external-staging-evidence-${{ github.run_id }}

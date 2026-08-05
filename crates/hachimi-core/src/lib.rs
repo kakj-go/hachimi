@@ -46,7 +46,6 @@ pub struct RuntimeFeatureSet {
     pub git_remote_mutations: bool,
     pub plugin_runtime: bool,
     pub enterprise_integrations: bool,
-    pub desktop_control: bool,
 }
 
 impl RuntimeFeatureSet {
@@ -60,7 +59,6 @@ impl RuntimeFeatureSet {
             git_remote_mutations: true,
             plugin_runtime: true,
             enterprise_integrations: true,
-            desktop_control: true,
         }
     }
 
@@ -74,7 +72,6 @@ impl RuntimeFeatureSet {
             git_remote_mutations: false,
             plugin_runtime: false,
             enterprise_integrations: false,
-            desktop_control: false,
         }
     }
 }
@@ -135,7 +132,6 @@ impl FeatureFlags {
             || self.runtime_features.git_remote_mutations
             || self.runtime_features.plugin_runtime
             || self.runtime_features.enterprise_integrations
-            || self.runtime_features.desktop_control
     }
 }
 

@@ -7,7 +7,7 @@ mod stream;
 
 pub use api::{
     EnterpriseApiClient, EnterpriseApiError, EnterpriseDirectoryPage, EnterpriseDownloadReceipt,
-    EnterpriseMessageTarget,
+    EnterpriseMediaKind, EnterpriseMessageTarget,
 };
 pub use credentials::EnterpriseCredential;
 pub use events::{

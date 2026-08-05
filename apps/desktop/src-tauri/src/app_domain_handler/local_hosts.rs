@@ -5,9 +5,8 @@ use hachimi_control_plane::{
     GatewayAppRequest, GatewayAppResponse, PluginAppRequest, PluginAppResponse,
 };
 use hachimi_protocol::{
-    BrowserHostSettings, BrowserProfileKind, CapabilityGrantSet, ComputerAppRule, RunId,
-    SandboxCapabilityReport, ScheduleEventEnvelope, ScheduleEventResourceRef, ScheduleEventSource,
-    ScheduleEventSourceKind, SessionId,
+    CapabilityGrantSet, ComputerAppRule, RunId, SandboxCapabilityReport, ScheduleEventEnvelope,
+    ScheduleEventResourceRef, ScheduleEventSource, ScheduleEventSourceKind, SessionId,
 };
 use sqlx::Row;
 
@@ -17,22 +16,8 @@ impl DesktopAppDomainHandler {
         context: &AppServerContext,
         request: BrowserAppRequest,
     ) -> Result<BrowserAppResponse, AppServerDomainError> {
-        self.require_runtime_feature(
-            self.features.runtime_features.desktop_control,
-            "desktop_control",
-        )?;
         self.require_feature(self.features.browser_control, "browser_control_disabled")?;
         match request {
-            BrowserAppRequest::BeginPairing => {
-                Ok(BrowserAppResponse::Pairing(self.browser.begin_pairing()))
-            }
-            BrowserAppRequest::GetHostSettings => {
-                let preferred = self.browser_preferred_profile().await?;
-                Ok(BrowserAppResponse::HostSettings(BrowserHostSettings {
-                    preferred_profile_kind: preferred,
-                    latest_pairing: self.browser.latest_confirmed_pairing(),
-                }))
-            }
             BrowserAppRequest::ListPermissions => {
                 let rows = sqlx::query("SELECT sessions.id AS browser_session_id, sessions.owner_session_id, sessions.owner_run_id, sessions.record_json, runs.generation, permissions.permission_json FROM browser_site_permissions AS permissions INNER JOIN browser_sessions AS sessions ON sessions.id = permissions.browser_session_id INNER JOIN runs ON runs.id = sessions.owner_run_id ORDER BY permissions.updated_at_ms DESC LIMIT 500")
                     .fetch_all(self.store.pool())
@@ -103,29 +88,6 @@ impl DesktopAppDomainHandler {
                     .collect::<Result<Vec<_>, _>>()?;
                 Ok(BrowserAppResponse::PermissionRequests(requests))
             }
-            BrowserAppRequest::SetPreferredProfile(profile_kind) => {
-                if profile_kind == BrowserProfileKind::ChromeExtension
-                    && self.browser.latest_confirmed_pairing().is_none()
-                {
-                    return Err(AppServerDomainError::new(
-                        "browser_pairing_required",
-                        "Confirm an unexpired Chrome extension pairing before selecting this mode",
-                    ));
-                }
-                sqlx::query("UPDATE browser_host_settings SET preferred_profile_kind = ?, updated_at_ms = ? WHERE singleton = 1")
-                    .bind(match profile_kind {
-                        BrowserProfileKind::Isolated => "isolated",
-                        BrowserProfileKind::ChromeExtension => "chrome_extension",
-                    })
-                    .bind(now_ms())
-                    .execute(self.store.pool())
-                    .await
-                    .map_err(domain_error("browser_host_settings_store_failed"))?;
-                Ok(BrowserAppResponse::HostSettings(BrowserHostSettings {
-                    preferred_profile_kind: profile_kind,
-                    latest_pairing: self.browser.latest_confirmed_pairing(),
-                }))
-            }
             BrowserAppRequest::Start {
                 session_id,
                 run_id,
@@ -148,15 +110,6 @@ impl DesktopAppDomainHandler {
                     .await
                     .map_err(domain_error("browser_start_failed"))?;
                 self.persist_browser_session(&session).await?;
-                self.store
-                    .set_desktop_control_browser_session(
-                        &session.owner_session_id,
-                        Some(&session.id),
-                        "observing",
-                        now_ms(),
-                    )
-                    .await
-                    .map_err(domain_error("desktop_control_browser_state_failed"))?;
                 Ok(BrowserAppResponse::Session(session))
             }
             BrowserAppRequest::GrantSitePermission {
@@ -380,14 +333,6 @@ impl DesktopAppDomainHandler {
                     .session_snapshot(&browser_session_id, &run_id)
                     .map_err(domain_error("browser_session_snapshot_failed"))?;
                 self.persist_browser_session(&session).await?;
-                self.store
-                    .touch_desktop_control_observation(
-                        &session_id,
-                        "observing",
-                        observation.created_at_ms,
-                    )
-                    .await
-                    .map_err(domain_error("desktop_control_observation_state_failed"))?;
                 Ok(BrowserAppResponse::Observation(observation))
             }
             BrowserAppRequest::Act { run_id, request } => {
@@ -395,7 +340,7 @@ impl DesktopAppDomainHandler {
                     .browser_owner_session(&request.browser_session_id)
                     .await?;
                 let action_id = self
-                    .prepare_desktop_control_action(
+                    .prepare_host_action(
                         &owner_session,
                         &run_id,
                         request.run_generation,
@@ -409,13 +354,8 @@ impl DesktopAppDomainHandler {
                         &request,
                     )
                     .await?;
-                self.update_desktop_control_action(
-                    &owner_session,
-                    action_id.as_deref(),
-                    "dispatched",
-                    None,
-                )
-                .await?;
+                self.update_host_action(&owner_session, action_id.as_deref(), "dispatched", None)
+                    .await?;
                 let pending =
                     if let hachimi_protocol::BrowserAction::Navigate { url } = &request.action {
                         let origin = hachimi_browser::normalized_origin(url)
@@ -434,25 +374,17 @@ impl DesktopAppDomainHandler {
                             .session_snapshot(&request.browser_session_id, &run_id)
                             .map_err(domain_error("browser_session_snapshot_failed"))?;
                         self.persist_browser_session(&session).await?;
-                        self.update_desktop_control_action(
+                        self.update_host_action(
                             &owner_session,
                             action_id.as_deref(),
                             "completed",
                             Some(&result.result_code),
                         )
                         .await?;
-                        self.store
-                            .touch_desktop_control_observation(
-                                &owner_session,
-                                "observing",
-                                now_ms(),
-                            )
-                            .await
-                            .map_err(domain_error("desktop_control_action_state_failed"))?;
                         Ok(BrowserAppResponse::Action(result))
                     }
                     Err(hachimi_browser::BrowserHostError::PermissionMissing) => {
-                        self.update_desktop_control_action(
+                        self.update_host_action(
                             &owner_session,
                             action_id.as_deref(),
                             "denied",
@@ -516,7 +448,7 @@ impl DesktopAppDomainHandler {
                     }
                     Err(error) => {
                         let (status, result_code) = browser_action_error_status(&error);
-                        self.update_desktop_control_action(
+                        self.update_host_action(
                             &owner_session,
                             action_id.as_deref(),
                             status,
@@ -566,15 +498,6 @@ impl DesktopAppDomainHandler {
                 self.persist_browser_session(&session).await?;
                 self.invalidate_browser_permission_ledger(&browser_session_id)
                     .await?;
-                self.store
-                    .set_desktop_control_browser_session(
-                        &session.owner_session_id,
-                        None,
-                        "taken_over",
-                        now_ms(),
-                    )
-                    .await
-                    .map_err(domain_error("desktop_control_browser_state_failed"))?;
                 Ok(BrowserAppResponse::Session(session))
             }
             BrowserAppRequest::Stop {
@@ -589,15 +512,6 @@ impl DesktopAppDomainHandler {
                 self.persist_browser_session(&session).await?;
                 self.invalidate_browser_permission_ledger(&browser_session_id)
                     .await?;
-                self.store
-                    .set_desktop_control_browser_session(
-                        &session.owner_session_id,
-                        None,
-                        "stopped",
-                        now_ms(),
-                    )
-                    .await
-                    .map_err(domain_error("desktop_control_browser_state_failed"))?;
                 Ok(BrowserAppResponse::Session(session))
             }
         }
@@ -608,10 +522,6 @@ impl DesktopAppDomainHandler {
         context: &AppServerContext,
         request: ComputerAppRequest,
     ) -> Result<ComputerAppResponse, AppServerDomainError> {
-        self.require_runtime_feature(
-            self.features.runtime_features.desktop_control,
-            "desktop_control",
-        )?;
         match request {
             ComputerAppRequest::ListWindows => {
                 self.require_feature(self.features.computer_observe, "computer_observe_disabled")?;
@@ -712,9 +622,9 @@ impl DesktopAppDomainHandler {
                         &sandbox,
                     )
                     .await
-                    .map_err(domain_error("computer_observe_failed"))?;
+                    .map_err(computer_domain_error)?;
                 self.store
-                    .set_desktop_control_computer_observation(
+                    .set_computer_control_observation(
                         &frame.session_id,
                         Some(&frame.target.app_id),
                         Some(&frame.target.fingerprint),
@@ -724,7 +634,7 @@ impl DesktopAppDomainHandler {
                         now_ms(),
                     )
                     .await
-                    .map_err(domain_error("desktop_control_computer_state_failed"))?;
+                    .map_err(domain_error("computer_control_state_failed"))?;
                 Ok(ComputerAppResponse::Frame(frame))
             }
             ComputerAppRequest::Act { run_id, request } => {
@@ -739,7 +649,7 @@ impl DesktopAppDomainHandler {
                         )
                     })?;
                 let action_id = self
-                    .prepare_desktop_control_action(
+                    .prepare_host_action(
                         &frame.session_id,
                         &run_id,
                         request.run_generation,
@@ -764,7 +674,7 @@ impl DesktopAppDomainHandler {
                             "active Run grant is unavailable",
                         )
                     })?;
-                self.update_desktop_control_action(
+                self.update_host_action(
                     &frame.session_id,
                     action_id.as_deref(),
                     "dispatched",
@@ -773,7 +683,7 @@ impl DesktopAppDomainHandler {
                 .await?;
                 match self.computer.act(&request, &grants).await {
                     Ok(result) => {
-                        self.update_desktop_control_action(
+                        self.update_host_action(
                             &frame.session_id,
                             action_id.as_deref(),
                             "completed",
@@ -781,7 +691,7 @@ impl DesktopAppDomainHandler {
                         )
                         .await?;
                         self.store
-                            .set_desktop_control_computer_observation(
+                            .set_computer_control_observation(
                                 &frame.session_id,
                                 Some(&frame.target.app_id),
                                 Some(&frame.target.fingerprint),
@@ -791,26 +701,26 @@ impl DesktopAppDomainHandler {
                                 now_ms(),
                             )
                             .await
-                            .map_err(domain_error("desktop_control_computer_state_failed"))?;
+                            .map_err(domain_error("computer_control_state_failed"))?;
                         Ok(ComputerAppResponse::Action(result))
                     }
                     Err(error) => {
                         let (status, result_code) = computer_action_error_status(&error);
-                        self.update_desktop_control_action(
+                        self.update_host_action(
                             &frame.session_id,
                             action_id.as_deref(),
                             status,
                             Some(result_code),
                         )
                         .await?;
-                        Err(domain_error("computer_action_failed")(error))
+                        Err(computer_domain_error(error))
                     }
                 }
             }
             ComputerAppRequest::TakeOver(session_id) => {
                 let next_epoch = self.computer.take_over(&session_id);
                 self.store
-                    .set_desktop_control_computer_observation(
+                    .set_computer_control_observation(
                         &session_id,
                         None,
                         None,
@@ -820,7 +730,7 @@ impl DesktopAppDomainHandler {
                         now_ms(),
                     )
                     .await
-                    .map_err(domain_error("desktop_control_computer_state_failed"))?;
+                    .map_err(domain_error("computer_control_state_failed"))?;
                 Ok(ComputerAppResponse::TakenOver(next_epoch))
             }
         }
@@ -1108,8 +1018,8 @@ impl DesktopAppDomainHandler {
     ) -> Result<ChannelAppResponse, AppServerDomainError> {
         self.require_feature(self.features.local_gateway, "local_gateway_disabled")?;
         match request {
-            ChannelAppRequest::DispatchIngress { envelope } => {
-                if is_enterprise_provider_id(&envelope.route.channel) {
+            ChannelAppRequest::DispatchIngress { message } => {
+                if is_enterprise_provider_id(&message.address.provider_id) {
                     self.require_runtime_feature(
                         self.features.runtime_features.enterprise_integrations,
                         "enterprise_integrations",
@@ -1122,70 +1032,72 @@ impl DesktopAppDomainHandler {
                     ));
                 }
                 if matches!(
-                    envelope.route.channel.as_str(),
-                    "wecom" | "ding_talk" | "feishu"
+                    message.address.provider_id.as_str(),
+                    "dingtalk" | "feishu" | "wecom_ai_bot" | "wecom_app" | "wechat_ilink"
                 ) {
-                    let event_type = envelope
-                        .metadata
+                    let event_type = message
+                        .provider_context
                         .get("eventType")
                         .and_then(serde_json::Value::as_str)
                         .unwrap_or("message.received")
                         .to_owned();
-                    let revision = envelope
-                        .metadata
+                    let revision = message
+                        .provider_context
                         .get("payloadHash")
                         .and_then(serde_json::Value::as_str)
                         .map(str::to_owned);
                     self.scheduler
                         .ingest_event(ScheduleEventEnvelope {
-                            event_id: envelope.message_id.as_str().to_owned(),
+                            event_id: message.event_key.external_message_id.clone(),
                             source: ScheduleEventSource {
                                 kind: ScheduleEventSourceKind::Channel,
                                 principal: context.principal.clone(),
                                 id: format!(
                                     "enterprise:{}:{}",
-                                    envelope.route.channel, envelope.route.account
+                                    message.address.provider_id, message.address.account_id
                                 ),
                             },
                             event_type,
-                            subject: Some(envelope.route.peer.clone()),
+                            subject: Some(message.address.chat_id.clone()),
                             labels: BTreeMap::from([
-                                ("platform".into(), envelope.route.channel.clone()),
-                                ("account".into(), envelope.route.account.clone()),
+                                ("platform".into(), message.address.provider_id.clone()),
+                                ("account".into(), message.address.account_id.clone()),
                             ]),
                             resource: Some(ScheduleEventResourceRef {
                                 kind: "enterprise_message".into(),
-                                id: envelope.message_id.as_str().to_owned(),
+                                id: message.event_key.external_message_id.clone(),
                                 revision,
                             }),
-                            occurred_at_ms: envelope.received_at_ms,
+                            occurred_at_ms: message.received_at_ms,
                         })
                         .await
                         .map_err(domain_error("enterprise_event_ingress_failed"))?;
                 }
                 self.run_launcher
-                    .dispatch_channel_ingress(context.principal.clone(), envelope)
+                    .dispatch_channel_ingress(context.principal.clone(), message)
                     .await
                     .map(ChannelAppResponse::Ingress)
             }
             ChannelAppRequest::LoopbackReceive {
                 bearer_token,
-                envelope,
+                message,
             } => self
                 .loopback_channel
-                .receive(&self.gateway, &bearer_token, envelope)
+                .receive(&self.gateway, &bearer_token, message)
                 .await
                 .map(ChannelAppResponse::Ingress)
                 .map_err(domain_error("loopback_receive_failed")),
-            ChannelAppRequest::MockPollPush(envelope) => {
+            ChannelAppRequest::MockPollPush(message) => {
                 self.mock_poll_channel
-                    .push(envelope)
+                    .push(message)
                     .await
                     .map_err(domain_error("mock_poll_push_failed"))?;
                 Ok(ChannelAppResponse::Ingresses(Vec::new()))
             }
             ChannelAppRequest::MockPollSetConnected(connected) => {
-                self.mock_poll_channel.set_connected(connected);
+                self.mock_poll_channel
+                    .set_connected(connected)
+                    .map_err(domain_error("mock_poll_connection_update_failed"))?;
                 Ok(ChannelAppResponse::MockPollConnected(connected))
             }
             ChannelAppRequest::MockPollDrain => self
@@ -1195,18 +1107,18 @@ impl DesktopAppDomainHandler {
                 .map(ChannelAppResponse::Ingresses)
                 .map_err(domain_error("mock_poll_drain_failed")),
             ChannelAppRequest::EnqueueDelivery {
-                route,
+                address,
                 idempotency_key,
                 text,
             } => {
-                if is_enterprise_provider_id(&route.channel) {
+                if is_enterprise_provider_id(&address.provider_id) {
                     self.require_runtime_feature(
                         self.features.runtime_features.enterprise_integrations,
                         "enterprise_integrations",
                     )?;
                 }
                 self.gateway
-                    .enqueue_delivery(route, &idempotency_key, &text, now_ms())
+                    .enqueue_text_delivery(address, &idempotency_key, &text, None, now_ms())
                     .await
                     .map(ChannelAppResponse::Delivery)
                     .map_err(domain_error("channel_delivery_enqueue_failed"))
@@ -1251,7 +1163,7 @@ impl DesktopAppDomainHandler {
                         "enterprise_integrations",
                     )?;
                 }
-                let preserve_existing_secret = input.credential.is_none();
+                let credential_changed = input.credential.is_some();
                 let secret_ref = if let Some(credential) = input.credential.as_deref() {
                     let entry = keyring::Entry::new(
                         "com.hachimi.channel",
@@ -1273,48 +1185,19 @@ impl DesktopAppDomainHandler {
                 } else {
                     None
                 };
-                self.gateway
-                    .upsert_provider_account(
-                        hachimi_protocol::ChannelProviderAccount {
-                            id: input.id,
-                            provider_id: input.provider_id,
-                            display_name: input.display_name,
-                            secret_ref,
-                            enabled: input.enabled,
-                            route_allowlist: input.route_allowlist,
-                            config_revision: input.expected_config_revision.unwrap_or_default(),
-                        },
-                        input.expected_config_revision,
-                        preserve_existing_secret,
-                    )
-                    .await
-                    .map(GatewayAppResponse::ProviderAccount)
-                    .map_err(domain_error("gateway_provider_account_upsert_failed"))
-            }
-            GatewayAppRequest::SetStartupEnabled(enabled) => {
-                let executable = std::env::current_exe()
-                    .map_err(domain_error("gateway_executable_lookup_failed"))?;
-                let mut health = self
+                let mut account = self
                     .gateway
-                    .set_startup_registration(&executable, enabled, now_ms())
+                    .upsert_provider_account(input)
                     .await
-                    .map_err(domain_error("gateway_startup_update_failed"))?;
-                if enabled {
-                    crate::gateway_process::ensure_running(&executable)
-                        .map_err(domain_error("gateway_process_start_failed"))?;
-                    for _ in 0..20 {
-                        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-                        health = self
-                            .gateway
-                            .health()
-                            .await
-                            .map_err(domain_error("gateway_health_failed"))?;
-                        if health.running {
-                            break;
-                        }
-                    }
+                    .map_err(domain_error("gateway_provider_account_upsert_failed"))?;
+                if credential_changed {
+                    account.credential_ref = secret_ref;
+                    self.gateway
+                        .bootstrap_provider_accounts(std::slice::from_ref(&account))
+                        .await
+                        .map_err(domain_error("gateway_provider_account_upsert_failed"))?;
                 }
-                Ok(GatewayAppResponse::Health(health))
+                Ok(GatewayAppResponse::ProviderAccount(account))
             }
             GatewayAppRequest::Reconcile => {
                 self.gateway
@@ -1327,7 +1210,7 @@ impl DesktopAppDomainHandler {
     }
 
     #[allow(clippy::too_many_arguments)]
-    async fn prepare_desktop_control_action<T: serde::Serialize>(
+    async fn prepare_host_action<T: serde::Serialize>(
         &self,
         session_id: &SessionId,
         run_id: &RunId,
@@ -1337,30 +1220,22 @@ impl DesktopAppDomainHandler {
         observation_revision: &str,
         payload: &T,
     ) -> Result<Option<String>, AppServerDomainError> {
-        if !self
-            .store
-            .desktop_control_session_exists(session_id)
-            .await
-            .map_err(domain_error("desktop_control_session_lookup_failed"))?
-        {
-            return Ok(None);
-        }
         let run = self
             .store
             .get_run(run_id)
             .await
-            .map_err(domain_error("desktop_control_run_lookup_failed"))?
+            .map_err(domain_error("host_action_run_lookup_failed"))?
             .filter(|run| &run.session_id == session_id)
             .ok_or_else(|| {
                 AppServerDomainError::new(
-                    "desktop_control_run_precondition_failed",
-                    "DesktopControl Run ownership changed",
+                    "host_action_run_precondition_failed",
+                    "Host action Run ownership changed",
                 )
             })?;
         if run.generation != expected_generation {
             return Err(AppServerDomainError::new(
                 "stale_run_generation",
-                "DesktopControl action belongs to an expired Run generation",
+                "Host action belongs to an expired Run generation",
             ));
         }
         let action_id = mutation_fingerprint(
@@ -1368,8 +1243,8 @@ impl DesktopAppDomainHandler {
             &(run_id.as_str(), observation_revision, payload),
         )?;
         let target_fingerprint_hash =
-            mutation_fingerprint("desktop-control-target", &target_fingerprint)?;
-        let input = hachimi_storage::DesktopControlActionLedgerInput {
+            mutation_fingerprint("host-action-target", &target_fingerprint)?;
+        let input = hachimi_storage::HostActionLedgerInput {
             session_id: session_id.clone(),
             run_id: run_id.clone(),
             generation: run.generation,
@@ -1381,17 +1256,17 @@ impl DesktopAppDomainHandler {
         };
         let inserted = self
             .store
-            .prepare_desktop_control_action(&input)
+            .prepare_host_action(&input)
             .await
-            .map_err(domain_error("desktop_control_action_prepare_failed"))?;
+            .map_err(domain_error("host_action_prepare_failed"))?;
         if !inserted {
             return Err(AppServerDomainError::new(
-                "desktop_control_action_duplicate",
-                "DesktopControl action was already claimed and will not be replayed",
+                "host_action_duplicate",
+                "Host action was already claimed and will not be replayed",
             ));
         }
         self.store
-            .update_desktop_control_action(
+            .update_host_action(
                 session_id,
                 &action_id,
                 "approved",
@@ -1399,11 +1274,11 @@ impl DesktopAppDomainHandler {
                 now_ms(),
             )
             .await
-            .map_err(domain_error("desktop_control_action_approve_failed"))?;
+            .map_err(domain_error("host_action_approve_failed"))?;
         Ok(Some(action_id))
     }
 
-    async fn update_desktop_control_action(
+    async fn update_host_action(
         &self,
         session_id: &SessionId,
         action_id: Option<&str>,
@@ -1414,9 +1289,9 @@ impl DesktopAppDomainHandler {
             return Ok(());
         };
         self.store
-            .update_desktop_control_action(session_id, action_id, status, result_code, now_ms())
+            .update_host_action(session_id, action_id, status, result_code, now_ms())
             .await
-            .map_err(domain_error("desktop_control_action_update_failed"))
+            .map_err(domain_error("host_action_update_failed"))
     }
 
     fn require_feature(
@@ -1626,23 +1501,6 @@ impl DesktopAppDomainHandler {
         Ok(())
     }
 
-    async fn browser_preferred_profile(&self) -> Result<BrowserProfileKind, AppServerDomainError> {
-        let row = sqlx::query(
-            "SELECT preferred_profile_kind FROM browser_host_settings WHERE singleton = 1",
-        )
-        .fetch_one(self.store.pool())
-        .await
-        .map_err(domain_error("browser_host_settings_load_failed"))?;
-        match row.get::<String, _>("preferred_profile_kind").as_str() {
-            "isolated" => Ok(BrowserProfileKind::Isolated),
-            "chrome_extension" => Ok(BrowserProfileKind::ChromeExtension),
-            _ => Err(AppServerDomainError::new(
-                "browser_host_settings_invalid",
-                "stored Browser profile preference is invalid",
-            )),
-        }
-    }
-
     async fn persist_computer_rule(
         &self,
         session_id: &SessionId,
@@ -1775,12 +1633,38 @@ fn computer_action_error_status(
     }
 }
 
+fn computer_domain_error(error: hachimi_computer::ComputerHostError) -> AppServerDomainError {
+    let code = error.stable_code();
+    tracing::warn!(code, detail = %error, "Computer Use operation rejected");
+    let message = match code {
+        "computer_protected_or_elevated_target" => {
+            "目标应用已提权或位于受保护桌面，当前权限无法控制。"
+        }
+        "computer_protected_desktop" => "当前处于锁屏或受保护桌面，Computer Use 已暂停。",
+        "computer_capture_unavailable" => "目标窗口无法捕获，请确认窗口仍然可见。",
+        "computer_input_rejected" => "Windows 拒绝了输入操作，请检查目标应用权限。",
+        "computer_target_changed" => "目标窗口已变化，请重新观察后再操作。",
+        "computer_frame_stale" | "computer_run_stale" => "窗口画面已过期，请重新观察后再操作。",
+        "computer_user_takeover" => "检测到用户接管，Agent 控制已停止。",
+        "computer_app_not_allowed" => "该应用未获得 Computer Use 授权。",
+        "computer_observe_not_granted" | "computer_control_not_granted" => {
+            "当前任务未获得所需的 Computer Use 权限。"
+        }
+        "computer_sandbox_not_ready" => "Computer Use 安全运行环境尚未就绪。",
+        _ => "Computer Use 操作未完成，请重试或查看应用日志。",
+    };
+    AppServerDomainError::new(code, message)
+}
+
 fn is_enterprise_plugin(plugin_id: &hachimi_protocol::PluginId) -> bool {
     is_enterprise_provider_id(plugin_id.as_str())
 }
 
 fn is_enterprise_provider_id(value: &str) -> bool {
-    matches!(value, "wecom" | "dingtalk" | "feishu")
+    matches!(
+        value,
+        "dingtalk" | "feishu" | "wecom_ai_bot" | "wecom_app" | "wechat_ilink"
+    )
 }
 
 fn decode_browser_permission_request(

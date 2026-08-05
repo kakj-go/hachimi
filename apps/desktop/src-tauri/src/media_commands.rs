@@ -758,7 +758,6 @@ fn entry_profile_key(profile: EntryProfile) -> &'static str {
     match profile {
         EntryProfile::Workbench => "workbench",
         EntryProfile::PetConversation => "pet_conversation",
-        EntryProfile::DesktopControl => "desktop_control",
     }
 }
 

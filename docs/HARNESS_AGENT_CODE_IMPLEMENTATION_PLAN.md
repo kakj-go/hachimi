@@ -22,32 +22,36 @@
 
 当前基线使用二十二个增量 migration，不提供 typed/untyped 双读：
 
-| Migration                             | 内容                                                                                                                   |
-| ------------------------------------- | ---------------------------------------------------------------------------------------------------------------------- |
-| `0001_agent_kernel.sql`               | Session/Run、typed Item、Event、Approval、UserInput、Audit、usage、Compaction、side-effect ledger                      |
-| `0002_workspace_extensions.sql`       | Project/Checkout、Diff、Process、Review、MCP、Skills、MCP Host identity                                                |
-| `0003_automation.sql`                 | ScheduleDefinition、ScheduleGrant、TaskRun、Delivery、invocation key                                                   |
-| `0004_local_hosts.sql`                | Browser/Computer 授权、Plugin/Connector metadata、Channel ingress/outbox、continuation binding                         |
-| `0005_connector_transport.sql`        | Connector transport ledger、持久 mock-poll inbox、Browser 首选模式和 Computer 全局规则                                 |
-| `0006_local_host_completion.sql`      | Browser document/resource 网络规则与待授权请求、Plugin runtime revision、Channel provider/account、Schedule Host Grant |
-| `0007_plugin_permission_review.sql`   | Plugin scope 差异与显式权限复核                                                                                        |
-| `0008_plugin_runtime_bindings.sql`    | Hook execution/subscription 及 MCP、Browser extension、Scheduled template、Asset、Custom UI、Channel runtime binding   |
-| `0009_channel_provider_runtime.sql`   | Channel contribution 启用状态和 provider runtime 索引                                                                  |
-| `0010_schedule_events.sql`            | Event Schedule matcher、metadata-only 去重 ledger、typed resource reference、TaskRun event context 与关联              |
-| `0011_run_recovery.sql`               | durable step checkpoint、Run recovery record、generation-safe decision                                                 |
-| `0012_provider_registry.sql`          | Provider endpoint/account/protocol/profile/capability registry                                                         |
-| `0013_provider_remote_context.sql`    | Remote Compaction state、公开 summary 来源与降级 metadata                                                              |
-| `0014_agent_tasks.sql`                | 父子 Agent Task/Run、预算、消息、取消与产物 lineage                                                                    |
-| `0015_git_forge_operations.sql`       | Git/Forge mutation、expected revision/OID、idempotency 与未知结果 ledger                                               |
-| `0016_plugin_revisions.sql`           | Plugin revision head、known-good、lifecycle journal 与 rollback                                                        |
-| `0017_enterprise_integrations.sql`    | 企业账号、token/rate-limit、event receipt、attachment metadata、operation ledger                                       |
-| `0018_desktop_control_state.sql`      | DesktopControl Session Host 状态与 metadata-only action ledger                                                         |
-| `0019_recovery_alignment.sql`         | Run recovery 状态、revision snapshot 与六阶段 checkpoint 对齐                                                          |
-| `0020_agent_task_recovery.sql`        | AgentTask execution generation、lease owner/expiry 与 reconciliation metadata                                          |
-| `0021_enterprise_content.sql`         | 结构化 mention、附件下载 fencing 和 EnterpriseAttachment Artifact 关联                                                 |
-| `0022_desktop_generation_fencing.sql` | Browser Session owner Run generation 与 Browser/Computer action generation fencing                                     |
+| Migration                                       | 内容                                                                                                                   |
+| ----------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------- |
+| `0001_agent_kernel.sql`                         | Session/Run、typed Item、Event、Approval、UserInput、Audit、usage、Compaction、side-effect ledger                      |
+| `0002_workspace_extensions.sql`                 | Project/Checkout、Diff、Process、Review、MCP、Skills、MCP Host identity                                                |
+| `0003_automation.sql`                           | ScheduleDefinition、ScheduleGrant、TaskRun、Delivery、invocation key                                                   |
+| `0004_local_hosts.sql`                          | Browser/Computer 授权、Plugin/Connector metadata、Channel ingress/outbox、continuation binding                         |
+| `0005_connector_transport.sql`                  | Connector transport ledger、持久 mock-poll inbox、Browser 首选模式和 Computer 全局规则                                 |
+| `0006_local_host_completion.sql`                | Browser document/resource 网络规则与待授权请求、Plugin runtime revision、Channel provider/account、Schedule Host Grant |
+| `0007_plugin_permission_review.sql`             | Plugin scope 差异与显式权限复核                                                                                        |
+| `0008_plugin_runtime_bindings.sql`              | Hook execution/subscription 及 MCP、Browser extension、Scheduled template、Asset、Custom UI、Channel runtime binding   |
+| `0009_channel_provider_runtime.sql`             | Channel contribution 启用状态和 provider runtime 索引                                                                  |
+| `0010_schedule_events.sql`                      | Event Schedule matcher、metadata-only 去重 ledger、typed resource reference、TaskRun event context 与关联              |
+| `0011_run_recovery.sql`                         | durable step checkpoint、Run recovery record、generation-safe decision                                                 |
+| `0012_provider_registry.sql`                    | Provider endpoint/account/protocol/profile/capability registry                                                         |
+| `0013_provider_remote_context.sql`              | Remote Compaction state、公开 summary 来源与降级 metadata                                                              |
+| `0014_agent_tasks.sql`                          | 父子 Agent Task/Run、预算、消息、取消与产物 lineage                                                                    |
+| `0015_git_forge_operations.sql`                 | Git/Forge mutation、expected revision/OID、idempotency 与未知结果 ledger                                               |
+| `0016_plugin_revisions.sql`                     | Plugin revision head、known-good、lifecycle journal 与 rollback                                                        |
+| `0017_enterprise_integrations.sql`              | 企业账号、token/rate-limit、event receipt、attachment metadata、operation ledger                                       |
+| `0018_desktop_control_state.sql`                | 历史 Host 状态 migration；当前由 `0029_unified_host_policies.sql` 迁移到统一 ledger                                    |
+| `0019_recovery_alignment.sql`                   | Run recovery 状态、revision snapshot 与六阶段 checkpoint 对齐                                                          |
+| `0020_agent_task_recovery.sql`                  | AgentTask execution generation、lease owner/expiry 与 reconciliation metadata                                          |
+| `0021_enterprise_content.sql`                   | 结构化 mention、附件下载 fencing 和 EnterpriseAttachment Artifact 关联                                                 |
+| `0022_desktop_generation_fencing.sql`           | Browser Session owner Run generation 与 Browser/Computer action generation fencing                                     |
+| `0023`–`0028`                                   | Workbench v2、Project Tool context、环境摘要与持久 Embedded Browser Workspace/权限/设置                                |
+| `0029_unified_host_policies.sql`                | Browser/Computer 统一 Host policy、可信应用身份与 action ledger                                                        |
+| `0030_enterprise_integration_orchestration.sql` | Connector/Channel 收敛为统一企业集成账户和 lifecycle journal                                                           |
+| `0031_plugin_builtin_channel_binding.sql`       | Plugin Runtime 对官方内置企业 Channel 绑定的持久化约束                                                                 |
 
-`CONTROL_PROTOCOL_VERSION = 29`。文件数据库 pending migration 使用 Desktop/Gateway 共享 `<database>.migrate.lock`；SQLite Online Backup、manifest/SHA-256、最近三份保留、30 秒 `database_migration_busy` 和失败事务回滚均由同一实现提供。内存数据库不备份。
+`CONTROL_PROTOCOL_VERSION = 31`。文件数据库 pending migration 使用 Desktop/Gateway 共享 `<database>.migrate.lock`；SQLite Online Backup、manifest/SHA-256、最近三份保留、30 秒 `database_migration_busy` 和失败事务回滚均由同一实现提供。内存数据库不备份。
 
 Transcript 只有 `payload_json`；secret、原始 Process 输出、附件正文、连接订阅、delta 和高权限 lease 不持久化。
 
@@ -93,6 +97,8 @@ Browser Host 已实现 managed Chromium 与 Chrome extension、history/input/wai
 
 Plugin Bundle 已实现统一 lifecycle journal：stage/validate/permission review/activate/health/commit，以及 install/enable/disable/update/rollback/uninstall、known-good revision、崩溃 reconciliation、账号撤销和跨产品清理。所有 contribution 继续通过 Sandbox/唯一 Runtime。企业微信官方 GET `echostr`/POST 加密 callback、钉钉 Stream、飞书 WebSocket/protobuf、结构化 mention、受控附件下载和 durable ledger 已接入 [ref:WECOM-API-20260730] [ref:DINGTALK-STREAM-SDK-GO-20260731] [ref:FEISHU-SDK-GO-20260731]；三个外部企业组织 Gate 真实环境待验证。
 
+Workbench 设置只暴露“平台集成”：由正式 manifest 生成企业微信、钉钉、飞书 Tab，并通过类型化凭据表单编排同一逻辑账户下的 Connector/API 与 Channel/消息能力。Gateway 的登录启动和进程需求由消息账户数量自动 reconcile；底层 Connector、Channel、Gateway domain 仅供 Runtime、诊断与测试。Plugins 用户入口在所有版本置灰，P6 Runtime/lifecycle 的完成结论不变，第三方 Bundle 用户管理界面后续开放。
+
 ## 4. 收口实施顺序
 
 当前实现状态、真实环境验证和发布边界只以 `docs/ROADMAP.md` 的双状态为准。以下编号保留实施顺序和验收映射，不另建状态体系。
@@ -118,11 +124,11 @@ Plugin Bundle 已实现统一 lifecycle journal：stage/validate/permission revi
 19. **已完成 P1**：durable checkpoint、可信恢复分类、generation/revision fencing、`indeterminate` 与 Resume UI。
 20. **已完成 P2**：capability Provider registry 与 Chat/Responses/Embeddings strict adapter；真实 OpenAI Gate 环境阻塞。
 21. **已完成 P3**：Remote Compaction 本地回退与公开 summary 边界；真实 staging 环境阻塞。
-22. **已完成 P4**：父子 Agent Task/Run、权限/预算收窄、消息/取消/产物与 lineage UI；五个 `agent.*` 已加入 Workbench General/Coding/Office ToolPlan，Scheduled 只接受持久化精确 allowlist，Pet/DesktopControl 不开放；独立 Desktop E2E 已真实执行 spawn→wait→collect。
+22. **已完成 P4**：父子 Agent Task/Run、权限/预算收窄、消息/取消/产物与 lineage UI；五个 `agent.*` 已加入 Workbench General/Coding/Office ToolPlan，Scheduled 只接受持久化精确 allowlist，Pet 不开放；独立 Desktop E2E 已真实执行 spawn→wait→collect。
 23. **已完成 P5 本地实现**：标准 Git push、Agent 原生 `git.remotes/git.push/forge.change.query/forge.change.mutate` 与四类 Forge adapter 已接入；Agent 与 Workbench command 复用 Remote/Workspace/transport/Credential/reconciliation Host，Agent 只在交互式 Project Coding 注册；Project Remote 推导的精确 host/protocol Grant 只进入 Git/Forge 授权上下文；Credential Manager/GCM/SSH、审批、revision/OID/idempotency/side-effect ledger 已覆盖 [ref:GITHUB-API-20260730] [ref:GITLAB-API-20260730] [ref:GITEE-API-20260730] [ref:GITEA-FORGEJO-API-20260730]；supplied Approval 重新校验 generation/Tool/参数/主体/一次性 scope/有效期，保证 merge 使用独立精确审批；mutation 响应未知时返回 executor error 并保持统一 ledger `Indeterminate`，只按 source/target/字段/状态/OID 查询证明，不重复 mutation。真实 staging 环境阻塞。
 24. **已完成 P6**：完整 Plugin contribution lifecycle 与产品入口 reconciliation。
 25. **代码与本地测试完成 P7**：企业 REST、事件验证、Bundle、Channel/EventSource、transport supervisor、结构化 mention、附件下载与 ledger 已完成；`enterprise.download_attachment` 已进入 General/Office ToolPlan，Scheduled 复用共享验证器精确校验 account、`download_attachment` action 和 contribution revision，缺失/漂移映射 `NeedsAttention`，通用 `connector_invoke` 不能绕过专用附件链；真实三个外部组织待验证。
-26. **已完成 P8 本地实现**：DesktopControl Session/UI/恢复、Observe-first、Browser/Computer 原语与 durable action ledger；真实 Windows smoke 环境阻塞。
+26. **已完成 P8 本地实现**：统一 Workbench Host Session、Browser/Computer Inspector、Observe-first、双 Browser lease 与 durable action ledger；真实 Windows smoke 环境阻塞。
 
 Memory 调整为远期，本轮不创建 migration、Store、检索方案或 Codex Memory 派生实现。
 
@@ -163,7 +169,7 @@ P1–P8 新增验收矩阵：
 - Multi-Agent：EntryProfile × Workload × Mode 正反矩阵、Feature Flag、Scheduled 精确 allowlist、子 Agent 权限/预算收窄、取消传播、重启恢复、Usage 汇总与 Artifact lineage 无缺口；产品 E2E 真实执行 spawn→wait→collect。
 - Git push/PR：Agent 与 Workbench UI 复用同一 Host；任意标准 Remote 的 fetch/push conformance；Plan mode 只保留 remotes/query；GitHub、GitLab、Gitee、Gitea/Forgejo 的 PR adapter 覆盖 remote/ref/OID 漂移、凭据撤销、重复请求、网络未知结果和并发更新；未知结果进入 `Indeterminate` 且 mutation 不重放。未知平台只能生成草稿。
 - Plugin/企业平台：升级/回滚/卸载无残留 contribution；企业微信、钉钉、飞书覆盖账号隔离、签名校验、入站去重、线程路由、限流、投递回执和重启恢复；Scheduled 企业附件覆盖 account/action/revision 成功、缺失和漂移的 `NeedsAttention` 路径。
-- DesktopControl/Hosts：正式入口只使用唯一 Runtime；新增 Browser/Computer 动作覆盖 stale observation/frame、接管、敏感动作审批和高权限/安全桌面拒绝。
+- Unified Hosts：Workbench 正式入口只使用唯一 Runtime；Browser/Computer 动作覆盖 stale observation/frame、接管、敏感动作审批和高权限/安全桌面拒绝。
 
 本轮新增完成证据：
 
@@ -177,12 +183,12 @@ P1–P8 新增验收矩阵：
 - `sample-crm` Webhook/Poll/retry ledger 与 `mock-poll` 重启/重复消息测试已加入；Gateway transport 不再组装 Agent Runtime，claimed ingress 经 typed AppServer 后由唯一 `AgentRunExecutor` 执行。
 - Windows release 脚本分别运行 handle sentinel、Workspace Worker、Agent `workspace_exec`、restricted stdio MCP 和 Terminal/ConPTY smoke；Toast 由 Windows Shell UI Automation 校验任务名与终态。
 - linked worktree Git mutation smoke 强制先用独立 lease stage 并恢复 RX，再用第二 lease commit；ACL 同时显式升级 shared common-dir 与 per-worktree git-dir，任一步准备失败都会回滚。
-- Desktop E2E 覆盖 Workbench core、Agent tools、Skills/MCP、Local Hosts 和 Task Center；独立 Agent tools spec 的 9 个场景验证 Multi-Agent 实际调用、General/Office 企业附件隔离、Git/Forge 全生命周期、Workbench UI/Agent 双入口共享 Host、一次性 Approval、Remote drift、凭据撤销、重复 mutation receipt 与未知结果不重放；独立 Feature Flag spec 在关闭 Multi-Agent、Git Remote Mutations 和 Enterprise Integrations 后验证真实模型 ToolPlan fail-closed，同时保留 Coding 只读 `git.remotes`。Local Hosts spec 会跨应用重启验证 Plugin/Connector 与 Gateway ledger，并在结束前撤销临时 Connector 凭据；Workbench core 验证 Pet/Workbench 对同一 Approval/UserInput 的 CAS 接续；Task Center 覆盖 Event accepted/replayed/conflict 投影。
+- Desktop E2E 覆盖 Workbench core、Agent tools、Skills/MCP、按领域拆分的 Host 集成和 Task Center；独立 Agent tools spec 的 9 个场景验证 Multi-Agent 实际调用、General/Office 企业附件隔离、Git/Forge 全生命周期、Workbench UI/Agent 双入口共享 Host、一次性 Approval、Remote drift、凭据撤销、重复 mutation receipt 与未知结果不重放；独立 Feature Flag spec 在关闭 Multi-Agent、Git Remote Mutations 和 Enterprise Integrations 后验证真实模型 ToolPlan fail-closed，同时保留 Coding 只读 `git.remotes`。Plugin、Connector、Channel 与 Gateway E2E 会跨应用重启验证各自的类型化命令和 ledger，并在结束前撤销临时 Connector 凭据；Workbench core 验证 Pet/Workbench 对同一 Approval/UserInput 的 CAS 接续；Task Center 覆盖 Event accepted/replayed/conflict 投影。
 - Desktop E2E 已消除 deprecated frame API、stale element 和滚动降级噪音；串行完整 Gate 结束后 Hachimi、WebDriver、Gateway、Browser broker 与 sidecar 进程/端口均无残留。
 - Storybook 静态构建和 128 个严格视觉/可访问性场景通过，覆盖 light/dark、zh-CN/en-US、100%/125%/150%、生产 Workbench 响应式布局、Task Center、设置页、Pet 和 WCAG A/AA；Tool Execution 可滚动结果支持键盘聚焦，表单说明文字满足对比度门槛。
 
-代码能力与可执行本地 Gate 的双状态见路线图。`v0.2.1` 已取消，当前源码统一为 `0.3.0-alpha.8`；许可、全 workspace 版本、候选 hash、staging harness、候选 Gateway callback、Forge 故障响应 reconciliation、三类包许可内容校验、五类证据聚合、Windows 单次构建和不可覆盖 tag 的发布 workflow 已实现。2026-07-31 当前 Windows 工作机已完整通过 `corepack pnpm check` 与独立 Feature Flag Desktop E2E。Desktop E2E 固定使用 `tauri-driver 2.0.6`，并按已安装 Edge 精确准备经过 Authenticode、版本和 SHA-256 校验的 Edge WebDriver；缓存可按需重建。真实 OpenAI/Forge/三个外部企业组织及两个 Windows 系统 Gate 仍后置。
+代码能力与可执行本地 Gate 的双状态见路线图。`v0.2.1` 已取消，当前源码统一为 `0.3.0-alpha.8`；许可、全 workspace 版本、候选 hash、staging harness、候选 Gateway callback、Forge 故障响应 reconciliation、三类包许可内容校验、六类证据聚合、Windows 单次构建和不可覆盖 tag 的发布 workflow 已实现。2026-07-31 当前 Windows 工作机已完整通过 `corepack pnpm check` 与独立 Feature Flag Desktop E2E。Desktop E2E 固定使用 `tauri-driver 2.0.6`，并按已安装 Edge 精确准备经过 Authenticode、版本和 SHA-256 校验的 Edge WebDriver；缓存可按需重建。真实 OpenAI/Forge/三个外部企业组织/五平台 Channel 及两个 Windows 系统 Gate 仍后置。
 
-`publish-alpha-prerelease.yml` 只允许使用 `Windows Release Gate` 的成功候选构建产物发布 alpha，并在发布说明中固定披露真实外部 Gate 和两类 Windows 身份 Gate 尚未形成通过结论。`publish-release.yml` 只处理 RC/GA；五类真实证据不齐、commit/hash 漂移或存在 skip 时不得创建对应 tag 或发布。任何已存在 tag 都不得覆盖，失败后递增 alpha/RC 序号。
+`publish-alpha-prerelease.yml` 只允许使用 `Windows Release Gate` 的成功候选构建产物发布 alpha，并在发布说明中固定披露真实外部 Gate 和两类 Windows 身份 Gate 尚未形成通过结论。`publish-release.yml` 只处理 RC/GA；六类真实证据不齐、commit/hash 漂移或存在 skip 时不得创建对应 tag 或发布。任何已存在 tag 都不得覆盖，失败后递增 alpha/RC 序号。
 
 固定门槛见 `docs/ROADMAP.md`，Gate 配置见 `docs/RELEASE_GATES.md`。fixture、mock、loopback transport 和确定性 Host 只证明本地实现；真实标准用户 Runner、elevated Runner、真实 0.2.0 基线、外部服务凭据或组织环境不可用时必须保持“真实环境待验证”，不能补造或伪造 Gate 证据。企业组织标识不引入 Hachimi 登录或租户体系。

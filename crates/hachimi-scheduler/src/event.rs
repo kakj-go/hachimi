@@ -12,6 +12,7 @@ impl SchedulerService {
         &self,
         envelope: ScheduleEventEnvelope,
     ) -> Result<ScheduleEventReceipt, SchedulerError> {
+        self.ensure_accepting()?;
         validate_event_envelope(&envelope)?;
         let received_at_ms = self.clock.now_ms();
         let fingerprint = event_fingerprint(&envelope)?;

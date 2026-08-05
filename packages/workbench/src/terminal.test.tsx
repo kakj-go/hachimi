@@ -134,6 +134,10 @@ function snapshot(suffix = "default"): WorkbenchSessionSnapshot {
     agentTasks: [],
     runSummaries: [],
     browserSessions: [],
+    browserAutomationLeases: [],
+    externalBrowserObservations: [],
+    hostAccessRequests: [],
+    computerControlSessions: [],
     sources: [],
   };
 }
@@ -244,6 +248,7 @@ describe("TerminalPanel", () => {
   });
 
   it("writes every xterm data event immediately and supports multiple shells", async () => {
+    const onClose = vi.fn();
     const port = {
       listProcesses: vi.fn(async () => []),
       spawnProcess: vi
@@ -269,6 +274,7 @@ describe("TerminalPanel", () => {
             projectId="project-multi"
             snapshot={snapshot("multi")}
             commandPort={port}
+            onClose={onClose}
           />
         </I18nProvider>
       ),
@@ -315,6 +321,11 @@ describe("TerminalPanel", () => {
     expect(port.terminateProcess).toHaveBeenCalledWith(
       expect.objectContaining({ processSessionId: "process-terminal-multi-1" }),
     );
+    expect(onClose).not.toHaveBeenCalled();
+    closeButtons[1]?.click();
+    await settle();
+    expect(root.querySelectorAll(".terminal-tab-select")).toHaveLength(0);
+    expect(onClose).toHaveBeenCalledOnce();
     dispose();
   });
 

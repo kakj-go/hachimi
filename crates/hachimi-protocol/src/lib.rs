@@ -23,7 +23,7 @@ use hachimi_core::{FeatureFlags, RuntimeFeatureSet, WindowKind};
 use serde::{Deserialize, Serialize};
 use specta::Type;
 
-pub const CONTROL_PROTOCOL_VERSION: u32 = 30;
+pub const CONTROL_PROTOCOL_VERSION: u32 = 31;
 pub const PLUGIN_UI_BRIDGE_PROTOCOL_VERSION: u32 = 1;
 pub const SETTINGS_SCHEMA_VERSION: u32 = 8;
 pub const THEME_PROFILE_FORMAT: &str = "hachimi-theme";
@@ -559,8 +559,6 @@ pub enum WorkbenchRoute {
     #[serde(rename = "home")]
     #[default]
     Home,
-    #[serde(rename = "desktop-control")]
-    DesktopControl,
     #[serde(rename = "settings/general")]
     SettingsGeneral,
     #[serde(rename = "settings/appearance")]
@@ -577,8 +575,16 @@ pub enum WorkbenchRoute {
     SettingsSkills,
     #[serde(rename = "settings/mcp")]
     SettingsMcp,
-    #[serde(rename = "settings/local-hosts")]
-    SettingsLocalHosts,
+    #[serde(rename = "settings/integrations")]
+    SettingsIntegrations,
+    #[serde(rename = "settings/browser")]
+    SettingsBrowser,
+    #[serde(rename = "settings/computer-use")]
+    SettingsComputerUse,
+    #[serde(rename = "settings/runtime-security")]
+    SettingsRuntimeSecurity,
+    #[serde(rename = "settings/diagnostics")]
+    SettingsDiagnostics,
     #[serde(rename = "developer/motion-lab")]
     DeveloperMotionLab,
 }
@@ -588,7 +594,6 @@ impl WorkbenchRoute {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Home => "home",
-            Self::DesktopControl => "desktop-control",
             Self::SettingsGeneral => "settings/general",
             Self::SettingsAppearance => "settings/appearance",
             Self::SettingsLlm => "settings/llm",
@@ -597,7 +602,11 @@ impl WorkbenchRoute {
             Self::SettingsVoice => "settings/voice",
             Self::SettingsSkills => "settings/skills",
             Self::SettingsMcp => "settings/mcp",
-            Self::SettingsLocalHosts => "settings/local-hosts",
+            Self::SettingsIntegrations => "settings/integrations",
+            Self::SettingsBrowser => "settings/browser",
+            Self::SettingsComputerUse => "settings/computer-use",
+            Self::SettingsRuntimeSecurity => "settings/runtime-security",
+            Self::SettingsDiagnostics => "settings/diagnostics",
             Self::DeveloperMotionLab => "developer/motion-lab",
         }
     }
@@ -1318,6 +1327,7 @@ pub fn registered_types() -> specta::Types {
         .register::<BrowserTabId>()
         .register::<BrowserAutomationLeaseId>()
         .register::<ComputerFrameId>()
+        .register::<ComputerControlSessionId>()
         .register::<PluginId>()
         .register::<ConnectorAccountId>()
         .register::<ChannelMessageId>()
@@ -1582,6 +1592,15 @@ pub fn registered_types() -> specta::Types {
         .register::<SandboxBootstrapState>()
         .register::<BrowserProfileKind>()
         .register::<BrowserAutomationSurfaceKind>()
+        .register::<BrowserAutomationPreference>()
+        .register::<HostPolicyDecision>()
+        .register::<BrowserSitePolicy>()
+        .register::<BrowserSitePolicyUpdate>()
+        .register::<HostAccessRequestStatus>()
+        .register::<HostAccessTarget>()
+        .register::<HostAccessRequestRecord>()
+        .register::<HostAccessDecision>()
+        .register::<HostAccessDecisionRequest>()
         .register::<BrowserOpenTarget>()
         .register::<BrowserWorkspaceRuntimeState>()
         .register::<BrowserNavigationErrorKind>()
@@ -1623,14 +1642,28 @@ pub fn registered_types() -> specta::Types {
         .register::<BrowserSessionStatus>()
         .register::<BrowserSession>()
         .register::<BrowserObservation>()
+        .register::<ExternalBrowserLeaseObservation>()
         .register::<BrowserWaitState>()
         .register::<BrowserAction>()
         .register::<BrowserActionRequest>()
         .register::<BrowserActionResult>()
         .register::<BrowserPairing>()
         .register::<BrowserHostSettings>()
+        .register::<BrowserHostSettingsUpdate>()
+        .register::<SystemBrowserKind>()
+        .register::<SystemBrowserInstallation>()
         .register::<ComputerWindowIdentity>()
+        .register::<ComputerAppDescriptor>()
+        .register::<ComputerAppCandidate>()
+        .register::<ComputerAppPolicy>()
+        .register::<ComputerAppPolicyUpdate>()
+        .register::<ComputerHostSettings>()
+        .register::<ComputerRuntimeHealth>()
+        .register::<ComputerHostSettingsUpdate>()
         .register::<ComputerFrame>()
+        .register::<ComputerFramePreview>()
+        .register::<ComputerControlStatus>()
+        .register::<ComputerControlSession>()
         .register::<ComputerAction>()
         .register::<ComputerActionRequest>()
         .register::<ComputerActionResult>()
@@ -1670,19 +1703,55 @@ pub fn registered_types() -> specta::Types {
         .register::<ConnectorInvocationRequest>()
         .register::<ConnectorInvocationResult>()
         .register::<ContributionRevision>()
-        .register::<EnterprisePlatform>()
-        .register::<EnterpriseIngressMode>()
-        .register::<EnterpriseIntegrationState>()
-        .register::<EnterpriseIntegrationAccount>()
-        .register::<EnterpriseEventReceiptStatus>()
-        .register::<EnterpriseEventReceipt>()
-        .register::<EnterpriseAttachmentMetadata>()
-        .register::<EnterpriseMentionKind>()
-        .register::<EnterpriseMention>()
+        .register::<IntegrationProviderId>()
+        .register::<IntegrationTransport>()
+        .register::<ChannelAccountState>()
+        .register::<IntegrationCapability>()
+        .register::<IntegrationAuthMethod>()
+        .register::<CredentialFieldKind>()
+        .register::<CredentialFieldDefinition>()
+        .register::<IntegrationProviderDefinition>()
+        .register::<IntegrationCredentialInput>()
+        .register::<IntegrationProviderAccount>()
+        .register::<IntegrationAccountUpsert>()
+        .register::<IntegrationAccountCapabilitiesUpdate>()
+        .register::<IntegrationProbeDimension>()
+        .register::<IntegrationAccountProbeSnapshot>()
+        .register::<IntegrationAccountProbeResult>()
+        .register::<IlinkQrSession>()
+        .register::<IlinkQrLoginRequest>()
         .register::<EnterpriseAttachmentDownloadRequest>()
         .register::<EnterpriseAttachmentDownloadResult>()
         .register::<EnterprisePluginIdentity>()
-        .register::<ChannelRouteKey>()
+        .register::<ChannelChatKind>()
+        .register::<ChannelConversationAddress>()
+        .register::<ChannelEventKey>()
+        .register::<ChannelActor>()
+        .register::<ChannelMessagePartKind>()
+        .register::<RemoteMediaDescriptor>()
+        .register::<ChannelMessagePart>()
+        .register::<ChannelMentionKind>()
+        .register::<ChannelMention>()
+        .register::<ChannelQuoteContext>()
+        .register::<ChannelDmPolicy>()
+        .register::<ChannelGroupHistoryPolicy>()
+        .register::<ChannelTopicPolicy>()
+        .register::<ChannelMentionPolicy>()
+        .register::<ChannelAuthorizationTarget>()
+        .register::<ChannelGrant>()
+        .register::<ChannelAccessPolicy>()
+        .register::<ChannelAccessPolicyUpsert>()
+        .register::<ChannelAuthorization>()
+        .register::<ChannelAuthorizationUpsert>()
+        .register::<ChannelPairingCodeRequest>()
+        .register::<ChannelPairingCode>()
+        .register::<ChannelIdentityLinkCodeRequest>()
+        .register::<ChannelIdentityLinkCode>()
+        .register::<ChannelIdentityGroup>()
+        .register::<ChannelIdentityTransferMember>()
+        .register::<ChannelIdentityTransferPreview>()
+        .register::<ChannelIdentityTransferCommitRequest>()
+        .register::<ChannelIdentityTransferResult>()
         .register::<ChannelProviderRuntimeKind>()
         .register::<ChannelProviderManifest>()
         .register::<ChannelProviderHealthState>()
@@ -1690,14 +1759,17 @@ pub fn registered_types() -> specta::Types {
         .register::<ChannelProviderAccount>()
         .register::<ChannelProviderAccountUpsert>()
         .register::<ChannelConfigRevision>()
-        .register::<ChannelEnvelope>()
+        .register::<VerifiedChannelMessage>()
         .register::<IngressStatus>()
         .register::<IngressReceipt>()
         .register::<DeliveryAttemptStatus>()
+        .register::<ChannelOutboundPayload>()
         .register::<DeliveryAttempt>()
         .register::<GatewayHealth>()
-        .register::<LocalHostCommandRequest>()
-        .register::<LocalHostCommandResponse>()
+        .register::<RuntimeComponentId>()
+        .register::<RuntimeComponentState>()
+        .register::<RuntimeComponentHealth>()
+        .register::<RuntimeHealthSnapshot>()
         .register::<ProcessStatus>()
         .register::<ProcessSessionRecord>()
         .register::<ProcessTerminalSize>()

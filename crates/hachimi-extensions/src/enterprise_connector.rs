@@ -5,7 +5,7 @@ use hachimi_enterprise::{
 };
 use hachimi_protocol::{
     ConnectorDriverDescriptor, ConnectorHealth, ConnectorInvocationRequest, ConnectorRevision,
-    ConnectorRuntimeKind, EnterprisePlatform, PluginId,
+    ConnectorRuntimeKind, IntegrationProviderId, PluginId,
 };
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -26,13 +26,13 @@ const ENTERPRISE_ACTIONS: &[&str] = &[
 
 #[derive(Debug, Clone)]
 pub struct EnterpriseConnectorDriver {
-    platform: EnterprisePlatform,
+    platform: IntegrationProviderId,
     api: EnterpriseApiClient,
 }
 
 impl EnterpriseConnectorDriver {
     #[must_use]
-    pub fn new(platform: EnterprisePlatform) -> Self {
+    pub fn new(platform: IntegrationProviderId) -> Self {
         Self {
             platform,
             api: EnterpriseApiClient::default(),
@@ -260,7 +260,7 @@ impl ConnectorDriver for EnterpriseConnectorDriver {
     fn revoke<'a>(&'a self, context: ConnectorDriverContext) -> ConnectorDriverFuture<'a, ()> {
         Box::pin(async move {
             self.api.revoke(context.account.id.as_str());
-            sqlx::query("UPDATE enterprise_integration_accounts SET state = 'revoked', diagnostic = 'enterprise_credential_revoked', updated_at_ms = ? WHERE connector_account_id = ?")
+            sqlx::query("UPDATE integration_provider_accounts SET state = 'revoked', diagnostic = 'enterprise_credential_revoked', updated_at_ms = ? WHERE connector_account_id = ?")
                 .bind(now_ms())
                 .bind(context.account.id.as_str())
                 .execute(context.store.pool())
@@ -273,16 +273,22 @@ impl ConnectorDriver for EnterpriseConnectorDriver {
 pub(crate) fn builtin_enterprise_drivers() -> Vec<(&'static str, Arc<dyn ConnectorDriver>)> {
     vec![
         (
-            "hachimi.enterprise.wecom.v1",
-            Arc::new(EnterpriseConnectorDriver::new(EnterprisePlatform::Wecom)),
+            "hachimi.enterprise.wecom_app.v1",
+            Arc::new(EnterpriseConnectorDriver::new(
+                IntegrationProviderId::WecomApp,
+            )),
         ),
         (
             "hachimi.enterprise.dingtalk.v1",
-            Arc::new(EnterpriseConnectorDriver::new(EnterprisePlatform::DingTalk)),
+            Arc::new(EnterpriseConnectorDriver::new(
+                IntegrationProviderId::DingTalk,
+            )),
         ),
         (
             "hachimi.enterprise.feishu.v1",
-            Arc::new(EnterpriseConnectorDriver::new(EnterprisePlatform::Feishu)),
+            Arc::new(EnterpriseConnectorDriver::new(
+                IntegrationProviderId::Feishu,
+            )),
         ),
     ]
 }
@@ -291,26 +297,22 @@ async fn upsert_integration_account(
     context: &ConnectorDriverContext,
     credential: &EnterpriseCredential,
 ) -> Result<String, ExtensionHostError> {
-    let id = format!("connector:{}", context.account.id.as_str());
     let tenant_identity_hash = digest_hex(credential.tenant_id().as_bytes());
-    let event_source_id = format!(
-        "enterprise:{}:{}",
-        credential.platform().as_str(),
-        context.account.id.as_str()
-    );
-    let now = now_ms();
-    sqlx::query("INSERT INTO enterprise_integration_accounts(id, platform, connector_account_id, channel_account_id, tenant_identity_hash, ingress_mode, event_source_id, state, diagnostic, credential_revision, source_account_updated_at_ms, created_at_ms, updated_at_ms) VALUES(?, ?, ?, NULL, ?, ?, ?, 'healthy', NULL, 1, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET platform = excluded.platform, connector_account_id = excluded.connector_account_id, tenant_identity_hash = excluded.tenant_identity_hash, ingress_mode = excluded.ingress_mode, event_source_id = excluded.event_source_id, state = CASE WHEN enterprise_integration_accounts.tenant_identity_hash = excluded.tenant_identity_hash THEN enterprise_integration_accounts.state ELSE 'needs_attention' END, diagnostic = CASE WHEN enterprise_integration_accounts.tenant_identity_hash = excluded.tenant_identity_hash THEN enterprise_integration_accounts.diagnostic ELSE 'enterprise_tenant_identity_changed' END, credential_revision = CASE WHEN enterprise_integration_accounts.source_account_updated_at_ms = excluded.source_account_updated_at_ms THEN enterprise_integration_accounts.credential_revision ELSE enterprise_integration_accounts.credential_revision + 1 END, source_account_updated_at_ms = excluded.source_account_updated_at_ms, updated_at_ms = excluded.updated_at_ms")
-        .bind(&id)
-        .bind(credential.platform().as_str())
+    let row = sqlx::query("SELECT id, tenant_identity_hash FROM integration_provider_accounts WHERE connector_account_id = ? AND provider_id = ? AND api_access_enabled = 1")
         .bind(context.account.id.as_str())
-        .bind(tenant_identity_hash)
-        .bind(ingress_mode(credential.ingress_mode()))
-        .bind(event_source_id)
-        .bind(context.account.updated_at_ms)
-        .bind(now)
-        .bind(now)
-        .execute(context.store.pool())
-        .await?;
+        .bind(credential.platform().as_str())
+        .fetch_optional(context.store.pool())
+        .await?
+        .ok_or(ExtensionHostError::ConnectorDrift)?;
+    let id = row.get::<String, _>("id");
+    if row.get::<String, _>("tenant_identity_hash") != tenant_identity_hash {
+        sqlx::query("UPDATE integration_provider_accounts SET state = 'needs_attention', diagnostic = 'enterprise_tenant_identity_changed', updated_at_ms = ? WHERE id = ?")
+            .bind(now_ms())
+            .bind(&id)
+            .execute(context.store.pool())
+            .await?;
+        return Err(ExtensionHostError::ConnectorDrift);
+    }
     Ok(id)
 }
 
@@ -319,7 +321,7 @@ async fn persist_success(
     integration_id: &str,
 ) -> Result<(), ExtensionHostError> {
     let now = now_ms();
-    sqlx::query("UPDATE enterprise_integration_accounts SET state = 'healthy', diagnostic = NULL, updated_at_ms = ? WHERE id = ?")
+    sqlx::query("UPDATE integration_provider_accounts SET state = 'healthy', diagnostic = NULL, updated_at_ms = ? WHERE id = ?")
         .bind(now)
         .bind(integration_id)
         .execute(context.store.pool())
@@ -343,13 +345,13 @@ async fn persist_api_error(
 ) -> Result<(), ExtensionHostError> {
     let now = now_ms();
     let state = match error {
-        EnterpriseApiError::RateLimited { .. } => "rate_limited",
+        EnterpriseApiError::RateLimited { .. } => "degraded",
         EnterpriseApiError::Authentication | EnterpriseApiError::InvalidCredential => "revoked",
         EnterpriseApiError::Indeterminate => "needs_attention",
         EnterpriseApiError::InvalidRequest => "needs_attention",
-        _ => "failed",
+        _ => "degraded",
     };
-    sqlx::query("UPDATE enterprise_integration_accounts SET state = ?, diagnostic = ?, updated_at_ms = ? WHERE id = ?")
+    sqlx::query("UPDATE integration_provider_accounts SET state = ?, diagnostic = ?, updated_at_ms = ? WHERE id = ?")
         .bind(state)
         .bind(error.code())
         .bind(now)
@@ -509,14 +511,6 @@ fn map_api_error(error: EnterpriseApiError) -> ExtensionHostError {
     }
 }
 
-fn ingress_mode(mode: hachimi_protocol::EnterpriseIngressMode) -> &'static str {
-    match mode {
-        hachimi_protocol::EnterpriseIngressMode::EncryptedCallback => "encrypted_callback",
-        hachimi_protocol::EnterpriseIngressMode::Stream => "stream",
-        hachimi_protocol::EnterpriseIngressMode::LongConnection => "long_connection",
-    }
-}
-
 fn hash_value(value: &Value) -> Result<String, serde_json::Error> {
     serde_json::to_vec(value).map(|bytes| digest_hex(&bytes))
 }
@@ -541,7 +535,7 @@ mod tests {
         assert_eq!(
             identities,
             vec![
-                "hachimi.enterprise.wecom.v1",
+                "hachimi.enterprise.wecom_app.v1",
                 "hachimi.enterprise.dingtalk.v1",
                 "hachimi.enterprise.feishu.v1",
             ]

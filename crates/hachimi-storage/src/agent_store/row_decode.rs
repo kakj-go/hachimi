@@ -340,6 +340,8 @@ pub(super) fn mcp_server_health_from_row(
         protocol_version: row.get("protocol_version"),
         tool_count: u32::try_from(row.get::<i64, _>("tool_count")).unwrap_or_default(),
         error_code: row.get("error_code"),
+        failure_count: u32::try_from(row.get::<i64, _>("failure_count")).unwrap_or(u32::MAX),
+        next_retry_at_ms: row.get("next_retry_at_ms"),
         checked_at_ms: row.get("checked_at_ms"),
     })
 }

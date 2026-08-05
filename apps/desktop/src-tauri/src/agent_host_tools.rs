@@ -5,13 +5,13 @@ use std::sync::Arc;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use hachimi_agent::{ToolExecutor, ToolFuture, ToolInvocation, ToolResult};
 use hachimi_protocol::{
-    BrowserAction, BrowserActionRequest, BrowserAutomationLeaseId, BrowserAutomationSurfaceKind,
-    BrowserCapability, BrowserNetworkPolicy, BrowserNetworkRule, BrowserNetworkRuleKind,
-    BrowserObservationId, BrowserPermissionDecision, BrowserProfileKind, BrowserSessionId,
+    BrowserAction, BrowserActionRequest, BrowserAutomationLeaseId, BrowserAutomationPreference,
+    BrowserAutomationSurfaceKind, BrowserCapability, BrowserNetworkPolicy, BrowserNetworkRule,
+    BrowserNetworkRuleKind, BrowserObservationId, BrowserPermissionDecision, BrowserProfileKind,
     CapabilityGrantSet, ClientId, ComputerActionRequest, ComputerAppRule,
-    ConnectorInvocationRequest, EnterpriseAttachmentDownloadRequest, EnterprisePlatform,
-    ModelInputImage, MutationContext, RequestId, ScheduleHostGrant, SessionId, SessionSourceOrigin,
-    ToolDescriptor, ToolEffect,
+    ConnectorInvocationRequest, EnterpriseAttachmentDownloadRequest, HostPolicyDecision,
+    IntegrationProviderId, ModelInputImage, MutationContext, RequestId, ScheduleHostGrant,
+    SessionId, SessionSourceOrigin, ToolDescriptor, ToolEffect,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -22,6 +22,10 @@ use crate::agent_host_tools_support::{
     computer_target_summary, connector_source, now_ms, object_schema, stable_hash,
 };
 
+#[path = "agent_host_tools_registry.rs"]
+mod registry;
+pub(super) use registry::*;
+
 pub(super) type EnvironmentChangeSink = Arc<dyn Fn(SessionId) + Send + Sync>;
 const BROWSER_LEASE_LIFETIME_MS: i64 = 30 * 60 * 1_000;
 
@@ -30,11 +34,7 @@ const BROWSER_LEASE_LIFETIME_MS: i64 = 30 * 60 * 1_000;
 struct BrowserStartArgs {
     initial_url: String,
     #[serde(default)]
-    surface: Option<BrowserAutomationSurfaceKind>,
-    #[serde(default)]
-    profile_kind: Option<BrowserProfileKind>,
-    #[serde(default)]
-    pairing_id: Option<hachimi_protocol::BrowserPairingId>,
+    surface: Option<BrowserAutomationPreference>,
 }
 
 struct BrowserStartTool {
@@ -57,9 +57,7 @@ impl ToolExecutor for BrowserStartTool {
             input_schema: object_schema(
                 json!({
                     "initialUrl": { "type": "string", "format": "uri", "maxLength": 4096 },
-                    "surface": { "type": "string", "enum": ["embedded", "external_chrome"] },
-                    "profileKind": { "type": "string", "enum": ["isolated", "chrome_extension"] },
-                    "pairingId": { "type": "string" }
+                    "surface": { "type": "string", "enum": ["auto", "embedded", "external_chrome"] }
                 }),
                 &["initialUrl"],
             ),
@@ -90,34 +88,40 @@ impl ToolExecutor for BrowserStartTool {
                         ));
                     }
                 };
-            let profile_kind = if schedule_host_grant.is_some() {
-                if args.profile_kind == Some(BrowserProfileKind::ChromeExtension)
-                    || args.pairing_id.is_some()
-                {
-                    return Ok(ToolResult::failed(
-                        &invocation.call,
-                        "scheduled Browser sessions only support the isolated profile",
-                    ));
-                }
-                BrowserProfileKind::Isolated
-            } else if let Some(profile_kind) = args.profile_kind {
-                profile_kind
+            let settings = sqlx::query(
+                "SELECT automation_enabled, automation_preference FROM browser_host_settings WHERE singleton = 1",
+            )
+            .fetch_one(store.pool())
+            .await
+            .map_err(|error| hachimi_agent::ToolExecutionError::Failed(error.to_string()))?;
+            if !settings.get::<bool, _>("automation_enabled") {
+                return Ok(ToolResult::failed(
+                    &invocation.call,
+                    "Browser automation is disabled in Settings",
+                ));
+            }
+            let configured_preference =
+                match settings.get::<String, _>("automation_preference").as_str() {
+                    "embedded" => BrowserAutomationPreference::Embedded,
+                    "external_chrome" => BrowserAutomationPreference::ExternalChrome,
+                    _ => BrowserAutomationPreference::Auto,
+                };
+            let pairing = host.latest_confirmed_pairing();
+            let surface = match crate::browser_router::select_browser_surface(
+                configured_preference,
+                args.surface,
+                embedded.runtime_available(),
+                pairing.is_some(),
+                schedule_host_grant.is_some(),
+            ) {
+                Ok(surface) => surface,
+                Err(error) => return Ok(ToolResult::failed(&invocation.call, error)),
+            };
+            let use_external = surface == BrowserAutomationSurfaceKind::ExternalChrome;
+            let profile_kind = if use_external {
+                BrowserProfileKind::ChromeExtension
             } else {
-                sqlx::query(
-                    "SELECT preferred_profile_kind FROM browser_host_settings WHERE singleton = 1",
-                )
-                .fetch_optional(store.pool())
-                .await
-                .ok()
-                .flatten()
-                .and_then(
-                    |row| match row.get::<String, _>("preferred_profile_kind").as_str() {
-                        "chrome_extension" => Some(BrowserProfileKind::ChromeExtension),
-                        "isolated" => Some(BrowserProfileKind::Isolated),
-                        _ => None,
-                    },
-                )
-                .unwrap_or(BrowserProfileKind::Isolated)
+                BrowserProfileKind::Isolated
             };
             let scheduled_browser = schedule_host_grant
                 .as_ref()
@@ -141,10 +145,8 @@ impl ToolExecutor for BrowserStartTool {
                     "scheduled Browser access is not authorized",
                 ));
             }
-            let interactive_exact_approval = schedule_host_grant.is_none()
-                && grants.profile == hachimi_protocol::PermissionProfile::ExternalSandbox
-                && grants.browser.origins.is_empty();
-            if !interactive_exact_approval
+            if schedule_host_grant.is_none()
+                && !grants.browser.origins.is_empty()
                 && !grants
                     .browser
                     .origins
@@ -175,10 +177,25 @@ impl ToolExecutor for BrowserStartTool {
             if grants.browser.cdp {
                 capabilities.push(BrowserCapability::Cdp);
             }
-            let embedded_surface = args.surface
-                != Some(BrowserAutomationSurfaceKind::ExternalChrome)
-                && profile_kind != BrowserProfileKind::ChromeExtension;
-            if embedded_surface {
+            let allow_private_network = if let Some(browser) = scheduled_browser {
+                browser.allow_private_network
+            } else {
+                match crate::browser_tool_policy::require_interactive_browser_access(
+                    &store,
+                    &session_id,
+                    &run_id,
+                    invocation.run_generation,
+                    args.initial_url.trim(),
+                    surface,
+                    &capabilities,
+                )
+                .await
+                {
+                    Ok(allow_private_network) => allow_private_network,
+                    Err(error) => return Ok(ToolResult::failed(&invocation.call, error)),
+                }
+            };
+            if !use_external {
                 if !grants.browser.observe
                     || !grants.browser.act
                     || !sandbox.os_enforced
@@ -189,29 +206,11 @@ impl ToolExecutor for BrowserStartTool {
                         "embedded Browser control is outside the active Run grant or sandbox enforcement is unavailable",
                     ));
                 }
-                let allow_private_network = scheduled_browser
-                    .map(|browser| browser.allow_private_network)
-                    .unwrap_or(true);
                 if let Err(error) = hachimi_browser::validate_agent_browser_target(
                     args.initial_url.trim(),
                     allow_private_network,
                 )
                 .await
-                {
-                    return Ok(ToolResult::failed(&invocation.call, error.to_string()));
-                }
-                if let Err(error) =
-                    crate::browser_tool_policy::require_embedded_navigation_permission(
-                        &embedded,
-                        schedule_host_grant.as_ref(),
-                        &session_id,
-                        &run_id,
-                        invocation.run_generation,
-                        args.initial_url.trim(),
-                        allow_private_network,
-                        None,
-                    )
-                    .await
                 {
                     return Ok(ToolResult::failed(&invocation.call, error.to_string()));
                 }
@@ -221,6 +220,7 @@ impl ToolExecutor for BrowserStartTool {
                         &run_id,
                         invocation.run_generation,
                         args.initial_url.trim(),
+                        &capabilities,
                     )
                     .await
                 {
@@ -245,12 +245,12 @@ impl ToolExecutor for BrowserStartTool {
                         (
                             initial_origin.clone(),
                             BrowserNetworkRuleKind::Document,
-                            false,
+                            allow_private_network,
                         ),
                         (
                             initial_origin.clone(),
                             BrowserNetworkRuleKind::Resource,
-                            false,
+                            allow_private_network,
                         ),
                     ]
                 },
@@ -297,7 +297,7 @@ impl ToolExecutor for BrowserStartTool {
                     Some(args.initial_url.trim()),
                     Some(initial_network_policy),
                     &sandbox,
-                    args.pairing_id.as_ref(),
+                    pairing.as_ref().map(|value| &value.id),
                 )
                 .await
             {
@@ -360,6 +360,18 @@ impl ToolExecutor for BrowserStartTool {
                 )
                 .await
                 .map_err(|error| hachimi_agent::ToolExecutionError::Failed(error.to_string()))?;
+            if let Some(observation) = observation.as_ref() {
+                store
+                    .store_external_browser_lease_observation(
+                        &lease.id,
+                        &session.owner_session_id,
+                        observation,
+                    )
+                    .await
+                    .map_err(|error| {
+                        hachimi_agent::ToolExecutionError::Failed(error.to_string())
+                    })?;
+            }
             persist_browser_environment(
                 &store,
                 &environment_change_sink,
@@ -378,7 +390,7 @@ impl ToolExecutor for BrowserStartTool {
                 "session_started",
             )
             .await?;
-            let content = json!({ "lease": lease, "browserSession": session });
+            let content = json!({ "lease": lease, "observation": observation });
             let model_content = content.to_string();
             Ok(ToolResult::succeeded(
                 &invocation.call,
@@ -392,10 +404,7 @@ impl ToolExecutor for BrowserStartTool {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct BrowserSessionArgs {
-    #[serde(default)]
-    lease_id: Option<BrowserAutomationLeaseId>,
-    #[serde(default)]
-    browser_session_id: Option<BrowserSessionId>,
+    lease_id: BrowserAutomationLeaseId,
 }
 
 struct BrowserObserveTool {
@@ -414,7 +423,7 @@ impl ToolExecutor for BrowserObserveTool {
         ToolDescriptor {
             name: "browser_observe".into(),
             description: "Read a fresh screenshot, page text and accessibility tree from a Run-owned Browser lease. The observation fences the next action against tab and user-input revisions.".into(),
-            input_schema: object_schema(json!({ "leaseId": { "type": "string" }, "browserSessionId": { "type": "string" } }), &[]),
+            input_schema: object_schema(json!({ "leaseId": { "type": "string" } }), &["leaseId"]),
             effect: ToolEffect::BrowserObserve,
             parallel_safe: false,
             required_scopes: vec!["browser.observe".into()],
@@ -442,57 +451,69 @@ impl ToolExecutor for BrowserObserveTool {
                     }
                 };
             let routed_lease_id = args.lease_id.clone();
-            let browser_session_id = if let Some(lease_id) = args.lease_id {
-                match crate::browser_router::route_browser_lease(
-                    &store,
-                    &lease_id,
-                    &session_id,
-                    &run_id,
-                    invocation.run_generation,
-                )
-                .await
-                {
-                    Ok(crate::browser_router::BrowserLeaseRoute::Embedded) => {
-                        return match embedded
-                            .observe(
-                                &lease_id,
-                                &run_id,
-                                invocation.run_generation,
-                                crate::browser_tool_policy::embedded_origin_policy(
-                                    &grants,
-                                    schedule_host_grant.as_ref(),
-                                ),
-                            )
-                            .await
-                        {
-                            Ok(observation) => {
-                                environment_change_sink(session_id.clone());
-                                let content =
-                                    serde_json::to_value(&observation).map_err(|error| {
-                                        hachimi_agent::ToolExecutionError::Failed(error.to_string())
-                                    })?;
-                                Ok(ToolResult::succeeded(
-                                    &invocation.call,
-                                    content.to_string(),
-                                    content,
-                                ))
-                            }
-                            Err(error) => {
-                                Ok(ToolResult::failed(&invocation.call, error.to_string()))
-                            }
-                        };
-                    }
-                    Ok(crate::browser_router::BrowserLeaseRoute::ExternalChrome {
-                        browser_session_id,
-                        ..
-                    }) => browser_session_id,
-                    Err(error) => return Ok(ToolResult::failed(&invocation.call, error)),
+            let browser_session_id = match crate::browser_router::route_browser_lease(
+                &store,
+                &args.lease_id,
+                &session_id,
+                &run_id,
+                invocation.run_generation,
+            )
+            .await
+            {
+                Ok(crate::browser_router::BrowserLeaseRoute::Embedded) => {
+                    return match embedded
+                        .observe(
+                            &args.lease_id,
+                            &run_id,
+                            invocation.run_generation,
+                            crate::browser_tool_policy::embedded_origin_policy(
+                                &grants,
+                                schedule_host_grant.as_ref(),
+                            ),
+                        )
+                        .await
+                    {
+                        Ok(observation) => {
+                            environment_change_sink(session_id.clone());
+                            let content = serde_json::to_value(&observation).map_err(|error| {
+                                hachimi_agent::ToolExecutionError::Failed(error.to_string())
+                            })?;
+                            Ok(ToolResult::succeeded(
+                                &invocation.call,
+                                content.to_string(),
+                                content,
+                            ))
+                        }
+                        Err(error) => Ok(ToolResult::failed(&invocation.call, error.to_string())),
+                    };
                 }
-            } else if let Some(browser_session_id) = args.browser_session_id {
-                browser_session_id
-            } else {
-                return Ok(ToolResult::failed(&invocation.call, "leaseId is required"));
+                Ok(crate::browser_router::BrowserLeaseRoute::ExternalChrome {
+                    browser_session_id,
+                    ..
+                }) => browser_session_id,
+                Err(error) => return Ok(ToolResult::failed(&invocation.call, error)),
             };
+            let current_session = match host.session_snapshot(&browser_session_id, &run_id) {
+                Ok(session) if session.owner_session_id == session_id => session,
+                Ok(_) => {
+                    return Ok(ToolResult::failed(
+                        &invocation.call,
+                        "Browser Session ownership changed",
+                    ));
+                }
+                Err(error) => return Ok(ToolResult::failed(&invocation.call, error.to_string())),
+            };
+            if let Err(error) = crate::browser_tool_policy::require_external_session_access(
+                &store,
+                &current_session,
+                schedule_host_grant.as_ref(),
+                invocation.run_generation,
+                &[BrowserCapability::Observe],
+            )
+            .await
+            {
+                return Ok(ToolResult::failed(&invocation.call, error));
+            }
             match host
                 .observe(&browser_session_id, &run_id, invocation.run_generation)
                 .await
@@ -509,6 +530,16 @@ impl ToolExecutor for BrowserObserveTool {
                             "Browser Session ownership changed",
                         ));
                     }
+                    store
+                        .store_external_browser_lease_observation(
+                            &routed_lease_id,
+                            &session_id,
+                            &observation,
+                        )
+                        .await
+                        .map_err(|error| {
+                            hachimi_agent::ToolExecutionError::Failed(error.to_string())
+                        })?;
                     persist_browser_environment(
                         &store,
                         &environment_change_sink,
@@ -520,10 +551,8 @@ impl ToolExecutor for BrowserObserveTool {
                     let mut content = serde_json::to_value(&observation).map_err(|error| {
                         hachimi_agent::ToolExecutionError::Failed(error.to_string())
                     })?;
-                    if let (Some(lease_id), Value::Object(fields)) =
-                        (routed_lease_id.as_ref(), &mut content)
-                    {
-                        fields.insert("leaseId".into(), json!(lease_id));
+                    if let Value::Object(fields) = &mut content {
+                        fields.insert("leaseId".into(), json!(routed_lease_id));
                     }
                     let model_content = content.to_string();
                     Ok(ToolResult::succeeded(
@@ -551,6 +580,7 @@ struct EmbeddedBrowserActionArgs {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ExternalBrowserActionArgs {
+    lease_id: BrowserAutomationLeaseId,
     observation_id: BrowserObservationId,
     expected_revision: u64,
     action: BrowserAction,
@@ -575,14 +605,13 @@ impl ToolExecutor for BrowserActTool {
             input_schema: object_schema(
                 json!({
                     "leaseId": { "type": "string" },
-                    "browserSessionId": { "type": "string" },
                     "observationId": { "type": "string" },
                     "expectedTabRevision": { "type": "integer", "minimum": 1 },
                     "expectedInputEpoch": { "type": "integer", "minimum": 1 },
                     "expectedRevision": { "type": "integer", "minimum": 1 },
                     "action": { "type": "object" }
                 }),
-                &["observationId", "action"],
+                &["leaseId", "observationId", "action"],
             ),
             effect: ToolEffect::BrowserAct,
             parallel_safe: false,
@@ -600,33 +629,69 @@ impl ToolExecutor for BrowserActTool {
         let schedule_host_grant = self.schedule_host_grant.clone();
         let environment_change_sink = Arc::clone(&self.environment_change_sink);
         Box::pin(async move {
-            let requested_lease_id = invocation
+            let requested_lease_id = match invocation
                 .call
                 .arguments
                 .get("leaseId")
                 .and_then(Value::as_str)
-                .map(BrowserAutomationLeaseId::new);
-            let external_browser_session_id = if let Some(lease_id) = requested_lease_id.as_ref() {
-                match crate::browser_router::route_browser_lease(
+                .map(BrowserAutomationLeaseId::new)
+            {
+                Some(lease_id) => lease_id,
+                None => return Ok(ToolResult::failed(&invocation.call, "leaseId is required")),
+            };
+            let external_browser_session_id = match crate::browser_router::route_browser_lease(
+                &store,
+                &requested_lease_id,
+                &session_id,
+                &run_id,
+                invocation.run_generation,
+            )
+            .await
+            {
+                Ok(crate::browser_router::BrowserLeaseRoute::Embedded) => None,
+                Ok(crate::browser_router::BrowserLeaseRoute::ExternalChrome {
+                    browser_session_id,
+                    ..
+                }) => Some(browser_session_id),
+                Err(error) => return Ok(ToolResult::failed(&invocation.call, error)),
+            };
+            if let Some(browser_session_id) = external_browser_session_id.as_ref() {
+                let current_session = match host.session_snapshot(browser_session_id, &run_id) {
+                    Ok(session) if session.owner_session_id == session_id => session,
+                    Ok(_) => {
+                        return Ok(ToolResult::failed(
+                            &invocation.call,
+                            "Browser Session ownership changed",
+                        ));
+                    }
+                    Err(error) => {
+                        return Ok(ToolResult::failed(&invocation.call, error.to_string()));
+                    }
+                };
+                let required_capability = match serde_json::from_value::<ExternalBrowserActionArgs>(
+                    invocation.call.arguments.clone(),
+                ) {
+                    Ok(request) => request.action.required_capability(),
+                    Err(error) => {
+                        return Ok(ToolResult::failed(
+                            &invocation.call,
+                            format!("invalid external Browser action arguments: {error}"),
+                        ));
+                    }
+                };
+                if let Err(error) = crate::browser_tool_policy::require_external_session_access(
                     &store,
-                    lease_id,
-                    &session_id,
-                    &run_id,
+                    &current_session,
+                    schedule_host_grant.as_ref(),
                     invocation.run_generation,
+                    &[required_capability],
                 )
                 .await
                 {
-                    Ok(crate::browser_router::BrowserLeaseRoute::Embedded) => None,
-                    Ok(crate::browser_router::BrowserLeaseRoute::ExternalChrome {
-                        browser_session_id,
-                        ..
-                    }) => Some(browser_session_id),
-                    Err(error) => return Ok(ToolResult::failed(&invocation.call, error)),
+                    return Ok(ToolResult::failed(&invocation.call, error));
                 }
-            } else {
-                None
-            };
-            if requested_lease_id.is_some() && external_browser_session_id.is_none() {
+            }
+            if external_browser_session_id.is_none() {
                 let request: EmbeddedBrowserActionArgs =
                     match serde_json::from_value(invocation.call.arguments.clone()) {
                         Ok(request) => request,
@@ -655,39 +720,40 @@ impl ToolExecutor for BrowserActTool {
                             return Ok(ToolResult::failed(&invocation.call, error.to_string()));
                         }
                     };
-                    let allowed = (grants.profile
-                        == hachimi_protocol::PermissionProfile::ExternalSandbox
-                        && grants.browser.origins.is_empty())
-                        || grants.browser.origins.iter().any(|entry| entry == &origin);
-                    if !allowed {
-                        return Ok(ToolResult::failed(
-                            &invocation.call,
-                            "Cross-origin navigation requires a new explicit site permission",
-                        ));
-                    }
-                    let allow_private_network = schedule_host_grant
+                    let allow_private_network = if let Some(schedule_browser) = schedule_host_grant
                         .as_ref()
                         .and_then(|grant| grant.browser.as_ref())
-                        .map(|browser| browser.allow_private_network)
-                        .unwrap_or(true);
-                    if let Err(error) =
-                        hachimi_browser::validate_agent_browser_target(url, allow_private_network)
-                            .await
                     {
-                        return Ok(ToolResult::failed(&invocation.call, error.to_string()));
-                    }
-                    if let Err(error) =
-                        crate::browser_tool_policy::require_embedded_navigation_permission(
-                            &embedded,
-                            schedule_host_grant.as_ref(),
+                        if !schedule_browser.enabled
+                            || !schedule_browser.document_origins.contains(&origin)
+                        {
+                            return Ok(ToolResult::failed(
+                                &invocation.call,
+                                "scheduled Browser navigation exceeds its exact Origin grant",
+                            ));
+                        }
+                        schedule_browser.allow_private_network
+                    } else {
+                        match crate::browser_tool_policy::require_interactive_browser_access(
+                            &store,
                             &session_id,
                             &run_id,
                             invocation.run_generation,
                             url,
-                            allow_private_network,
-                            Some(&request.lease_id),
+                            BrowserAutomationSurfaceKind::Embedded,
+                            &[BrowserCapability::Observe, BrowserCapability::Act],
                         )
                         .await
+                        {
+                            Ok(allow_private_network) => allow_private_network,
+                            Err(error) => {
+                                return Ok(ToolResult::failed(&invocation.call, error));
+                            }
+                        }
+                    };
+                    if let Err(error) =
+                        hachimi_browser::validate_agent_browser_target(url, allow_private_network)
+                            .await
                     {
                         return Ok(ToolResult::failed(&invocation.call, error.to_string()));
                     }
@@ -727,36 +793,26 @@ impl ToolExecutor for BrowserActTool {
                     Err(error) => Ok(ToolResult::failed(&invocation.call, error.to_string())),
                 };
             }
-            let mut request: BrowserActionRequest =
-                if let Some(browser_session_id) = external_browser_session_id {
-                    match serde_json::from_value::<ExternalBrowserActionArgs>(
-                        invocation.call.arguments.clone(),
-                    ) {
-                        Ok(args) => BrowserActionRequest {
-                            browser_session_id,
-                            observation_id: args.observation_id,
-                            run_generation: invocation.run_generation,
-                            expected_revision: args.expected_revision,
-                            action: args.action,
-                        },
-                        Err(error) => {
-                            return Ok(ToolResult::failed(
-                                &invocation.call,
-                                format!("invalid external Chrome lease action arguments: {error}"),
-                            ));
-                        }
-                    }
-                } else {
-                    match serde_json::from_value(invocation.call.arguments.clone()) {
-                        Ok(request) => request,
-                        Err(error) => {
-                            return Ok(ToolResult::failed(
-                                &invocation.call,
-                                format!("invalid Browser action arguments: {error}"),
-                            ));
-                        }
-                    }
-                };
+            let browser_session_id = external_browser_session_id.expect("external route checked");
+            let args = match serde_json::from_value::<ExternalBrowserActionArgs>(
+                invocation.call.arguments.clone(),
+            ) {
+                Ok(args) if args.lease_id == requested_lease_id => args,
+                Ok(_) => return Ok(ToolResult::failed(&invocation.call, "leaseId changed")),
+                Err(error) => {
+                    return Ok(ToolResult::failed(
+                        &invocation.call,
+                        format!("invalid external Chrome lease action arguments: {error}"),
+                    ));
+                }
+            };
+            let mut request = BrowserActionRequest {
+                browser_session_id,
+                observation_id: args.observation_id,
+                run_generation: invocation.run_generation,
+                expected_revision: args.expected_revision,
+                action: args.action,
+            };
             request.run_generation = invocation.run_generation;
             let action_category =
                 crate::browser_tool_policy::browser_action_category(&request.action);
@@ -813,15 +869,7 @@ impl ToolExecutor for BrowserActTool {
                     }
                 };
                 let origin_allowed = schedule_host_grant.as_ref().map_or_else(
-                    || {
-                        (grants.profile == hachimi_protocol::PermissionProfile::ExternalSandbox
-                            && grants.browser.origins.is_empty())
-                            || grants
-                                .browser
-                                .origins
-                                .iter()
-                                .any(|origin| origin == &target_origin)
-                    },
+                    || true,
                     |grant| {
                         grant.browser.as_ref().is_some_and(|browser| {
                             browser.enabled && browser.document_origins.contains(&target_origin)
@@ -858,12 +906,32 @@ impl ToolExecutor for BrowserActTool {
                         BrowserNetworkRuleKind::Resource,
                     ]
                 };
-                let allow_private_network = schedule_host_grant.as_ref().is_some_and(|grant| {
-                    grant
-                        .browser
-                        .as_ref()
-                        .is_some_and(|browser| browser.allow_private_network)
-                });
+                let allow_private_network = if let Some(schedule_browser) = schedule_host_grant
+                    .as_ref()
+                    .and_then(|grant| grant.browser.as_ref())
+                {
+                    schedule_browser.allow_private_network
+                } else {
+                    match crate::browser_tool_policy::require_interactive_browser_access(
+                        &store,
+                        &session_id,
+                        &run_id,
+                        invocation.run_generation,
+                        url,
+                        BrowserAutomationSurfaceKind::ExternalChrome,
+                        &capabilities,
+                    )
+                    .await
+                    {
+                        Ok(allow_private_network) => allow_private_network,
+                        Err(error) => return Ok(ToolResult::failed(&invocation.call, error)),
+                    }
+                };
+                if let Err(error) =
+                    hachimi_browser::validate_agent_browser_target(url, allow_private_network).await
+                {
+                    return Ok(ToolResult::failed(&invocation.call, error.to_string()));
+                }
                 for network_kind in network_kinds {
                     if let Err(error) = host
                         .grant_site_permission(
@@ -937,10 +1005,8 @@ impl ToolExecutor for BrowserActTool {
                     let mut content = serde_json::to_value(&result).map_err(|error| {
                         hachimi_agent::ToolExecutionError::Failed(error.to_string())
                     })?;
-                    if let (Some(lease_id), Value::Object(fields)) =
-                        (requested_lease_id.as_ref(), &mut content)
-                    {
-                        fields.insert("leaseId".into(), json!(lease_id));
+                    if let Value::Object(fields) = &mut content {
+                        fields.insert("leaseId".into(), json!(requested_lease_id));
                     }
                     let model_content = content.to_string();
                     Ok(ToolResult::succeeded(
@@ -984,7 +1050,7 @@ impl ToolExecutor for BrowserStopTool {
         ToolDescriptor {
             name: "browser_stop".into(),
             description: "Release a Run-owned Browser automation lease without closing the user's persistent embedded tab.".into(),
-            input_schema: object_schema(json!({ "leaseId": { "type": "string" }, "browserSessionId": { "type": "string" } }), &[]),
+            input_schema: object_schema(json!({ "leaseId": { "type": "string" } }), &["leaseId"]),
             effect: ToolEffect::BrowserObserve,
             parallel_safe: false,
             required_scopes: vec!["browser.observe".into()],
@@ -1009,86 +1075,61 @@ impl ToolExecutor for BrowserStopTool {
                         ));
                     }
                 };
-            if let Some(lease_id) = args.lease_id {
-                let route = match crate::browser_router::route_browser_lease(
-                    &store,
-                    &lease_id,
-                    &session_id,
-                    &run_id,
-                    invocation.run_generation,
-                )
-                .await
-                {
-                    Ok(route) => route,
-                    Err(error) => return Ok(ToolResult::failed(&invocation.call, error)),
-                };
-                let stopped = match route {
-                    crate::browser_router::BrowserLeaseRoute::Embedded => embedded
-                        .stop(&lease_id, &run_id, invocation.run_generation)
-                        .await
-                        .map_err(|error| error.to_string()),
-                    crate::browser_router::BrowserLeaseRoute::ExternalChrome {
-                        lease,
-                        browser_session_id,
-                    } => match host.stop(&browser_session_id, &run_id).await {
-                        Ok(session) => {
-                            persist_browser_environment(
-                                &store,
-                                &environment_change_sink,
-                                &session,
-                                None,
-                                None,
-                            )
-                            .await?;
-                            store
-                                .set_browser_automation_lease_status(
-                                    &lease.id,
-                                    lease.revision,
-                                    hachimi_protocol::BrowserAutomationLeaseStatus::Expired,
-                                )
-                                .await
-                                .map_err(|error| error.to_string())
-                        }
-                        Err(error) => Err(error.to_string()),
-                    },
-                };
-                return match stopped {
-                    Ok(lease) => {
-                        let content = serde_json::to_value(&lease).map_err(|error| {
-                            hachimi_agent::ToolExecutionError::Failed(error.to_string())
-                        })?;
-                        Ok(ToolResult::succeeded(
-                            &invocation.call,
-                            content.to_string(),
-                            content,
-                        ))
-                    }
-                    Err(error) => Ok(ToolResult::failed(&invocation.call, error)),
-                };
-            }
-            let Some(browser_session_id) = args.browser_session_id else {
-                return Ok(ToolResult::failed(&invocation.call, "leaseId is required"));
+            let lease_id = args.lease_id;
+            let route = match crate::browser_router::route_browser_lease(
+                &store,
+                &lease_id,
+                &session_id,
+                &run_id,
+                invocation.run_generation,
+            )
+            .await
+            {
+                Ok(route) => route,
+                Err(error) => return Ok(ToolResult::failed(&invocation.call, error)),
             };
-            match host.stop(&browser_session_id, &run_id).await {
-                Ok(session) => {
-                    persist_browser_environment(
-                        &store,
-                        &environment_change_sink,
-                        &session,
-                        None,
-                        None,
-                    )
-                    .await?;
-                    let content = serde_json::to_value(&session).map_err(|error| {
+            let stopped = match route {
+                crate::browser_router::BrowserLeaseRoute::Embedded => embedded
+                    .stop(&lease_id, &run_id, invocation.run_generation)
+                    .await
+                    .map_err(|error| error.to_string()),
+                crate::browser_router::BrowserLeaseRoute::ExternalChrome {
+                    lease,
+                    browser_session_id,
+                } => match host.stop(&browser_session_id, &run_id).await {
+                    Ok(session) => {
+                        persist_browser_environment(
+                            &store,
+                            &environment_change_sink,
+                            &session,
+                            None,
+                            None,
+                        )
+                        .await?;
+                        store
+                            .set_browser_automation_lease_status(
+                                &lease.id,
+                                lease.revision,
+                                hachimi_protocol::BrowserAutomationLeaseStatus::Expired,
+                            )
+                            .await
+                            .map_err(|error| error.to_string())
+                    }
+                    Err(error) => Err(error.to_string()),
+                },
+            };
+            match stopped {
+                Ok(lease) => {
+                    let content = serde_json::to_value(&lease).map_err(|error| {
                         hachimi_agent::ToolExecutionError::Failed(error.to_string())
                     })?;
                     Ok(ToolResult::succeeded(
                         &invocation.call,
-                        "Browser session stopped.",
+                        content.to_string(),
                         content,
                     ))
                 }
-                Err(error) => Ok(ToolResult::failed(&invocation.call, error.to_string())),
+                Err(error) => Ok(ToolResult::failed(&invocation.call, error)),
             }
         })
     }
@@ -1097,7 +1138,9 @@ impl ToolExecutor for BrowserStopTool {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ComputerObserveArgs {
-    window_handle: String,
+    app_name: String,
+    #[serde(default)]
+    window_title: Option<String>,
 }
 
 #[derive(Debug)]
@@ -1109,7 +1152,7 @@ impl ToolExecutor for ComputerListWindowsTool {
     fn descriptor(&self) -> ToolDescriptor {
         ToolDescriptor {
             name: "computer_list_windows".into(),
-            description: "List visible, non-elevated user application windows that are eligible for explicit Computer authorization. Listing does not grant Observe or Act.".into(),
+            description: "List visible, non-elevated application names and window titles that are eligible for Computer authorization. Process IDs and window handles are intentionally hidden; listing does not grant Observe or Act.".into(),
             input_schema: object_schema(json!({}), &[]),
             effect: ToolEffect::ComputerObserve,
             parallel_safe: false,
@@ -1121,106 +1164,24 @@ impl ToolExecutor for ComputerListWindowsTool {
         let host = Arc::clone(&self.host);
         Box::pin(async move {
             match host.list_windows().await {
-                Ok(windows) => Ok(ToolResult::succeeded(
-                    &invocation.call,
-                    "Visible Computer targets listed; no application rule was changed.",
-                    serde_json::to_value(windows).map_err(|error| {
-                        hachimi_agent::ToolExecutionError::Failed(error.to_string())
-                    })?,
-                )),
+                Ok(windows) => {
+                    let candidates = windows
+                        .into_iter()
+                        .map(|window| {
+                            json!({
+                                "appName": window.app_id,
+                                "windowTitle": window.title,
+                            })
+                        })
+                        .collect::<Vec<_>>();
+                    Ok(ToolResult::succeeded(
+                        &invocation.call,
+                        "Visible semantic Computer targets listed; no application rule was changed.",
+                        json!({ "windows": candidates }),
+                    ))
+                }
                 Err(error) => Ok(ToolResult::failed(&invocation.call, error.to_string())),
             }
-        })
-    }
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct ComputerAuthorizeAppArgs {
-    app_id: String,
-    observe: bool,
-    act: bool,
-}
-
-#[derive(Debug)]
-struct ComputerAuthorizeAppTool {
-    host: Arc<hachimi_computer::ComputerHost>,
-    store: hachimi_storage::AgentStore,
-    session_id: SessionId,
-    grants: CapabilityGrantSet,
-}
-
-impl ToolExecutor for ComputerAuthorizeAppTool {
-    fn descriptor(&self) -> ToolDescriptor {
-        ToolDescriptor {
-            name: "computer_authorize_app".into(),
-            description: "Create a Session-scoped Computer application rule after explicit user approval. This never creates an Always-allowed rule and cannot exceed the active Run grant.".into(),
-            input_schema: object_schema(
-                json!({
-                    "appId": { "type": "string", "minLength": 1, "maxLength": 512 },
-                    "observe": { "type": "boolean" },
-                    "act": { "type": "boolean" }
-                }),
-                &["appId", "observe", "act"],
-            ),
-            effect: ToolEffect::ComputerAct,
-            parallel_safe: false,
-            required_scopes: vec!["computer.control".into()],
-        }
-    }
-
-    fn execute(&self, invocation: ToolInvocation) -> ToolFuture {
-        let host = Arc::clone(&self.host);
-        let store = self.store.clone();
-        let session_id = self.session_id.clone();
-        let grants = self.grants.clone();
-        Box::pin(async move {
-            let args: ComputerAuthorizeAppArgs =
-                match serde_json::from_value(invocation.call.arguments.clone()) {
-                    Ok(args) => args,
-                    Err(error) => {
-                        return Ok(ToolResult::failed(
-                            &invocation.call,
-                            format!("invalid Computer authorization arguments: {error}"),
-                        ));
-                    }
-                };
-            let app_id = args.app_id.trim();
-            if app_id.is_empty()
-                || app_id.chars().count() > 512
-                || !args.observe
-                || (args.observe && !grants.computer.observe)
-                || (args.act && !grants.computer.act)
-            {
-                return Ok(ToolResult::failed(
-                    &invocation.call,
-                    "Computer application authorization exceeds the active Run grant",
-                ));
-            }
-            let rule = ComputerAppRule {
-                app_id: app_id.to_owned(),
-                observe: true,
-                act: args.act,
-                always_allowed: false,
-                granted_by: "run:explicit-computer-authorization".into(),
-                updated_at_ms: now_ms(),
-            };
-            sqlx::query("INSERT INTO computer_app_rules(session_id, app_id, rule_json, updated_at_ms) VALUES(?, ?, ?, ?) ON CONFLICT(session_id, app_id) DO UPDATE SET rule_json = excluded.rule_json, updated_at_ms = excluded.updated_at_ms")
-                .bind(session_id.as_str())
-                .bind(&rule.app_id)
-                .bind(serde_json::to_string(&rule).map_err(|error| hachimi_agent::ToolExecutionError::Failed(error.to_string()))?)
-                .bind(rule.updated_at_ms)
-                .execute(store.pool())
-                .await
-                .map_err(|error| hachimi_agent::ToolExecutionError::Failed(error.to_string()))?;
-            host.set_app_rule(&session_id, rule.clone());
-            Ok(ToolResult::succeeded(
-                &invocation.call,
-                "Session-scoped Computer application rule created.",
-                serde_json::to_value(rule).map_err(|error| {
-                    hachimi_agent::ToolExecutionError::Failed(error.to_string())
-                })?,
-            ))
         })
     }
 }
@@ -1239,10 +1200,13 @@ impl ToolExecutor for ComputerObserveTool {
     fn descriptor(&self) -> ToolDescriptor {
         ToolDescriptor {
             name: "computer_observe".into(),
-            description: "Capture a fresh frame for one user-authorized, non-elevated application window. The returned frame ID, fingerprint, and input epoch must be used by the next Computer action.".into(),
+            description: "Resolve an application by name and optional window title, then capture a fresh frame for the user-authorized, non-elevated window. Never ask the user for a PID or window handle. If application identity is ambiguous, use request_user_input to ask for the application name. The returned frame ID, fingerprint, and input epoch must be used by the next Computer action.".into(),
             input_schema: object_schema(
-                json!({ "windowHandle": { "type": "string", "minLength": 1 } }),
-                &["windowHandle"],
+                json!({
+                    "appName": { "type": "string", "minLength": 1, "maxLength": 256 },
+                    "windowTitle": { "type": "string", "minLength": 1, "maxLength": 512 }
+                }),
+                &["appName"],
             ),
             effect: ToolEffect::ComputerObserve,
             parallel_safe: false,
@@ -1268,31 +1232,115 @@ impl ToolExecutor for ComputerObserveTool {
                         ));
                     }
                 };
-            if args.window_handle.trim().is_empty() || args.window_handle.len() > 128 {
+            if args.app_name.trim().is_empty() || args.app_name.len() > 256 {
                 return Ok(ToolResult::failed(
                     &invocation.call,
-                    "windowHandle must contain 1-128 bytes",
+                    "appName must contain 1-256 bytes",
                 ));
             }
-            let rows = sqlx::query(
-                "SELECT rule_json, 0 AS priority FROM computer_global_app_rules UNION ALL SELECT rule_json, 1 AS priority FROM computer_app_rules WHERE session_id = ? ORDER BY priority",
+            if args
+                .window_title
+                .as_ref()
+                .is_some_and(|value| value.trim().is_empty() || value.len() > 512)
+            {
+                return Ok(ToolResult::failed(
+                    &invocation.call,
+                    "windowTitle must contain 1-512 bytes when provided",
+                ));
+            }
+            let settings = sqlx::query(
+                "SELECT automation_enabled FROM computer_host_settings WHERE singleton = 1",
             )
-            .bind(session_id.as_str())
-            .fetch_all(store.pool())
+            .fetch_one(store.pool())
             .await
             .map_err(|error| hachimi_agent::ToolExecutionError::Failed(error.to_string()))?;
-            for row in rows {
-                let rule = serde_json::from_str::<ComputerAppRule>(row.get("rule_json")).map_err(
-                    |error| hachimi_agent::ToolExecutionError::Failed(error.to_string()),
-                )?;
-                host.set_app_rule(&session_id, rule);
+            if !settings.get::<bool, _>("automation_enabled") {
+                return Ok(ToolResult::failed(
+                    &invocation.call,
+                    "Computer Use automation is disabled in Settings",
+                ));
             }
+            let windows = match host.list_windows().await {
+                Ok(windows) => windows,
+                Err(error) => return Ok(ToolResult::failed(&invocation.call, error.to_string())),
+            };
+            let target = match hachimi_computer::resolve_window_target(
+                &windows,
+                &args.app_name,
+                args.window_title.as_deref(),
+            ) {
+                Ok(target) => target,
+                Err(error) => {
+                    return Ok(ToolResult::failed(
+                        &invocation.call,
+                        crate::computer_targeting::resolution_message(&error),
+                    ));
+                }
+            };
+            let app = target.app.clone();
+            match store
+                .computer_host_policy_decision(&app, &session_id, &run_id)
+                .await
+                .map_err(|error| hachimi_agent::ToolExecutionError::Failed(error.to_string()))?
+            {
+                HostPolicyDecision::Block => {
+                    return Ok(ToolResult::failed(
+                        &invocation.call,
+                        format!(
+                            "Computer application is blocked by policy: {}",
+                            app.display_name
+                        ),
+                    ));
+                }
+                HostPolicyDecision::Ask => {
+                    let request = store
+                        .create_computer_host_access_request(
+                            &session_id,
+                            &run_id,
+                            invocation.run_generation,
+                            &app,
+                        )
+                        .await
+                        .map_err(|error| {
+                            hachimi_agent::ToolExecutionError::Failed(error.to_string())
+                        })?;
+                    let _ = store
+                        .append_event(
+                            &session_id,
+                            Some(&run_id),
+                            "host.access_required",
+                            serde_json::to_value(&request).map_err(|error| {
+                                hachimi_agent::ToolExecutionError::Failed(error.to_string())
+                            })?,
+                        )
+                        .await;
+                    return Ok(ToolResult::failed(
+                        &invocation.call,
+                        format!(
+                            "Computer application access requires user confirmation: {}",
+                            request.id
+                        ),
+                    ));
+                }
+                HostPolicyDecision::Allow => {}
+            }
+            host.set_app_rule(
+                &session_id,
+                ComputerAppRule {
+                    app_id: app.app_id.clone(),
+                    observe: true,
+                    act: grants.computer.act,
+                    always_allowed: false,
+                    granted_by: "host:resolved-computer-policy".into(),
+                    updated_at_ms: now_ms(),
+                },
+            );
             match host
                 .observe(
                     session_id.clone(),
                     run_id.clone(),
                     invocation.run_generation,
-                    args.window_handle.trim(),
+                    &target.window_handle,
                     &grants,
                     &sandbox,
                 )
@@ -1318,6 +1366,26 @@ impl ToolExecutor for ComputerObserveTool {
                             ));
                         }
                     };
+                    store
+                        .set_computer_control_observation(
+                            &session_id,
+                            Some(&frame.target.app_id),
+                            Some(&frame.target.fingerprint),
+                            frame.input_epoch,
+                            "observing",
+                            Some(now_ms()),
+                            now_ms(),
+                        )
+                        .await
+                        .map_err(|error| {
+                            hachimi_agent::ToolExecutionError::Failed(error.to_string())
+                        })?;
+                    store
+                        .store_computer_control_frame(&frame, &app, now_ms())
+                        .await
+                        .map_err(|error| {
+                            hachimi_agent::ToolExecutionError::Failed(error.to_string())
+                        })?;
                     let content = serde_json::to_value(&frame).map_err(|error| {
                         hachimi_agent::ToolExecutionError::Failed(error.to_string())
                     })?;
@@ -1343,7 +1411,7 @@ impl ToolExecutor for ComputerObserveTool {
                         "computer.observe",
                         format!(
                             "computer:window_handle_sha256:{}:action:observe",
-                            stable_hash(args.window_handle.as_bytes())
+                            stable_hash(target.window_handle.as_bytes())
                         ),
                         "denied",
                         computer_error_code(&error),
@@ -1407,6 +1475,22 @@ impl ToolExecutor for ComputerActTool {
             let action_category = computer_action_category(&request.action);
             match host.act(&request, &grants).await {
                 Ok(result) => {
+                    if let Some(frame) = frame.as_ref() {
+                        store
+                            .set_computer_control_observation(
+                                &session_id,
+                                Some(&frame.target.app_id),
+                                Some(&frame.target.fingerprint),
+                                result.next_input_epoch,
+                                "observing",
+                                Some(now_ms()),
+                                now_ms(),
+                            )
+                            .await
+                            .map_err(|error| {
+                                hachimi_agent::ToolExecutionError::Failed(error.to_string())
+                            })?;
+                    }
                     let target_summary = frame.as_ref().map_or_else(
                         || {
                             format!(
@@ -1465,6 +1549,7 @@ impl ToolExecutor for ComputerActTool {
 #[derive(Debug)]
 struct ComputerStopTool {
     host: Arc<hachimi_computer::ComputerHost>,
+    store: hachimi_storage::AgentStore,
     session_id: SessionId,
 }
 
@@ -1484,9 +1569,22 @@ impl ToolExecutor for ComputerStopTool {
 
     fn execute(&self, invocation: ToolInvocation) -> ToolFuture {
         let host = Arc::clone(&self.host);
+        let store = self.store.clone();
         let session_id = self.session_id.clone();
         Box::pin(async move {
             let epoch = host.take_over(&session_id);
+            store
+                .set_computer_control_observation(
+                    &session_id,
+                    None,
+                    None,
+                    epoch,
+                    "stopped",
+                    None,
+                    now_ms(),
+                )
+                .await
+                .map_err(|error| hachimi_agent::ToolExecutionError::Failed(error.to_string()))?;
             Ok(ToolResult::succeeded(
                 &invocation.call,
                 "Computer control stopped.",
@@ -1559,7 +1657,7 @@ struct ConnectorInvokeTool {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct EnterpriseAttachmentDownloadArgs {
-    platform: EnterprisePlatform,
+    provider_id: IntegrationProviderId,
     account_id: String,
     event_id: String,
     remote_id: String,
@@ -1583,14 +1681,14 @@ impl ToolExecutor for EnterpriseAttachmentDownloadTool {
             description: "Explicitly download one enterprise message attachment into the managed Artifact store after size, MIME, magic, metadata, Run, generation, and idempotency checks.".into(),
             input_schema: object_schema(
                 json!({
-                    "platform": { "type": "string", "enum": ["wecom", "ding_talk", "feishu"] },
+                    "providerId": { "type": "string", "enum": ["wecom_app", "dingtalk", "feishu"] },
                     "accountId": { "type": "string", "minLength": 1, "maxLength": 128 },
                     "eventId": { "type": "string", "minLength": 1, "maxLength": 512 },
                     "remoteId": { "type": "string", "minLength": 1, "maxLength": 1024 },
                     "metadataHash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
                     "idempotencyKey": { "type": "string", "minLength": 1, "maxLength": 128 }
                 }),
-                &["platform", "accountId", "eventId", "remoteId", "metadataHash", "idempotencyKey"],
+                &["providerId", "accountId", "eventId", "remoteId", "metadataHash", "idempotencyKey"],
             ),
             effect: ToolEffect::ExternalSideEffect,
             parallel_safe: false,
@@ -1651,7 +1749,7 @@ impl ToolExecutor for EnterpriseAttachmentDownloadTool {
                     expected_run_id: Some(run_id.clone()),
                     expected_generation: Some(invocation.run_generation),
                 },
-                platform: args.platform,
+                provider_id: args.provider_id,
                 account_id: args.account_id,
                 event_id: args.event_id,
                 remote_id: args.remote_id,
@@ -1790,140 +1888,6 @@ impl ToolExecutor for ConnectorInvokeTool {
             }
         })
     }
-}
-
-pub(super) struct LocalHostToolContext {
-    pub(super) browser: Arc<hachimi_browser::BrowserHost>,
-    pub(super) embedded_browser: Arc<crate::embedded_browser_agent::EmbeddedAgentBrowser>,
-    pub(super) computer: Arc<hachimi_computer::ComputerHost>,
-    pub(super) plugins: hachimi_extensions::PluginHost,
-    pub(super) store: hachimi_storage::AgentStore,
-    pub(super) session_id: SessionId,
-    pub(super) run_id: hachimi_protocol::RunId,
-    pub(super) grants: CapabilityGrantSet,
-    pub(super) sandbox: hachimi_protocol::SandboxCapabilityReport,
-    pub(super) schedule_host_grant: Option<ScheduleHostGrant>,
-    pub(super) desktop_control_enabled: bool,
-    pub(super) enterprise_integrations_enabled: bool,
-    pub(super) browser_environment_change_sink: EnvironmentChangeSink,
-    pub(super) source_environment_change_sink: EnvironmentChangeSink,
-}
-
-pub(super) fn local_host_tool_executors(
-    context: LocalHostToolContext,
-) -> Vec<Arc<dyn ToolExecutor>> {
-    let LocalHostToolContext {
-        browser,
-        embedded_browser,
-        computer,
-        plugins,
-        store,
-        session_id,
-        run_id,
-        grants,
-        sandbox,
-        schedule_host_grant,
-        desktop_control_enabled,
-        enterprise_integrations_enabled,
-        browser_environment_change_sink,
-        source_environment_change_sink,
-    } = context;
-    let mut tools: Vec<Arc<dyn ToolExecutor>> = Vec::new();
-    if desktop_control_enabled {
-        tools.extend([
-            Arc::new(BrowserStartTool {
-                host: Arc::clone(&browser),
-                embedded: Arc::clone(&embedded_browser),
-                store: store.clone(),
-                session_id: session_id.clone(),
-                run_id: run_id.clone(),
-                grants: grants.clone(),
-                sandbox: sandbox.clone(),
-                schedule_host_grant: schedule_host_grant.clone(),
-                environment_change_sink: Arc::clone(&browser_environment_change_sink),
-            }),
-            Arc::new(BrowserObserveTool {
-                host: Arc::clone(&browser),
-                embedded: Arc::clone(&embedded_browser),
-                store: store.clone(),
-                session_id: session_id.clone(),
-                run_id: run_id.clone(),
-                grants: grants.clone(),
-                schedule_host_grant: schedule_host_grant.clone(),
-                environment_change_sink: Arc::clone(&browser_environment_change_sink),
-            }),
-            Arc::new(BrowserActTool {
-                host: Arc::clone(&browser),
-                embedded: Arc::clone(&embedded_browser),
-                store: store.clone(),
-                session_id: session_id.clone(),
-                run_id: run_id.clone(),
-                grants: grants.clone(),
-                schedule_host_grant: schedule_host_grant.clone(),
-                environment_change_sink: Arc::clone(&browser_environment_change_sink),
-            }),
-            Arc::new(BrowserStopTool {
-                host: browser,
-                embedded: embedded_browser,
-                store: store.clone(),
-                session_id: session_id.clone(),
-                run_id: run_id.clone(),
-                environment_change_sink: browser_environment_change_sink,
-            }),
-            Arc::new(ComputerListWindowsTool {
-                host: Arc::clone(&computer),
-            }),
-            Arc::new(ComputerAuthorizeAppTool {
-                host: Arc::clone(&computer),
-                store: store.clone(),
-                session_id: session_id.clone(),
-                grants: grants.clone(),
-            }),
-            Arc::new(ComputerObserveTool {
-                host: Arc::clone(&computer),
-                store: store.clone(),
-                session_id: session_id.clone(),
-                run_id: run_id.clone(),
-                grants: grants.clone(),
-                sandbox,
-            }),
-            Arc::new(ComputerActTool {
-                host: Arc::clone(&computer),
-                store: store.clone(),
-                session_id: session_id.clone(),
-                run_id: run_id.clone(),
-                grants,
-            }),
-            Arc::new(ComputerStopTool {
-                host: computer,
-                session_id: session_id.clone(),
-            }),
-        ] as [Arc<dyn ToolExecutor>; 9]);
-    }
-    if enterprise_integrations_enabled {
-        tools.extend([
-            Arc::new(ConnectorListTool {
-                host: plugins.clone(),
-                schedule_host_grant: schedule_host_grant.clone(),
-            }),
-            Arc::new(ConnectorInvokeTool {
-                host: plugins.clone(),
-                store: store.clone(),
-                session_id: session_id.clone(),
-                run_id: run_id.clone(),
-                schedule_host_grant: schedule_host_grant.clone(),
-                environment_change_sink: source_environment_change_sink,
-            }),
-            Arc::new(EnterpriseAttachmentDownloadTool {
-                host: plugins,
-                store,
-                session_id,
-                run_id,
-                schedule_host_grant,
-            }),
-        ] as [Arc<dyn ToolExecutor>; 3]);
-    }
-    tools
 }
 
 async fn persist_browser_environment(

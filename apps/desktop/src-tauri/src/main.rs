@@ -10,11 +10,17 @@ mod agent_host_tools_support;
 mod agent_runtime_host;
 mod app_domain_handler;
 mod app_shell;
+mod browser_detection;
 mod browser_extension_server;
+mod browser_extension_trust;
 mod browser_router;
+mod browser_settings_commands;
 mod browser_tool_policy;
 mod browser_workspace_commands;
 mod channel_agent_dispatch;
+mod command_error;
+mod computer_settings_commands;
+mod computer_targeting;
 mod desktop_e2e;
 #[cfg(all(debug_assertions, feature = "desktop-e2e"))]
 mod desktop_e2e_agent_tools;
@@ -27,41 +33,55 @@ mod forge_commands;
 mod gateway_process;
 mod gateway_runtime;
 mod git_forge_host;
+mod host_domain_commands;
+mod integration_commands;
 mod local_host_commands;
 mod managed_sandbox_runtime;
 mod mcp_commands;
+mod mcp_runtime;
 mod media_commands;
+mod optional_resource_runtime;
 mod plugin_content_protocol;
 mod process_commands;
 mod project_git_commands;
 mod project_tool_commands;
 mod review_commands;
+mod runtime_supervisor;
 mod sandbox_commands;
 mod schedule_host_grants;
 mod scheduler_commands;
+mod scheduler_runtime;
+mod shutdown_coordinator;
 mod skill_drop;
+mod startup_error;
 mod storage_layout;
 mod workbench_commands;
 mod workbench_plan_commands;
 mod workspace_commands;
 mod workspace_mutation_commands;
-
 use agent_commands::*;
 use app_shell::*;
+use browser_settings_commands::*;
 use browser_workspace_commands::*;
+use command_error::CommandError;
+use computer_settings_commands::*;
 use desktop_e2e::*;
 use environment_commands::*;
 use extension_commands::*;
 use forge_commands::*;
-use local_host_commands::*;
+use host_domain_commands::*;
+use integration_commands::*;
 use mcp_commands::*;
+use mcp_runtime::*;
 use media_commands::*;
 use process_commands::*;
 use project_git_commands::*;
 use project_tool_commands::*;
 use review_commands::*;
+use runtime_supervisor::*;
 use sandbox_commands::*;
 use scheduler_commands::*;
+use scheduler_runtime::start_desktop_scheduler;
 use skill_drop::{PendingSkillDrop, handle_skill_drag_event};
 use std::{
     collections::BTreeMap,
@@ -129,7 +149,6 @@ use hachimi_windowing::{
 use hachimi_workbench::WorkbenchService;
 use parking_lot::{Mutex, RwLock};
 use serde::Serialize;
-use specta::Type;
 use tauri::{
     AppHandle, Emitter, LogicalPosition, Manager, PhysicalPosition, Runtime, State, WebviewUrl,
     WebviewWindow, WebviewWindowBuilder, WindowEvent, Wry,
@@ -140,8 +159,6 @@ use tauri_runtime::ResizeDirection;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-const VITS_RESOURCE: &str = "resources/ai-models/text-to-speech/vits-melo-zh-en";
-const SENSEVOICE_RESOURCE: &str = "resources/ai-models/speech-to-text/sensevoice-small";
 const PET_TURN_EVENT: &str = "pet:turn";
 const VOICE_PLAYBACK_EVENT: &str = "voice:playback";
 const VOICE_TURN_EVENT: &str = "voice:turn";
@@ -153,7 +170,6 @@ const WORKBENCH_RUN_EVENT: &str = "workbench:run-updated";
 const WORKBENCH_SESSION_ACTIVITY_EVENT: &str = "workbench:session-activity-changed";
 const DEFAULT_AVATAR_RESOURCE: &str =
     "resources/avatar-default/2639776812528692620/2639776812528692620.vrm";
-const MOTION_CATALOG_RESOURCE: &str = "resources/avatar-motions-v4/catalog.json";
 const PET_VISIBILITY_EVENT: &str = "pet:visibility";
 const MAX_THEME_FILE_BYTES: u64 = 64 * 1024;
 const AVATAR_IMPORT_TOKEN_TTL: Duration = Duration::from_secs(10 * 60);
@@ -285,13 +301,6 @@ fn cancel_pending_voice_import(
     }
 }
 
-#[derive(Debug, Clone, Serialize, Type)]
-#[serde(rename_all = "camelCase")]
-struct CommandError {
-    code: String,
-    message: String,
-}
-
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct PetWindowMotionEvent {
@@ -299,25 +308,6 @@ struct PetWindowMotionEvent {
     y: i32,
     velocity_x: f32,
     velocity_y: f32,
-}
-
-impl CommandError {
-    fn new(code: impl Into<String>, message: impl Into<String>) -> Self {
-        Self {
-            code: code.into(),
-            message: message.into(),
-        }
-    }
-
-    fn operation(code: &'static str, error: impl std::fmt::Display) -> Self {
-        Self::new(code, error.to_string())
-    }
-}
-
-impl From<tauri::Error> for CommandError {
-    fn from(error: tauri::Error) -> Self {
-        Self::operation("tauri_error", error)
-    }
 }
 
 struct DesktopState {
@@ -341,6 +331,7 @@ struct DesktopState {
     process_registry: Arc<ProcessRegistry>,
     process_event_bridges: ProcessEventBridgeRegistry,
     scheduler_handle: Mutex<Option<hachimi_scheduler::SchedulerHandle>>,
+    runtime_supervisor: RuntimeSupervisor,
     workspace_watches: Arc<Mutex<BTreeMap<hachimi_protocol::FsWatchId, ActiveWorkspaceWatch>>>,
     workspace_searches: Arc<Mutex<BTreeMap<hachimi_protocol::FsSearchId, ActiveWorkspaceSearch>>>,
     agent_event_streams: Mutex<BTreeMap<hachimi_protocol::EventSubscriptionId, CancellationToken>>,
@@ -350,6 +341,8 @@ struct DesktopState {
     gateway: hachimi_gateway::GatewayHost,
     plugin_host: hachimi_extensions::PluginHost,
     plugin_surfaces: plugin_content_protocol::PluginSurfaceRegistry,
+    browser_host: Arc<hachimi_browser::BrowserHost>,
+    computer_host: Arc<hachimi_computer::ComputerHost>,
     embedded_browser: Arc<embedded_browser::EmbeddedBrowserService<Wry>>,
     sandbox_runtime: Arc<SandboxRuntimeManager>,
     sandbox_activity: SandboxActivityTracker,
@@ -1002,8 +995,14 @@ fn main() {
     }
     configure_webview_storage(&storage_layout);
     let log_dir = initialize_logging(storage_layout.logs());
+    let startup_log_dir = log_dir.clone();
 
-    tauri::Builder::default()
+    let builder = tauri::Builder::default();
+    #[cfg(not(feature = "desktop-e2e"))]
+    let builder = builder.plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+        activate_existing_instance(app);
+    }));
+    let result = builder
         .plugin(tauri_plugin_notification::init())
         .register_uri_scheme_protocol("hachimi-avatar", |context, request| {
             if !matches!(context.webview_label(), "pet" | "workbench")
@@ -1250,7 +1249,60 @@ fn main() {
             cancel_task_run,
             retry_task_run,
             continue_task_interactively,
-            local_host_command,
+            list_installed_plugins,
+            list_installed_plugin_contributions,
+            get_plugin_contribution_surface,
+            check_plugin_health,
+            get_plugin_permission_diff,
+            list_plugin_revisions,
+            list_plugin_lifecycle_journal,
+            list_connector_accounts,
+            get_connector_driver_descriptor,
+            get_gateway_health,
+            get_runtime_health,
+            retry_runtime_component,
+            list_channel_provider_manifests,
+            list_channel_provider_health,
+            list_channel_provider_accounts,
+            list_integration_providers,
+            list_enterprise_integrations,
+            begin_ilink_qr_login,
+            poll_ilink_qr_login,
+            cancel_ilink_qr_login,
+            upsert_enterprise_integration,
+            set_enterprise_integration_capabilities,
+            probe_enterprise_integration,
+            remove_enterprise_integration,
+            list_channel_authorizations,
+            upsert_channel_authorization,
+            create_channel_pairing_code,
+            create_channel_identity_link_code,
+            list_channel_identity_transfer_previews,
+            transfer_channel_identity,
+            get_channel_access_policy,
+            update_channel_access_policy,
+            approve_browser_extension,
+            install_browser_extension,
+            get_browser_host_settings,
+            update_browser_host_settings,
+            list_browser_site_policies,
+            update_browser_site_policy,
+            update_private_browser_site_policy,
+            remove_browser_site_policy,
+            list_host_access_requests,
+            resolve_host_access_request,
+            stop_browser_automation,
+            take_over_browser_automation,
+            resume_browser_automation,
+            get_computer_host_settings,
+            update_computer_host_settings,
+            list_computer_app_candidates,
+            list_computer_app_policies,
+            update_computer_app_policy,
+            take_over_computer_control,
+            resume_computer_control,
+            stop_computer_control,
+            get_computer_control_frame,
             initialize_agent_control,
             search_agent_sessions,
             resume_agent_session,
@@ -1312,6 +1364,23 @@ fn main() {
             exit_app,
         ])
         .setup(move |app| {
+            let startup_window = WebviewWindowBuilder::new(
+                app,
+                "startup",
+                WebviewUrl::App("startup.html".into()),
+            )
+            .title("Hachimi")
+            .inner_size(390.0, 150.0)
+            .resizable(false)
+            .decorations(false)
+            .always_on_top(true)
+            .visible(true)
+            .build()
+            .map_err(|error| {
+                tracing::warn!(%error, "startup feedback window could not be created");
+                error
+            })
+            .ok();
             let data_dir = storage_layout.root.clone();
             std::fs::create_dir_all(&data_dir)?;
             std::fs::write(data_dir.join(DATA_ROOT_SENTINEL_FILE), APP_IDENTIFIER)?;
@@ -1337,11 +1406,11 @@ fn main() {
                 enterprise_integrations: env_disabled(
                     "HACHIMI_DISABLE_ENTERPRISE_INTEGRATIONS",
                 ),
-                desktop_control: env_disabled("HACHIMI_DISABLE_DESKTOP_CONTROL"),
             });
             let agent_store = tauri::async_runtime::block_on(AgentStore::connect(
                 data_dir.join("agent-v2.sqlite3"),
             ))?;
+            let runtime_supervisor = RuntimeSupervisor::new(app.handle().clone());
             let run_activity = agent_store.subscribe_run_activity();
             let mut recovery = tauri::async_runtime::block_on(
                 agent_store.recover_interrupted_with_run_recovery(
@@ -1383,8 +1452,9 @@ fn main() {
                     settings.developer_mode,
                 ),
             );
-            let managed_sandbox = managed_sandbox_runtime::stage(&data_dir, &resource_dir)
-                .map_err(std::io::Error::other)?;
+            let managed_sandbox = managed_sandbox_runtime::stage_or_degrade(
+                &data_dir, &resource_dir, runtime_supervisor.clone(),
+            );
             let sandbox_probe = Arc::new(
                 WindowsSandboxReadinessProbe::new(storage_layout.sandbox_setup_marker())
                     .with_runtime(
@@ -1490,28 +1560,21 @@ fn main() {
                         AvatarCatalog::load(avatar_root)?
                     }
                 };
-            let bundled_motion_catalog =
-                resolve_resource(app.handle(), MOTION_CATALOG_RESOURCE);
-            let development_motion_catalog = Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("../../../assets/avatar-motions-v4/catalog.json");
-            let builtin_motion_catalog = if bundled_motion_catalog.is_file() {
-                bundled_motion_catalog
-            } else {
-                development_motion_catalog
-            };
-            let motion_catalog =
-                MotionCatalog::load(data_dir.join("motions-v3"), builtin_motion_catalog)?;
-            let bundled_sensevoice = resolve_resource(app.handle(), SENSEVOICE_RESOURCE);
-            let development_sensevoice = Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("resources/ai-models/speech-to-text/sensevoice-small");
-            let sensevoice_dir = if bundled_sensevoice.join("model.int8.onnx").is_file() {
-                bundled_sensevoice
-            } else {
-                development_sensevoice
-            };
-            let vits_dir = resolve_resource(app.handle(), VITS_RESOURCE);
+            let optional_resources = optional_resource_runtime::stage_optional_resources(
+                app.handle(),
+                &data_dir,
+                runtime_supervisor.clone(),
+            );
+            let motion_catalog = optional_resource_runtime::load_motion_catalog(
+                &optional_resources.motion_catalog,
+                &data_dir,
+                &runtime_supervisor,
+            )?;
+            let sensevoice_dir = optional_resources.speech_model;
+            let vits_dir = optional_resources.voice_model;
             let voice_catalog = VoiceCatalog::load(data_dir.join("voice-models"), &vits_dir)?;
             let current_voice_asset = voice_catalog.current_asset();
+            let voice_model_available = current_voice_asset.is_some();
             let speech_recognizer = SpeechRecognizerRuntime::new(
                 sensevoice_dir.clone(),
                 settings.voice.recognition_compute_mode,
@@ -1539,9 +1602,12 @@ fn main() {
                     state: Some(voice_runtime_state_sink),
                 },
             );
-            if !speech_recognizer.available() {
-                tracing::error!(path = %sensevoice_dir.display(), "bundled SenseVoice-Small model is missing");
-            }
+            optional_resource_runtime::publish_voice_health(
+                &runtime_supervisor,
+                speech_recognizer.available(),
+                voice_model_available,
+                &sensevoice_dir,
+            );
             let mut feature_flags = release_agent_feature_flags(
                 std::env::var("HACHIMI_DISABLE_WORKSPACE_TOOLS").as_deref() == Ok("1"),
                 std::env::var("HACHIMI_DISABLE_MCP_RUNTIME").as_deref() == Ok("1"),
@@ -1549,9 +1615,6 @@ fn main() {
             );
             feature_flags.runtime_features = runtime_features;
             feature_flags.plugin_runtime = feature_flags.runtime_features.plugin_runtime;
-            feature_flags.browser_control &= feature_flags.runtime_features.desktop_control;
-            feature_flags.computer_observe &= feature_flags.runtime_features.desktop_control;
-            feature_flags.computer_control &= feature_flags.runtime_features.desktop_control;
             feature_flags.motion_lab = cfg!(debug_assertions)
                 || settings.developer_mode
                 || std::env::var("HACHIMI_ENABLE_MOTION_LAB").as_deref() == Ok("1");
@@ -1578,34 +1641,10 @@ fn main() {
                 &data_dir,
                 mcp_secrets,
             );
-            if feature_flags.mcp_runtime
-                && let Err(error) =
-                    tauri::async_runtime::block_on(mcp_control.reconcile_startup())
-            {
-                tracing::warn!(%error, "MCP startup reconciliation failed");
-            }
-            let chrome_extension_broker = Arc::new(hachimi_browser::ChromeExtensionBroker::new(
-                data_dir.join("browser/extension-files"),
-            ));
-            let browser = Arc::new(hachimi_browser::BrowserHost::with_broker(
-                Arc::new(hachimi_browser::SystemBrowserClock),
-                chrome_extension_broker.clone(),
-            ));
-            if feature_flags.runtime_features.desktop_control {
-                tauri::async_runtime::spawn({
-                    let browser = Arc::clone(&browser);
-                    async move {
-                        if let Err(error) = browser_extension_server::run(
-                            browser,
-                            chrome_extension_broker,
-                        )
-                        .await
-                        {
-                            tracing::warn!(%error, "Chrome extension broker stopped");
-                        }
-                    }
-                });
-            }
+            let browser = browser_extension_server::create_browser_host(
+                app.handle().clone(), &data_dir, feature_flags.browser_control,
+                runtime_supervisor.clone(),
+            );
             let computer = Arc::new(hachimi_computer::ComputerHost::new(
                 Arc::new(hachimi_computer::PlatformComputerBroker::new()),
                 Arc::new(hachimi_computer::SystemComputerClock),
@@ -1654,6 +1693,9 @@ fn main() {
                     plugins: plugins.clone(),
                     multi_agent: multi_agent.clone(),
                     runtime_features: feature_flags.runtime_features,
+                    browser_control: feature_flags.browser_control,
+                    computer_observe: feature_flags.computer_observe,
+                    computer_control: feature_flags.computer_control,
                 },
             ));
             let agent_executor = AgentRunExecutor::new(
@@ -1728,9 +1770,6 @@ fn main() {
             tauri::async_runtime::block_on(
                 gateway.bootstrap_provider_accounts(&builtins.accounts),
             )?;
-            tauri::async_runtime::block_on(gateway.reconcile_startup(
-                i64::try_from(epoch_millis()).unwrap_or(i64::MAX),
-            ))?;
             let plugin_surfaces = plugin_content_protocol::PluginSurfaceRegistry::default();
             let domain_handler = app_domain_handler::DesktopAppDomainHandler::new(
                 app_domain_handler::DesktopAppDomainDependencies {
@@ -1748,7 +1787,7 @@ fn main() {
                     workspace_watches: Arc::clone(&workspace_watches),
                     workspace_searches: Arc::clone(&workspace_searches),
                     browser: Arc::clone(&browser),
-                    computer,
+                    computer: Arc::clone(&computer),
                     plugins: plugins.clone(),
                     plugin_surfaces: plugin_surfaces.clone(),
                     gateway: gateway.clone(),
@@ -1771,7 +1810,7 @@ fn main() {
                 .with_domain_handler(Arc::new(domain_handler));
             let state = DesktopState {
                 storage_layout: storage_layout.clone(),
-                agent_store,
+                agent_store: agent_store.clone(),
                 settings: RwLock::new(settings.clone()),
                 settings_store: store,
                 workbench,
@@ -1790,6 +1829,7 @@ fn main() {
                 process_registry,
                 process_event_bridges: ProcessEventBridgeRegistry::default(),
                 scheduler_handle: Mutex::new(None),
+                runtime_supervisor: runtime_supervisor.clone(),
                 workspace_watches,
                 workspace_searches,
                 agent_event_streams: Mutex::new(BTreeMap::new()),
@@ -1799,11 +1839,13 @@ fn main() {
                 gateway: gateway.clone(),
                 plugin_host: plugins,
                 plugin_surfaces,
-                embedded_browser,
+                browser_host: browser,
+                computer_host: computer,
+                embedded_browser: Arc::clone(&embedded_browser),
                 sandbox_runtime,
                 sandbox_activity,
                 control_plane,
-                mcp_control,
+                mcp_control: mcp_control.clone(),
                 mcp_secrets,
                 mcp_echo_server,
                 skill_host,
@@ -1815,6 +1857,27 @@ fn main() {
                 placement_revision: AtomicU64::new(0),
             };
             app.manage(state);
+            let reconciliation_store = agent_store.clone();
+            let reconciliation_gateway = gateway.clone();
+            tauri::async_runtime::spawn(async move {
+                if let Err(error) = integration_commands::reconcile_integration_startup(
+                    &reconciliation_store,
+                    &reconciliation_gateway,
+                )
+                .await
+                {
+                    tracing::warn!(code = error.code, message = %error.message, "Integration startup reconciliation degraded");
+                }
+                if let Err(error) = reconciliation_gateway
+                    .reconcile_startup(i64::try_from(epoch_millis()).unwrap_or(i64::MAX))
+                    .await
+                {
+                    tracing::warn!(%error, "Gateway durable startup reconciliation degraded");
+                }
+            });
+            embedded_browser.start_supervision();
+            computer_settings_commands::start_computer_runtime(runtime_supervisor.clone());
+            start_mcp_runtime(mcp_control.clone(), runtime_supervisor.clone(), feature_flags.mcp_runtime);
             workbench_plan_commands::start_workbench_activity_bridge(
                 app.handle().clone(),
                 run_activity,
@@ -1825,6 +1888,7 @@ fn main() {
                 app.handle().clone(),
                 feature_flags.local_gateway,
                 loopback_token,
+                runtime_supervisor,
             );
             start_skill_change_bridge(app.handle().clone(), skill_change_host);
             create_pet_context_menu(app)?;
@@ -1907,10 +1971,22 @@ fn main() {
                 open_workbench_route(app.handle(), &managed, WorkbenchRoute::Home)
                     .map_err(|error| std::io::Error::other(error.message))?;
             }
+            if let Some(window) = startup_window {
+                let _ = window.close();
+            }
             Ok(())
         })
-        .run(tauri::generate_context!())
-        .expect("failed to run Hachimi");
+        .build(tauri::generate_context!());
+    match result {
+        Ok(app) => app.run(|app, event| {
+            if matches!(event, tauri::RunEvent::ExitRequested { .. })
+                && let Some(state) = app.try_state::<DesktopState>()
+            {
+                tauri::async_runtime::block_on(shutdown_coordinator::shutdown(&state));
+            }
+        }),
+        Err(error) => startup_error::show(&error, &startup_log_dir),
+    }
 }
 
 #[cfg(test)]

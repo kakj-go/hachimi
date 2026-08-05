@@ -181,6 +181,25 @@ vi.mock("@hachimi/ui", () => {
       </div>
     ),
     StatusBanner: (props: { children?: JSX.Element }) => <div role="status">{props.children}</div>,
+    Tabs: (props: {
+      value: string;
+      tabs: readonly { value: string; label: JSX.Element; content: JSX.Element }[];
+      onChange?: (value: string) => void;
+    }) => (
+      <div role="tablist">
+        <For each={props.tabs}>
+          {(tab) => (
+            <button
+              role="tab"
+              aria-selected={tab.value === props.value}
+              onClick={() => props.onChange?.(tab.value)}
+            >
+              {tab.label}
+            </button>
+          )}
+        </For>
+      </div>
+    ),
     Switch: (props: {
       checked: boolean;
       disabled?: boolean;
@@ -280,6 +299,8 @@ const mcpServer: McpServerView = {
     protocolVersion: "2025-06-18",
     toolCount: 1,
     errorCode: null,
+    failureCount: 0,
+    nextRetryAtMs: null,
     checkedAtMs: 1,
   },
 };

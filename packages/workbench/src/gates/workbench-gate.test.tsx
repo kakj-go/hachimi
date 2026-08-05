@@ -4,6 +4,7 @@ import type { JSX } from "solid-js";
 import { describe, expect, it, vi } from "vitest";
 import type {
   ApprovalRequestRecord,
+  HostAccessRequestRecord,
   ProposedPlan,
   UserInputRequestRecord,
 } from "@hachimi/contracts";
@@ -35,6 +36,7 @@ vi.mock("@hachimi/ui", () => {
     MessageCircle: Icon,
     Play: Icon,
     Send: Icon,
+    ShieldAlert: Icon,
     ShieldCheck: Icon,
     X: Icon,
     TextArea: (props: JSX.TextareaHTMLAttributes<HTMLTextAreaElement>) => <textarea {...props} />,
@@ -43,6 +45,60 @@ vi.mock("@hachimi/ui", () => {
 });
 
 describe("WorkbenchGate", () => {
+  it("keeps Host access separate and prevents persistent private-network grants", () => {
+    const request = {
+      id: "host-access-1",
+      ownerRunId: "run-1",
+      target: {
+        kind: "browser",
+        origin: "http://127.0.0.1:8080",
+        surface: "embedded",
+        private_network: true,
+      },
+      capabilities: ["observe", "act"],
+      status: "pending",
+    } as HostAccessRequestRecord;
+    const resolve = vi.fn();
+    const host = document.createElement("div");
+    document.body.append(host);
+    const dispose = render(
+      () => (
+        <I18nProvider initialLocale="en-US">
+          <WorkbenchGate
+            locale="en-US"
+            userInput={undefined}
+            hostAccess={request}
+            approval={undefined}
+            plan={undefined}
+            resolvingUserInput={false}
+            resolvingHostAccess={false}
+            resolvingApproval={false}
+            acceptingPlan={false}
+            revisingPlan={false}
+            onResolveUserInput={vi.fn()}
+            onResolveHostAccess={resolve}
+            onResolveApproval={vi.fn()}
+            onAcceptPlan={vi.fn()}
+            onRevisePlan={vi.fn()}
+            onDismissPlan={vi.fn()}
+          />
+        </I18nProvider>
+      ),
+      host,
+    );
+
+    expect(host.textContent).toContain("Allow the agent to access http://127.0.0.1:8080?");
+    expect(host.textContent).toContain("observe");
+    expect(
+      host.querySelector<HTMLButtonElement>('[data-testid="workbench-host-always-allow"]')
+        ?.disabled,
+    ).toBe(true);
+    host.querySelector<HTMLButtonElement>('[data-testid="workbench-host-allow-session"]')?.click();
+    expect(resolve).toHaveBeenCalledWith(request, "allow_session");
+    dispose();
+    host.remove();
+  });
+
   it("describes the full approval decision before allowing it", () => {
     const approval = {
       id: "approval-1",
@@ -65,14 +121,17 @@ describe("WorkbenchGate", () => {
           <WorkbenchGate
             locale="en-US"
             userInput={undefined}
+            hostAccess={undefined}
             approval={approval}
             plan={undefined}
             resolvingUserInput={false}
+            resolvingHostAccess={false}
             resolvingApproval={false}
             acceptingPlan={false}
             revisingPlan={false}
             onResolveUserInput={vi.fn()}
             onResolveApproval={onResolveApproval}
+            onResolveHostAccess={vi.fn()}
             onAcceptPlan={vi.fn()}
             onRevisePlan={vi.fn()}
             onDismissPlan={vi.fn()}
@@ -139,14 +198,17 @@ describe("WorkbenchGate", () => {
           <WorkbenchGate
             locale="en-US"
             userInput={userInput}
+            hostAccess={undefined}
             approval={approval}
             plan={plan}
             resolvingUserInput={false}
+            resolvingHostAccess={false}
             resolvingApproval={false}
             acceptingPlan={false}
             revisingPlan={false}
             onResolveUserInput={noop}
             onResolveApproval={noop}
+            onResolveHostAccess={noop}
             onAcceptPlan={noop}
             onRevisePlan={noop}
             onDismissPlan={noop}
@@ -184,14 +246,17 @@ describe("WorkbenchGate", () => {
           <WorkbenchGate
             locale="en-US"
             userInput={undefined}
+            hostAccess={undefined}
             approval={undefined}
             plan={plan}
             resolvingUserInput={false}
+            resolvingHostAccess={false}
             resolvingApproval={false}
             acceptingPlan={false}
             revisingPlan={false}
             onResolveUserInput={vi.fn()}
             onResolveApproval={vi.fn()}
+            onResolveHostAccess={vi.fn()}
             onAcceptPlan={onAcceptPlan}
             onRevisePlan={onRevisePlan}
             onDismissPlan={onDismissPlan}
@@ -259,14 +324,17 @@ describe("WorkbenchGate", () => {
           <WorkbenchGate
             locale="en-US"
             userInput={userInput}
+            hostAccess={undefined}
             approval={undefined}
             plan={undefined}
             resolvingUserInput={false}
+            resolvingHostAccess={false}
             resolvingApproval={false}
             acceptingPlan={false}
             revisingPlan={false}
             onResolveUserInput={onResolveUserInput}
             onResolveApproval={vi.fn()}
+            onResolveHostAccess={vi.fn()}
             onAcceptPlan={vi.fn()}
             onRevisePlan={vi.fn()}
             onDismissPlan={vi.fn()}

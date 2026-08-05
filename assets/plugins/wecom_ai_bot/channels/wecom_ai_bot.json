@@ -1,0 +1,5 @@
+{
+  "protocolVersion": 1,
+  "providerId": "wecom_ai_bot",
+  "transport": "builtin_enterprise"
+}

@@ -66,7 +66,7 @@ pub(super) trait DesktopDomainRunLauncher: Send + Sync {
     fn dispatch_channel_ingress(
         &self,
         principal: String,
-        envelope: hachimi_protocol::ChannelEnvelope,
+        message: hachimi_protocol::VerifiedChannelMessage,
     ) -> DesktopDomainLaunchFuture<hachimi_protocol::IngressReceipt>;
 }
 

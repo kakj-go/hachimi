@@ -426,6 +426,12 @@ impl AgentStore {
         if changed.rows_affected() != 1 {
             return Err(AgentStoreError::SessionNotFound(session_id.clone()));
         }
+        if archived == Some(true) {
+            sqlx::query("DELETE FROM channel_session_bindings WHERE session_id = ?")
+                .bind(session_id.as_str())
+                .execute(&mut *transaction)
+                .await?;
+        }
         append_event_tx(
             &mut transaction,
             session_id,

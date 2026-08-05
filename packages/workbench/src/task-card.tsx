@@ -42,7 +42,13 @@ export function TaskCard(props: {
   onReauthorize: () => void;
 }) {
   return (
-    <article class="task-card" data-testid="task-schedule-card">
+    <article
+      class="task-card"
+      data-testid="task-schedule-card"
+      data-schedule-id={props.schedule.id}
+      data-schedule-name={props.schedule.name}
+      aria-label={props.schedule.name}
+    >
       <header class="task-card-header">
         <span class="task-card-icon" aria-hidden="true">
           <CalendarClock size={18} />

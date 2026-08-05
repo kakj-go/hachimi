@@ -24,6 +24,9 @@ jobs:
     runs-on: [self-hosted, windows, x64, hachimi-sandbox]
     environment: hachimi-sandbox-release
     timeout-minutes: 180
+    env:
+      HACHIMI_CHROME_EXTENSION_ID: ${{ vars.HACHIMI_CHROME_EXTENSION_ID }}
+      HACHIMI_EDGE_EXTENSION_ID: ${{ vars.HACHIMI_EDGE_EXTENSION_ID }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -40,6 +43,11 @@ jobs:
       - name: Verify self-hosted runner disk budget
         shell: powershell
         run: scripts/release/check-disk-space.ps1 -MinimumFreeGiB 80
+      - name: Verify signed browser extension identities
+        shell: powershell
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:HACHIMI_CHROME_EXTENSION_ID)) { throw "missing_chrome_extension_id" }
+          if ([string]::IsNullOrWhiteSpace($env:HACHIMI_EDGE_EXTENSION_ID)) { throw "missing_edge_extension_id" }
       - name: Verify clean versioned source
         run: |
           pnpm release:check-clean

@@ -3,10 +3,12 @@ use specta::Type;
 
 use super::{
     AgentTaskRecord, ApprovalId, ApprovalRequestRecord, ApprovalStatus, ArtifactId, ArtifactRecord,
-    AttachmentId, BehaviorMode, BrowserSession, BrowserTabId, CheckoutId, CheckoutKind,
-    CheckoutRecord, ExecutionTarget, GitRemoteRecord, MutationContext, PlanId, PlanStepId,
-    ProjectId, ProjectRecord, ProposedPlan, RunEventEnvelope, RunId, RunRecord, RunStatus,
-    SessionRecord, SessionSourceId, SkillId, TranscriptItem,
+    AttachmentId, BehaviorMode, BrowserAutomationLease, BrowserAutomationLeaseId,
+    BrowserAutomationSurfaceKind, BrowserSession, BrowserSessionId, BrowserTabId, CheckoutId,
+    CheckoutKind, CheckoutRecord, ComputerControlSession, ComputerControlSessionId,
+    ExecutionTarget, ExternalBrowserLeaseObservation, GitRemoteRecord, HostAccessRequestRecord,
+    MutationContext, PlanId, PlanStepId, ProjectId, ProjectRecord, ProposedPlan, RunEventEnvelope,
+    RunId, RunRecord, RunStatus, SessionRecord, SessionSourceId, SkillId, TranscriptItem,
 };
 use crate::FileDiffStatus;
 
@@ -128,9 +130,18 @@ pub struct EnvironmentGitSummary {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum EnvironmentActivity {
     Browser {
-        browser_tab_id: BrowserTabId,
+        lease_id: BrowserAutomationLeaseId,
+        surface: BrowserAutomationSurfaceKind,
+        browser_tab_id: Option<BrowserTabId>,
+        browser_session_id: Option<BrowserSessionId>,
         run_id: RunId,
         domain: String,
+    },
+    Computer {
+        control_session_id: ComputerControlSessionId,
+        run_id: Option<RunId>,
+        app_id: String,
+        app_name: String,
     },
     Plan {
         plan_id: PlanId,
@@ -303,6 +314,10 @@ pub struct WorkbenchSessionSnapshot {
     pub agent_tasks: Vec<AgentTaskRecord>,
     pub run_summaries: Vec<RunSummaryRecord>,
     pub browser_sessions: Vec<BrowserSession>,
+    pub browser_automation_leases: Vec<BrowserAutomationLease>,
+    pub external_browser_observations: Vec<ExternalBrowserLeaseObservation>,
+    pub host_access_requests: Vec<HostAccessRequestRecord>,
+    pub computer_control_sessions: Vec<ComputerControlSession>,
     pub sources: Vec<SessionSourceRecord>,
 }
 

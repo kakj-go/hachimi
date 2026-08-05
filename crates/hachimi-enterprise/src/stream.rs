@@ -7,7 +7,7 @@ use std::{
 };
 
 use hachimi_protocol::{
-    EnterpriseAttachmentMetadata, EnterpriseMention, EnterpriseMentionKind, EnterprisePlatform,
+    ChannelMention, ChannelMentionKind, IntegrationProviderId, RemoteMediaDescriptor,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -33,9 +33,12 @@ pub struct EnterpriseStreamEndpoint {
 }
 
 impl EnterpriseStreamEndpoint {
-    pub(crate) fn from_bootstrap(platform: EnterprisePlatform, value: &Value) -> Result<Self, ()> {
+    pub(crate) fn from_bootstrap(
+        platform: IntegrationProviderId,
+        value: &Value,
+    ) -> Result<Self, ()> {
         let (url, reconnect_ms, ping_ms) = match platform {
-            EnterprisePlatform::DingTalk => {
+            IntegrationProviderId::DingTalk => {
                 let endpoint = value
                     .get("endpoint")
                     .or_else(|| value.pointer("/data/endpoint"))
@@ -53,7 +56,7 @@ impl EnterpriseStreamEndpoint {
                     30_000,
                 )
             }
-            EnterprisePlatform::Feishu => (
+            IntegrationProviderId::Feishu => (
                 value
                     .pointer("/data/URL")
                     .or_else(|| value.pointer("/data/url"))
@@ -71,7 +74,8 @@ impl EnterpriseStreamEndpoint {
                     .unwrap_or(120)
                     .saturating_mul(1_000),
             ),
-            EnterprisePlatform::Wecom => return Err(()),
+            IntegrationProviderId::WecomApp => return Err(()),
+            _ => return Err(()),
         };
         validate_websocket_url(&url)?;
         Ok(Self {
@@ -93,7 +97,7 @@ impl EnterpriseStreamEndpoint {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct EnterpriseStreamEvent {
-    pub platform: EnterprisePlatform,
+    pub platform: IntegrationProviderId,
     pub connection_id: String,
     pub event_id: String,
     pub event_type: String,
@@ -103,14 +107,14 @@ pub struct EnterpriseStreamEvent {
     pub thread: String,
     pub sender: String,
     pub text: String,
-    pub mentions: Vec<EnterpriseMention>,
-    pub attachments: Vec<EnterpriseAttachmentMetadata>,
+    pub mentions: Vec<ChannelMention>,
+    pub attachments: Vec<RemoteMediaDescriptor>,
     pub payload: Value,
 }
 
 pub struct EnterpriseStreamRuntime {
     cancellation: CancellationToken,
-    handle: tokio::task::JoinHandle<()>,
+    handle: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl std::fmt::Debug for EnterpriseStreamRuntime {
@@ -122,9 +126,17 @@ impl std::fmt::Debug for EnterpriseStreamRuntime {
 }
 
 impl EnterpriseStreamRuntime {
-    pub async fn stop(self) {
+    pub async fn stop(mut self) {
         self.cancellation.cancel();
-        let _ = self.handle.await;
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.await;
+        }
+    }
+}
+
+impl Drop for EnterpriseStreamRuntime {
+    fn drop(&mut self) {
+        self.cancellation.cancel();
     }
 }
 
@@ -173,7 +185,7 @@ pub fn spawn_enterprise_stream(
     (
         EnterpriseStreamRuntime {
             cancellation,
-            handle,
+            handle: Some(handle),
         },
         receiver,
     )
@@ -187,7 +199,7 @@ async fn wait_or_cancel(cancellation: &CancellationToken, duration: Duration) ->
 }
 
 fn run_stream_session(
-    platform: EnterprisePlatform,
+    platform: IntegrationProviderId,
     endpoint: &EnterpriseStreamEndpoint,
     sender: &mpsc::Sender<EnterpriseStreamEvent>,
     cancellation: &CancellationToken,
@@ -206,13 +218,14 @@ fn run_stream_session(
     while !cancellation.is_cancelled() {
         if last_ping.elapsed() >= endpoint.ping_interval {
             match platform {
-                EnterprisePlatform::DingTalk => socket
+                IntegrationProviderId::DingTalk => socket
                     .send(Message::Ping(Vec::new().into()))
                     .map_err(|_| StreamError::Transport)?,
-                EnterprisePlatform::Feishu => socket
+                IntegrationProviderId::Feishu => socket
                     .send(Message::Binary(encode_feishu_ping(service_id).into()))
                     .map_err(|_| StreamError::Transport)?,
-                EnterprisePlatform::Wecom => return Err(StreamError::InvalidFrame),
+                IntegrationProviderId::WecomApp => return Err(StreamError::InvalidFrame),
+                _ => return Err(StreamError::InvalidFrame),
             }
             last_ping = Instant::now();
         }
@@ -238,14 +251,14 @@ fn run_stream_session(
                 .map_err(|_| StreamError::Transport)?,
             Message::Pong(_) => {}
             Message::Close(_) => break,
-            Message::Text(text) if platform == EnterprisePlatform::DingTalk => {
+            Message::Text(text) if platform == IntegrationProviderId::DingTalk => {
                 let (event, ack) = decode_dingtalk(text.as_bytes(), &connection_id)?;
                 deliver_once(event, sender, recent)?;
                 socket
                     .send(Message::Text(ack.into()))
                     .map_err(|_| StreamError::Transport)?;
             }
-            Message::Binary(bytes) if platform == EnterprisePlatform::Feishu => {
+            Message::Binary(bytes) if platform == IntegrationProviderId::Feishu => {
                 let frame = decode_feishu_frame(&bytes)?;
                 if frame.method == 0 {
                     continue;
@@ -348,7 +361,7 @@ fn decode_dingtalk(
         .ok_or(StreamError::InvalidFrame)?;
     let text = string_at(&payload, &["/text/content", "/content"]).unwrap_or_default();
     let mentions = dingtalk_mentions(&payload);
-    let attachments = normalized_attachments(EnterprisePlatform::DingTalk, &payload)?;
+    let attachments = normalized_attachments(IntegrationProviderId::DingTalk, &payload)?;
     let mut ack_headers = BTreeMap::new();
     ack_headers.insert("contentType".into(), "application/json".into());
     ack_headers.insert("messageId".into(), event_id.clone());
@@ -361,7 +374,7 @@ fn decode_dingtalk(
     .map_err(|_| StreamError::InvalidFrame)?;
     Ok((
         EnterpriseStreamEvent {
-            platform: EnterprisePlatform::DingTalk,
+            platform: IntegrationProviderId::DingTalk,
             connection_id: connection_id.into(),
             event_id,
             event_type,
@@ -383,25 +396,23 @@ fn decode_dingtalk(
     ))
 }
 
-fn dingtalk_mentions(payload: &Value) -> Vec<EnterpriseMention> {
+fn dingtalk_mentions(payload: &Value) -> Vec<ChannelMention> {
     let mut mentions = payload
         .get("atUsers")
         .and_then(Value::as_array)
         .into_iter()
         .flatten()
         .filter_map(|value| {
-            string_at(value, &["/staffId", "/dingtalkId", "/id"]).map(|target_id| {
-                EnterpriseMention {
-                    kind: EnterpriseMentionKind::User,
-                    target_id: Some(target_id),
-                    display_text: value.get("name").and_then(Value::as_str).map(str::to_owned),
-                }
+            string_at(value, &["/staffId", "/dingtalkId", "/id"]).map(|target_id| ChannelMention {
+                kind: ChannelMentionKind::User,
+                target_id: Some(target_id),
+                display_text: value.get("name").and_then(Value::as_str).map(str::to_owned),
             })
         })
         .collect::<Vec<_>>();
     if payload.get("isAtAll").and_then(Value::as_bool) == Some(true) {
-        mentions.push(EnterpriseMention {
-            kind: EnterpriseMentionKind::All,
+        mentions.push(ChannelMention {
+            kind: ChannelMentionKind::All,
             target_id: None,
             display_text: Some("@all".into()),
         });
@@ -536,7 +547,7 @@ fn normalize_feishu(
         })
         .unwrap_or_default();
     Ok(EnterpriseStreamEvent {
-        platform: EnterprisePlatform::Feishu,
+        platform: IntegrationProviderId::Feishu,
         connection_id: connection_id.into(),
         event_id,
         event_type,
@@ -552,7 +563,7 @@ fn normalize_feishu(
     })
 }
 
-fn feishu_mentions(payload: &Value) -> Vec<EnterpriseMention> {
+fn feishu_mentions(payload: &Value) -> Vec<ChannelMention> {
     payload
         .pointer("/event/message/mentions")
         .and_then(Value::as_array)
@@ -561,11 +572,11 @@ fn feishu_mentions(payload: &Value) -> Vec<EnterpriseMention> {
         .map(|value| {
             let key = value.get("key").and_then(Value::as_str).unwrap_or_default();
             let target = string_at(value, &["/id/open_id", "/id/user_id", "/id/union_id"]);
-            EnterpriseMention {
+            ChannelMention {
                 kind: if key.eq_ignore_ascii_case("@all") {
-                    EnterpriseMentionKind::All
+                    ChannelMentionKind::All
                 } else {
-                    EnterpriseMentionKind::User
+                    ChannelMentionKind::User
                 },
                 target_id: target,
                 display_text: value.get("name").and_then(Value::as_str).map(str::to_owned),
@@ -575,9 +586,9 @@ fn feishu_mentions(payload: &Value) -> Vec<EnterpriseMention> {
 }
 
 fn normalized_attachments(
-    platform: EnterprisePlatform,
+    platform: IntegrationProviderId,
     payload: &Value,
-) -> Result<Vec<EnterpriseAttachmentMetadata>, StreamError> {
+) -> Result<Vec<RemoteMediaDescriptor>, StreamError> {
     payload
         .get("attachments")
         .cloned()
@@ -585,10 +596,10 @@ fn normalized_attachments(
         .transpose()
         .map_err(|_| StreamError::InvalidFrame)
         .map(|value| value.unwrap_or_default())
-        .and_then(|attachments: Vec<EnterpriseAttachmentMetadata>| {
+        .and_then(|attachments: Vec<RemoteMediaDescriptor>| {
             attachments
                 .iter()
-                .all(|attachment| attachment.platform == platform)
+                .all(|attachment| attachment.provider_id == platform)
                 .then_some(attachments)
                 .ok_or(StreamError::InvalidFrame)
         })
@@ -597,7 +608,7 @@ fn normalized_attachments(
 fn feishu_attachments(
     payload: &Value,
     content: &Value,
-) -> Result<Vec<EnterpriseAttachmentMetadata>, StreamError> {
+) -> Result<Vec<RemoteMediaDescriptor>, StreamError> {
     if let Some(attachments) = payload.get("attachments") {
         return serde_json::from_value(attachments.clone()).map_err(|_| StreamError::InvalidFrame);
     }
@@ -612,15 +623,17 @@ fn feishu_attachments(
     }
     .and_then(Value::as_str);
     Ok(remote_id
-        .map(|remote_id| EnterpriseAttachmentMetadata {
-            platform: EnterprisePlatform::Feishu,
+        .map(|remote_id| RemoteMediaDescriptor {
+            provider_id: IntegrationProviderId::Feishu,
             remote_id: remote_id.to_owned(),
+            resource_key: Some(message_type.to_owned()),
             file_name: content
                 .get("file_name")
                 .and_then(Value::as_str)
                 .map(str::to_owned),
             mime_type: None,
             declared_size_bytes: None,
+            content_hash: None,
             download_required: true,
         })
         .into_iter()
@@ -858,7 +871,7 @@ mod tests {
         let (sender, mut receiver) = mpsc::channel(8);
         let cancellation = CancellationToken::new();
         run_stream_session(
-            EnterprisePlatform::DingTalk,
+            IntegrationProviderId::DingTalk,
             &endpoint,
             &sender,
             &cancellation,
@@ -929,7 +942,7 @@ mod tests {
         let recent = Arc::new(Mutex::new(RecentEventIds::default()));
         for _ in 0..2 {
             run_stream_session(
-                EnterprisePlatform::DingTalk,
+                IntegrationProviderId::DingTalk,
                 &endpoint,
                 &sender,
                 &CancellationToken::new(),
@@ -994,7 +1007,7 @@ mod tests {
         ));
         let (sender, mut receiver) = mpsc::channel(8);
         run_stream_session(
-            EnterprisePlatform::Feishu,
+            IntegrationProviderId::Feishu,
             &endpoint,
             &sender,
             &CancellationToken::new(),

@@ -167,6 +167,23 @@ describe("Skill text editor", () => {
     mounted.dispose();
   });
 
+  it("writes the user-facing alias into Skill frontmatter", () => {
+    const mounted = mount();
+    const alias = [...mounted.host.querySelectorAll("label")].find((label) =>
+      label.textContent?.startsWith("Alias"),
+    );
+    const input = alias?.querySelector("input");
+    expect(input).not.toBeNull();
+    if (input) {
+      input.value = "Safe Writer";
+      input.dispatchEvent(new InputEvent("input", { bubbles: true }));
+    }
+    expect(mounted.onInput).toHaveBeenLastCalledWith(
+      expect.stringContaining("display_name: Safe Writer"),
+    );
+    mounted.dispose();
+  });
+
   it("offers existing Skill files in the reference picker", () => {
     const mounted = mount();
     [...mounted.host.querySelectorAll("button")]

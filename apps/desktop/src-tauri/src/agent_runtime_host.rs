@@ -259,6 +259,9 @@ pub(super) struct DesktopAgentRunPreparer {
     plugins: hachimi_extensions::PluginHost,
     multi_agent: MultiAgentCoordinator,
     runtime_features: hachimi_core::RuntimeFeatureSet,
+    browser_control: bool,
+    computer_observe: bool,
+    computer_control: bool,
 }
 
 pub(super) struct DesktopAgentRunDependencies {
@@ -276,6 +279,9 @@ pub(super) struct DesktopAgentRunDependencies {
     pub(super) plugins: hachimi_extensions::PluginHost,
     pub(super) multi_agent: MultiAgentCoordinator,
     pub(super) runtime_features: hachimi_core::RuntimeFeatureSet,
+    pub(super) browser_control: bool,
+    pub(super) computer_observe: bool,
+    pub(super) computer_control: bool,
 }
 
 impl DesktopAgentRunPreparer {
@@ -295,6 +301,9 @@ impl DesktopAgentRunPreparer {
             plugins,
             multi_agent,
             runtime_features,
+            browser_control,
+            computer_observe,
+            computer_control,
         } = dependencies;
         Self {
             app,
@@ -311,6 +320,9 @@ impl DesktopAgentRunPreparer {
             plugins,
             multi_agent,
             runtime_features,
+            browser_control,
+            computer_observe,
+            computer_control,
         }
     }
 
@@ -666,7 +678,10 @@ impl DesktopAgentRunPreparer {
         messages.extend(model_view.messages);
         append_selected_skill_messages(&mut messages, &selected_skills);
         if let Some(context) = attachment_context {
-            messages.push(ModelMessage::user(context.content));
+            messages.push(ModelMessage::user_with_images(
+                context.content,
+                context.input_images,
+            ));
         }
         messages.push(ModelMessage::user(prompt));
         let workspace_tool_names = tool_executors
@@ -722,6 +737,14 @@ impl DesktopAgentRunPreparer {
             .file_system
             .retain(|grant| grant.access == FileSystemAccess::Read);
         request.capability_grants.process = hachimi_protocol::ProcessGrant::default();
+        self.store
+            .persist_run_security_snapshot(
+                &request.capability_grants,
+                &request.sandbox_snapshot,
+                now_ms(),
+            )
+            .await
+            .map_err(AgentExecutionError::Store)?;
         let selection_prompt = if matches!(
             request.run.origin,
             RunOrigin::Scheduled { .. } | RunOrigin::Channel { .. }
@@ -878,33 +901,6 @@ impl DesktopAgentRunPreparer {
                 })),
             ));
         }
-        let mut local_host_authorization = authorization.clone();
-        local_host_authorization.capability_host = "local-host-broker".into();
-        for tool in crate::agent_host_tools::local_host_tool_executors(
-            crate::agent_host_tools::LocalHostToolContext {
-                browser: Arc::clone(&self.browser),
-                embedded_browser: Arc::clone(&self.embedded_browser),
-                computer: Arc::clone(&self.computer),
-                plugins: self.plugins.clone(),
-                store: self.store.clone(),
-                session_id: request.session.id.clone(),
-                run_id: request.run.id.clone(),
-                grants: request.capability_grants.clone(),
-                sandbox: request.sandbox_snapshot.clone(),
-                schedule_host_grant: request.schedule_host_grant.clone(),
-                desktop_control_enabled: self.runtime_features.desktop_control,
-                enterprise_integrations_enabled: self.runtime_features.enterprise_integrations,
-                browser_environment_change_sink: self.environment_change_sink(vec![
-                    hachimi_protocol::WorkbenchEnvironmentChangeReason::Browser,
-                    hachimi_protocol::WorkbenchEnvironmentChangeReason::Sources,
-                ]),
-                source_environment_change_sink: self.environment_change_sink(vec![
-                    hachimi_protocol::WorkbenchEnvironmentChangeReason::Sources,
-                ]),
-            },
-        ) {
-            tool_executors.push(authorized_tool(tool, local_host_authorization.clone()));
-        }
         if !runtime_skills.is_empty() {
             let mut skill_authorization = authorization.clone();
             skill_authorization.capability_host = "skill-host".into();
@@ -963,6 +959,35 @@ impl DesktopAgentRunPreparer {
             for tool in mcp_resource_tool_executors(resource_runtimes) {
                 tool_executors.push(authorized_tool(tool, resource_authorization.clone()));
             }
+        }
+        let mut local_host_authorization = authorization.clone();
+        local_host_authorization.capability_host = "local-host-broker".into();
+        for tool in crate::agent_host_tools::local_host_tool_executors(
+            crate::agent_host_tools::LocalHostToolContext {
+                browser: Arc::clone(&self.browser),
+                embedded_browser: Arc::clone(&self.embedded_browser),
+                computer: Arc::clone(&self.computer),
+                plugins: self.plugins.clone(),
+                store: self.store.clone(),
+                session_id: request.session.id.clone(),
+                run_id: request.run.id.clone(),
+                grants: request.capability_grants.clone(),
+                sandbox: request.sandbox_snapshot.clone(),
+                schedule_host_grant: request.schedule_host_grant.clone(),
+                browser_enabled: self.browser_control,
+                computer_observe_enabled: self.computer_observe,
+                computer_control_enabled: self.computer_control,
+                enterprise_integrations_enabled: self.runtime_features.enterprise_integrations,
+                browser_environment_change_sink: self.environment_change_sink(vec![
+                    hachimi_protocol::WorkbenchEnvironmentChangeReason::Browser,
+                    hachimi_protocol::WorkbenchEnvironmentChangeReason::Sources,
+                ]),
+                source_environment_change_sink: self.environment_change_sink(vec![
+                    hachimi_protocol::WorkbenchEnvironmentChangeReason::Sources,
+                ]),
+            },
+        ) {
+            tool_executors.push(authorized_tool(tool, local_host_authorization.clone()));
         }
         Ok(())
     }

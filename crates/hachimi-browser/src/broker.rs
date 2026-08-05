@@ -108,6 +108,13 @@ pub trait BrowserBroker: Send + Sync {
         Box::pin(async { Ok(Vec::new()) })
     }
 
+    fn resume<'a>(
+        &'a self,
+        session_id: &'a BrowserSessionId,
+        task_tab_group: &'a str,
+        network_policy: BrowserNetworkPolicy,
+    ) -> BrowserBrokerFuture<'a, ()>;
+
     fn take_over<'a>(&'a self, session_id: &'a BrowserSessionId) -> BrowserBrokerFuture<'a, ()>;
 
     fn stop<'a>(&'a self, session_id: &'a BrowserSessionId) -> BrowserBrokerFuture<'a, ()>;
@@ -162,6 +169,15 @@ impl BrowserBroker for UnavailableBrowserBroker {
     }
 
     fn take_over<'a>(&'a self, _session_id: &'a BrowserSessionId) -> BrowserBrokerFuture<'a, ()> {
+        Box::pin(async { Err(BrowserHostError::BrokerUnavailable) })
+    }
+
+    fn resume<'a>(
+        &'a self,
+        _session_id: &'a BrowserSessionId,
+        _task_tab_group: &'a str,
+        _network_policy: BrowserNetworkPolicy,
+    ) -> BrowserBrokerFuture<'a, ()> {
         Box::pin(async { Err(BrowserHostError::BrokerUnavailable) })
     }
 

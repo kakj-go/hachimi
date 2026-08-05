@@ -1,9 +1,12 @@
 use std::{fs, io::Read as _, path::Path};
 
+use aes::{Aes128, Aes256};
+use base64::{Engine as _, engine::general_purpose::STANDARD};
+use cbc::cipher::{BlockDecryptMut as _, KeyIvInit as _, block_padding::Pkcs7};
 use hachimi_enterprise::{EnterpriseApiClient, EnterpriseApiError, EnterpriseCredential};
 use hachimi_protocol::{
     ArtifactId, ArtifactKind, ArtifactRecord, AttachmentId, AttachmentRecord, ConnectorAccountId,
-    EnterpriseAttachmentDownloadRequest, EnterpriseAttachmentDownloadResult,
+    EnterpriseAttachmentDownloadRequest, EnterpriseAttachmentDownloadResult, IntegrationProviderId,
 };
 use serde_json::{Value, json};
 use sha2::{Digest as _, Sha256};
@@ -33,7 +36,7 @@ impl PluginHost {
         integration_account_id: &str,
     ) -> Result<Option<ConnectorAccountId>, ExtensionHostError> {
         let row = sqlx::query(
-            "SELECT connector_account_id FROM enterprise_integration_accounts WHERE id = ? AND state = 'healthy'",
+            "SELECT connector_account_id FROM integration_provider_accounts WHERE id = ? AND state = 'healthy' AND api_access_enabled = 1",
         )
         .bind(integration_account_id)
         .fetch_optional(self.store.pool())
@@ -53,21 +56,6 @@ impl PluginHost {
         }
         let metadata = attachment_metadata(self, request).await?;
         claim_download(self, request, &metadata.input_hash).await?;
-        let mut raw_credential = load_enterprise_credential(self, request).await?;
-        let credential = EnterpriseCredential::parse(&raw_credential)
-            .map_err(|_| ExtensionHostError::ConnectorNotHealthy)?;
-        raw_credential.zeroize();
-        if credential.platform() != request.platform {
-            fail_download(
-                self,
-                request,
-                "failed",
-                "enterprise_credential_platform_drift",
-            )
-            .await?;
-            return Err(ExtensionHostError::EnterpriseAttachmentDrift);
-        }
-
         let root = self
             .store
             .managed_artifact_root()
@@ -78,17 +66,35 @@ impl PluginHost {
         if staging.is_file() {
             fs::remove_file(&staging)?;
         }
-        let receipt = self
-            .enterprise_api
-            .download_attachment_to(
-                &request.account_id,
-                &credential,
-                &request.event_id,
-                &request.remote_id,
-                &staging,
-                MAX_ATTACHMENT_BYTES,
-            )
-            .await;
+        let receipt = if request.provider_id.supports_enterprise_api() {
+            let mut raw_credential = load_enterprise_credential(self, request).await?;
+            let credential = EnterpriseCredential::parse(&raw_credential)
+                .map_err(|_| ExtensionHostError::ConnectorNotHealthy)?;
+            raw_credential.zeroize();
+            if credential.platform() != request.provider_id {
+                fail_download(
+                    self,
+                    request,
+                    "failed",
+                    "enterprise_credential_platform_drift",
+                )
+                .await?;
+                return Err(ExtensionHostError::EnterpriseAttachmentDrift);
+            }
+            self.enterprise_api
+                .download_attachment_to(
+                    &request.account_id,
+                    &credential,
+                    &request.event_id,
+                    &request.remote_id,
+                    metadata.resource_key.as_deref(),
+                    &staging,
+                    MAX_ATTACHMENT_BYTES,
+                )
+                .await
+        } else {
+            download_encrypted_channel_attachment(self, request, &staging).await
+        };
         let receipt = match receipt {
             Ok(receipt) => receipt,
             Err(error) => {
@@ -98,6 +104,21 @@ impl PluginHost {
                 return Err(map_download_error(error));
             }
         };
+        if metadata
+            .expected_content_hash
+            .as_ref()
+            .is_some_and(|expected| expected != &receipt.content_hash)
+        {
+            let _ = fs::remove_file(&staging);
+            fail_download(
+                self,
+                request,
+                "failed",
+                "enterprise_attachment_content_hash_drift",
+            )
+            .await?;
+            return Err(ExtensionHostError::EnterpriseAttachmentDrift);
+        }
         let mime_type = match detect_allowed_type(
             &staging,
             metadata.file_name.as_deref(),
@@ -149,7 +170,7 @@ impl PluginHost {
                 content_hash: Some(receipt.content_hash.clone()),
                 metadata: json!({
                     "attachmentId": attachment.id,
-                    "platform": request.platform,
+                    "platform": request.provider_id,
                     "accountIdHash": digest_hex(request.account_id.as_bytes()),
                     "eventIdHash": digest_hex(request.event_id.as_bytes()),
                     "remoteIdHash": digest_hex(request.remote_id.as_bytes()),
@@ -161,19 +182,23 @@ impl PluginHost {
             .await?;
         let result = EnterpriseAttachmentDownloadResult {
             artifact_id: artifact.id,
+            attachment_id: attachment.id.clone(),
             content_hash: receipt.content_hash,
             mime_type,
             byte_size: receipt.byte_size,
             duplicate: false,
         };
         complete_download(self, request, &attachment.id, &result).await?;
+        let _ = cleanup_media_secret(self, request).await;
         Ok(result)
     }
 }
 
 struct AttachmentMetadata {
+    resource_key: Option<String>,
     file_name: Option<String>,
     declared_mime: Option<String>,
+    expected_content_hash: Option<String>,
     input_hash: String,
 }
 
@@ -209,8 +234,8 @@ async fn attachment_metadata(
     host: &PluginHost,
     request: &EnterpriseAttachmentDownloadRequest,
 ) -> Result<AttachmentMetadata, ExtensionHostError> {
-    let row = sqlx::query("SELECT metadata.file_name, metadata.mime_type, metadata.declared_size_bytes, metadata.metadata_hash, integration.platform FROM enterprise_attachment_metadata AS metadata INNER JOIN enterprise_integration_accounts AS integration ON integration.id = metadata.account_id WHERE metadata.platform = ? AND metadata.account_id = ? AND metadata.event_id = ? AND metadata.remote_id = ?")
-        .bind(request.platform.as_str())
+    let row = sqlx::query("SELECT metadata.resource_key, metadata.file_name, metadata.mime_type, metadata.declared_size_bytes, metadata.expected_content_hash, metadata.metadata_hash, integration.provider_id FROM channel_attachment_metadata AS metadata INNER JOIN integration_provider_accounts AS integration ON integration.id = metadata.account_id WHERE metadata.platform = ? AND metadata.account_id = ? AND metadata.event_id = ? AND metadata.remote_id = ?")
+        .bind(request.provider_id.as_str())
         .bind(&request.account_id)
         .bind(&request.event_id)
         .bind(&request.remote_id)
@@ -221,15 +246,17 @@ async fn attachment_metadata(
     let declared_size = row.get::<Option<i64>, _>("declared_size_bytes");
     let size_error = validate_declared_size(declared_size);
     if metadata_hash != request.metadata_hash
-        || row.get::<String, _>("platform") != request.platform.as_str()
+        || row.get::<String, _>("provider_id") != request.provider_id.as_str()
         || size_error.is_some()
     {
         return Err(size_error.unwrap_or(ExtensionHostError::EnterpriseAttachmentDrift));
     }
     let input_hash = request_input_hash(request)?;
     Ok(AttachmentMetadata {
+        resource_key: row.get("resource_key"),
         file_name: row.get("file_name"),
         declared_mime: row.get("mime_type"),
+        expected_content_hash: row.get("expected_content_hash"),
         input_hash,
     })
 }
@@ -249,7 +276,7 @@ fn request_input_hash(
 ) -> Result<String, ExtensionHostError> {
     Ok(digest_hex(
         serde_json::to_vec(&json!({
-            "platform": request.platform,
+            "platform": request.provider_id,
             "accountId": request.account_id,
             "eventId": request.event_id,
             "remoteId": request.remote_id,
@@ -301,8 +328,8 @@ async fn claim_download(
             _ => return Err(ExtensionHostError::EnterpriseTransport),
         }
     }
-    sqlx::query("UPDATE enterprise_attachment_metadata SET download_status = 'downloading' WHERE platform = ? AND account_id = ? AND event_id = ? AND remote_id = ?")
-        .bind(request.platform.as_str())
+    sqlx::query("UPDATE channel_attachment_metadata SET download_status = 'downloading' WHERE platform = ? AND account_id = ? AND event_id = ? AND remote_id = ?")
+        .bind(request.provider_id.as_str())
         .bind(&request.account_id)
         .bind(&request.event_id)
         .bind(&request.remote_id)
@@ -316,10 +343,10 @@ async fn completed_result(
     host: &PluginHost,
     request: &EnterpriseAttachmentDownloadRequest,
 ) -> Result<Option<EnterpriseAttachmentDownloadResult>, ExtensionHostError> {
-    let row = sqlx::query("SELECT ledger.input_hash, ledger.result_json, metadata.metadata_hash FROM enterprise_operation_ledger AS ledger INNER JOIN enterprise_attachment_metadata AS metadata ON metadata.account_id = ledger.account_id WHERE ledger.account_id = ? AND ledger.idempotency_key = ? AND ledger.operation = 'download_attachment' AND ledger.status = 'completed' AND metadata.platform = ? AND metadata.event_id = ? AND metadata.remote_id = ?")
+    let row = sqlx::query("SELECT ledger.input_hash, ledger.result_json, metadata.metadata_hash FROM enterprise_operation_ledger AS ledger INNER JOIN channel_attachment_metadata AS metadata ON metadata.account_id = ledger.account_id WHERE ledger.account_id = ? AND ledger.idempotency_key = ? AND ledger.operation = 'download_attachment' AND ledger.status = 'completed' AND metadata.platform = ? AND metadata.event_id = ? AND metadata.remote_id = ?")
         .bind(&request.account_id)
         .bind(&request.idempotency_key)
-        .bind(request.platform.as_str())
+        .bind(request.provider_id.as_str())
         .bind(&request.event_id)
         .bind(&request.remote_id)
         .fetch_optional(host.store.pool())
@@ -340,26 +367,263 @@ async fn load_enterprise_credential(
     host: &PluginHost,
     request: &EnterpriseAttachmentDownloadRequest,
 ) -> Result<String, ExtensionHostError> {
-    let row = sqlx::query("SELECT connector_account_id, channel_account_id FROM enterprise_integration_accounts WHERE id = ? AND platform = ?")
-        .bind(&request.account_id)
-        .bind(request.platform.as_str())
-        .fetch_optional(host.store.pool())
-        .await?
-        .ok_or(ExtensionHostError::ConnectorNotHealthy)?;
-    let entry = if let Some(account_id) = row.get::<Option<String>, _>("connector_account_id") {
-        keyring::Entry::new("com.hachimi.connector", &account_id)
-    } else if let Some(account_id) = row.get::<Option<String>, _>("channel_account_id") {
-        keyring::Entry::new(
-            "com.hachimi.channel",
-            &format!("{}:{account_id}", request.platform.channel_provider_id()),
-        )
-    } else {
+    let row = sqlx::query(
+        "SELECT credential_ref FROM integration_provider_accounts WHERE id = ? AND provider_id = ?",
+    )
+    .bind(&request.account_id)
+    .bind(request.provider_id.as_str())
+    .fetch_optional(host.store.pool())
+    .await?
+    .ok_or(ExtensionHostError::ConnectorNotHealthy)?;
+    let expected_reference = format!(
+        "keyring:integration:{}:{}:primary",
+        request.provider_id.as_str(),
+        request.account_id
+    );
+    if row.get::<Option<&str>, _>("credential_ref") != Some(expected_reference.as_str()) {
         return Err(ExtensionHostError::ConnectorNotHealthy);
     }
+    let entry = keyring::Entry::new(
+        "com.hachimi.integration",
+        &format!(
+            "{}:{}:primary",
+            request.provider_id.as_str(),
+            request.account_id
+        ),
+    )
     .map_err(|_| ExtensionHostError::SecretStore)?;
     entry
         .get_password()
         .map_err(|_| ExtensionHostError::SecretStore)
+}
+
+async fn download_encrypted_channel_attachment(
+    host: &PluginHost,
+    request: &EnterpriseAttachmentDownloadRequest,
+    destination: &Path,
+) -> Result<hachimi_enterprise::EnterpriseDownloadReceipt, EnterpriseApiError> {
+    if !matches!(
+        request.provider_id,
+        IntegrationProviderId::WecomAiBot | IntegrationProviderId::WechatIlink
+    ) {
+        return Err(EnterpriseApiError::InvalidCredential);
+    }
+    let row = sqlx::query("SELECT secret_ref, secret_fingerprint FROM channel_media_secrets WHERE platform = ? AND account_id = ? AND event_id = ? AND remote_id = ?")
+        .bind(request.provider_id.as_str())
+        .bind(&request.account_id)
+        .bind(&request.event_id)
+        .bind(&request.remote_id)
+        .fetch_optional(host.store.pool())
+        .await
+        .map_err(|_| EnterpriseApiError::Transport)?
+        .ok_or(EnterpriseApiError::Authentication)?;
+    let identity = digest_hex(
+        format!(
+            "{}:{}:{}:{}",
+            request.provider_id.as_str(),
+            request.account_id,
+            request.event_id,
+            request.remote_id
+        )
+        .as_bytes(),
+    );
+    let username = format!(
+        "{}:{}:media:{}",
+        request.provider_id.as_str(),
+        request.account_id,
+        identity
+    );
+    if row.get::<String, _>("secret_ref") != format!("keyring:integration:{username}") {
+        return Err(EnterpriseApiError::Authentication);
+    }
+    let raw = zeroize::Zeroizing::new(
+        keyring::Entry::new("com.hachimi.integration", &username)
+            .and_then(|entry| entry.get_password())
+            .map_err(|_| EnterpriseApiError::Authentication)?,
+    );
+    if digest_hex(raw.as_bytes()) != row.get::<String, _>("secret_fingerprint") {
+        return Err(EnterpriseApiError::Authentication);
+    }
+    let secret: Value =
+        serde_json::from_str(&raw).map_err(|_| EnterpriseApiError::InvalidRequest)?;
+    let encrypted = match request.provider_id {
+        IntegrationProviderId::WechatIlink => {
+            download_ilink_ciphertext(&request.remote_id, MAX_ATTACHMENT_BYTES + 16).await?
+        }
+        IntegrationProviderId::WecomAiBot => {
+            let url = secret
+                .get("download_url")
+                .and_then(Value::as_str)
+                .ok_or(EnterpriseApiError::InvalidRequest)?;
+            download_wecom_ciphertext(url, MAX_ATTACHMENT_BYTES + 32).await?
+        }
+        _ => return Err(EnterpriseApiError::InvalidCredential),
+    };
+    let aes_key = secret
+        .get("aes_key")
+        .and_then(Value::as_str)
+        .ok_or(EnterpriseApiError::InvalidRequest)?;
+    let decrypted = match request.provider_id {
+        IntegrationProviderId::WechatIlink => decrypt_ilink_media(encrypted, aes_key)?,
+        IntegrationProviderId::WecomAiBot => decrypt_wecom_ai_media(encrypted, aes_key)?,
+        _ => return Err(EnterpriseApiError::InvalidCredential),
+    };
+    if u64::try_from(decrypted.len()).unwrap_or(u64::MAX) > MAX_ATTACHMENT_BYTES {
+        return Err(EnterpriseApiError::InvalidRequest);
+    }
+    fs::write(destination, &decrypted).map_err(|_| EnterpriseApiError::Transport)?;
+    Ok(hachimi_enterprise::EnterpriseDownloadReceipt {
+        content_type: None,
+        content_hash: digest_hex(&decrypted),
+        byte_size: u64::try_from(decrypted.len()).unwrap_or(u64::MAX),
+    })
+}
+
+async fn download_ilink_ciphertext(
+    encrypted_query_param: &str,
+    max_bytes: u64,
+) -> Result<Vec<u8>, EnterpriseApiError> {
+    let mut url = reqwest::Url::parse("https://novac2c.cdn.weixin.qq.com/c2c/download")
+        .map_err(|_| EnterpriseApiError::InvalidRequest)?;
+    url.query_pairs_mut()
+        .append_pair("encrypted_query_param", encrypted_query_param);
+    download_bounded(url, max_bytes).await
+}
+
+async fn download_wecom_ciphertext(
+    value: &str,
+    max_bytes: u64,
+) -> Result<Vec<u8>, EnterpriseApiError> {
+    let url = validated_wecom_media_url(value)?;
+    download_bounded(url, max_bytes).await
+}
+
+fn validated_wecom_media_url(value: &str) -> Result<reqwest::Url, EnterpriseApiError> {
+    let url = reqwest::Url::parse(value).map_err(|_| EnterpriseApiError::InvalidRequest)?;
+    let host = url.host_str().ok_or(EnterpriseApiError::InvalidRequest)?;
+    let allowed_host = ["work.weixin.qq.com", "weixin.qq.com", "qpic.cn"]
+        .iter()
+        .any(|suffix| host.eq_ignore_ascii_case(suffix) || host.ends_with(&format!(".{suffix}")));
+    if url.scheme() != "https"
+        || !allowed_host
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.port().is_some_and(|port| port != 443)
+    {
+        return Err(EnterpriseApiError::InvalidRequest);
+    }
+    Ok(url)
+}
+
+async fn download_bounded(
+    url: reqwest::Url,
+    max_bytes: u64,
+) -> Result<Vec<u8>, EnterpriseApiError> {
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(std::time::Duration::from_secs(60))
+        .build()
+        .map_err(|_| EnterpriseApiError::Transport)?;
+    let response = client
+        .get(url)
+        .send()
+        .await
+        .map_err(|_| EnterpriseApiError::Transport)?;
+    if !response.status().is_success() {
+        return Err(EnterpriseApiError::Provider {
+            code: format!("http_{}", response.status().as_u16()),
+            retryable: response.status().is_server_error(),
+        });
+    }
+    if response
+        .content_length()
+        .is_some_and(|size| size > max_bytes)
+    {
+        return Err(EnterpriseApiError::InvalidRequest);
+    }
+    let bytes = response
+        .bytes()
+        .await
+        .map_err(|_| EnterpriseApiError::Transport)?;
+    if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > max_bytes {
+        return Err(EnterpriseApiError::InvalidRequest);
+    }
+    Ok(bytes.to_vec())
+}
+
+fn decrypt_wecom_ai_media(
+    mut encrypted: Vec<u8>,
+    encoded_key: &str,
+) -> Result<Vec<u8>, EnterpriseApiError> {
+    let key = STANDARD
+        .decode(format!(
+            "{encoded_key}{}",
+            "=".repeat((4 - encoded_key.len() % 4) % 4)
+        ))
+        .map_err(|_| EnterpriseApiError::InvalidRequest)?;
+    if key.len() != 32 || encrypted.is_empty() || !encrypted.len().is_multiple_of(16) {
+        return Err(EnterpriseApiError::InvalidRequest);
+    }
+    let decrypted = cbc::Decryptor::<Aes256>::new_from_slices(&key, &key[..16])
+        .map_err(|_| EnterpriseApiError::InvalidRequest)?
+        .decrypt_padded_mut::<Pkcs7>(&mut encrypted)
+        .map_err(|_| EnterpriseApiError::InvalidRequest)?;
+    Ok(decrypted.to_vec())
+}
+
+fn decrypt_ilink_media(
+    mut encrypted: Vec<u8>,
+    encoded_key: &str,
+) -> Result<Vec<u8>, EnterpriseApiError> {
+    use aes::cipher::{Block, BlockDecrypt as _, KeyInit as _};
+    let key = decode_ilink_key(encoded_key)?;
+    if encrypted.is_empty() || !encrypted.len().is_multiple_of(16) {
+        return Err(EnterpriseApiError::InvalidRequest);
+    }
+    let cipher = Aes128::new_from_slice(&key).map_err(|_| EnterpriseApiError::InvalidRequest)?;
+    for block in encrypted.chunks_exact_mut(16) {
+        cipher.decrypt_block(Block::<Aes128>::from_mut_slice(block));
+    }
+    let padding = usize::from(*encrypted.last().ok_or(EnterpriseApiError::InvalidRequest)?);
+    if padding == 0
+        || padding > 16
+        || encrypted.len() < padding
+        || !encrypted[encrypted.len() - padding..]
+            .iter()
+            .all(|byte| usize::from(*byte) == padding)
+    {
+        return Err(EnterpriseApiError::InvalidRequest);
+    }
+    encrypted.truncate(encrypted.len() - padding);
+    Ok(encrypted)
+}
+
+fn decode_ilink_key(value: &str) -> Result<[u8; 16], EnterpriseApiError> {
+    let decode_hex = |value: &str| -> Option<[u8; 16]> {
+        if value.len() != 32 {
+            return None;
+        }
+        let mut output = [0_u8; 16];
+        for (index, byte) in output.iter_mut().enumerate() {
+            *byte = u8::from_str_radix(&value[index * 2..index * 2 + 2], 16).ok()?;
+        }
+        Some(output)
+    };
+    if let Some(key) = decode_hex(value) {
+        return Ok(key);
+    }
+    let decoded = STANDARD
+        .decode(value)
+        .map_err(|_| EnterpriseApiError::InvalidRequest)?;
+    if decoded.len() == 16 {
+        return decoded
+            .try_into()
+            .map_err(|_| EnterpriseApiError::InvalidRequest);
+    }
+    std::str::from_utf8(&decoded)
+        .ok()
+        .and_then(decode_hex)
+        .ok_or(EnterpriseApiError::InvalidRequest)
 }
 
 async fn complete_download(
@@ -369,13 +633,13 @@ async fn complete_download(
     result: &EnterpriseAttachmentDownloadResult,
 ) -> Result<(), ExtensionHostError> {
     let mut transaction = host.store.pool().begin().await?;
-    sqlx::query("UPDATE enterprise_attachment_metadata SET download_status = 'completed', content_hash = ?, detected_mime_type = ?, downloaded_size_bytes = ?, managed_attachment_id = ?, artifact_id = ? WHERE platform = ? AND account_id = ? AND event_id = ? AND remote_id = ? AND download_status = 'downloading'")
+    sqlx::query("UPDATE channel_attachment_metadata SET download_status = 'completed', content_hash = ?, detected_mime_type = ?, downloaded_size_bytes = ?, managed_attachment_id = ?, artifact_id = ? WHERE platform = ? AND account_id = ? AND event_id = ? AND remote_id = ? AND download_status = 'downloading'")
         .bind(&result.content_hash)
         .bind(&result.mime_type)
         .bind(i64::try_from(result.byte_size).unwrap_or(i64::MAX))
         .bind(attachment_id.as_str())
         .bind(result.artifact_id.as_str())
-        .bind(request.platform.as_str())
+        .bind(request.provider_id.as_str())
         .bind(&request.account_id)
         .bind(&request.event_id)
         .bind(&request.remote_id)
@@ -393,6 +657,62 @@ async fn complete_download(
     Ok(())
 }
 
+async fn cleanup_media_secret(
+    host: &PluginHost,
+    request: &EnterpriseAttachmentDownloadRequest,
+) -> Result<(), ExtensionHostError> {
+    if !matches!(
+        request.provider_id,
+        IntegrationProviderId::WecomAiBot | IntegrationProviderId::WechatIlink
+    ) {
+        return Ok(());
+    }
+    let row = sqlx::query("SELECT secret_ref FROM channel_media_secrets WHERE platform = ? AND account_id = ? AND event_id = ? AND remote_id = ?")
+        .bind(request.provider_id.as_str())
+        .bind(&request.account_id)
+        .bind(&request.event_id)
+        .bind(&request.remote_id)
+        .fetch_optional(host.store.pool())
+        .await?;
+    let Some(row) = row else {
+        return Ok(());
+    };
+    let secret_ref: String = row.get("secret_ref");
+    let prefix = "keyring:integration:";
+    let username = secret_ref
+        .strip_prefix(prefix)
+        .filter(|value| {
+            value.starts_with(&format!(
+                "{}:{}:media:",
+                request.provider_id.as_str(),
+                request.account_id
+            ))
+        })
+        .ok_or(ExtensionHostError::SecretStore)?;
+    let deleted = keyring::Entry::new("com.hachimi.integration", username)
+        .and_then(|entry| entry.delete_credential());
+    if deleted.is_ok() || matches!(deleted, Err(keyring::Error::NoEntry)) {
+        sqlx::query("DELETE FROM channel_media_secrets WHERE platform = ? AND account_id = ? AND event_id = ? AND remote_id = ?")
+            .bind(request.provider_id.as_str())
+            .bind(&request.account_id)
+            .bind(&request.event_id)
+            .bind(&request.remote_id)
+            .execute(host.store.pool())
+            .await?;
+        return Ok(());
+    }
+    let timestamp_ms = now_ms();
+    sqlx::query("INSERT INTO integration_secret_cleanup_queue(secret_ref, account_id, attempt, next_attempt_at_ms, error_code, created_at_ms, updated_at_ms) VALUES(?, ?, 0, ?, 'delete_failed', ?, ?) ON CONFLICT(secret_ref) DO UPDATE SET next_attempt_at_ms = excluded.next_attempt_at_ms, updated_at_ms = excluded.updated_at_ms")
+        .bind(&secret_ref)
+        .bind(&request.account_id)
+        .bind(timestamp_ms.saturating_add(60_000))
+        .bind(timestamp_ms)
+        .bind(timestamp_ms)
+        .execute(host.store.pool())
+        .await?;
+    Err(ExtensionHostError::SecretStore)
+}
+
 async fn fail_download(
     host: &PluginHost,
     request: &EnterpriseAttachmentDownloadRequest,
@@ -400,9 +720,9 @@ async fn fail_download(
     code: &str,
 ) -> Result<(), ExtensionHostError> {
     let mut transaction = host.store.pool().begin().await?;
-    sqlx::query("UPDATE enterprise_attachment_metadata SET download_status = ? WHERE platform = ? AND account_id = ? AND event_id = ? AND remote_id = ? AND download_status = 'downloading'")
+    sqlx::query("UPDATE channel_attachment_metadata SET download_status = ? WHERE platform = ? AND account_id = ? AND event_id = ? AND remote_id = ? AND download_status = 'downloading'")
         .bind(status)
-        .bind(request.platform.as_str())
+        .bind(request.provider_id.as_str())
         .bind(&request.account_id)
         .bind(&request.event_id)
         .bind(&request.remote_id)
@@ -611,6 +931,8 @@ fn digest_hex(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use aes::cipher::{Block, BlockEncrypt as _, BlockEncryptMut as _, KeyInit as _};
+    use cbc::cipher::block_padding::Pkcs7;
     use hachimi_protocol::{ClientId, MutationContext, RequestId, RunId};
 
     fn attachment_request(generation: u64) -> EnterpriseAttachmentDownloadRequest {
@@ -624,7 +946,7 @@ mod tests {
                 expected_run_id: Some(run_id.clone()),
                 expected_generation: Some(generation),
             },
-            platform: hachimi_protocol::EnterprisePlatform::DingTalk,
+            provider_id: hachimi_protocol::IntegrationProviderId::DingTalk,
             account_id: "account-1".into(),
             event_id: "event-1".into(),
             remote_id: "remote-1".into(),
@@ -705,5 +1027,63 @@ mod tests {
             fs::write(&path, body).expect("fixture");
             assert!(detect_allowed_type(&path, Some(name), None, None).is_err());
         }
+    }
+
+    #[test]
+    fn ilink_aes_128_ecb_fixture_decrypts_and_rejects_bad_padding() {
+        let key = [0x2a_u8; 16];
+        let plaintext = b"managed image bytes";
+        let mut encrypted = plaintext.to_vec();
+        let padding = 16 - encrypted.len() % 16;
+        encrypted.extend(std::iter::repeat_n(padding as u8, padding));
+        let cipher = Aes128::new_from_slice(&key).expect("key");
+        for block in encrypted.chunks_exact_mut(16) {
+            cipher.encrypt_block(Block::<Aes128>::from_mut_slice(block));
+        }
+        assert_eq!(
+            decrypt_ilink_media(encrypted.clone(), &hex_key(&key)).expect("decrypt"),
+            plaintext
+        );
+        let last = encrypted.len() - 1;
+        encrypted[last] ^= 0xff;
+        assert!(decrypt_ilink_media(encrypted, &hex_key(&key)).is_err());
+        assert!(decrypt_ilink_media(vec![0; 16], "not-a-key").is_err());
+    }
+
+    #[test]
+    fn wecom_ai_aes_256_cbc_fixture_decrypts_and_rejects_bad_key() {
+        let key = [0x17_u8; 32];
+        let plaintext = b"managed file bytes";
+        let mut buffer = vec![0_u8; plaintext.len() + 16];
+        buffer[..plaintext.len()].copy_from_slice(plaintext);
+        let encrypted = cbc::Encryptor::<Aes256>::new_from_slices(&key, &key[..16])
+            .expect("cipher")
+            .encrypt_padded_mut::<Pkcs7>(&mut buffer, plaintext.len())
+            .expect("padding")
+            .to_vec();
+        let encoded = STANDARD.encode(key);
+        assert_eq!(
+            decrypt_wecom_ai_media(encrypted.clone(), &encoded).expect("decrypt"),
+            plaintext
+        );
+        assert!(decrypt_wecom_ai_media(encrypted, &STANDARD.encode([0_u8; 16])).is_err());
+    }
+
+    #[test]
+    fn wecom_media_url_is_https_and_host_allowlisted() {
+        assert!(validated_wecom_media_url("https://res.work.weixin.qq.com/path").is_ok());
+        for denied in [
+            "http://res.work.weixin.qq.com/path",
+            "https://work.weixin.qq.com.evil.example/path",
+            "https://user:pass@work.weixin.qq.com/path",
+            "https://work.weixin.qq.com:8443/path",
+            "https://example.com/path",
+        ] {
+            assert!(validated_wecom_media_url(denied).is_err(), "{denied}");
+        }
+    }
+
+    fn hex_key(key: &[u8]) -> String {
+        key.iter().map(|byte| format!("{byte:02x}")).collect()
     }
 }

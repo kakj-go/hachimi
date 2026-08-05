@@ -34,6 +34,11 @@ const fixedSources = [
   "4c43465133428898aa84f0bfc02c306ed65fb66a",
   "f6d456235cf011004f7cffc71a95acf6fbf1fa0a",
   "34b3dc99bf40c57c0b78f3b5b1d70471ebc2d06d",
+  "11bb8ddcd95f41e673783b7e20c4ab4cd5ee7e24",
+  "f2e4ed83c6953297a92d66d49114196fc4402206",
+  "7820949d3a3d8ca0b6f07d060deab40cb86807ff",
+  "03a6edb29e7e742fb97d5926949c03c3214a31e5",
+  "848a1a4eb171f3d891304370f7d5ed42046f3280",
   "d1cc841e6013c3f6513a5bb01dfe3219b9c37d17",
   "ff207b774541a195f0a98c5bfda1507905e45431",
 ];
@@ -84,6 +89,44 @@ for (const definition of registryDefinitions) {
     }
     if (definition.requireBehavior && (!reference.hachimiBehavior || !reference.acceptance)) {
       failures.push(`${reference.id}: missing Hachimi behavior or acceptance mapping`);
+    }
+  }
+}
+
+const channelRegistryPath = resolve(
+  workspaceRoot,
+  "docs",
+  "references",
+  "channels",
+  "registry.json",
+);
+if (!existsSync(channelRegistryPath)) {
+  failures.push("missing source registry: docs/references/channels/registry.json");
+} else {
+  const registry = JSON.parse(readFileSync(channelRegistryPath, "utf8"));
+  if (registry.schemaVersion !== 1 || !Array.isArray(registry.sources)) {
+    failures.push("invalid Channel source registry shape");
+  } else {
+    const names = new Set();
+    for (const source of registry.sources) {
+      if (
+        typeof source.name !== "string" ||
+        names.has(source.name) ||
+        !/^https:\/\/github\.com\//u.test(source.repository ?? "") ||
+        !/^[a-f0-9]{40}$/iu.test(source.commit ?? "") ||
+        typeof source.license !== "string" ||
+        !["copied", "adapted", "behavior-only"].includes(source.classification) ||
+        !Array.isArray(source.files) ||
+        source.files.length === 0 ||
+        typeof source.implementationStatus !== "string"
+      ) {
+        failures.push(`invalid Channel source entry: ${source.name ?? "missing"}`);
+        continue;
+      }
+      names.add(source.name);
+      if (!fixedSources.includes(source.commit)) {
+        failures.push(`unregistered Channel source commit: ${source.name}`);
+      }
     }
   }
 }

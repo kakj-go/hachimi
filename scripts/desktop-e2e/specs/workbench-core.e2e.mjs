@@ -30,14 +30,28 @@ async function clickWorkspaceElement(selector) {
   await clickWhenReady(selector);
 }
 
+async function waitForRun(status, timeout = 60_000) {
+  await browser.waitUntil(
+    async () =>
+      (await $('[data-testid="workbench-session-timeline"]').getAttribute("data-run-status")) ===
+      status,
+    {
+      timeout,
+      timeoutMsg: `Agent Run did not reach ${status}`,
+    },
+  );
+}
+
 async function ensureDefaultMode() {
-  if (!(await isDisplayed(".plan-mode-banner"))) return;
-  await clickWhenReady('[data-testid="workbench-task-options"]');
-  await clickWhenReady('[data-testid="workbench-plan-mode"]');
-  await browser.waitUntil(async () => !(await isDisplayed(".plan-mode-banner")), {
-    timeout: 5_000,
-    timeoutMsg: "Plan mode banner did not close",
-  });
+  if (!(await isDisplayed('[data-testid="workbench-plan-mode-chip"]'))) return;
+  await clickWhenReady('[data-testid="workbench-plan-mode-chip"]');
+  await browser.waitUntil(
+    async () => !(await isDisplayed('[data-testid="workbench-plan-mode-chip"]')),
+    {
+      timeout: 5_000,
+      timeoutMsg: "Plan mode chip did not close",
+    },
+  );
 }
 
 async function expandFirstProject() {
@@ -51,6 +65,16 @@ async function expandFirstProject() {
 async function openProjectSessions() {
   await expandFirstProject();
   await waitForDisplayed(".project-sessions button");
+}
+
+async function openInspectorToolLauncher() {
+  if (await isDisplayed('[data-testid="workbench-resource-menu"]')) return;
+  if (await isDisplayed(".workbench-inspector")) {
+    await clickWhenReady('[data-testid="workbench-toggle-inspector"]');
+    await browser.waitUntil(async () => !(await isDisplayed(".workbench-inspector")));
+  }
+  await clickWhenReady('[data-testid="workbench-toggle-inspector"]');
+  await waitForDisplayed('[data-testid="workbench-resource-menu"]');
 }
 
 async function submitEphemeralUserInput() {
@@ -187,7 +211,7 @@ describe("Hachimi Workbench core lifecycle", () => {
     await $(".composer-attachment-card").waitForDisplayed({ timeout: 10_000 });
     await clickWhenReady('[data-testid="workbench-task-options"]');
     await clickWhenReady('[data-testid="workbench-plan-mode"]');
-    await $(".plan-mode-banner").waitForDisplayed({ timeout: 5_000 });
+    await $('[data-testid="workbench-plan-mode-chip"]').waitForDisplayed({ timeout: 5_000 });
 
     const draft = await $(".composer textarea");
     await draft.setValue("Create and verify the deterministic Desktop E2E evidence file.");
@@ -198,17 +222,16 @@ describe("Hachimi Workbench core lifecycle", () => {
     await clickWhenReady('[data-testid="workbench-execute-plan"]');
     await submitEphemeralUserInput();
     await clickWhenReady('[data-testid="workbench-approve-once"]');
-    await browser.waitUntil(
-      async () => (await $(".composer-capability-note").getText()).includes("succeeded"),
-      { timeout: 45_000, timeoutMsg: "Default Run did not succeed" },
-    );
+    await waitForRun("succeeded", 45_000);
     await clickWhenReady('[data-testid="workbench-pin-summary"]');
     await clickWhenReady('[data-testid="workbench-summary-files"]');
     await browser.waitUntil(
       async () => (await $(".workspace-file-tree").getText()).includes("desktop-e2e-evidence.txt"),
       { timeout: 20_000, timeoutMsg: "Workspace Watch did not project the new file" },
     );
-    await $(".evidence-card").waitForDisplayed({ timeout: 20_000 });
+    await expect($(".run-completion-summary")).toHaveText(
+      expect.stringContaining("desktop-e2e-evidence.txt"),
+    );
 
     await clickWhenReady('[data-testid="workbench-summary-diff"]');
     await waitForDisplayed(".workspace-diff-tree-entry[data-status]");
@@ -231,14 +254,16 @@ describe("Hachimi Workbench core lifecycle", () => {
 
     await browser.refresh();
     await $(".session-timeline").waitForDisplayed({ timeout: 20_000 });
-    await expect($(".composer-capability-note")).toHaveText(expect.stringContaining("succeeded"));
+    await waitForRun("succeeded", 20_000);
 
     await restartApplication();
     await switchToWorkbench();
     await openProjectSessions();
     await clickWhenReady(".project-sessions button");
-    await $(".evidence-card").waitForDisplayed({ timeout: 20_000 });
-    await expect($(".composer-capability-note")).toHaveText(expect.stringContaining("succeeded"));
+    await expect($(".run-completion-summary")).toHaveText(
+      expect.stringContaining("desktop-e2e-evidence.txt"),
+    );
+    await waitForRun("succeeded", 20_000);
 
     if (!(await isDisplayed('[data-testid="workbench-summary-files"]'))) {
       await clickWorkspaceElement('[data-testid="workbench-pin-summary"]');
@@ -277,8 +302,7 @@ describe("Hachimi Workbench core lifecycle", () => {
     await submitEphemeralUserInput();
     await $('[data-testid="workbench-approve-once"]').waitForDisplayed({ timeout: 30_000 });
 
-    await clickWhenReady('[data-testid="workbench-toggle-inspector"]');
-    await waitForDisplayed('[data-testid="workbench-resource-menu"]');
+    await openInspectorToolLauncher();
     await clickWhenReady(
       '//*[@data-testid="workbench-resource-menu"]//button[contains(., "终端") or contains(., "Terminal")]',
     );
@@ -337,22 +361,14 @@ describe("Hachimi Workbench core lifecycle", () => {
     await switchToWorkbench();
     await openProjectSessions();
     await clickWhenReady(".project-sessions button");
-    await expect($(".composer-capability-note")).toHaveText(
-      expect.stringContaining("waiting_recovery_decision"),
-    );
+    await waitForRun("waiting_recovery_decision", 20_000);
     const recoveryCard = await $('[data-testid^="run-recovery-"]');
     await recoveryCard.waitForDisplayed({ timeout: 20_000 });
     await expect(recoveryCard).toHaveText(expect.stringContaining("approval_expired_on_restart"));
     await expect(recoveryCard).toHaveText(expect.stringContaining("generation 1 → 2"));
     await expect($('[data-testid="workbench-approve-once"]')).not.toBeDisplayed();
     await clickWhenReady('[data-testid^="run-recovery-"] footer button');
-    await browser.waitUntil(
-      async () => (await $(".composer-capability-note").getText()).includes("cancelled"),
-      {
-        timeout: 20_000,
-        timeoutMsg: "Abandoned recovery did not cancel the interrupted Run",
-      },
-    );
+    await waitForRun("cancelled", 20_000);
     await expect($('[data-testid^="run-recovery-"]')).not.toBeDisplayed();
   });
 

@@ -3,7 +3,7 @@ use std::{collections::BTreeSet, env, fs, time::Duration};
 use hachimi_enterprise::{
     EnterpriseApiClient, EnterpriseCredential, EnterpriseMessageTarget, spawn_enterprise_stream,
 };
-use hachimi_protocol::EnterprisePlatform;
+use hachimi_protocol::IntegrationProviderId;
 use serde::Deserialize;
 use zeroize::Zeroize;
 
@@ -17,7 +17,7 @@ struct StagingConfig {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct StagingConnection {
-    platform: EnterprisePlatform,
+    platform: IntegrationProviderId,
     account_id: String,
     credential_ref: String,
     department_id: String,
@@ -60,9 +60,9 @@ async fn enterprise_product_adapters_conform_against_staging() {
     assert_eq!(
         platforms,
         BTreeSet::from([
-            EnterprisePlatform::Wecom,
-            EnterprisePlatform::DingTalk,
-            EnterprisePlatform::Feishu,
+            IntegrationProviderId::WecomApp,
+            IntegrationProviderId::DingTalk,
+            IntegrationProviderId::Feishu,
         ])
     );
     let api = EnterpriseApiClient::new().expect("enterprise API client");
@@ -132,7 +132,7 @@ async fn enterprise_product_adapters_conform_against_staging() {
         if connection.expect_inbound_event
             && matches!(
                 connection.platform,
-                EnterprisePlatform::DingTalk | EnterprisePlatform::Feishu
+                IntegrationProviderId::DingTalk | IntegrationProviderId::Feishu
             )
         {
             let (runtime, mut receiver) = spawn_enterprise_stream(api.clone(), credential);
@@ -159,6 +159,7 @@ async fn enterprise_product_adapters_conform_against_staging() {
                     &download_credential,
                     &event.event_id,
                     &attachment.remote_id,
+                    attachment.resource_key.as_deref(),
                     &destination,
                     25 * 1024 * 1024,
                 )

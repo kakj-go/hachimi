@@ -1,4 +1,4 @@
-use std::{path::Path, sync::Arc, time::Duration};
+use std::{path::Path, process::Child, sync::Arc, time::Duration};
 
 #[cfg(not(test))]
 use std::{
@@ -6,15 +6,16 @@ use std::{
     time::Instant,
 };
 
-#[cfg(test)]
-use hachimi_protocol::ChannelRouteKey;
-use hachimi_protocol::{ChannelEnvelope, IngressReceipt};
+use hachimi_protocol::{
+    ChannelActor, ChannelChatKind, ChannelConversationAddress, ChannelEventKey, ChannelMessagePart,
+    IngressReceipt, IntegrationProviderId, VerifiedChannelMessage,
+};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 const LOOPBACK_ADDRESS: &str = "127.0.0.1:42371";
 const LOOPBACK_PATH: &str = "/v1/channels/loopback-webhook";
 const LOOPBACK_OUTBOX_PATH: &str = "/v1/channels/loopback-webhook/outbox/claim";
-const WECOM_CALLBACK_PATH: &str = "/v1/channels/wecom/callback";
+const WECOM_APP_CALLBACK_PREFIX: &str = "/v1/channels/wecom_app/";
 const DESKTOP_WAKE_ADDRESS: &str = "127.0.0.1:42373";
 const MAX_HTTP_REQUEST_BYTES: usize = 64 * 1024;
 
@@ -31,7 +32,7 @@ pub(super) fn run(data_root: &Path) {
         .build()
         .unwrap_or_else(|error| panic!("failed to start local Gateway runtime: {error}"));
     runtime.block_on(async move {
-        let listener = match tokio::net::TcpListener::bind(LOOPBACK_ADDRESS).await {
+        let listener = match tokio::net::TcpListener::bind(loopback_address()).await {
             Ok(listener) => listener,
             Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => return,
             Err(error) => panic!("failed to bind loopback Gateway endpoint: {error}"),
@@ -39,8 +40,12 @@ pub(super) fn run(data_root: &Path) {
         let store = hachimi_storage::AgentStore::connect(database)
             .await
             .unwrap_or_else(|error| panic!("failed to open Gateway ledger: {error}"));
-        let builtins = hachimi_gateway::local_builtin_providers(store.clone(), &token)
-            .unwrap_or_else(|error| panic!("failed to register builtin providers: {error}"));
+        let builtins = hachimi_gateway::local_builtin_providers_with_enterprise(
+            store.clone(),
+            &token,
+            true,
+        )
+        .unwrap_or_else(|error| panic!("failed to register builtin providers: {error}"));
         let providers = builtins.registry.clone();
         let sandbox_runtime_root = data_root
             .join("sandbox/windows/runtime")
@@ -80,9 +85,17 @@ pub(super) fn run(data_root: &Path) {
             .await
             .unwrap_or_else(|error| panic!("failed to load provider configuration: {error}"));
         gateway
+            .reload_configuration()
+            .await
+            .unwrap_or_else(|error| panic!("failed to restore provider accounts: {error}"));
+        gateway
             .reconcile_startup(now_ms())
             .await
             .unwrap_or_else(|error| panic!("failed to reconcile Gateway ledger: {error}"));
+        gateway
+            .start_provider_ingress()
+            .await
+            .unwrap_or_else(|error| panic!("failed to start provider ingress: {error}"));
         let mut heartbeat = tokio::time::interval(Duration::from_secs(5));
         loop {
             tokio::select! {
@@ -119,10 +132,12 @@ pub(super) fn run(data_root: &Path) {
                         }
                         Err(error) => tracing::warn!(%error, "Gateway plugin provider discovery failed"),
                     }
-                    gateway
-                        .reload_configuration()
-                        .await
-                        .unwrap_or_else(|error| panic!("failed to reload Gateway providers: {error}"));
+                    if let Err(error) = gateway.reconcile_provider_accounts().await {
+                        tracing::warn!(%error, "Gateway provider account reconciliation failed");
+                    }
+                    if let Err(error) = gateway.persist_provider_health(now_ms()).await {
+                        tracing::warn!(%error, "Gateway provider health persistence failed");
+                    }
                     gateway
                         .heartbeat(std::process::id(), now_ms())
                         .await
@@ -168,21 +183,37 @@ pub(super) fn run(data_root: &Path) {
     });
 }
 
-pub(super) fn ensure_running(executable: &Path) -> std::io::Result<()> {
+pub(super) fn spawn(executable: &Path, log_path: &Path) -> std::io::Result<Child> {
     if std::net::TcpStream::connect_timeout(
-        &LOOPBACK_ADDRESS.parse().expect("static Gateway address"),
+        &loopback_address()
+            .parse()
+            .expect("validated loopback Gateway address"),
         Duration::from_millis(150),
     )
     .is_ok()
     {
-        return Ok(());
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::AddrInUse,
+            "Gateway is already listening",
+        ));
     }
+    if let Some(parent) = log_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let stdout = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log_path)?;
+    let stderr = stdout.try_clone()?;
     let mut command = hachimi_process_policy::std_command(
         executable,
         hachimi_process_policy::ProcessPolicy::HiddenBackground,
     );
-    command.arg("--gateway");
-    command.spawn().map(|_| ())
+    command
+        .arg("--gateway")
+        .stdout(std::process::Stdio::from(stdout))
+        .stderr(std::process::Stdio::from(stderr));
+    command.spawn()
 }
 
 async fn serve_loopback(
@@ -195,18 +226,14 @@ async fn serve_loopback(
         Err(code) => return write_response(&mut stream, code, "invalid_request", None).await,
     };
     let (request_path, query) = request_target(&request.path);
-    if request_path == WECOM_CALLBACK_PATH && request.method == "GET" {
+    let wecom_app_account_id = wecom_app_callback_account_id(request_path);
+    if let Some(account_id) = wecom_app_account_id
+        && request.method == "GET"
+    {
         let Some(query) = wecom_query(query, true) else {
             return write_response(&mut stream, 400, "invalid_wecom_callback", None).await;
         };
-        let credential = match keyring::Entry::new(
-            "com.hachimi.channel",
-            &format!("wecom:{}", query.account_id),
-        )
-        .and_then(|entry| entry.get_password())
-        .ok()
-        .and_then(|raw| hachimi_enterprise::EnterpriseCredential::parse(&raw).ok())
-        {
+        let credential = match wecom_app_credential(account_id) {
             Some(credential) => credential,
             None => return write_response(&mut stream, 401, "unauthenticated", None).await,
         };
@@ -223,28 +250,65 @@ async fn serve_loopback(
         };
         return write_plain_response(&mut stream, 200, &echo).await;
     }
-    if request_path == WECOM_CALLBACK_PATH && request.method == "POST" {
-        let envelope = if let Some(query) = wecom_query(query, false) {
-            match wecom_callback_envelope(&query, &request.body) {
-                Some(envelope) => envelope,
-                None => {
-                    return write_response(&mut stream, 400, "invalid_wecom_callback", None).await;
-                }
-            }
-        } else {
-            match serde_json::from_slice::<ChannelEnvelope>(&request.body) {
-                Ok(envelope) if envelope.route.channel == "wecom" => envelope,
-                _ => return write_response(&mut stream, 400, "invalid_envelope", None).await,
+    if let Some(account_id) = wecom_app_account_id
+        && request.method == "POST"
+    {
+        let Some(query) = wecom_query(query, false) else {
+            return write_response(&mut stream, 400, "invalid_wecom_callback", None).await;
+        };
+        let Some(encrypted) = wecom_callback_encrypted(&request.body) else {
+            return write_response(&mut stream, 400, "invalid_wecom_callback", None).await;
+        };
+        let Some(credential) = wecom_app_credential(account_id) else {
+            return write_response(&mut stream, 401, "unauthenticated", None).await;
+        };
+        let verified = match hachimi_enterprise::verify_enterprise_event(
+            &credential,
+            hachimi_enterprise::EnterpriseRawEvent {
+                platform: IntegrationProviderId::WecomApp,
+                account_id: account_id.to_owned(),
+                tenant_id: credential.tenant_id().to_owned(),
+                event_id: None,
+                event_type: None,
+                peer: None,
+                thread: None,
+                sender: None,
+                text: None,
+                mentions: Vec::new(),
+                attachments: Vec::new(),
+                payload: serde_json::Value::Null,
+                auth: hachimi_enterprise::EnterpriseEventAuth::WecomCallback {
+                    timestamp: query.timestamp,
+                    nonce: query.nonce,
+                    signature: query.signature,
+                    encrypted,
+                },
+            },
+            now_ms(),
+        ) {
+            Ok(verified) => verified,
+            Err(error) => {
+                let status = if matches!(
+                    error,
+                    hachimi_enterprise::EnterpriseEventError::InvalidSignature
+                        | hachimi_enterprise::EnterpriseEventError::Unauthenticated
+                        | hachimi_enterprise::EnterpriseEventError::CredentialMismatch
+                ) {
+                    401
+                } else {
+                    400
+                };
+                return write_response(&mut stream, status, error.code(), None).await;
             }
         };
-        return match gateway.ingest_provider("wecom", None, envelope).await {
+        let message = channel_message_from_enterprise(verified);
+        return match gateway.ingest_provider("wecom_app", None, message).await {
             Ok(_receipt) => {
                 notify_desktop(token).await;
                 write_plain_response(&mut stream, 200, "success").await
             }
             Err(error) => {
                 let (status, code) = match error {
-                    hachimi_gateway::GatewayError::Unauthenticated => (401, "unauthenticated"),
                     hachimi_gateway::GatewayError::RouteNotAllowed => (403, "route_not_allowed"),
                     hachimi_gateway::GatewayError::InvalidMessage => (400, "invalid_message"),
                     _ => (503, "gateway_unavailable"),
@@ -270,16 +334,25 @@ async fn serve_loopback(
         let Some(delivery) = delivery else {
             return write_empty_response(&mut stream, 204).await;
         };
+        let delivery = match gateway
+            .mark_delivery_dispatched(&delivery.id, now_ms())
+            .await
+        {
+            Ok(delivery) => delivery,
+            Err(_) => return write_response(&mut stream, 503, "gateway_unavailable", None).await,
+        };
         let written = write_delivery_response(&mut stream, &delivery).await;
         let _ = gateway
             .finish_delivery(
                 &delivery.id,
                 written.is_ok(),
-                true,
+                false,
+                written.is_err(),
                 written
                     .as_ref()
                     .err()
                     .map(|_| "loopback_delivery_write_failed"),
+                None,
                 now_ms(),
             )
             .await;
@@ -288,12 +361,12 @@ async fn serve_loopback(
     if request_path != LOOPBACK_PATH {
         return write_response(&mut stream, 404, "not_found", None).await;
     }
-    let envelope = match serde_json::from_slice::<ChannelEnvelope>(&request.body) {
-        Ok(envelope) => envelope,
-        Err(_) => return write_response(&mut stream, 400, "invalid_envelope", None).await,
+    let message = match serde_json::from_slice::<VerifiedChannelMessage>(&request.body) {
+        Ok(message) => message,
+        Err(_) => return write_response(&mut stream, 400, "invalid_message", None).await,
     };
     match gateway
-        .ingest_provider("loopback-webhook", Some(token), envelope)
+        .ingest_provider("loopback-webhook", Some(token), message)
         .await
     {
         Ok(receipt) => {
@@ -302,7 +375,9 @@ async fn serve_loopback(
         }
         Err(error) => {
             let (status, code) = match error {
-                hachimi_gateway::GatewayError::Unauthenticated => (401, "unauthenticated"),
+                hachimi_gateway::GatewayError::ProviderCredentialUnavailable => {
+                    (401, "unauthenticated")
+                }
                 hachimi_gateway::GatewayError::RouteNotAllowed => (403, "route_not_allowed"),
                 hachimi_gateway::GatewayError::BotLoop => (409, "bot_loop"),
                 hachimi_gateway::GatewayError::InvalidMessage => (400, "invalid_message"),
@@ -314,7 +389,6 @@ async fn serve_loopback(
 }
 
 struct WecomQuery {
-    account_id: String,
     signature: String,
     timestamp: String,
     nonce: String,
@@ -330,17 +404,11 @@ fn request_target(target: &str) -> (&str, Option<&str>) {
 fn wecom_query(query: Option<&str>, require_echo: bool) -> Option<WecomQuery> {
     let values = url::form_urlencoded::parse(query?.as_bytes())
         .collect::<std::collections::BTreeMap<_, _>>();
-    let account_id = values.get("account_id")?.to_string();
     let signature = values.get("msg_signature")?.to_string();
     let timestamp = values.get("timestamp")?.to_string();
     let nonce = values.get("nonce")?.to_string();
     let echo = values.get("echostr").map(ToString::to_string);
-    if account_id.is_empty()
-        || account_id.len() > 128
-        || !account_id
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b':'))
-        || signature.len() != 40
+    if signature.len() != 40
         || !signature.bytes().all(|byte| byte.is_ascii_hexdigit())
         || timestamp.is_empty()
         || timestamp.len() > 20
@@ -354,7 +422,6 @@ fn wecom_query(query: Option<&str>, require_echo: bool) -> Option<WecomQuery> {
         return None;
     }
     Some(WecomQuery {
-        account_id,
         signature,
         timestamp,
         nonce,
@@ -362,35 +429,94 @@ fn wecom_query(query: Option<&str>, require_echo: bool) -> Option<WecomQuery> {
     })
 }
 
-fn wecom_callback_envelope(query: &WecomQuery, body: &[u8]) -> Option<ChannelEnvelope> {
+fn wecom_callback_encrypted(body: &[u8]) -> Option<String> {
     let xml = std::str::from_utf8(body).ok()?;
     let encrypted = xml_tag(xml, "Encrypt")?;
     if encrypted.is_empty() || encrypted.len() > 48 * 1024 {
         return None;
     }
-    Some(ChannelEnvelope {
-        message_id: hachimi_protocol::ChannelMessageId::new(format!(
-            "wecom:{}:{}",
-            query.account_id, query.signature
-        )),
-        route: hachimi_protocol::ChannelRouteKey {
-            channel: "wecom".into(),
-            account: query.account_id.clone(),
-            peer: "pending-verification".into(),
-            thread: "pending-verification".into(),
+    Some(encrypted)
+}
+
+fn wecom_app_callback_account_id(path: &str) -> Option<&str> {
+    let account_id = path
+        .strip_prefix(WECOM_APP_CALLBACK_PREFIX)?
+        .strip_suffix("/callback")?;
+    (!account_id.is_empty()
+        && account_id.len() <= 128
+        && account_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b':')))
+    .then_some(account_id)
+}
+
+fn wecom_app_credential(account_id: &str) -> Option<hachimi_enterprise::EnterpriseCredential> {
+    keyring::Entry::new(
+        "com.hachimi.integration",
+        &format!("wecom_app:{account_id}:primary"),
+    )
+    .and_then(|entry| entry.get_password())
+    .ok()
+    .and_then(|raw| hachimi_enterprise::EnterpriseCredential::parse(&raw).ok())
+}
+
+fn channel_message_from_enterprise(
+    event: hachimi_enterprise::VerifiedEnterpriseEvent,
+) -> VerifiedChannelMessage {
+    let mut parts = Vec::with_capacity(1 + event.attachments.len());
+    if !event.text.is_empty() {
+        parts.push(ChannelMessagePart::Text {
+            text: event.text.clone(),
+        });
+    }
+    parts.extend(
+        event
+            .attachments
+            .iter()
+            .cloned()
+            .map(|media| match event.event_type.as_str() {
+                "image" => ChannelMessagePart::Image { media },
+                "voice" | "audio" => ChannelMessagePart::Audio { media },
+                "video" => ChannelMessagePart::Video { media },
+                _ => ChannelMessagePart::File { media },
+            }),
+    );
+    VerifiedChannelMessage {
+        event_key: ChannelEventKey {
+            provider_id: event.platform.as_str().into(),
+            account_id: event.account_id.clone(),
+            external_message_id: event.event_id.clone(),
         },
-        sender: "pending-verification".into(),
-        text: String::new(),
-        metadata: serde_json::json!({
-            "timestamp": query.timestamp,
-            "nonce": query.nonce,
-            "signature": query.signature,
-            "encrypted": encrypted,
+        address: ChannelConversationAddress {
+            provider_id: event.platform.as_str().into(),
+            account_id: event.account_id,
+            tenant_key: event.tenant_id,
+            chat_kind: if event.group_chat {
+                ChannelChatKind::Group
+            } else {
+                ChannelChatKind::Dm
+            },
+            chat_id: if event.group_chat {
+                event.peer
+            } else {
+                event.sender.clone()
+            },
+            topic_id: None,
+        },
+        actor: ChannelActor {
+            external_id: event.sender,
+            display_name: None,
+            is_bot: false,
+        },
+        parts,
+        mentions: event.mentions,
+        quote: None,
+        provider_context: serde_json::json!({
+            "eventType": event.event_type,
+            "payloadHash": event.payload_hash,
         }),
-        authenticated: false,
-        bot_generated: false,
-        received_at_ms: now_ms(),
-    })
+        received_at_ms: event.received_at_ms,
+    }
 }
 
 fn xml_tag(xml: &str, tag: &str) -> Option<String> {
@@ -415,11 +541,10 @@ fn executable_name(name: &str) -> String {
 }
 
 async fn notify_desktop(token: &str) {
-    let notified = if let Ok(mut stream) =
-        tokio::net::TcpStream::connect(DESKTOP_WAKE_ADDRESS).await
-    {
+    let wake_address = desktop_wake_address();
+    let notified = if let Ok(mut stream) = tokio::net::TcpStream::connect(&wake_address).await {
         let request = format!(
-            "POST /v1/gateway/wake HTTP/1.1\r\nHost: {DESKTOP_WAKE_ADDRESS}\r\nAuthorization: Bearer {token}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            "POST /v1/gateway/wake HTTP/1.1\r\nHost: {wake_address}\r\nAuthorization: Bearer {token}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
         );
         stream.write_all(request.as_bytes()).await.is_ok()
     } else {
@@ -455,6 +580,30 @@ async fn notify_desktop(token: &str) {
         }
         let _ = command.spawn();
     }
+}
+
+fn loopback_address() -> String {
+    configured_loopback_address("HACHIMI_DESKTOP_E2E_GATEWAY_PORT", LOOPBACK_ADDRESS)
+}
+
+pub(super) fn desktop_wake_address() -> String {
+    configured_loopback_address(
+        "HACHIMI_DESKTOP_E2E_GATEWAY_WAKE_PORT",
+        DESKTOP_WAKE_ADDRESS,
+    )
+}
+
+fn configured_loopback_address(variable: &str, default: &str) -> String {
+    #[cfg(feature = "desktop-e2e")]
+    if let Some(port) = std::env::var(variable)
+        .ok()
+        .and_then(|value| value.parse::<u16>().ok())
+        .filter(|port| *port != 0)
+    {
+        return format!("127.0.0.1:{port}");
+    }
+    let _ = variable;
+    default.to_owned()
 }
 
 struct HttpRequest {
@@ -607,27 +756,39 @@ fn now_ms() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use hachimi_protocol::{ChannelMessageId, IngressStatus};
+    use hachimi_protocol::{ChannelOutboundPayload, IngressStatus};
     use serde_json::{Value, json};
 
-    fn route(thread: &str) -> ChannelRouteKey {
-        ChannelRouteKey {
-            channel: "loopback-webhook".into(),
-            account: "local".into(),
-            peer: "local-user".into(),
-            thread: thread.into(),
+    fn address(topic: &str) -> ChannelConversationAddress {
+        ChannelConversationAddress {
+            provider_id: "loopback-webhook".into(),
+            account_id: "loopback-local".into(),
+            tenant_key: "local".into(),
+            chat_kind: ChannelChatKind::Dm,
+            chat_id: "local-user".into(),
+            topic_id: Some(topic.into()),
         }
     }
 
-    fn envelope(id: &str, route: ChannelRouteKey) -> ChannelEnvelope {
-        ChannelEnvelope {
-            message_id: ChannelMessageId::new(id),
-            route,
-            sender: "local-user".into(),
-            text: "hello".into(),
-            metadata: json!({}),
-            authenticated: false,
-            bot_generated: false,
+    fn message(id: &str, address: ChannelConversationAddress) -> VerifiedChannelMessage {
+        VerifiedChannelMessage {
+            event_key: ChannelEventKey {
+                provider_id: address.provider_id.clone(),
+                account_id: address.account_id.clone(),
+                external_message_id: id.into(),
+            },
+            address,
+            actor: ChannelActor {
+                external_id: "local-user".into(),
+                display_name: None,
+                is_bot: false,
+            },
+            parts: vec![ChannelMessagePart::Text {
+                text: "hello".into(),
+            }],
+            mentions: Vec::new(),
+            quote: None,
+            provider_context: json!({}),
             received_at_ms: 1,
         }
     }
@@ -731,32 +892,31 @@ mod tests {
     }
 
     #[test]
-    fn wecom_callback_target_is_bounded_decoded_and_normalized() {
+    fn wecom_app_callback_target_is_bounded_and_decoded() {
         let query = wecom_query(
-            Some("account_id=release-wecom&msg_signature=0123456789abcdef0123456789abcdef01234567&timestamp=2000&nonce=abc123&echostr=echo%2Bvalue%3D"),
+            Some("msg_signature=0123456789abcdef0123456789abcdef01234567&timestamp=2000&nonce=abc123&echostr=echo%2Bvalue%3D"),
             true,
         )
         .expect("query");
-        assert_eq!(query.account_id, "release-wecom");
         assert_eq!(query.echo.as_deref(), Some("echo+value="));
-        let envelope = wecom_callback_envelope(
-            &query,
-            b"<xml><Encrypt><![CDATA[encrypted-value]]></Encrypt></xml>",
-        )
-        .expect("envelope");
-        assert_eq!(envelope.route.channel, "wecom");
-        assert_eq!(envelope.route.account, "release-wecom");
-        assert_eq!(envelope.metadata["encrypted"], "encrypted-value");
-        assert!(!envelope.authenticated);
+        assert_eq!(
+            wecom_callback_encrypted(b"<xml><Encrypt><![CDATA[encrypted-value]]></Encrypt></xml>")
+                .as_deref(),
+            Some("encrypted-value")
+        );
+        assert_eq!(
+            wecom_app_callback_account_id("/v1/channels/wecom_app/release-wecom/callback"),
+            Some("release-wecom")
+        );
     }
 
     #[tokio::test]
     async fn loopback_http_enforces_bearer_route_loop_and_dedup() {
         let token = "0123456789abcdef0123456789abcdef";
         let (gateway, channel) = configured_gateway(token).await;
-        let allowed_route = route("main");
+        let allowed_address = address("main");
         let body =
-            serde_json::to_vec(&envelope("message-1", allowed_route.clone())).expect("envelope");
+            serde_json::to_vec(&message("message-1", allowed_address.clone())).expect("message");
         let unauthorized = exchange(
             gateway.clone(),
             channel.clone(),
@@ -791,23 +951,9 @@ mod tests {
             json!(IngressStatus::Duplicate)
         );
 
-        let rejected_route =
-            serde_json::to_vec(&envelope("message-2", route("other"))).expect("envelope");
-        assert_eq!(
-            response_status(
-                &exchange(
-                    gateway.clone(),
-                    channel.clone(),
-                    token,
-                    request(LOOPBACK_PATH, token, &rejected_route),
-                )
-                .await
-            ),
-            403
-        );
-        let mut loop_message = envelope("message-3", allowed_route);
-        loop_message.bot_generated = true;
-        let loop_body = serde_json::to_vec(&loop_message).expect("envelope");
+        let mut loop_message = message("message-3", allowed_address);
+        loop_message.actor.is_bot = true;
+        let loop_body = serde_json::to_vec(&loop_message).expect("message");
         assert_eq!(
             response_status(
                 &exchange(
@@ -818,7 +964,7 @@ mod tests {
                 )
                 .await
             ),
-            409
+            400
         );
     }
 
@@ -836,7 +982,17 @@ mod tests {
         assert_eq!(response_status(&empty), 204);
 
         let queued = gateway
-            .enqueue_delivery(route("main"), "reply-1", "done", now_ms())
+            .enqueue_delivery(
+                address("main"),
+                "reply-1",
+                ChannelOutboundPayload {
+                    parts: vec![ChannelMessagePart::Text {
+                        text: "done".into(),
+                    }],
+                    reply_to_external_message_id: None,
+                },
+                now_ms(),
+            )
             .await
             .expect("enqueue");
         let delivered = exchange(

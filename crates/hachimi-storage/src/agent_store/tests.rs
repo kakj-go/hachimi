@@ -73,7 +73,23 @@ async fn fresh_database_applies_all_registered_kernel_migrations() {
         .fetch_one(store.pool())
         .await
         .expect("migration count");
-    assert_eq!(migration_count, 26);
+    assert_eq!(migration_count, 39);
+
+    let hardened_outbox_columns: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM pragma_table_info('channel_outbox') WHERE name IN ('authorization_revision', 'account_config_revision', 'run_id', 'final_item_id', 'part_index', 'dispatched_at_ms')",
+    )
+    .fetch_one(store.pool())
+    .await
+    .expect("hardened outbox columns");
+    assert_eq!(hardened_outbox_columns, 6);
+
+    let provider_diagnostic_columns: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM pragma_table_info('channel_provider_runtime_health') WHERE name IN ('last_handshake_at_ms', 'last_frame_at_ms', 'last_error_code')",
+    )
+    .fetch_one(store.pool())
+    .await
+    .expect("provider diagnostic columns");
+    assert_eq!(provider_diagnostic_columns, 3);
 
     let payload_columns: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM pragma_table_info('transcript_items') WHERE name = 'payload_json'",
@@ -89,6 +105,23 @@ async fn fresh_database_applies_all_registered_kernel_migrations() {
     .expect("legacy columns");
     assert_eq!(payload_columns, 1);
     assert_eq!(legacy_columns, 0);
+
+    let enterprise_secret_columns: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM pragma_table_info('integration_provider_accounts') WHERE lower(name) LIKE '%secret%' OR lower(name) LIKE '%credential_json%' OR lower(name) LIKE '%credential_body%'",
+    )
+    .fetch_one(store.pool())
+    .await
+    .expect("enterprise credential columns");
+    assert_eq!(enterprise_secret_columns, 0);
+
+    sqlx::query("INSERT INTO plugin_installations(plugin_id, manifest_json, content_hash, root_path, status, diagnostics_json, installed_at_ms, updated_at_ms) VALUES('wecom_app', '{}', 'hash', 'fixture', 'enabled', '[]', 1, 1)")
+        .execute(store.pool())
+        .await
+        .expect("plugin installation");
+    sqlx::query("INSERT INTO plugin_runtime_bindings(plugin_id, contribution_id, resource_kind, resource_id, runtime_revision, metadata_json, enabled, updated_at_ms) VALUES('wecom_app', 'messages', 'builtin_channel', 'wecom_app', 'revision', '{}', 1, 1)")
+        .execute(store.pool())
+        .await
+        .expect("built-in channel binding");
 }
 
 #[tokio::test]
@@ -1911,6 +1944,8 @@ async fn mcp_configuration_and_health_are_persistent_and_restart_safe() {
         protocol_version: Some("2025-06-18".into()),
         tool_count: 1,
         error_code: None,
+        failure_count: 0,
+        next_retry_at_ms: None,
         checked_at_ms: configured_at + 1,
     };
     store.set_mcp_server_health(&ready).await.expect("ready");

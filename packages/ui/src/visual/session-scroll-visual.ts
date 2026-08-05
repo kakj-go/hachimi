@@ -66,6 +66,7 @@ export function installSessionScrollVisualTest(installTauriMocks: InstallTauriMo
     await page.setViewportSize({ width: 1440, height: 900 });
     await installTauriMocks(page, true, false, true);
     await page.goto("http://127.0.0.1:1420/workbench.html?route=home");
+    await page.getByTestId("project-select-project-hachimi").click();
     await page.getByTestId("session-select-session-ui-unification").click();
     await page.setViewportSize({ width: 720, height: 640 });
 
@@ -79,6 +80,7 @@ export function installSessionScrollVisualTest(installTauriMocks: InstallTauriMo
     await page.setViewportSize({ width: 1440, height: 900 });
     await installTauriMocks(page, true, false, true);
     await page.goto("http://127.0.0.1:1420/workbench.html?route=home");
+    await page.getByTestId("project-select-project-hachimi").click();
     await page.getByTestId("session-select-session-ui-unification").click();
     await page.locator(".timeline-items").evaluate((element) => {
       for (let index = 0; index < 60; index += 1) {

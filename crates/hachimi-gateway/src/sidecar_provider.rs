@@ -6,10 +6,10 @@ use std::{
 };
 
 use hachimi_protocol::{
-    CapabilityGrantSet, ChannelEnvelope, ChannelProviderAccount, ChannelProviderHealth,
-    ChannelProviderHealthState, ChannelProviderManifest, CheckoutId, ComputerGrant,
-    DeliveryAttempt, FileSystemAccess, FileSystemGrant, NetworkGrant, PermissionGrantScope,
-    PermissionProfile, ProcessGrant, RunId, SessionId, ToolEffect,
+    CapabilityGrantSet, ChannelProviderAccount, ChannelProviderHealth, ChannelProviderHealthState,
+    ChannelProviderManifest, CheckoutId, ComputerGrant, DeliveryAttempt, FileSystemAccess,
+    FileSystemGrant, NetworkGrant, PermissionGrantScope, PermissionProfile, ProcessGrant, RunId,
+    SessionId, ToolEffect, VerifiedChannelMessage,
 };
 use hachimi_sandbox::{
     SandboxBackend, SandboxLaunchSpec, SandboxNetworkPolicy, grant_restricted_code_access,
@@ -85,7 +85,7 @@ impl SandboxedStdioChannelProvider {
         method: &'static str,
         account: &ChannelProviderAccount,
         transport_credential: Option<&str>,
-        envelope: Option<&ChannelEnvelope>,
+        message: Option<&VerifiedChannelMessage>,
         delivery: Option<&DeliveryAttempt>,
     ) -> Result<Value, GatewayError> {
         let mut credential = match transport_credential {
@@ -103,10 +103,11 @@ impl SandboxedStdioChannelProvider {
                     provider_id: &account.provider_id,
                     display_name: &account.display_name,
                     config_revision: account.config_revision,
-                    route_allowlist: &account.route_allowlist,
+                    tenant_key: &account.tenant_key,
+                    config: &account.config,
                 },
                 credential: credential.as_deref(),
-                envelope,
+                message,
                 delivery,
             },
         };
@@ -229,13 +230,7 @@ impl ChannelProvider for SandboxedStdioChannelProvider {
         account: &'a ChannelProviderAccount,
     ) -> ChannelProviderFuture<'a, ()> {
         Box::pin(async move {
-            if account.provider_id != self.manifest.id
-                || account.route_allowlist.is_empty()
-                || account
-                    .route_allowlist
-                    .iter()
-                    .any(|route| route.channel != self.manifest.id)
-            {
+            if account.provider_id != self.manifest.id || account.tenant_key.trim().is_empty() {
                 return Err(GatewayError::InvalidProvider);
             }
             self.call("configure", account, None, None, None).await?;
@@ -275,8 +270,16 @@ impl ChannelProvider for SandboxedStdioChannelProvider {
                 Err(_) => {
                     return Ok(ChannelProviderHealth {
                         provider_id: self.manifest.id.clone(),
+                        account_id: None,
                         state: ChannelProviderHealthState::Disabled,
                         diagnostic: None,
+                        last_event_at_ms: None,
+                        last_delivery_at_ms: None,
+                        last_handshake_at_ms: None,
+                        last_frame_at_ms: None,
+                        last_error_code: None,
+                        next_reconnect_at_ms: None,
+                        consecutive_failures: 0,
                         config_revision: 0,
                     });
                 }
@@ -286,8 +289,16 @@ impl ChannelProvider for SandboxedStdioChannelProvider {
                     self.set_state(ChannelProviderHealthState::Healthy)?;
                     Ok(ChannelProviderHealth {
                         provider_id: self.manifest.id.clone(),
+                        account_id: Some(account.id.clone()),
                         state: ChannelProviderHealthState::Healthy,
                         diagnostic: None,
+                        last_event_at_ms: None,
+                        last_delivery_at_ms: None,
+                        last_handshake_at_ms: Some(crate::now_ms()),
+                        last_frame_at_ms: None,
+                        last_error_code: None,
+                        next_reconnect_at_ms: None,
+                        consecutive_failures: 0,
                         config_revision: account.config_revision,
                     })
                 }
@@ -295,8 +306,16 @@ impl ChannelProvider for SandboxedStdioChannelProvider {
                     self.set_state(ChannelProviderHealthState::NeedsAttention)?;
                     Ok(ChannelProviderHealth {
                         provider_id: self.manifest.id.clone(),
+                        account_id: Some(account.id.clone()),
                         state: ChannelProviderHealthState::NeedsAttention,
                         diagnostic: Some("channel_sidecar_health_rejected".into()),
+                        last_event_at_ms: None,
+                        last_delivery_at_ms: None,
+                        last_handshake_at_ms: None,
+                        last_frame_at_ms: None,
+                        last_error_code: Some("channel_sidecar_health_rejected".into()),
+                        next_reconnect_at_ms: None,
+                        consecutive_failures: 1,
                         config_revision: account.config_revision,
                     })
                 }
@@ -304,8 +323,16 @@ impl ChannelProvider for SandboxedStdioChannelProvider {
                     self.set_state(ChannelProviderHealthState::Failed)?;
                     Ok(ChannelProviderHealth {
                         provider_id: self.manifest.id.clone(),
+                        account_id: Some(account.id.clone()),
                         state: ChannelProviderHealthState::Failed,
                         diagnostic: Some(error.to_string()),
+                        last_event_at_ms: None,
+                        last_delivery_at_ms: None,
+                        last_handshake_at_ms: None,
+                        last_frame_at_ms: None,
+                        last_error_code: Some("channel_sidecar_unavailable".into()),
+                        next_reconnect_at_ms: None,
+                        consecutive_failures: 1,
                         config_revision: account.config_revision,
                     })
                 }
@@ -313,15 +340,21 @@ impl ChannelProvider for SandboxedStdioChannelProvider {
         })
     }
 
-    fn receive<'a>(
+    fn accept_verified<'a>(
         &'a self,
         credential: Option<&'a str>,
-        envelope: ChannelEnvelope,
-    ) -> ChannelProviderFuture<'a, ChannelEnvelope> {
+        message: VerifiedChannelMessage,
+    ) -> ChannelProviderFuture<'a, VerifiedChannelMessage> {
         Box::pin(async move {
             let account = self.configured_account()?;
             let result = self
-                .call("receive", &account, credential, Some(&envelope), None)
+                .call(
+                    "accept_verified",
+                    &account,
+                    credential,
+                    Some(&message),
+                    None,
+                )
                 .await?;
             serde_json::from_value(result).map_err(GatewayError::from)
         })
@@ -345,16 +378,24 @@ impl ChannelProvider for SandboxedStdioChannelProvider {
                     .get("retryable")
                     .and_then(Value::as_bool)
                     .unwrap_or(false),
+                indeterminate: result
+                    .get("indeterminate")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
                 result_code: result
                     .get("resultCode")
                     .and_then(Value::as_str)
                     .unwrap_or("channel_sidecar_delivery_rejected")
                     .to_owned(),
+                provider_receipt: result
+                    .get("providerReceipt")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned),
             })
         })
     }
 
-    fn ack<'a>(&'a self, delivery: &'a DeliveryAttempt) -> ChannelProviderFuture<'a, ()> {
+    fn ack_delivery<'a>(&'a self, delivery: &'a DeliveryAttempt) -> ChannelProviderFuture<'a, ()> {
         Box::pin(async move {
             let account = self.configured_account()?;
             self.call("ack", &account, None, None, Some(delivery))
@@ -365,13 +406,7 @@ impl ChannelProvider for SandboxedStdioChannelProvider {
 
     fn reload<'a>(&'a self, account: &'a ChannelProviderAccount) -> ChannelProviderFuture<'a, ()> {
         Box::pin(async move {
-            if account.provider_id != self.manifest.id
-                || account.route_allowlist.is_empty()
-                || account
-                    .route_allowlist
-                    .iter()
-                    .any(|route| route.channel != self.manifest.id)
-            {
+            if account.provider_id != self.manifest.id || account.tenant_key.trim().is_empty() {
                 return Err(GatewayError::InvalidProvider);
             }
             self.call("reload", account, None, None, None).await?;
@@ -401,7 +436,7 @@ struct SidecarRequest<'a> {
 struct SidecarParams<'a> {
     account: SidecarAccount<'a>,
     credential: Option<&'a str>,
-    envelope: Option<&'a ChannelEnvelope>,
+    message: Option<&'a VerifiedChannelMessage>,
     delivery: Option<&'a DeliveryAttempt>,
 }
 
@@ -412,7 +447,8 @@ struct SidecarAccount<'a> {
     provider_id: &'a str,
     display_name: &'a str,
     config_revision: u64,
-    route_allowlist: &'a [hachimi_protocol::ChannelRouteKey],
+    tenant_key: &'a str,
+    config: &'a Value,
 }
 
 #[derive(Deserialize)]
@@ -424,10 +460,13 @@ struct SidecarResponse {
 }
 
 fn channel_secret(account: &ChannelProviderAccount) -> Result<Option<String>, GatewayError> {
-    let Some(reference) = account.secret_ref.as_deref() else {
+    let Some(reference) = account.credential_ref.as_deref() else {
         return Ok(None);
     };
-    let expected = format!("keyring:channel:{}:{}", account.provider_id, account.id);
+    let expected = format!(
+        "keyring:channel:{}:{}:primary",
+        account.provider_id, account.id
+    );
     if reference != expected {
         return Err(GatewayError::ProviderCredentialUnavailable);
     }

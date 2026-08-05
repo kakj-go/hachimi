@@ -2,7 +2,6 @@ import {
   commandFailure,
   commands,
   type BrowserDataKind,
-  type BrowserHistoryEntry,
   type EmbeddedBrowserSettings,
   type FeatureFlags,
 } from "@hachimi/contracts";
@@ -10,19 +9,19 @@ import { useI18n } from "@hachimi/i18n";
 import {
   Badge,
   Button,
+  Dialog,
   SettingsCard,
   SettingsRow,
   SettingsSection,
   StatusBanner,
   Switch as Toggle,
 } from "@hachimi/ui";
-import { For, Show, createSignal, onMount } from "solid-js";
+import { Show, createSignal, onMount, untrack } from "solid-js";
 
 export function BrowserSettingsSection(props: { featureFlags: FeatureFlags }) {
   const i18n = useI18n();
   const zh = () => i18n.locale() === "zh-CN";
   const [settings, setSettings] = createSignal<EmbeddedBrowserSettings>();
-  const [history, setHistory] = createSignal<BrowserHistoryEntry[]>([]);
   const [dataSelection, setDataSelection] = createSignal<BrowserDataKind[]>([
     "history",
     "cookies",
@@ -31,6 +30,7 @@ export function BrowserSettingsSection(props: { featureFlags: FeatureFlags }) {
   const [busy, setBusy] = createSignal(false);
   const [failure, setFailure] = createSignal<string>();
   const [notice, setNotice] = createSignal<string>();
+  const [clearDialogOpen, setClearDialogOpen] = createSignal(false);
 
   async function run(operation: () => Promise<void>) {
     setBusy(true);
@@ -47,12 +47,7 @@ export function BrowserSettingsSection(props: { featureFlags: FeatureFlags }) {
 
   async function load() {
     await run(async () => {
-      const [browserSettings, browserHistory] = await Promise.all([
-        commands.getEmbeddedBrowserSettings(),
-        commands.getBrowserHistory("", 12),
-      ]);
-      setSettings(browserSettings);
-      setHistory(browserHistory);
+      setSettings(await commands.getEmbeddedBrowserSettings());
     });
   }
 
@@ -84,7 +79,7 @@ export function BrowserSettingsSection(props: { featureFlags: FeatureFlags }) {
   async function chooseDownloadDirectory() {
     await run(async () => {
       const directory = await commands.chooseBrowserDownloadDirectory();
-      const current = settings();
+      const current = untrack(settings);
       if (!directory || !current) return;
       setSettings(
         await commands.updateEmbeddedBrowserSettings({
@@ -109,8 +104,8 @@ export function BrowserSettingsSection(props: { featureFlags: FeatureFlags }) {
     if (data.length === 0) return;
     await run(async () => {
       await commands.clearEmbeddedBrowserData({ data });
-      if (data.includes("history")) setHistory([]);
       setNotice(zh() ? "选中的浏览器数据已清除。" : "Selected browser data was cleared.");
+      setClearDialogOpen(false);
     });
   }
 
@@ -150,7 +145,7 @@ export function BrowserSettingsSection(props: { featureFlags: FeatureFlags }) {
             (zh() ? "系统 Downloads 文件夹" : "System Downloads folder")
           }
         >
-          <div class="local-hosts-actions">
+          <div class="host-domain-actions">
             <Button size="small" disabled={busy()} onClick={() => void chooseDownloadDirectory()}>
               {zh() ? "选择文件夹" : "Choose folder"}
             </Button>
@@ -178,74 +173,127 @@ export function BrowserSettingsSection(props: { featureFlags: FeatureFlags }) {
             onChange={(enabled) => void updateSettings({ askWhereToSaveDownloads: enabled })}
           />
         </SettingsRow>
-        <SettingsRow
-          label="Developer mode"
-          description={
-            settings()?.fullCdpAccessAllowed
-              ? zh()
+        <Show when={settings()?.fullCdpAccessAllowed}>
+          <SettingsRow
+            label={zh() ? "开发者 CDP" : "Developer CDP"}
+            description={
+              zh()
                 ? "完整 CDP 每次仍经过 Run、站点权限和审批校验。"
                 : "Full CDP still requires Run, site-permission, and approval checks."
-              : zh()
-                ? "先在应用设置中开启 Developer mode 并重启。"
-                : "Enable application Developer mode and restart first."
-          }
-        >
-          <Toggle
-            label={zh() ? "启用完整 CDP 访问" : "Enable full CDP access"}
-            checked={settings()?.fullCdpAccess ?? false}
-            disabled={busy() || !settings()?.fullCdpAccessAllowed}
-            onChange={(enabled) => void updateSettings({ fullCdpAccess: enabled })}
-          />
-        </SettingsRow>
+            }
+          >
+            <Toggle
+              label={zh() ? "启用完整 CDP 访问" : "Enable full CDP access"}
+              checked={settings()?.fullCdpAccess ?? false}
+              disabled={busy()}
+              onChange={(enabled) => void updateSettings({ fullCdpAccess: enabled })}
+            />
+          </SettingsRow>
+        </Show>
         <SettingsRow
           label={zh() ? "清除浏览数据" : "Clear browsing data"}
           description={
             zh()
-              ? "历史记录存于 Hachimi；Cookie 和缓存由 CEF Profile 管理。"
-              : "History is stored by Hachimi; cookies and cache belong to the CEF profile."
+              ? "选择需要移除的数据类型，确认后立即清除。"
+              : "Choose which data types to remove, then confirm."
           }
         >
-          <div class="local-hosts-actions">
-            <Toggle
-              label={zh() ? "历史记录" : "History"}
-              checked={dataSelection().includes("history")}
-              disabled={busy()}
-              onChange={(value) => toggleData("history", value)}
-            />
-            <Toggle
-              label="Cookie"
-              checked={dataSelection().includes("cookies")}
-              disabled={busy()}
-              onChange={(value) => toggleData("cookies", value)}
-            />
-            <Toggle
-              label={zh() ? "缓存" : "Cache"}
-              checked={dataSelection().includes("cache")}
-              disabled={busy()}
-              onChange={(value) => toggleData("cache", value)}
-            />
+          <Button
+            size="small"
+            variant="danger"
+            disabled={busy()}
+            data-testid="embedded-browser-clear-data"
+            onClick={() => setClearDialogOpen(true)}
+          >
+            {zh() ? "选择并清除…" : "Choose and clear…"}
+          </Button>
+        </SettingsRow>
+      </SettingsCard>
+      <Dialog
+        open={clearDialogOpen()}
+        title={zh() ? "清除浏览数据" : "Clear browsing data"}
+        description={
+          zh()
+            ? "此操作无法撤销。请选择本次要清除的数据。"
+            : "This cannot be undone. Choose the data to clear."
+        }
+        closeLabel={zh() ? "关闭" : "Close"}
+        tone="danger"
+        loading={busy()}
+        onOpenChange={(open) => !busy() && setClearDialogOpen(open)}
+      >
+        <div class="browser-clear-dialog">
+          <BrowserDataOption
+            label={zh() ? "浏览历史" : "Browsing history"}
+            description={
+              zh()
+                ? "清除 Hachimi 保存的访问记录，不会删除书签或下载文件。"
+                : "Removes visits saved by Hachimi, without deleting bookmarks or downloads."
+            }
+            checked={dataSelection().includes("history")}
+            disabled={busy()}
+            onChange={(value) => toggleData("history", value)}
+          />
+          <BrowserDataOption
+            label={zh() ? "Cookie 与站点数据" : "Cookies and site data"}
+            description={
+              zh()
+                ? "清除登录状态和站点偏好，之后可能需要重新登录。"
+                : "Removes sign-in sessions and site preferences; sites may require sign-in again."
+            }
+            checked={dataSelection().includes("cookies")}
+            disabled={busy()}
+            onChange={(value) => toggleData("cookies", value)}
+          />
+          <BrowserDataOption
+            label={zh() ? "缓存文件" : "Cached files"}
+            description={
+              zh()
+                ? "清除 CEF Profile 缓存；网页下次打开时会重新加载资源。"
+                : "Clears the CEF profile cache; pages reload resources on the next visit."
+            }
+            checked={dataSelection().includes("cache")}
+            disabled={busy()}
+            onChange={(value) => toggleData("cache", value)}
+          />
+          <div class="browser-clear-dialog-actions">
+            <Button disabled={busy()} onClick={() => setClearDialogOpen(false)}>
+              {zh() ? "取消" : "Cancel"}
+            </Button>
             <Button
-              size="small"
               variant="danger"
               disabled={busy() || dataSelection().length === 0}
-              data-testid="embedded-browser-clear-data"
+              data-testid="embedded-browser-clear-confirm"
               onClick={() => void clearData()}
             >
               {zh() ? "清除所选数据" : "Clear selected data"}
             </Button>
           </div>
-        </SettingsRow>
-        <For each={history().slice(0, 8)}>
-          {(entry) => (
-            <SettingsRow
-              label={entry.title || entry.url}
-              description={`${entry.url} · ${zh() ? "访问" : "visited"} ${entry.visitCount}`}
-            >
-              <Badge>{new Date(entry.lastVisitedAtMs).toLocaleDateString()}</Badge>
-            </SettingsRow>
-          )}
-        </For>
-      </SettingsCard>
+        </div>
+      </Dialog>
     </SettingsSection>
+  );
+}
+
+function BrowserDataOption(props: {
+  label: string;
+  description: string;
+  checked: boolean;
+  disabled: boolean;
+  onChange: (value: boolean) => void;
+}) {
+  return (
+    <div class="browser-clear-option">
+      <span>
+        <strong>{props.label}</strong>
+        <small>{props.description}</small>
+      </span>
+      <Toggle
+        label={props.label}
+        checked={props.checked}
+        disabled={props.disabled}
+        onChange={props.onChange}
+      />
+    </div>
   );
 }

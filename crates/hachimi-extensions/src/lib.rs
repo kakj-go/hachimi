@@ -3,6 +3,7 @@
 mod channel_manifest;
 mod connector_driver;
 mod connector_manifest;
+mod connector_secrets;
 mod connector_sidecar;
 mod contribution_runtime;
 mod enterprise_attachment;
@@ -18,6 +19,7 @@ pub use connector_driver::{
     ConnectorDriver, ConnectorDriverContext, ConnectorDriverFuture, ConnectorDriverRegistry,
 };
 pub(crate) use connector_manifest::connector_descriptor;
+use connector_secrets::{connector_keyring_entry, connector_secret, connector_secret_reference};
 pub use connector_sidecar::SandboxedStdioConnectorDriver;
 use contribution_runtime::{
     connector_health, contribution_runtime_state, decode_installed_contribution,
@@ -724,6 +726,34 @@ impl PluginHost {
         &self,
         input: ConnectorAccountUpsert,
     ) -> Result<ConnectorAccount, ExtensionHostError> {
+        self.upsert_connector_account_resolved(input, None).await
+    }
+
+    pub async fn upsert_integration_connector_account(
+        &self,
+        input: ConnectorAccountUpsert,
+        provider_id: hachimi_protocol::IntegrationProviderId,
+        integration_account_id: &str,
+    ) -> Result<ConnectorAccount, ExtensionHostError> {
+        if input.secret.is_some()
+            || integration_account_id.trim().is_empty()
+            || integration_account_id.len() > 128
+        {
+            return Err(ExtensionHostError::InvalidInvocation);
+        }
+        let reference = format!(
+            "keyring:integration:{}:{integration_account_id}:primary",
+            provider_id.as_str()
+        );
+        self.upsert_connector_account_resolved(input, Some(reference))
+            .await
+    }
+
+    async fn upsert_connector_account_resolved(
+        &self,
+        input: ConnectorAccountUpsert,
+        integration_secret_ref: Option<String>,
+    ) -> Result<ConnectorAccount, ExtensionHostError> {
         let plugin = self.health_check(&input.plugin_id).await?;
         if plugin.status != PluginStatus::Enabled
             || input.connector_id.trim().is_empty()
@@ -744,7 +774,8 @@ impl PluginHost {
             )));
         }
         let previous = self.connector_account(&input.id).await?;
-        let mut secret_ref = previous.and_then(|account| account.secret_ref);
+        let mut secret_ref =
+            integration_secret_ref.or_else(|| previous.and_then(|account| account.secret_ref));
         if let Some(secret) = input.secret.as_deref() {
             let reference = connector_secret_reference(&input.id);
             connector_keyring_entry(&input.id)?
@@ -1063,7 +1094,11 @@ impl PluginHost {
                 })
                 .await?;
         }
-        if account.secret_ref.is_some() {
+        if account
+            .secret_ref
+            .as_deref()
+            .is_some_and(|reference| reference.starts_with("keyring:connector:"))
+        {
             match connector_keyring_entry(account_id)?.delete_credential() {
                 Ok(()) | Err(keyring::Error::NoEntry) => {}
                 Err(_) => return Err(ExtensionHostError::SecretStore),
@@ -1098,9 +1133,7 @@ impl PluginHost {
             .ok_or(ExtensionHostError::ConnectorNotHealthy)?;
         if account.health != ConnectorHealth::Healthy {
             if account.health == ConnectorHealth::RateLimited {
-                // Rate limiting is window based and therefore recoverable;
-                // callers receive a stable diagnostic while the ledger is
-                // retained for reconciliation.
+                // Window-based rate limits remain recoverable and retain their ledger.
                 if !rate_limit_window_expired(&self.store, &account.id).await? {
                     return Err(ExtensionHostError::RateLimited);
                 }
@@ -1788,31 +1821,6 @@ fn revision_drift_health(
         ConnectorHealth::SchemaDrift
     } else {
         ConnectorHealth::ActionDrift
-    }
-}
-
-fn connector_secret_reference(account_id: &ConnectorAccountId) -> String {
-    format!("keyring:connector:{}", account_id.as_str())
-}
-
-fn connector_keyring_entry(
-    account_id: &ConnectorAccountId,
-) -> Result<keyring::Entry, ExtensionHostError> {
-    keyring::Entry::new("com.hachimi.connector", account_id.as_str())
-        .map_err(|_| ExtensionHostError::SecretStore)
-}
-
-fn connector_secret(
-    reference: &str,
-    account_id: &ConnectorAccountId,
-) -> Result<Option<String>, ExtensionHostError> {
-    if reference != connector_secret_reference(account_id) {
-        return Err(ExtensionHostError::SecretStore);
-    }
-    match connector_keyring_entry(account_id)?.get_password() {
-        Ok(secret) => Ok(Some(secret)),
-        Err(keyring::Error::NoEntry) => Ok(None),
-        Err(_) => Err(ExtensionHostError::SecretStore),
     }
 }
 

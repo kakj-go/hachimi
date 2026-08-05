@@ -39,6 +39,14 @@ pub enum AgentStoreError {
     EmbeddedBrowserPermissionRequestNotFound(hachimi_protocol::ItemId),
     #[error("embedded browser permission request is stale or no longer pending")]
     EmbeddedBrowserPermissionRequestStale,
+    #[error("host access request does not exist: {0}")]
+    HostAccessRequestNotFound(hachimi_protocol::ItemId),
+    #[error("host access request is stale or no longer pending")]
+    HostAccessRequestStale,
+    #[error("host policy revision precondition failed")]
+    HostPolicyRevisionConflict,
+    #[error("private-network access cannot be persisted outside Developer security settings")]
+    PersistentPrivateHostPolicyDenied,
     #[error("proposed plan does not exist: {0}")]
     ProposedPlanNotFound(PlanId),
     #[error("proposed plan is no longer available for acceptance: {0}")]

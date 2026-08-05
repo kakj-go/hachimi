@@ -28,6 +28,7 @@ hachimi-core.workspace = true
 hachimi-avatar.workspace = true
 hachimi-browser.workspace = true
 hachimi-capabilities.workspace = true
+hachimi-channel-providers.workspace = true
 hachimi-computer.workspace = true
 hachimi-enterprise.workspace = true
 hachimi-extensions.workspace = true
@@ -58,6 +59,7 @@ sqlx.workspace = true
 rfd.workspace = true
 tauri = { workspace = true, features = ["tray-icon"] }
 tauri-plugin-notification.workspace = true
+tauri-plugin-single-instance.workspace = true
 tauri-runtime.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
@@ -66,6 +68,7 @@ tracing-subscriber.workspace = true
 thiserror.workspace = true
 url.workspace = true
 uuid.workspace = true
+zeroize.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

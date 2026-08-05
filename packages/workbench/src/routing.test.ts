@@ -11,7 +11,15 @@ describe("workbench routing", () => {
     expect(normalizeWorkbenchRoute("settings/mcp")).toBe("settings/mcp");
     expect(normalizeWorkbenchRoute("developer/motion-lab")).toBe("developer/motion-lab");
     for (const route of WORKBENCH_ROUTES) expect(normalizeWorkbenchRoute(route)).toBe(route);
-    expect(normalizeWorkbenchRoute("settings/plugins")).toBe("settings/general");
+    expect(normalizeWorkbenchRoute("settings/integrations")).toBe("settings/integrations");
+    for (const removed of [
+      "settings/connected-apps",
+      "settings/channels",
+      "settings/gateway",
+      "settings/plugins",
+    ]) {
+      expect(normalizeWorkbenchRoute(removed)).toBe("settings/general");
+    }
     expect(normalizeWorkbenchRoute("settings/worktrees")).toBe("settings/general");
     expect(normalizeWorkbenchRoute("workspace/admin")).toBe("home");
     expect(normalizeWorkbenchRoute(null)).toBe("home");

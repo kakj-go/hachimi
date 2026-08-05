@@ -4,7 +4,7 @@ use hachimi_browser::{CefHostCommand, CefHostResponse, normalized_browser_input}
 use hachimi_protocol::{
     BrowserAction, BrowserAutomationLease, BrowserAutomationLeaseId, BrowserAutomationLeaseStatus,
     BrowserAutomationSurfaceKind, BrowserCapability, BrowserObservationId, BrowserTabId,
-    EmbeddedBrowserPermissionRequiredEvent, RunId, SessionId,
+    EmbeddedBrowserPermissionRequiredEvent, HostPolicyDecision, RunId, SessionId,
 };
 use parking_lot::Mutex;
 use serde::Serialize;
@@ -30,6 +30,8 @@ pub enum EmbeddedAgentBrowserError {
     StaleObservation,
     #[error("browser site permission is missing for the current tab origin")]
     SitePermissionMissing,
+    #[error("browser site access is blocked by the persistent site policy")]
+    SitePolicyBlocked,
     #[error("browser site permission requires user confirmation: {0}")]
     SitePermissionRequired(hachimi_protocol::ItemId),
     #[error("embedded browser capability is not supported: {0}")]
@@ -125,12 +127,29 @@ impl EmbeddedAgentBrowser {
         }
     }
 
+    pub fn runtime_available(&self) -> bool {
+        let snapshot = self
+            .app
+            .state::<crate::DesktopState>()
+            .runtime_supervisor
+            .snapshot();
+        snapshot.components.into_iter().any(|health| {
+            health.component == hachimi_protocol::RuntimeComponentId::Cef
+                && !matches!(
+                    health.state,
+                    hachimi_protocol::RuntimeComponentState::Degraded
+                        | hachimi_protocol::RuntimeComponentState::Failed
+                )
+        })
+    }
+
     pub async fn start(
         &self,
         session_id: &SessionId,
         run_id: &RunId,
         run_generation: u64,
         initial_url: &str,
+        capabilities: &[BrowserCapability],
     ) -> Result<EmbeddedBrowserStarted, EmbeddedAgentBrowserError> {
         self.validate_run(session_id, run_id, run_generation)
             .await?;
@@ -201,7 +220,7 @@ impl EmbeddedAgentBrowser {
                 session_id,
                 run_id,
                 run_generation,
-                &[BrowserCapability::Observe, BrowserCapability::Act],
+                capabilities,
                 now_ms().saturating_add(LEASE_LIFETIME_MS),
             )
             .await
@@ -230,6 +249,24 @@ impl EmbeddedAgentBrowser {
             hachimi_browser::validate_agent_browser_target(url, false).await,
             Err(hachimi_browser::BrowserHostError::PrivateNetworkDenied)
         );
+        match self
+            .store
+            .browser_host_policy_decision(
+                &origin,
+                session_id,
+                run_id,
+                &[BrowserCapability::Observe, BrowserCapability::Act],
+                private_network,
+            )
+            .await
+            .map_err(storage)?
+        {
+            HostPolicyDecision::Allow => return Ok(()),
+            HostPolicyDecision::Block => {
+                return Err(EmbeddedAgentBrowserError::SitePolicyBlocked);
+            }
+            HostPolicyDecision::Ask => {}
+        }
         if self
             .store
             .embedded_browser_site_permission(&origin, session_id, run_id, private_network)

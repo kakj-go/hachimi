@@ -10,10 +10,41 @@ import type {
   AvatarImportInspection,
   AvatarRuntimeAsset,
   BootstrapState,
+  ChannelProviderAccount,
+  ChannelAccessPolicy,
+  ChannelAccessPolicyUpsert,
+  ChannelAuthorization,
+  ChannelAuthorizationUpsert,
+  ChannelIdentityLinkCode,
+  ChannelIdentityLinkCodeRequest,
+  ChannelIdentityTransferCommitRequest,
+  ChannelIdentityTransferPreview,
+  ChannelIdentityTransferResult,
+  ChannelPairingCode,
+  ChannelPairingCodeRequest,
+  ChannelProviderHealth,
+  ChannelProviderManifest,
   BrowserDownloadSnapshot,
   BrowserDownloadActionRequest,
   BrowserHistoryEntry,
+  BrowserHostSettings,
+  BrowserHostSettingsUpdate,
+  BrowserAutomationLease,
+  BrowserAutomationLeaseId,
+  BrowserPairingId,
+  BrowserSitePolicy,
+  BrowserSitePolicyUpdate,
+  HostAccessDecisionRequest,
+  HostAccessRequestRecord,
   ClearEmbeddedBrowserDataRequest,
+  ComputerAppCandidate,
+  ComputerAppPolicy,
+  ComputerAppPolicyUpdate,
+  ComputerHostSettings,
+  ComputerHostSettingsUpdate,
+  ComputerControlSession,
+  ComputerFrameId,
+  ComputerFramePreview,
   EmbeddedBrowserSettings,
   EmbeddedBrowserSettingsUpdate,
   BrowserSurfaceLayoutRequest,
@@ -25,9 +56,18 @@ import type {
   CheckoutRecord,
   ControlInitializeRequest,
   ControlInitializeResponse,
+  ConnectorAccount,
+  ConnectorDriverDescriptor,
   EventSubscriptionId,
   EventSubscriptionRequest,
   EventSubscriptionSnapshot,
+  IntegrationAccountCapabilitiesUpdate,
+  IntegrationAccountProbeResult,
+  IntegrationAccountUpsert,
+  IntegrationProviderAccount,
+  IntegrationProviderDefinition,
+  IlinkQrLoginRequest,
+  IlinkQrSession,
   DiffScope,
   DiffReadFileRequest,
   DiffReadFileResponse,
@@ -44,6 +84,9 @@ import type {
   FsWatchId,
   FsWatchRegistration,
   FsWatchRequest,
+  GatewayHealth,
+  RuntimeComponentId,
+  RuntimeHealthSnapshot,
   FrontendLogEntry,
   ForgeChangeMutationRequest,
   ForgeChangeQueryRequest,
@@ -57,6 +100,8 @@ import type {
   SandboxBootstrapState,
   SandboxRepairRequest,
   SandboxRuntimeSnapshot,
+  SystemBrowserKind,
+  SessionId,
   SessionPermissionConfig,
   SessionPermissionConfigRequest,
   SessionPermissionConfigUpdate,
@@ -69,11 +114,11 @@ import type {
   GitWorkspaceRequest,
   GitWorkspaceSnapshot,
   InteractiveRegionsUpdate,
+  InstalledContribution,
+  InstalledPlugin,
   LlmSettingsInput,
   LlmSettingsView,
   LlmTestResult,
-  LocalHostCommandRequest,
-  LocalHostCommandResponse,
   McpServerHealthRecord,
   McpServerId,
   McpServerDraft,
@@ -104,6 +149,10 @@ import type {
   PetTurnRequest,
   PlanAcceptanceRequest,
   PlanRevisionRequest,
+  PluginContributionSurface,
+  PluginLifecycleJournalRecord,
+  PluginPermissionDiff,
+  PluginRevisionRecord,
   ProjectId,
   ProjectRecord,
   ProcessListRequest,
@@ -311,6 +360,84 @@ export const commands = {
     invoke<EmbeddedBrowserSettings>("update_embedded_browser_settings", { update }),
   clearEmbeddedBrowserData: (request: ClearEmbeddedBrowserDataRequest) =>
     invoke<boolean>("clear_embedded_browser_data", { request }),
+  approveBrowserExtension: (pairingId: BrowserPairingId) =>
+    invoke<BrowserHostSettings>("approve_browser_extension", { pairingId }),
+  installBrowserExtension: (browser: SystemBrowserKind) =>
+    invoke<void>("install_browser_extension", { browser }),
+  getBrowserHostSettings: () => invoke<BrowserHostSettings>("get_browser_host_settings"),
+  updateBrowserHostSettings: (update: BrowserHostSettingsUpdate) =>
+    invoke<BrowserHostSettings>("update_browser_host_settings", { update }),
+  listBrowserSitePolicies: () => invoke<BrowserSitePolicy[]>("list_browser_site_policies"),
+  updateBrowserSitePolicy: (update: BrowserSitePolicyUpdate) =>
+    invoke<BrowserSitePolicy>("update_browser_site_policy", { update }),
+  updatePrivateBrowserSitePolicy: (update: BrowserSitePolicyUpdate) =>
+    invoke<BrowserSitePolicy>("update_private_browser_site_policy", { update }),
+  removeBrowserSitePolicy: (origin: string) =>
+    invoke<boolean>("remove_browser_site_policy", { origin }),
+  listHostAccessRequests: (sessionId?: SessionId) =>
+    invoke<HostAccessRequestRecord[]>("list_host_access_requests", { sessionId }),
+  resolveHostAccessRequest: (request: HostAccessDecisionRequest) =>
+    invoke<HostAccessRequestRecord>("resolve_host_access_request", { request }),
+  stopBrowserAutomation: (leaseId: BrowserAutomationLeaseId) =>
+    invoke<BrowserAutomationLease>("stop_browser_automation", { leaseId }),
+  takeOverBrowserAutomation: (leaseId: BrowserAutomationLeaseId) =>
+    invoke<BrowserAutomationLease>("take_over_browser_automation", { leaseId }),
+  resumeBrowserAutomation: (leaseId: BrowserAutomationLeaseId) =>
+    invoke<BrowserAutomationLease>("resume_browser_automation", { leaseId }),
+  getComputerHostSettings: () => invoke<ComputerHostSettings>("get_computer_host_settings"),
+  updateComputerHostSettings: (update: ComputerHostSettingsUpdate) =>
+    invoke<ComputerHostSettings>("update_computer_host_settings", { update }),
+  getRuntimeHealth: () => invoke<RuntimeHealthSnapshot>("get_runtime_health"),
+  retryRuntimeComponent: (component: RuntimeComponentId) =>
+    invoke<RuntimeHealthSnapshot>("retry_runtime_component", { component }),
+  listComputerAppCandidates: () => invoke<ComputerAppCandidate[]>("list_computer_app_candidates"),
+  listComputerAppPolicies: () => invoke<ComputerAppPolicy[]>("list_computer_app_policies"),
+  updateComputerAppPolicy: (update: ComputerAppPolicyUpdate) =>
+    invoke<ComputerAppPolicy>("update_computer_app_policy", { update }),
+  listIntegrationProviders: () =>
+    invoke<IntegrationProviderDefinition[]>("list_integration_providers"),
+  listEnterpriseIntegrations: () =>
+    invoke<IntegrationProviderAccount[]>("list_enterprise_integrations"),
+  beginIlinkQrLogin: (request: IlinkQrLoginRequest) =>
+    invoke<IlinkQrSession>("begin_ilink_qr_login", { request }),
+  pollIlinkQrLogin: (accountId: string) =>
+    invoke<IlinkQrSession>("poll_ilink_qr_login", { accountId }),
+  cancelIlinkQrLogin: (accountId: string) =>
+    invoke<boolean>("cancel_ilink_qr_login", { accountId }),
+  upsertEnterpriseIntegration: (input: IntegrationAccountUpsert) =>
+    invoke<IntegrationProviderAccount>("upsert_enterprise_integration", { input }),
+  setEnterpriseIntegrationCapabilities: (update: IntegrationAccountCapabilitiesUpdate) =>
+    invoke<IntegrationProviderAccount>("set_enterprise_integration_capabilities", { update }),
+  probeEnterpriseIntegration: (id: string) =>
+    invoke<IntegrationAccountProbeResult>("probe_enterprise_integration", { id }),
+  removeEnterpriseIntegration: (id: string) =>
+    invoke<boolean>("remove_enterprise_integration", { id }),
+  listChannelAuthorizations: (accountId: string) =>
+    invoke<ChannelAuthorization[]>("list_channel_authorizations", { accountId }),
+  upsertChannelAuthorization: (input: ChannelAuthorizationUpsert) =>
+    invoke<ChannelAuthorization>("upsert_channel_authorization", { input }),
+  createChannelPairingCode: (request: ChannelPairingCodeRequest) =>
+    invoke<ChannelPairingCode>("create_channel_pairing_code", { request }),
+  createChannelIdentityLinkCode: (request: ChannelIdentityLinkCodeRequest) =>
+    invoke<ChannelIdentityLinkCode>("create_channel_identity_link_code", { request }),
+  listChannelIdentityTransferPreviews: (accountId: string) =>
+    invoke<ChannelIdentityTransferPreview[]>("list_channel_identity_transfer_previews", {
+      accountId,
+    }),
+  transferChannelIdentity: (request: ChannelIdentityTransferCommitRequest) =>
+    invoke<ChannelIdentityTransferResult>("transfer_channel_identity", { request }),
+  getChannelAccessPolicy: (accountId: string) =>
+    invoke<ChannelAccessPolicy>("get_channel_access_policy", { accountId }),
+  updateChannelAccessPolicy: (input: ChannelAccessPolicyUpsert) =>
+    invoke<ChannelAccessPolicy>("update_channel_access_policy", { input }),
+  takeOverComputerControl: (sessionId: SessionId) =>
+    invoke<ComputerControlSession>("take_over_computer_control", { sessionId }),
+  resumeComputerControl: (sessionId: SessionId) =>
+    invoke<ComputerControlSession>("resume_computer_control", { sessionId }),
+  stopComputerControl: (sessionId: SessionId) =>
+    invoke<ComputerControlSession>("stop_computer_control", { sessionId }),
+  getComputerControlFrame: (sessionId: SessionId, frameId: ComputerFrameId) =>
+    invoke<ComputerFramePreview>("get_computer_control_frame", { sessionId, frameId }),
   getBrowserDownloads: (workspaceId: string, limit = 50) =>
     invoke<BrowserDownloadSnapshot[]>("get_browser_downloads", { workspaceId, limit }),
   manageBrowserDownload: (request: BrowserDownloadActionRequest) =>
@@ -354,8 +481,34 @@ export const commands = {
   attestSandbox: () => invoke<SandboxRuntimeSnapshot>("attest_sandbox"),
   repairSandbox: (request: SandboxRepairRequest) =>
     invoke<SandboxRuntimeSnapshot>("repair_sandbox", { request }),
-  localHostCommand: (request: LocalHostCommandRequest) =>
-    invoke<LocalHostCommandResponse>("local_host_command", { request }),
+  listPlugins: () => invoke<InstalledPlugin[]>("list_installed_plugins"),
+  listPluginContributions: (pluginId: string | null = null) =>
+    invoke<InstalledContribution[]>("list_installed_plugin_contributions", { pluginId }),
+  getPluginContributionSurface: (pluginId: string, contributionId: string) =>
+    invoke<PluginContributionSurface>("get_plugin_contribution_surface", {
+      pluginId,
+      contributionId,
+    }),
+  checkPluginHealth: (pluginId: string) =>
+    invoke<InstalledPlugin | null>("check_plugin_health", { pluginId }),
+  getPluginPermissionDiff: (pluginId: string) =>
+    invoke<PluginPermissionDiff | null>("get_plugin_permission_diff", { pluginId }),
+  listPluginRevisions: (pluginId: string) =>
+    invoke<PluginRevisionRecord[]>("list_plugin_revisions", { pluginId }),
+  listPluginLifecycleJournal: (pluginId: string | null = null) =>
+    invoke<PluginLifecycleJournalRecord[]>("list_plugin_lifecycle_journal", { pluginId }),
+  listConnectorAccounts: () => invoke<ConnectorAccount[]>("list_connector_accounts"),
+  getConnectorDriverDescriptor: (pluginId: string, connectorId: string) =>
+    invoke<ConnectorDriverDescriptor>("get_connector_driver_descriptor", {
+      pluginId,
+      connectorId,
+    }),
+  getGatewayHealth: () => invoke<GatewayHealth>("get_gateway_health"),
+  listChannelProviderManifests: () =>
+    invoke<ChannelProviderManifest[]>("list_channel_provider_manifests"),
+  listChannelProviderHealth: () => invoke<ChannelProviderHealth[]>("list_channel_provider_health"),
+  listChannelProviderAccounts: () =>
+    invoke<ChannelProviderAccount[]>("list_channel_provider_accounts"),
   pinWorkbenchCheckout: (checkoutId: string, pinned: boolean) =>
     invoke<CheckoutRecord>("pin_workbench_checkout", { checkoutId, pinned }),
   cleanupWorkbenchCheckout: (checkoutId: string) =>

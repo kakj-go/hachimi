@@ -4,7 +4,7 @@ CREATE TABLE sessions (
     id TEXT PRIMARY KEY NOT NULL,
     context_kind TEXT NOT NULL CHECK (context_kind IN ('general', 'project', 'avatar')),
     context_json TEXT NOT NULL,
-    entry_profile TEXT NOT NULL CHECK (entry_profile IN ('workbench', 'pet_conversation', 'desktop_control')),
+    entry_profile TEXT NOT NULL CHECK (entry_profile IN ('workbench', 'pet_conversation')),
     title TEXT NOT NULL,
     archived INTEGER NOT NULL DEFAULT 0 CHECK (archived IN (0, 1)),
     pinned INTEGER NOT NULL DEFAULT 0 CHECK (pinned IN (0, 1)),

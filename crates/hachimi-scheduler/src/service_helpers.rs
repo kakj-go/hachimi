@@ -160,7 +160,3 @@ pub(super) async fn apply_stop_conditions(
     }
     Ok(())
 }
-
-pub(super) fn tracing_fallback(error: &SchedulerError) {
-    eprintln!("Hachimi scheduler tick failed: {error}");
-}

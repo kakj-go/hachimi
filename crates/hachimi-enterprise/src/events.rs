@@ -2,7 +2,7 @@ use aes::Aes256;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use cbc::cipher::{BlockDecryptMut, KeyIvInit, block_padding::Pkcs7};
 use hachimi_protocol::{
-    EnterpriseAttachmentMetadata, EnterpriseMention, EnterpriseMentionKind, EnterprisePlatform,
+    ChannelMention, ChannelMentionKind, IntegrationProviderId, RemoteMediaDescriptor,
 };
 use serde_json::Value;
 use sha1::{Digest as _, Sha1};
@@ -14,7 +14,7 @@ use crate::EnterpriseCredential;
 
 const MAX_EVENT_SKEW_MS: i64 = 5 * 60 * 1_000;
 const MAX_EVENT_TEXT_CHARS: usize = 32_000;
-const MAX_ATTACHMENTS: usize = 32;
+const MAX_ATTACHMENTS: usize = 8;
 const MAX_MENTIONS: usize = 128;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -40,7 +40,7 @@ pub enum EnterpriseEventAuth {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EnterpriseRawEvent {
-    pub platform: EnterprisePlatform,
+    pub platform: IntegrationProviderId,
     pub account_id: String,
     pub tenant_id: String,
     pub event_id: Option<String>,
@@ -49,15 +49,15 @@ pub struct EnterpriseRawEvent {
     pub thread: Option<String>,
     pub sender: Option<String>,
     pub text: Option<String>,
-    pub mentions: Vec<EnterpriseMention>,
-    pub attachments: Vec<EnterpriseAttachmentMetadata>,
+    pub mentions: Vec<ChannelMention>,
+    pub attachments: Vec<RemoteMediaDescriptor>,
     pub payload: Value,
     pub auth: EnterpriseEventAuth,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VerifiedEnterpriseEvent {
-    pub platform: EnterprisePlatform,
+    pub platform: IntegrationProviderId,
     pub account_id: String,
     pub tenant_id: String,
     pub event_id: String,
@@ -65,9 +65,10 @@ pub struct VerifiedEnterpriseEvent {
     pub peer: String,
     pub thread: String,
     pub sender: String,
+    pub group_chat: bool,
     pub text: String,
-    pub mentions: Vec<EnterpriseMention>,
-    pub attachments: Vec<EnterpriseAttachmentMetadata>,
+    pub mentions: Vec<ChannelMention>,
+    pub attachments: Vec<RemoteMediaDescriptor>,
     pub payload_hash: String,
     pub received_at_ms: i64,
 }
@@ -138,7 +139,7 @@ pub fn verify_enterprise_event(
             connection_id,
             transport_authenticated,
         } => {
-            if raw.platform != EnterprisePlatform::DingTalk {
+            if raw.platform != IntegrationProviderId::DingTalk {
                 return Err(EnterpriseEventError::CredentialMismatch);
             }
             verify_stream(
@@ -157,7 +158,7 @@ pub fn verify_enterprise_event(
             transport_authenticated,
             verification_token,
         } => {
-            if raw.platform != EnterprisePlatform::Feishu {
+            if raw.platform != IntegrationProviderId::Feishu {
                 return Err(EnterpriseEventError::CredentialMismatch);
             }
             verify_stream(
@@ -221,8 +222,8 @@ fn verify_wecom(
     nonce: String,
     signature: String,
     encrypted: String,
-    mut mentions: Vec<EnterpriseMention>,
-    attachments: Vec<EnterpriseAttachmentMetadata>,
+    mut mentions: Vec<ChannelMention>,
+    attachments: Vec<RemoteMediaDescriptor>,
     now_ms: i64,
 ) -> Result<VerifiedEnterpriseEvent, EnterpriseEventError> {
     let timestamp_seconds = timestamp
@@ -269,16 +270,21 @@ fn verify_wecom(
         .or_else(|| xml_tag(&xml, "MsgType"))
         .unwrap_or_else(|| "message".into());
     let sender = xml_tag(&xml, "FromUserName").unwrap_or_else(|| "unknown".into());
-    let peer = xml_tag(&xml, "ChatId")
-        .or_else(|| xml_tag(&xml, "ToUserName"))
-        .unwrap_or_else(|| sender.clone());
+    let chat_id = xml_tag(&xml, "ChatId").filter(|value| !value.is_empty());
+    let group_chat = chat_id.is_some();
+    let peer = chat_id.unwrap_or_else(|| sender.clone());
     let text = xml_tag(&xml, "Content").unwrap_or_default();
+    let attachments = if attachments.is_empty() {
+        attachments_from_wecom_xml(&xml, &event_type)
+    } else {
+        return Err(EnterpriseEventError::InvalidPayload);
+    };
     if mentions.is_empty() {
         mentions = mentions_from_wecom_xml(&xml, &text);
     }
     validate_normalized(&event_id, &event_type, &peer, &sender, &text)?;
     Ok(VerifiedEnterpriseEvent {
-        platform: EnterprisePlatform::Wecom,
+        platform: IntegrationProviderId::WecomApp,
         account_id,
         tenant_id,
         event_id,
@@ -286,12 +292,43 @@ fn verify_wecom(
         peer: peer.clone(),
         thread: peer,
         sender,
+        group_chat,
         text,
         mentions,
         attachments,
         payload_hash: digest_hex(xml.as_bytes()),
         received_at_ms: now_ms,
     })
+}
+
+fn attachments_from_wecom_xml(xml: &str, event_type: &str) -> Vec<RemoteMediaDescriptor> {
+    let Some(remote_id) = xml_tag(xml, "MediaId").filter(|value| !value.is_empty()) else {
+        return Vec::new();
+    };
+    let resource_key = match event_type {
+        "image" | "voice" | "video" | "file" => event_type,
+        _ => "file",
+    };
+    let mime_type = match resource_key {
+        "image" => Some("image/jpeg".into()),
+        "voice" => xml_tag(xml, "Format").and_then(|format| match format.as_str() {
+            "amr" => Some("audio/amr".into()),
+            "speex" => Some("audio/speex".into()),
+            _ => None,
+        }),
+        "video" => Some("video/mp4".into()),
+        _ => None,
+    };
+    vec![RemoteMediaDescriptor {
+        provider_id: IntegrationProviderId::WecomApp,
+        remote_id,
+        resource_key: Some(resource_key.into()),
+        file_name: xml_tag(xml, "FileName").filter(|value| !value.is_empty()),
+        mime_type,
+        declared_size_bytes: None,
+        content_hash: None,
+        download_required: true,
+    }]
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -311,7 +348,7 @@ fn verify_stream(
     if raw.tenant_id != credential.tenant_id() {
         return Err(EnterpriseEventError::TenantMismatch);
     }
-    if credential.platform() == EnterprisePlatform::Feishu
+    if credential.platform() == IntegrationProviderId::Feishu
         && let Some(expected) = credential.feishu_verification_token()
         && !constant_time_eq(
             expected.as_bytes(),
@@ -323,6 +360,7 @@ fn verify_stream(
     let event_id = raw.event_id.ok_or(EnterpriseEventError::InvalidPayload)?;
     let event_type = raw.event_type.ok_or(EnterpriseEventError::InvalidPayload)?;
     let peer = raw.peer.ok_or(EnterpriseEventError::InvalidPayload)?;
+    let group_chat = raw.thread.as_deref().is_some_and(|thread| thread != peer);
     let thread = raw.thread.unwrap_or_else(|| peer.clone());
     let sender = raw.sender.ok_or(EnterpriseEventError::InvalidPayload)?;
     let text = raw.text.unwrap_or_default();
@@ -339,6 +377,7 @@ fn verify_stream(
         peer,
         thread,
         sender,
+        group_chat,
         text,
         mentions: raw.mentions,
         attachments: raw.attachments,
@@ -419,7 +458,7 @@ fn validate_normalized(
     Ok(())
 }
 
-fn mentions_valid(mentions: &[EnterpriseMention]) -> bool {
+fn mentions_valid(mentions: &[ChannelMention]) -> bool {
     mentions.iter().all(|mention| {
         mention
             .target_id
@@ -429,15 +468,15 @@ fn mentions_valid(mentions: &[EnterpriseMention]) -> bool {
                 .display_text
                 .as_deref()
                 .is_none_or(|value| !value.is_empty() && value.chars().count() <= 512)
-            && (mention.kind == EnterpriseMentionKind::All || mention.target_id.is_some())
+            && (mention.kind == ChannelMentionKind::All || mention.target_id.is_some())
     })
 }
 
-fn mentions_from_wecom_xml(xml: &str, text: &str) -> Vec<EnterpriseMention> {
+fn mentions_from_wecom_xml(xml: &str, text: &str) -> Vec<ChannelMention> {
     let mut mentions = Vec::new();
     if text.contains("@all") || text.contains("@所有人") {
-        mentions.push(EnterpriseMention {
-            kind: EnterpriseMentionKind::All,
+        mentions.push(ChannelMention {
+            kind: ChannelMentionKind::All,
             target_id: None,
             display_text: Some("@all".into()),
         });
@@ -445,8 +484,8 @@ fn mentions_from_wecom_xml(xml: &str, text: &str) -> Vec<EnterpriseMention> {
     if let Some(user_id) = xml_tag(xml, "MentionedUserId")
         && !user_id.is_empty()
     {
-        mentions.push(EnterpriseMention {
-            kind: EnterpriseMentionKind::User,
+        mentions.push(ChannelMention {
+            kind: ChannelMentionKind::User,
             target_id: Some(user_id),
             display_text: None,
         });
@@ -546,13 +585,13 @@ mod tests {
         let (encrypted, signature) =
             wecom_fixture(token, &encoding_key, tenant, timestamp, nonce, xml);
         let credential = EnterpriseCredential::parse(&format!(
-            r#"{{"platform":"wecom","corpId":"{tenant}","corpSecret":"secret","agentId":1,"callbackToken":"{token}","encodingAesKey":"{encoding_key}"}}"#
+            r#"{{"providerId":"wecom_app","corpId":"{tenant}","corpSecret":"secret","agentId":"1","callbackToken":"{token}","encodingAesKey":"{encoding_key}"}}"#
         ))
         .expect("credential");
         let verified = verify_enterprise_event(
             &credential,
             EnterpriseRawEvent {
-                platform: EnterprisePlatform::Wecom,
+                platform: IntegrationProviderId::WecomApp,
                 account_id: "account-wecom".into(),
                 tenant_id: tenant.into(),
                 event_id: None,
@@ -580,12 +619,30 @@ mod tests {
             verified
                 .mentions
                 .iter()
-                .any(|mention| mention.kind == EnterpriseMentionKind::All)
+                .any(|mention| mention.kind == ChannelMentionKind::All)
         );
         assert!(verified.mentions.iter().any(|mention| {
-            mention.kind == EnterpriseMentionKind::User
+            mention.kind == ChannelMentionKind::User
                 && mention.target_id.as_deref() == Some("user-2")
         }));
+    }
+
+    #[test]
+    fn wecom_callback_media_uses_media_id_instead_of_arbitrary_url() {
+        let image = attachments_from_wecom_xml(
+            "<xml><MediaId><![CDATA[media-1]]></MediaId><PicUrl><![CDATA[http://example.invalid/image]]></PicUrl></xml>",
+            "image",
+        );
+        assert_eq!(image.len(), 1);
+        assert_eq!(image[0].remote_id, "media-1");
+        assert_eq!(image[0].resource_key.as_deref(), Some("image"));
+        assert_eq!(image[0].mime_type.as_deref(), Some("image/jpeg"));
+
+        let voice = attachments_from_wecom_xml(
+            "<xml><MediaId>voice-1</MediaId><Format>amr</Format></xml>",
+            "voice",
+        );
+        assert_eq!(voice[0].mime_type.as_deref(), Some("audio/amr"));
     }
 
     #[test]
@@ -605,7 +662,7 @@ mod tests {
             "HACHIMI_ECHO_OK",
         );
         let credential = EnterpriseCredential::parse(&format!(
-            r#"{{"platform":"wecom","corpId":"{tenant}","corpSecret":"secret","agentId":1,"callbackToken":"{token}","encodingAesKey":"{encoding_key}"}}"#
+            r#"{{"providerId":"wecom_app","corpId":"{tenant}","corpSecret":"secret","agentId":"1","callbackToken":"{token}","encodingAesKey":"{encoding_key}"}}"#
         ))
         .expect("credential");
         assert_eq!(
@@ -636,11 +693,11 @@ mod tests {
     #[test]
     fn stream_events_require_transport_auth_and_exact_tenant() {
         let credential = EnterpriseCredential::parse(
-            r#"{"platform":"ding_talk","appKey":"tenant","appSecret":"secret","agentId":null,"robotCode":"robot"}"#,
+            r#"{"providerId":"dingtalk","clientId":"tenant","clientSecret":"secret","agentId":null,"robotCode":"robot"}"#,
         )
         .expect("credential");
         let raw = EnterpriseRawEvent {
-            platform: EnterprisePlatform::DingTalk,
+            platform: IntegrationProviderId::DingTalk,
             account_id: "account".into(),
             tenant_id: "tenant".into(),
             event_id: Some("event".into()),
@@ -649,8 +706,8 @@ mod tests {
             thread: Some("thread".into()),
             sender: Some("sender".into()),
             text: Some("hello".into()),
-            mentions: vec![EnterpriseMention {
-                kind: EnterpriseMentionKind::User,
+            mentions: vec![ChannelMention {
+                kind: ChannelMentionKind::User,
                 target_id: Some("sender".into()),
                 display_text: Some("@sender".into()),
             }],

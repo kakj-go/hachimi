@@ -5,6 +5,7 @@ use std::{
     time::Duration,
 };
 
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use hachimi_protocol::{
     BrowserAction, BrowserFileToken, BrowserImportedDownload, BrowserNetworkPolicy,
     BrowserProfileKind, BrowserSessionId,
@@ -20,6 +21,7 @@ use crate::{
 };
 
 const EXTENSION_COMMAND_TIMEOUT: Duration = Duration::from_secs(45);
+const MAX_SCREENSHOT_BYTES: usize = 20 * 1024 * 1024;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -50,6 +52,10 @@ pub enum ExtensionCommandKind {
         expected_origin: String,
         action: BrowserAction,
     },
+    Resume {
+        task_tab_group: String,
+        network_policy: BrowserNetworkPolicy,
+    },
     TakeOver,
     Stop,
 }
@@ -72,6 +78,12 @@ pub struct BrokerObservationPayload {
     pub url: String,
     pub title: String,
     pub text: String,
+    #[serde(default)]
+    pub screenshot_base64: Option<String>,
+    #[serde(default)]
+    pub viewport_width: Option<u32>,
+    #[serde(default)]
+    pub viewport_height: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -292,13 +304,33 @@ impl BrowserBroker for ChromeExtensionBroker {
             let observation = result
                 .observation
                 .ok_or(BrowserHostError::ExtensionCommandInvalid)?;
+            let screenshot_png = observation
+                .screenshot_base64
+                .map(|encoded| {
+                    let bytes = BASE64_STANDARD
+                        .decode(encoded)
+                        .map_err(|_| BrowserHostError::ExtensionCommandInvalid)?;
+                    if bytes.len() > MAX_SCREENSHOT_BYTES
+                        || !bytes.starts_with(b"\x89PNG\r\n\x1a\n")
+                    {
+                        return Err(BrowserHostError::ExtensionCommandInvalid);
+                    }
+                    Ok(bytes)
+                })
+                .transpose()?;
+            let viewport = observation
+                .viewport_width
+                .zip(observation.viewport_height)
+                .filter(|(width, height)| {
+                    *width > 0 && *height > 0 && *width <= 32_768 && *height <= 32_768
+                });
             Ok(BrokerObservation {
                 url: observation.url,
                 title: observation.title,
                 text: observation.text,
-                screenshot_png: None,
-                viewport_width: None,
-                viewport_height: None,
+                screenshot_png,
+                viewport_width: viewport.map(|(width, _)| width),
+                viewport_height: viewport.map(|(_, height)| height),
             })
         })
     }
@@ -511,7 +543,47 @@ impl BrowserBroker for ChromeExtensionBroker {
                 .ok_or(BrowserHostError::SessionNotFound)?;
             self.request(identity, session_id.clone(), ExtensionCommandKind::TakeOver)
                 .await?;
-            self.state.lock().sessions.remove(&session_id);
+            Ok(())
+        })
+    }
+
+    fn resume<'a>(
+        &'a self,
+        session_id: &'a BrowserSessionId,
+        task_tab_group: &'a str,
+        network_policy: BrowserNetworkPolicy,
+    ) -> BrowserBrokerFuture<'a, ()> {
+        let session_id = session_id.clone();
+        let task_tab_group = task_tab_group.to_owned();
+        Box::pin(async move {
+            let identity = self
+                .state
+                .lock()
+                .sessions
+                .get(&session_id)
+                .map(|session| session.extension_identity.clone())
+                .ok_or(BrowserHostError::SessionNotFound)?;
+            let result = self
+                .request(
+                    identity.clone(),
+                    session_id.clone(),
+                    ExtensionCommandKind::Resume {
+                        task_tab_group,
+                        network_policy,
+                    },
+                )
+                .await?;
+            let owner_tab_id = result
+                .owner_tab_id
+                .filter(|tab_id| *tab_id > 0)
+                .ok_or(BrowserHostError::ExtensionCommandInvalid)?;
+            let mut state = self.state.lock();
+            let session = state
+                .sessions
+                .get_mut(&session_id)
+                .filter(|session| session.extension_identity == identity)
+                .ok_or(BrowserHostError::ExtensionCommandInvalid)?;
+            session.owner_tab_id = owner_tab_id;
             Ok(())
         })
     }
@@ -615,6 +687,11 @@ mod tests {
                         url: "https://example.com/page".into(),
                         title: "Example".into(),
                         text: "untrusted page text".into(),
+                        screenshot_base64: Some(
+                            BASE64_STANDARD.encode(b"\x89PNG\r\n\x1a\nobservation"),
+                        ),
+                        viewport_width: Some(1280),
+                        viewport_height: Some(720),
                     }),
                     action: None,
                     owner_tab_id: Some(42),
@@ -623,6 +700,11 @@ mod tests {
             .expect("complete observe");
         let observation = observe.await.expect("join").expect("observation");
         assert_eq!(observation.title, "Example");
+        assert_eq!(
+            observation.screenshot_png.as_deref(),
+            Some(&b"\x89PNG\r\n\x1a\nobservation"[..])
+        );
+        assert_eq!(observation.viewport_width, Some(1280));
 
         let rogue_download = root.path().join("rogue.txt");
         std::fs::write(&rogue_download, b"rogue tab download\n").expect("rogue download");
@@ -786,6 +868,93 @@ mod tests {
         assert_eq!(
             click.await.expect("join"),
             Err(BrowserHostError::ExtensionCommandInvalid)
+        );
+    }
+
+    #[tokio::test]
+    async fn takeover_preserves_the_session_for_an_explicit_resume() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let broker = ChromeExtensionBroker::new(root.path());
+        let token = broker.register_identity("extension-a").expect("token");
+        let session_id = BrowserSessionId::from("session-resume");
+        let start_broker = broker.clone();
+        let start_session = session_id.clone();
+        let start = tokio::spawn(async move {
+            start_broker
+                .start(
+                    &start_session,
+                    BrowserProfileKind::ChromeExtension,
+                    None,
+                    BrowserNetworkPolicy {
+                        rules: Vec::new(),
+                        deny_private_network_by_default: true,
+                        revision: 1,
+                    },
+                    Some("extension-a"),
+                )
+                .await
+        });
+        tokio::task::yield_now().await;
+        let command = broker.claim(&token).expect("claim").expect("start");
+        broker
+            .complete(&token, success(&command.command_id))
+            .expect("complete start");
+        start.await.expect("join").expect("started");
+
+        let takeover_broker = broker.clone();
+        let takeover_session = session_id.clone();
+        let takeover =
+            tokio::spawn(async move { takeover_broker.take_over(&takeover_session).await });
+        tokio::task::yield_now().await;
+        let command = broker.claim(&token).expect("claim").expect("takeover");
+        assert!(matches!(command.kind, ExtensionCommandKind::TakeOver));
+        broker
+            .complete(
+                &token,
+                ExtensionCommandResult {
+                    owner_tab_id: None,
+                    ..success(&command.command_id)
+                },
+            )
+            .expect("complete takeover");
+        takeover.await.expect("join").expect("taken over");
+
+        let resume_broker = broker.clone();
+        let resume_session = session_id.clone();
+        let resume = tokio::spawn(async move {
+            resume_broker
+                .resume(
+                    &resume_session,
+                    "Hachimi resumed",
+                    BrowserNetworkPolicy {
+                        rules: Vec::new(),
+                        deny_private_network_by_default: true,
+                        revision: 2,
+                    },
+                )
+                .await
+        });
+        tokio::task::yield_now().await;
+        let command = broker.claim(&token).expect("claim").expect("resume");
+        assert!(matches!(command.kind, ExtensionCommandKind::Resume { .. }));
+        broker
+            .complete(
+                &token,
+                ExtensionCommandResult {
+                    owner_tab_id: Some(84),
+                    ..success(&command.command_id)
+                },
+            )
+            .expect("complete resume");
+        resume.await.expect("join").expect("resumed");
+        assert_eq!(
+            broker
+                .state
+                .lock()
+                .sessions
+                .get(&session_id)
+                .map(|session| session.owner_tab_id),
+            Some(84)
         );
     }
 }

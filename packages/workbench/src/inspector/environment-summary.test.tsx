@@ -48,7 +48,10 @@ vi.mock("../git/workbench-git-controls", () => ({
 function environment(
   activity: WorkbenchEnvironmentSnapshot["activity"] = {
     kind: "browser",
+    lease_id: "browser-lease-1",
+    surface: "embedded",
     browser_tab_id: "browser-tab-1",
+    browser_session_id: null,
     run_id: "run-1",
     domain: "docs.example.com",
   },
@@ -171,7 +174,14 @@ describe("EnvironmentSummary", () => {
           diffBranches: ["main", "feature"],
         },
       ],
-      [{ kind: "browser" }],
+      [
+        {
+          kind: "browser",
+          leaseId: "browser-lease-1",
+          surface: "embedded",
+          browserTabId: "browser-tab-1",
+        },
+      ],
       [{ kind: "attachment", attachmentId: "attachment-1", name: "design.png" }],
       [
         {
@@ -206,7 +216,7 @@ describe("EnvironmentSummary", () => {
           remotePushEnabled={false}
           handoffBusy={false}
           handoffFailure={undefined}
-          onHandoff={async () => undefined}
+          onHandoff={() => Promise.resolve()}
           onOpenInspector={openInspector}
         />
       ),

@@ -8,7 +8,7 @@
 
 Hachimi 以 Codex 为统一 Agent 与权限模型主基线：当前选择性适配 Session/Turn/Item、Tool Orchestrator、`AGENTS.md`、Skills、MCP、Session/Thread 持久化恢复、Process、Workspace、Compaction 和 Sandbox 控制流，并以 Codex Browser/Chrome、Computer Use、Plugins/Connectors 和 Scheduled Tasks 的公开产品行为约束本地 Host。OpenClaw 只作为本地常驻 Gateway、Channel 插件与确定性消息路由、Cron/Heartbeat/事件触发、Task ledger、投递和后台任务重启 reconciliation 的深度参考；实际代码派生仍以来源登记为准。Compaction 仅把 Claude Code Best 用作 clean-room 行为参考。没有嵌入任一完整产品 Runtime、产品提示词或授权模型。
 
-当前实现边界已扩展到活动 Run 安全续跑、公开 OpenAI Chat/Responses/Embeddings、Remote Compaction/公开 summary、Multi-Agent、通用 Git/Forge、完整 Plugin lifecycle、企业 REST/事件安全层、DesktopControl 和完整 Browser/Computer 原语。本地代码完成不代表 alpha/GA 已发布；真实 Provider/Forge、外部企业组织与 Windows 证据仍按路线图阻塞。Memory 为远期，不采用 Codex Memory 方案。Hachimi 保持本机单用户运行，不增加登录或租户体系。
+当前实现边界已扩展到活动 Run 安全续跑、公开 OpenAI Chat/Responses/Embeddings、Remote Compaction/公开 summary、Multi-Agent、通用 Git/Forge、完整 Plugin lifecycle、企业 REST/事件安全层，以及统一 Workbench 会话中的 Browser/Computer 原语。本地代码完成不代表 alpha/GA 已发布；真实 Provider/Forge、外部企业组织与 Windows 证据仍按路线图阻塞。Memory 为远期，不采用 Codex Memory 方案。Hachimi 保持本机单用户运行，不增加登录或租户体系。
 
 ## 2. Kernel 结构
 
@@ -33,9 +33,9 @@ Kernel 不直接访问文件系统、Windows token、Keyring、浏览器 Profile
 
 ### Profile、Workload 与权限
 
-`EntryProfile::{Workbench,PetConversation,DesktopControl}` 和 Multi-Agent 子 Run 都进入唯一 `AgentRunExecutor`；`WorkloadKind::{General,Coding,Office}` 描述任务 overlay。Pet 的窗口/TTS/动作与 DesktopControl 的 Observe/Takeover 只是受控产品 Host，不拥有独立模型循环或 Grant。Profile、Skill/MCP/Host allowlist、Provider、Host readiness、Capability Grant、Mode 和 Run allowlist 求交集后才生成 ToolPlan。
+`EntryProfile::{Workbench,PetConversation}` 和 Multi-Agent 子 Run 都进入唯一 `AgentRunExecutor`；`WorkloadKind::{General,Coding,Office}` 描述任务 overlay。Pet 的窗口/TTS/动作和 Workbench 的 Browser/Computer Inspector 只是受控产品 Host，不拥有独立模型循环或 Grant。Profile、Skill/MCP/Host allowlist、Provider、Host readiness、Capability Grant、Mode 和 Run allowlist 求交集后才生成 ToolPlan。
 
-P4/P5/P7 的模型入口按产品边界固定：五个 `agent.*` 只进入 Workbench General/Coding/Office，Scheduled 还必须命中持久化精确 Tool allowlist；企业附件只进入 General/Office；四个 Git/Forge 工具只进入交互式 Project Coding。Pet 与 DesktopControl 均不注册这些工具。Plan mode 对 Multi-Agent 只保留 wait/collect，对 Git/Forge 只保留 remotes/query，并继续移除全部 mutation。
+P4/P5/P7 的模型入口按产品边界固定：五个 `agent.*` 只进入 Workbench General/Coding/Office，Scheduled 还必须命中持久化精确 Tool allowlist；企业附件只进入 General/Office；四个 Git/Forge 工具只进入交互式 Project Coding。Pet 不注册这些工具。Plan mode 对 Multi-Agent 只保留 wait/collect，对 Git/Forge 只保留 remotes/query，并继续移除全部 mutation。
 
 WorkloadResolver 优先级固定为：用户 override → 显式且分类一致 Skill → Built-in Office Skill activation → Prompt/冲突 metadata 的 strict 分类 → General。分类、Prompt、Skill、MCP、Compaction 和模型输出永远不能产生授权。
 
@@ -138,15 +138,17 @@ Tauri 负责 DTO、系统对话框和 `agent:events` bridge；Scheduler 使用 `
 
 Release 默认开启 Workspace、MCP、Scheduler 与本地 Host 框架，但默认开启不产生权限；Browser/Chrome 配对、Computer Act、Connector account 和外部 ingress 仍需用户显式授权。Tool 逐次与 Policy、Grant、Approval、Sandbox、Host readiness 和 Run allowlist 求交集。
 
-控制协议统一为 v29。`0019`–`0022` 分别对齐 Run recovery、AgentTask lease/reconciliation、企业 mention/附件 Artifact 和 Desktop run generation。Desktop 与 Gateway 共享文件迁移锁、SQLite Online Backup、manifest/SHA-256、最近三份保留和失败回滚。八类 `RuntimeFeatureSet` 开关只影响入口、工具注册和命令执行，不跳过 migration；停用命令统一返回 `feature_disabled` 和 feature key。
+控制协议统一为 v31。`0019`–`0031` 依次覆盖 Run recovery、AgentTask lease/reconciliation、企业内容、Workbench 环境、持久 CEF Workspace/Tab/Lease、统一 Host policy、企业平台账户编排与官方内置 Channel 绑定。Desktop 与 Gateway 共享文件迁移锁、SQLite Online Backup、manifest/SHA-256、最近三份保留和失败回滚。`RuntimeFeatureSet` 开关只影响入口、工具注册和命令执行，不跳过 migration；停用命令统一返回 `feature_disabled` 和 feature key。
+
+设置的信息架构只保留“平台集成”产品页：正式 Provider catalog 仅包含企业微信、钉钉和飞书，一个逻辑账户关联可独立启停的 Connector/API 与 Channel/消息能力，凭据正文只进入 Windows Credential Manager。Gateway 不暴露总开关，而由首个/最后一个消息账户自动注册、启动、停止和注销。测试 Provider 不进入正式 UI；本地应用访问继续属于 Computer Use。
 
 ## 11. P1–P8 已落地架构与后置验证
 
 - **P1–P4**：durable Run recovery、三类 Provider、Remote context 和父子 Agent Task 已接入统一 Store/Executor/Projector；`agent.spawn/send/wait/cancel/collect` 已通过实际 Workbench ToolPlan 和独立 Desktop E2E 调用，Scheduled 只允许持久化精确 allowlist；真实 OpenAI Gate仍环境阻塞。
 - **P5**：标准 Git Remote、Agent 原生 `git.remotes/git.push/forge.change.query/forge.change.mutate` 与四类 Forge adapter 已接入共享 Host、side-effect ledger、Credential Manager/GCM/SSH、expected revision/OID 和审批 [ref:GITHUB-API-20260730] [ref:GITLAB-API-20260730] [ref:GITEE-API-20260730] [ref:GITEA-FORGEJO-API-20260730]。mutation 响应未知时只做有界远端查询，并按 source/target、可见字段、状态和 commit OID 精确证明结果；无法证明仍保持 `indeterminate`，不会重放。supplied Approval 重新匹配 Session/Run generation/Tool call/参数哈希/解析主体/一次性 scope/有效期，不能复用旧审批完成 merge；source ref 仍是不可变前置条件。真实 staging Gate 环境阻塞。
-- **P6**：完整 contribution lifecycle 和跨产品 reconciliation 已接入；扩展只允许本地/内置/管理员 Bundle，不建设 Marketplace。
+- **P6**：完整 contribution lifecycle 和跨产品 reconciliation 已接入；扩展只允许本地/内置/管理员 Bundle，不建设 Marketplace。Plugin Runtime 保留给官方集成，用户管理界面与第三方 Bundle 产品化后续开放。
 - **P7**：三个企业 REST driver、事件认证、Channel contribution、EventSource、transport supervisor、结构化 mention、General/Office 可达的 25 MiB 受控附件下载和 Artifact fencing 已接入 [ref:WECOM-API-20260730] [ref:DINGTALK-STREAM-SDK-GO-20260731] [ref:FEISHU-SDK-GO-20260731]；Scheduled account/action/revision fencing 与 `NeedsAttention` 已复用同一验证器；三个外部企业组织 Gate 真实环境待验证，外部组织标识不构成 Hachimi 租户。
-- **P8**：DesktopControl Session/UI、Observe-first、接管/恢复和 Browser/Computer 原语已接入；终态 Run 必须 fresh generation，真实 Windows UI smoke 环境阻塞。
+- **P8**：统一 Workbench Host Session、Browser/Computer Inspector、Observe-first、接管/恢复和双 Browser lease 原语已接入；终态 Run 必须 fresh generation，真实 Windows UI smoke 环境阻塞。
 - **Office**：产品边界是本地 DOCX/XLSX/PPTX/PDF 和文件整理，通过 Skills、普通 Tool/MCP、Artifact 与格式验证完成，不增加在线 Office 服务依赖或专用 Agent Kernel。
 
 Memory 不进入本轮架构；后续独立立项时再确定生命周期、隐私、检索和来源边界。
@@ -157,6 +159,6 @@ Memory 不进入本轮架构；后续独立立项时再确定生命周期、隐�
 
 系统 Gate 包含两个缺一不可的隔离 Windows Runner：standard-user Runner 必须确认账户不属于 `BUILTIN\\Administrators` 且进程未提升，使用真实发布的 0.2.0 NSIS 升级到同一不可变候选，验证 per-user setup/repair、Workspace/Exec/MCP、Pet、Browser、Computer、本地 Plugin/Connector/Gateway、Scheduled continuation 和不跳过的 Desktop E2E；elevated Runner 必须下载同一候选并验证 linked-worktree ACL/双 lease、handle sentinel、restricted Office/MCP、真实 Scheduler soak、系统 Toast、便携恢复和高权限边界。两个 Gate 都上传脱敏 `summary.json`、同一候选 SHA-256 和必要日志，失败不自动重试。
 
-`v0.2.1` 已取消，升级基线固定为 `v0.2.0`。源码版本为 `0.3.0-alpha.8`；候选状态只由对应 clean commit 的 immutable manifest/Windows run artifact 记录，真实 Gate、tag 和 GitHub Release 尚未完成；alpha.1–alpha.7 未发布并由 alpha.8 合并取代。许可、候选哈希、来源哈希、五类 summary 聚合、候选 Gateway callback、故障代理 reconciliation、三类包解包后许可校验和不可覆盖 tag 的发布架构见 `docs/RELEASE_GATES.md`。管理员窗口、UAC 和安全桌面只验证稳定拒绝，不进入控制范围。
+`v0.2.1` 已取消，升级基线固定为 `v0.2.0`。源码版本为 `0.3.0-alpha.8`；候选状态只由对应 clean commit 的 immutable manifest/Windows run artifact 记录，真实 Gate、tag 和 GitHub Release 尚未完成；alpha.1–alpha.7 未发布并由 alpha.8 合并取代。许可、候选哈希、来源哈希、六类 summary 聚合、候选 Gateway callback、故障代理 reconciliation、三类包解包后许可校验和不可覆盖 tag 的发布架构见 `docs/RELEASE_GATES.md`。管理员窗口、UAC 和安全桌面只验证稳定拒绝，不进入控制范围。
 
 路线图唯一状态见 `docs/ROADMAP.md`；来源登记唯一权威见 `docs/HARNESS_AGENT_SOURCE_PROVENANCE.md`。

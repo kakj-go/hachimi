@@ -120,21 +120,6 @@ const definitions = {
         ],
       },
       {
-        id: "enterprise_real_wecom_gateway_callback",
-        cargo: [
-          "test",
-          "-p",
-          "hachimi-gateway",
-          "--test",
-          "staging_enterprise_gateway",
-          "--",
-          "--ignored",
-          "--exact",
-          "--nocapture",
-          "--test-threads=1",
-        ],
-      },
-      {
         id: "enterprise_real_tenant_conformance",
         cargo: [
           "test",
@@ -142,6 +127,34 @@ const definitions = {
           "hachimi-enterprise",
           "--test",
           "staging_enterprise",
+          "--",
+          "--ignored",
+          "--exact",
+          "--nocapture",
+          "--test-threads=1",
+        ],
+      },
+    ],
+  },
+  channels: {
+    configEnv: "HACHIMI_STAGING_CHANNELS_CONFIG",
+    checks: [
+      {
+        id: "channels_deterministic_provider_conformance",
+        cargo: ["test", "-p", "hachimi-channel-providers"],
+      },
+      {
+        id: "channels_deterministic_gateway_recovery",
+        cargo: ["test", "-p", "hachimi-gateway"],
+      },
+      {
+        id: "channels_real_five_provider_conformance",
+        cargo: [
+          "test",
+          "-p",
+          "hachimi-gateway",
+          "--test",
+          "staging_channels",
           "--",
           "--ignored",
           "--exact",

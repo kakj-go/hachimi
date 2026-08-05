@@ -9,6 +9,7 @@ members = [
   "crates/hachimi-browser",
   "crates/hachimi-cef-host",
   "crates/hachimi-capabilities",
+  "crates/hachimi-channel-providers",
   "crates/hachimi-computer",
   "crates/hachimi-control-plane",
   "crates/hachimi-core",
@@ -51,7 +52,7 @@ chrono-tz = "=0.10.4"
 keyring = { version = "=4.1.5", default-features = false, features = ["v1"] }
 parking_lot = "=0.12.5"
 cpal = "=0.17.3"
-reqwest = { version = "=0.13.4", default-features = false, features = ["blocking", "json", "query", "rustls", "stream"] }
+reqwest = { version = "=0.13.4", default-features = false, features = ["blocking", "json", "multipart", "query", "rustls", "stream"] }
 rfd = { version = "=0.17.2", default-features = false, features = ["common-controls-v6"] }
 rodio = { version = "=0.22.2", default-features = false, features = ["playback", "wav"] }
 sherpa-onnx = { version = "=1.13.4", default-features = false, features = ["shared"] }
@@ -64,6 +65,7 @@ specta-serde = "=0.0.12"
 specta-typescript = "=0.0.12"
 tauri = "=2.11.5"
 tauri-plugin-notification = "=2.3.3"
+tauri-plugin-single-instance = "=2.4.3"
 tauri-runtime = "=2.11.3"
 tracing-subscriber = { version = "=0.3.23", features = ["env-filter"] }
 tempfile = "=3.27.0"
@@ -86,6 +88,7 @@ gltf = { version = "=1.4.1", default-features = false, features = ["names", "ext
 base64 = "=0.22.1"
 aes = "=0.8.4"
 cbc = "=0.1.2"
+md5 = "=0.8.0"
 cef = "=151.2.0+151.3.14"
 hmac = "=0.12.1"
 sha1 = "=0.10.7"
@@ -100,6 +103,7 @@ hachimi-audit = { path = "crates/hachimi-audit" }
 hachimi-avatar = { path = "crates/hachimi-avatar" }
 hachimi-browser = { path = "crates/hachimi-browser" }
 hachimi-capabilities = { path = "crates/hachimi-capabilities" }
+hachimi-channel-providers = { path = "crates/hachimi-channel-providers" }
 hachimi-computer = { path = "crates/hachimi-computer" }
 hachimi-control-plane = { path = "crates/hachimi-control-plane" }
 hachimi-core = { path = "crates/hachimi-core" }

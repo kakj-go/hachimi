@@ -4,6 +4,10 @@ import {
   type BrowserWorkspaceMutation,
   type BrowserPermissionDecision,
   type EmbeddedBrowserPermissionRequest,
+  type BrowserAutomationLease,
+  type BrowserHostSettings,
+  type HostAccessDecision,
+  type HostAccessRequestRecord,
   type WorkbenchSessionSnapshot,
 } from "@hachimi/contracts";
 import {
@@ -23,9 +27,28 @@ import {
   TextField,
   X,
 } from "@hachimi/ui";
-import { For, Show, createEffect, createMemo, createSignal, onCleanup, onMount } from "solid-js";
+import {
+  For,
+  Show,
+  createEffect,
+  createMemo,
+  createSignal,
+  onCleanup,
+  onMount,
+  untrack,
+} from "solid-js";
 
 import type { BrowserShortcutRequested, WorkbenchCommandPort } from "../workbench-command-port";
+
+type BrowserHostAccessRequest = HostAccessRequestRecord & {
+  target: Extract<HostAccessRequestRecord["target"], { kind: "browser" }>;
+};
+
+function isBrowserHostAccessRequest(
+  request: HostAccessRequestRecord,
+): request is BrowserHostAccessRequest {
+  return request.target.kind === "browser";
+}
 
 function mutationKey() {
   return globalThis.crypto?.randomUUID?.() ?? `browser-${Date.now()}-${Math.random()}`;
@@ -47,14 +70,254 @@ function surfaceBlocked() {
   );
 }
 
-export function BrowserInspector(props: {
+function ExternalBrowserInspector(props: {
   snapshot: WorkbenchSessionSnapshot;
   commandPort: WorkbenchCommandPort;
   locale: "zh-CN" | "en-US";
-  browserTabId?: string;
-  initialUrl?: string;
+  leaseId?: string;
+  browserSessionId?: string;
 }) {
   const zh = () => props.locale === "zh-CN";
+  const initialLease = () =>
+    props.snapshot.browserAutomationLeases.find(
+      (candidate) =>
+        candidate.surface === "external_chrome" &&
+        (!props.leaseId || candidate.id === props.leaseId),
+    );
+  const [lease, setLease] = createSignal<BrowserAutomationLease | undefined>(initialLease());
+  const [settings, setSettings] = createSignal<BrowserHostSettings>();
+  const [requests, setRequests] = createSignal<HostAccessRequestRecord[]>([]);
+  const [busy, setBusy] = createSignal(false);
+  const [failure, setFailure] = createSignal<string>();
+  const observation = createMemo(() => {
+    const current = lease();
+    return current
+      ? props.snapshot.externalBrowserObservations.find(
+          (candidate) => candidate.leaseId === current.id,
+        )?.observation
+      : undefined;
+  });
+  const browserSession = createMemo(() => {
+    const observedSessionId = observation()?.browserSessionId ?? props.browserSessionId;
+    return props.snapshot.browserSessions.find((candidate) => candidate.id === observedSessionId);
+  });
+  const pendingRequest = createMemo(() =>
+    requests().find(
+      (request): request is BrowserHostAccessRequest =>
+        request.status === "pending" &&
+        isBrowserHostAccessRequest(request) &&
+        request.target.surface === "external_chrome",
+    ),
+  );
+  const screenshot = createMemo(() => {
+    const current = observation();
+    return current?.screenshotBase64 && current.screenshotMimeType
+      ? `data:${current.screenshotMimeType};base64,${current.screenshotBase64}`
+      : undefined;
+  });
+
+  async function resolveAccess(decision: HostAccessDecision) {
+    const request = pendingRequest();
+    if (!request) return;
+    setBusy(true);
+    setFailure(undefined);
+    try {
+      const resolved = await props.commandPort.resolveHostAccessRequest({
+        requestId: request.id,
+        decision,
+      });
+      setRequests((current) =>
+        current.map((candidate) => (candidate.id === resolved.id ? resolved : candidate)),
+      );
+    } catch (error) {
+      setFailure(commandFailure(error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function changeControl(action: "take_over" | "resume" | "stop") {
+    const current = lease();
+    if (!current) return;
+    setBusy(true);
+    setFailure(undefined);
+    try {
+      if (action === "take_over") {
+        setLease(await props.commandPort.takeOverBrowserAutomation(current.id));
+      } else if (action === "resume") {
+        setLease(await props.commandPort.resumeBrowserAutomation(current.id));
+      } else {
+        setLease(await props.commandPort.stopBrowserAutomation(current.id));
+      }
+    } catch (error) {
+      setFailure(commandFailure(error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  onMount(() => {
+    void props.commandPort
+      .getBrowserHostSettings()
+      .then(setSettings)
+      .catch((error) => setFailure(commandFailure(error).message));
+    void props.commandPort
+      .listHostAccessRequests(props.snapshot.session.id)
+      .then(setRequests)
+      .catch(() => undefined);
+  });
+
+  createEffect(() => {
+    const next = initialLease();
+    if (next) setLease(next);
+    setRequests(props.snapshot.hostAccessRequests);
+  });
+
+  return (
+    <div class="browser-inspector browser-external-inspector">
+      <div class="browser-external-header">
+        <div>
+          <strong>
+            {observation()?.title || browserSession()?.currentUrl || "External Chrome"}
+          </strong>
+          <span>{observation()?.url || browserSession()?.currentUrl}</span>
+        </div>
+        <span data-status={settings()?.latestPairing?.confirmed ? "healthy" : "unavailable"}>
+          {settings()?.latestPairing?.confirmed
+            ? zh()
+              ? "扩展已配对"
+              : "Extension paired"
+            : zh()
+              ? "扩展未配对"
+              : "Extension unavailable"}
+        </span>
+      </div>
+      <Show
+        when={screenshot()}
+        fallback={
+          <div class="browser-external-empty">
+            {zh() ? "等待 Agent 获取页面观察..." : "Waiting for an Agent observation..."}
+          </div>
+        }
+      >
+        {(source) => (
+          <img
+            class="browser-external-screenshot"
+            src={source()}
+            alt={observation()?.title || "External Chrome observation"}
+          />
+        )}
+      </Show>
+      <Show when={pendingRequest()}>
+        {(request) => (
+          <div class="browser-permission-prompt">
+            <div>
+              <ShieldAlert size={18} />
+              <span>
+                <strong>{zh() ? "Agent 请求访问网站" : "Agent requests site access"}</strong>
+                <small>{request().target.origin}</small>
+              </span>
+            </div>
+            <div class="browser-permission-actions">
+              <Button disabled={busy()} onClick={() => void resolveAccess("allow_once")}>
+                {zh() ? "允许一次" : "Allow once"}
+              </Button>
+              <Button disabled={busy()} onClick={() => void resolveAccess("allow_session")}>
+                {zh() ? "本会话允许" : "Allow session"}
+              </Button>
+              <Button
+                disabled={busy() || request().target.private_network}
+                onClick={() => void resolveAccess("always_allow")}
+              >
+                {zh() ? "始终允许" : "Always allow"}
+              </Button>
+              <Button disabled={busy()} onClick={() => void resolveAccess("always_block")}>
+                {zh() ? "始终阻止" : "Always block"}
+              </Button>
+              <Button variant="danger" disabled={busy()} onClick={() => void resolveAccess("deny")}>
+                {zh() ? "拒绝" : "Deny"}
+              </Button>
+            </div>
+          </div>
+        )}
+      </Show>
+      <Show when={failure()}>
+        {(message) => <p class="browser-inspector-error">{message()}</p>}
+      </Show>
+      <Show when={lease()}>
+        {(current) => (
+          <div class="browser-automation-control" data-status={current().status}>
+            <span>{current().status}</span>
+            <Show when={current().status === "active"}>
+              <Button
+                data-testid="external-browser-take-over"
+                disabled={busy()}
+                onClick={() => void changeControl("take_over")}
+              >
+                <Hand size={14} />
+                {zh() ? "接管" : "Take over"}
+              </Button>
+            </Show>
+            <Show when={current().status === "suspended"}>
+              <Button
+                data-testid="external-browser-resume-agent"
+                disabled={busy()}
+                onClick={() => void changeControl("resume")}
+              >
+                <Play size={14} />
+                {zh() ? "恢复 Agent" : "Resume Agent"}
+              </Button>
+            </Show>
+            <Show when={current().status === "active" || current().status === "suspended"}>
+              <Button
+                variant="danger"
+                data-testid="external-browser-stop-agent"
+                disabled={busy()}
+                onClick={() => void changeControl("stop")}
+              >
+                <Square size={13} />
+                {zh() ? "停止 Agent 控制" : "Stop Agent control"}
+              </Button>
+            </Show>
+          </div>
+        )}
+      </Show>
+    </div>
+  );
+}
+
+type BrowserInspectorProps = {
+  snapshot: WorkbenchSessionSnapshot;
+  commandPort: WorkbenchCommandPort;
+  locale: "zh-CN" | "en-US";
+  leaseId?: string;
+  surfaceKind?: "embedded" | "external_chrome";
+  browserTabId?: string;
+  browserSessionId?: string;
+  initialUrl?: string;
+};
+
+export function BrowserInspector(props: BrowserInspectorProps) {
+  return (
+    <Show
+      when={props.surfaceKind === "external_chrome"}
+      fallback={<EmbeddedBrowserInspector {...props} />}
+    >
+      <ExternalBrowserInspector
+        snapshot={props.snapshot}
+        commandPort={props.commandPort}
+        locale={props.locale}
+        {...(props.leaseId ? { leaseId: props.leaseId } : {})}
+        {...(props.browserSessionId ? { browserSessionId: props.browserSessionId } : {})}
+      />
+    </Show>
+  );
+}
+
+function EmbeddedBrowserInspector(props: BrowserInspectorProps) {
+  const zh = () => props.locale === "zh-CN";
+  const commandPort = untrack(() => props.commandPort);
+  const sessionId = untrack(() => props.snapshot.session.id);
   const [workspace, setWorkspace] = createSignal<BrowserWorkspace>();
   const [address, setAddress] = createSignal(props.initialUrl ?? "");
   const [addressFocused, setAddressFocused] = createSignal(false);
@@ -62,6 +325,7 @@ export function BrowserInspector(props: {
   const [permissionRequests, setPermissionRequests] = createSignal<
     EmbeddedBrowserPermissionRequest[]
   >([]);
+  const [hostAccessRequests, setHostAccessRequests] = createSignal<HostAccessRequestRecord[]>([]);
   const [busy, setBusy] = createSignal(false);
   const [failure, setFailure] = createSignal<string>();
   const [runtimeFailure, setRuntimeFailure] = createSignal<string>();
@@ -78,9 +342,17 @@ export function BrowserInspector(props: {
   const pendingPermission = createMemo(() =>
     permissionRequests().find((request) => request.status === "pending"),
   );
+  const pendingHostAccess = createMemo(() =>
+    hostAccessRequests().find(
+      (request): request is BrowserHostAccessRequest =>
+        request.status === "pending" &&
+        isBrowserHostAccessRequest(request) &&
+        request.target.surface === "embedded",
+    ),
+  );
 
   function acceptWorkspace(next: BrowserWorkspace) {
-    if (next.ownerSessionId !== props.snapshot.session.id) return;
+    if (next.ownerSessionId !== sessionId) return;
     setWorkspace((current) => (!current || next.revision >= current.revision ? next : current));
   }
 
@@ -88,13 +360,10 @@ export function BrowserInspector(props: {
     setBusy(true);
     setFailure(undefined);
     try {
-      const next = await props.commandPort.openBrowserWorkspace(
-        props.snapshot.session.id,
-        props.initialUrl ?? null,
-      );
+      const next = await commandPort.openBrowserWorkspace(sessionId, props.initialUrl ?? null);
       acceptWorkspace(next);
-      void props.commandPort
-        .listEmbeddedBrowserPermissionRequests(props.snapshot.session.id)
+      void commandPort
+        .listEmbeddedBrowserPermissionRequests(sessionId)
         .then((requests) =>
           setPermissionRequests((current) => [
             ...requests,
@@ -103,6 +372,10 @@ export function BrowserInspector(props: {
             ),
           ]),
         )
+        .catch(() => undefined);
+      void commandPort
+        .listHostAccessRequests(sessionId)
+        .then(setHostAccessRequests)
         .catch(() => undefined);
       const requestedTab = props.browserTabId;
       if (
@@ -132,7 +405,7 @@ export function BrowserInspector(props: {
     setBusy(true);
     setFailure(undefined);
     try {
-      const next = await props.commandPort.mutateBrowserWorkspace({
+      const next = await commandPort.mutateBrowserWorkspace({
         workspaceId: base.id,
         expectedRevision: base.revision,
         idempotencyKey: mutationKey(),
@@ -171,7 +444,7 @@ export function BrowserInspector(props: {
     if (!current || !tab) return;
     layoutRevision += 1;
     const isVisible = visible && document.visibilityState !== "hidden" && !surfaceBlocked();
-    void props.commandPort
+    void commandPort
       .updateBrowserSurfaceLayout({
         workspaceId: current.id,
         tabId: tab.id,
@@ -212,22 +485,24 @@ export function BrowserInspector(props: {
   }
 
   function newTab(url: string | null = null) {
+    if (busy()) return;
     void mutate({ kind: "new_tab", url }).catch(() => undefined);
   }
 
   function closeTab(tabId: string) {
+    if (busy()) return;
     void mutate({ kind: "close_tab", tab_id: tabId }).catch(() => undefined);
   }
 
   function activateTab(tabId: string) {
-    if (tabId === workspace()?.activeTabId) return;
+    if (busy() || tabId === workspace()?.activeTabId) return;
     void mutate({ kind: "activate_tab", tab_id: tabId }).catch(() => undefined);
   }
 
   function queryHistory(value: string) {
     if (historyTimer !== undefined) window.clearTimeout(historyTimer);
     historyTimer = window.setTimeout(() => {
-      void props.commandPort
+      void commandPort
         .getBrowserHistory(value, 8)
         .then((entries) => setHistory(entries))
         .catch(() => setHistory([]));
@@ -240,13 +515,50 @@ export function BrowserInspector(props: {
     setBusy(true);
     setFailure(undefined);
     try {
-      const resolved = await props.commandPort.resolveEmbeddedBrowserPermission({
+      const resolved = await commandPort.resolveEmbeddedBrowserPermission({
         requestId: request.id,
         decision,
       });
       setPermissionRequests((current) =>
         current.map((candidate) => (candidate.id === resolved.id ? resolved : candidate)),
       );
+    } catch (error) {
+      setFailure(commandFailure(error).message);
+    } finally {
+      setBusy(false);
+      scheduleLayout();
+    }
+  }
+
+  async function resolveHostAccess(decision: HostAccessDecision) {
+    const request = pendingHostAccess();
+    if (!request) return;
+    setBusy(true);
+    setFailure(undefined);
+    try {
+      const resolved = await commandPort.resolveHostAccessRequest({
+        requestId: request.id,
+        decision,
+      });
+      setHostAccessRequests((current) =>
+        current.map((candidate) => (candidate.id === resolved.id ? resolved : candidate)),
+      );
+    } catch (error) {
+      setFailure(commandFailure(error).message);
+    } finally {
+      setBusy(false);
+      scheduleLayout();
+    }
+  }
+
+  async function stopAutomation() {
+    const lease = workspace()?.automationLease;
+    if (!lease) return;
+    setBusy(true);
+    setFailure(undefined);
+    try {
+      await commandPort.stopBrowserAutomation(lease.id);
+      await openWorkspace();
     } catch (error) {
       setFailure(commandFailure(error).message);
     } finally {
@@ -299,25 +611,32 @@ export function BrowserInspector(props: {
     scheduleLayout();
   });
 
+  createEffect(() => {
+    setHostAccessRequests(props.snapshot.hostAccessRequests);
+  });
+
   onMount(() => {
     void openWorkspace();
     const unlisteners: Array<() => void> = [];
-    void props.commandPort
+    const browserStoppedLabel = untrack(() =>
+      zh() ? "内置浏览器已停止" : "Embedded browser stopped",
+    );
+    void commandPort
       .onBrowserTabStateChange((next) => acceptWorkspace(next))
       .then((unlisten) => unlisteners.push(unlisten));
-    void props.commandPort
+    void commandPort
       .onBrowserWorkspaceChange((event) => {
-        if (event.ownerSessionId === props.snapshot.session.id && !workspace()) {
-          void openWorkspace();
+        if (event.ownerSessionId === sessionId && !untrack(workspace)) {
+          void untrack(() => openWorkspace());
         }
       })
       .then((unlisten) => unlisteners.push(unlisten));
-    void props.commandPort
+    void commandPort
       .onBrowserShortcutRequested(nativeShortcut)
       .then((unlisten) => unlisteners.push(unlisten));
-    void props.commandPort
+    void commandPort
       .onBrowserPermissionRequired?.((event) => {
-        if (event.request.ownerSessionId !== props.snapshot.session.id) return;
+        if (event.request.ownerSessionId !== sessionId) return;
         setPermissionRequests((current) => [
           event.request,
           ...current.filter((candidate) => candidate.id !== event.request.id),
@@ -325,12 +644,10 @@ export function BrowserInspector(props: {
         scheduleLayout();
       })
       ?.then((unlisten) => unlisteners.push(unlisten));
-    void props.commandPort
+    void commandPort
       .onBrowserRuntimeCrash((event) => {
-        setRuntimeFailure(
-          event.message || (zh() ? "内置浏览器已停止" : "Embedded browser stopped"),
-        );
-        reportLayout(false);
+        setRuntimeFailure(event.message || browserStoppedLabel);
+        untrack(() => reportLayout(false));
       })
       .then((unlisten) => unlisteners.push(unlisten));
 
@@ -374,6 +691,7 @@ export function BrowserInspector(props: {
                   class="browser-inspector-tab-select"
                   title={tabLabel(tab, zh())}
                   data-testid={`browser-tab-${tab.id}`}
+                  disabled={busy()}
                   onClick={() => activateTab(tab.id)}
                 >
                   <Globe size={14} />
@@ -384,6 +702,7 @@ export function BrowserInspector(props: {
                   aria-label={zh() ? "关闭标签页" : "Close tab"}
                   title={zh() ? "关闭标签页" : "Close tab"}
                   data-testid={`browser-tab-close-${tab.id}`}
+                  disabled={busy()}
                   onClick={() => closeTab(tab.id)}
                 >
                   <X size={13} />
@@ -512,7 +831,7 @@ export function BrowserInspector(props: {
           onClick={() => {
             const tab = activeTab();
             if (tab)
-              void props.commandPort
+              void commandPort
                 .openSystemBrowser(tab.url)
                 .catch((error) => setFailure(commandFailure(error).message));
           }}
@@ -557,7 +876,7 @@ export function BrowserInspector(props: {
               </Button>
               <Button
                 data-testid="browser-permission-allow-persisted"
-                disabled={busy()}
+                disabled={busy() || request().privateNetwork}
                 onClick={() => void resolvePermission("allow_persisted")}
               >
                 {zh() ? "始终允许" : "Always allow"}
@@ -567,6 +886,44 @@ export function BrowserInspector(props: {
                 variant="danger"
                 disabled={busy()}
                 onClick={() => void resolvePermission("deny")}
+              >
+                {zh() ? "拒绝" : "Deny"}
+              </Button>
+            </div>
+          </div>
+        )}
+      </Show>
+
+      <Show when={pendingHostAccess()}>
+        {(request) => (
+          <div class="browser-permission-prompt" data-native-surface-blocker="true">
+            <div>
+              <ShieldAlert size={18} />
+              <span>
+                <strong>{zh() ? "Agent 请求访问此网站" : "Agent requests site access"}</strong>
+                <small>{request().target.origin}</small>
+              </span>
+            </div>
+            <div class="browser-permission-actions">
+              <Button disabled={busy()} onClick={() => void resolveHostAccess("allow_once")}>
+                {zh() ? "允许一次" : "Allow once"}
+              </Button>
+              <Button disabled={busy()} onClick={() => void resolveHostAccess("allow_session")}>
+                {zh() ? "本会话允许" : "Allow session"}
+              </Button>
+              <Button
+                disabled={busy() || request().target.private_network}
+                onClick={() => void resolveHostAccess("always_allow")}
+              >
+                {zh() ? "始终允许" : "Always allow"}
+              </Button>
+              <Button disabled={busy()} onClick={() => void resolveHostAccess("always_block")}>
+                {zh() ? "始终阻止" : "Always block"}
+              </Button>
+              <Button
+                variant="danger"
+                disabled={busy()}
+                onClick={() => void resolveHostAccess("deny")}
               >
                 {zh() ? "拒绝" : "Deny"}
               </Button>
@@ -612,6 +969,15 @@ export function BrowserInspector(props: {
                 {zh() ? "接管" : "Take over"}
               </Button>
             </Show>
+            <Button
+              variant="danger"
+              data-testid="browser-stop-agent"
+              disabled={busy()}
+              onClick={() => void stopAutomation()}
+            >
+              <Square size={13} />
+              {zh() ? "停止 Agent 控制" : "Stop Agent control"}
+            </Button>
           </div>
         )}
       </Show>

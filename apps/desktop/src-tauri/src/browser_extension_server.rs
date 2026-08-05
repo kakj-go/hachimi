@@ -1,8 +1,10 @@
-use std::{io, sync::Arc};
+use std::{io, path::Path, sync::Arc, time::Duration};
 
 use hachimi_browser::{BrowserHost, ChromeExtensionBroker, ExtensionCommandResult};
+use hachimi_protocol::{RuntimeComponentId, RuntimeComponentState};
 use serde::Deserialize;
 use serde_json::json;
+use tauri::{AppHandle, Emitter, Manager};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 const EXTENSION_ADDRESS: &str = "127.0.0.1:42372";
@@ -10,16 +12,92 @@ const MAX_REQUEST_BYTES: usize = 256 * 1024;
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct PairRequest {
-    nonce: String,
+struct AuthorizationRequest {
     extension_identity: String,
 }
 
+pub(super) fn create_browser_host(
+    app: AppHandle,
+    data_dir: &Path,
+    enabled: bool,
+    supervisor: crate::runtime_supervisor::RuntimeSupervisor,
+) -> Arc<BrowserHost> {
+    let broker = Arc::new(ChromeExtensionBroker::new(
+        data_dir.join("browser/extension-files"),
+    ));
+    let browser = Arc::new(BrowserHost::with_broker(
+        Arc::new(hachimi_browser::SystemBrowserClock),
+        broker.clone(),
+    ));
+    if enabled {
+        supervisor.update(
+            RuntimeComponentId::BrowserExtension,
+            RuntimeComponentState::Degraded,
+            Some("browser_extension_not_connected"),
+            false,
+            0,
+            None,
+        );
+        let runtime_browser = Arc::clone(&browser);
+        tauri::async_runtime::spawn(async move {
+            let retry = supervisor.retry_signal(RuntimeComponentId::BrowserExtension);
+            let shutdown = supervisor.shutdown_token();
+            let mut attempt = 0_u32;
+            loop {
+                if let Err(error) = run(
+                    app.clone(),
+                    Arc::clone(&runtime_browser),
+                    Arc::clone(&broker),
+                    supervisor.clone(),
+                )
+                .await
+                {
+                    attempt = attempt.saturating_add(1);
+                    tracing::warn!(%error, attempt, "Browser extension broker stopped");
+                    supervisor.update(
+                        RuntimeComponentId::BrowserExtension,
+                        RuntimeComponentState::Degraded,
+                        Some("browser_extension_broker_unavailable"),
+                        true,
+                        attempt,
+                        None,
+                    );
+                }
+                tokio::select! {
+                    () = shutdown.cancelled() => break,
+                    () = tokio::time::sleep(broker_retry_delay(attempt)) => {}
+                    () = retry.notified() => attempt = 0,
+                }
+            }
+        });
+    } else {
+        supervisor.update(
+            RuntimeComponentId::BrowserExtension,
+            RuntimeComponentState::Degraded,
+            Some("browser_extension_not_connected"),
+            false,
+            0,
+            None,
+        );
+    }
+    browser
+}
+
 pub(super) async fn run(
+    app: AppHandle,
     browser: Arc<BrowserHost>,
     broker: Arc<ChromeExtensionBroker>,
+    supervisor: crate::runtime_supervisor::RuntimeSupervisor,
 ) -> Result<(), io::Error> {
     let listener = tokio::net::TcpListener::bind(EXTENSION_ADDRESS).await?;
+    supervisor.update(
+        RuntimeComponentId::BrowserExtension,
+        RuntimeComponentState::Degraded,
+        Some("browser_extension_not_connected"),
+        false,
+        0,
+        None,
+    );
     tracing::info!(
         address = EXTENSION_ADDRESS,
         "Chrome extension broker listening"
@@ -31,16 +109,26 @@ pub(super) async fn run(
         }
         let browser = Arc::clone(&browser);
         let broker = Arc::clone(&broker);
+        let app = app.clone();
         tokio::spawn(async move {
-            if let Err(error) = handle(stream, browser, broker).await {
+            if let Err(error) = handle(stream, app, browser, broker).await {
                 tracing::debug!(%error, "Chrome extension request failed");
             }
         });
     }
 }
 
+fn broker_retry_delay(attempt: u32) -> Duration {
+    Duration::from_secs(match attempt {
+        0 | 1 => 1,
+        2 => 2,
+        _ => 5,
+    })
+}
+
 async fn handle(
     mut stream: tokio::net::TcpStream,
+    app: AppHandle,
     browser: Arc<BrowserHost>,
     broker: Arc<ChromeExtensionBroker>,
 ) -> Result<(), io::Error> {
@@ -57,8 +145,8 @@ async fn handle(
         return write_json(&mut stream, 405, &json!({"error":"method_not_allowed"})).await;
     }
     match request.path.as_str() {
-        "/v1/pair" => {
-            let input: PairRequest = match serde_json::from_slice(&request.body) {
+        "/v1/pair/request" => {
+            let input: AuthorizationRequest = match serde_json::from_slice(&request.body) {
                 Ok(input) => input,
                 Err(_) => {
                     return write_json(&mut stream, 400, &json!({"error":"invalid_json"})).await;
@@ -75,37 +163,50 @@ async fn handle(
                 )
                 .await;
             }
-            let pairing =
-                match browser.confirm_extension_pairing(&input.nonce, &input.extension_identity) {
+            let mut pairing =
+                match browser.request_extension_authorization(&input.extension_identity) {
                     Ok(pairing) => pairing,
-                    Err(error) => {
-                        return write_json(
-                            &mut stream,
-                            403,
-                            &json!({"error":"pairing_rejected","message":error.to_string()}),
-                        )
-                        .await;
+                    Err(_) => {
+                        return write_json(&mut stream, 403, &json!({"error":"identity_rejected"}))
+                            .await;
                     }
                 };
-            let token = match broker.register_identity(&input.extension_identity) {
-                Ok(token) => token,
-                Err(error) => {
-                    return write_json(
-                        &mut stream,
-                        403,
-                        &json!({"error":"identity_rejected","message":error.to_string()}),
-                    )
-                    .await;
-                }
-            };
+            if !pairing.confirmed
+                && crate::browser_extension_trust::is_trusted(&input.extension_identity)
+            {
+                pairing = browser
+                    .approve_extension_authorization(&pairing.id)
+                    .map_err(|error| io::Error::other(error.to_string()))?;
+            }
+            if !pairing.confirmed {
+                app.state::<crate::DesktopState>()
+                    .runtime_supervisor
+                    .update(
+                        RuntimeComponentId::BrowserExtension,
+                        RuntimeComponentState::Degraded,
+                        Some("browser_extension_authorization_required"),
+                        false,
+                        0,
+                        None,
+                    );
+                let _ = app.emit("browser-extension-authorization-requested", &pairing);
+                return write_json(
+                    &mut stream,
+                    202,
+                    &json!({"pairingId":pairing.id,"status":"authorization_required"}),
+                )
+                .await;
+            }
+            let token = broker
+                .register_identity(&input.extension_identity)
+                .map_err(|error| io::Error::other(error.to_string()))?;
+            app.state::<crate::DesktopState>()
+                .runtime_supervisor
+                .ready(RuntimeComponentId::BrowserExtension);
             write_json(
                 &mut stream,
                 200,
-                &json!({
-                    "token": token,
-                    "pairingId": pairing.id,
-                    "expiresAtMs": pairing.expires_at_ms,
-                }),
+                &json!({"token":token,"pairingId":pairing.id,"expiresAtMs":pairing.expires_at_ms}),
             )
             .await
         }

@@ -2,7 +2,6 @@ import type { WorkbenchRoute } from "@hachimi/contracts";
 
 export const WORKBENCH_ROUTES: readonly WorkbenchRoute[] = [
   "home",
-  "desktop-control",
   "settings/general",
   "settings/appearance",
   "settings/llm",
@@ -11,7 +10,11 @@ export const WORKBENCH_ROUTES: readonly WorkbenchRoute[] = [
   "settings/voice",
   "settings/skills",
   "settings/mcp",
-  "settings/local-hosts",
+  "settings/integrations",
+  "settings/browser",
+  "settings/computer-use",
+  "settings/runtime-security",
+  "settings/diagnostics",
   "developer/motion-lab",
 ];
 

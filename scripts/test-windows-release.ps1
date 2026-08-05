@@ -63,6 +63,7 @@ function Get-SourceRegistryDigests {
         openai = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $Root "docs\references\openai\registry.json")).Hash.ToLowerInvariant()
         forge = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $Root "docs\references\forge\registry.json")).Hash.ToLowerInvariant()
         enterprise = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $Root "docs\references\enterprise\registry.json")).Hash.ToLowerInvariant()
+        channels = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $Root "docs\references\channels\registry.json")).Hash.ToLowerInvariant()
     }
 }
 
