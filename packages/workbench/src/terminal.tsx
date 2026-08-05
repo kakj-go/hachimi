@@ -325,6 +325,10 @@ function TerminalSession(props: {
 
   onMount(() => {
     const record = untrack(() => props.record);
+    const commandPort = untrack(() => props.commandPort);
+    const onRecord = untrack(() => props.onRecord);
+    const onFailure = untrack(() => props.onFailure);
+    const initiallyActive = untrack(() => props.active);
     if (!host) return;
     let disposed = false;
     let pollTimer: number | undefined;
@@ -353,10 +357,10 @@ function TerminalSession(props: {
     terminal.open(host);
 
     const send = terminal.onData((data) => {
-      if (!isLive(props.record)) return;
+      if (!isLive(record)) return;
       writeChain = writeChain
         .then(() =>
-          props.commandPort.writeProcessStdin({
+          commandPort.writeProcessStdin({
             context: directUserMutationContext(),
             processSessionId: record.id,
             writeId: crypto.randomUUID(),
@@ -364,11 +368,11 @@ function TerminalSession(props: {
             closeStdin: false,
           }),
         )
-        .catch((error) => props.onFailure(commandFailure(error).message));
+        .catch((error) => onFailure(commandFailure(error).message));
     });
 
     const resize = () => {
-      if (disposed || !terminal || !fit || !isLive(props.record)) return;
+      if (disposed || !terminal || !fit || !isLive(record)) return;
       try {
         fit.fit();
       } catch {
@@ -378,19 +382,19 @@ function TerminalSession(props: {
       const key = `${size.rows}:${size.cols}`;
       if (size.rows < 1 || size.cols < 1 || key === previousSize) return;
       previousSize = key;
-      void props.commandPort
+      void commandPort
         .resizeProcess({
           context: directUserMutationContext(),
           processSessionId: record.id,
           size,
         })
-        .catch((error) => props.onFailure(commandFailure(error).message));
+        .catch((error) => onFailure(commandFailure(error).message));
     };
     const observer = typeof ResizeObserver === "undefined" ? undefined : new ResizeObserver(resize);
     observer?.observe(host);
     queueMicrotask(() => {
       resize();
-      if (props.active) terminal?.focus();
+      if (initiallyActive) terminal?.focus();
     });
 
     let afterSequence = 0;
@@ -403,7 +407,7 @@ function TerminalSession(props: {
         waitMs: 100,
       };
       try {
-        const snapshot = await props.commandPort.readProcess(request);
+        const snapshot = await commandPort.readProcess(request);
         if (disposed) return;
         afterSequence = snapshot.nextSequence;
         for (const chunk of snapshot.chunks.toSorted(
@@ -411,11 +415,11 @@ function TerminalSession(props: {
         )) {
           terminal?.write(decodeBase64(chunk.deltaBase64));
         }
-        props.onRecord(snapshot.process);
+        onRecord(snapshot.process);
         if (!snapshot.closed) pollTimer = window.setTimeout(() => void poll(), 80);
       } catch (error) {
         if (!disposed) {
-          props.onFailure(commandFailure(error).message);
+          onFailure(commandFailure(error).message);
           pollTimer = window.setTimeout(() => void poll(), 500);
         }
       }

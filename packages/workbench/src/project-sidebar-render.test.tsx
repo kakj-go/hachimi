@@ -7,10 +7,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ProjectSidebar } from "./project-sidebar";
 import { PROJECT_SIDEBAR_EXPANSION_STORAGE_KEY } from "./state/project-sidebar-expansion";
 
-function className(props: { class?: string; classList?: Record<string, boolean | undefined> }) {
+function className(baseClass?: string, classList?: Record<string, boolean | undefined>) {
   return [
-    props.class,
-    ...Object.entries(props.classList ?? {})
+    baseClass,
+    ...Object.entries(classList ?? {})
       .filter(([, enabled]) => enabled)
       .map(([name]) => name),
   ]
@@ -20,7 +20,7 @@ function className(props: { class?: string; classList?: Record<string, boolean |
 
 function icon(name: string) {
   return (props: { class?: string; classList?: Record<string, boolean | undefined> }) => (
-    <i data-icon={name} class={className(props)} />
+    <i data-icon={name} class={className(props.class, props.classList)} />
   );
 }
 
@@ -54,7 +54,7 @@ vi.mock("@hachimi/ui", () => ({
     onClick?: () => void;
   }) => (
     <button
-      class={className(props)}
+      class={className(props.class, props.classList)}
       disabled={props.disabled}
       title={props.title}
       aria-label={props["aria-label"]}

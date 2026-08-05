@@ -345,14 +345,18 @@ async fn serve_loopback(
         let _ = gateway
             .finish_delivery(
                 &delivery.id,
-                written.is_ok(),
-                false,
-                written.is_err(),
-                written
-                    .as_ref()
-                    .err()
-                    .map(|_| "loopback_delivery_write_failed"),
-                None,
+                hachimi_gateway::ChannelDeliveryOutcome {
+                    delivered: written.is_ok(),
+                    retryable: false,
+                    indeterminate: written.is_err(),
+                    result_code: if written.is_ok() {
+                        "delivered"
+                    } else {
+                        "loopback_delivery_write_failed"
+                    }
+                    .into(),
+                    provider_receipt: None,
+                },
                 now_ms(),
             )
             .await;

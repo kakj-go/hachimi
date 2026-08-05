@@ -620,6 +620,26 @@ export const hostSettingsMocks = {
   list_integration_providers: integrationMocks.providers,
   list_enterprise_integrations: integrationMocks.accounts,
   get_gateway_health: integrationMocks.gatewayHealth,
+  get_runtime_health: {
+    components: [
+      "gateway",
+      "internal_resources",
+      "mcp",
+      "scheduler",
+      "browser_extension",
+      "cef",
+      "computer_use",
+    ].map((component) => ({
+      component,
+      state: "ready",
+      errorCode: null,
+      retryable: false,
+      attempt: 0,
+      nextRetryAtMs: null,
+      updatedAtMs: 1_783_273_200_000,
+    })),
+    revision: 1,
+  },
   get_channel_access_policy: {
     accountId: "wecom-app-support",
     dmPolicy: "pairing",

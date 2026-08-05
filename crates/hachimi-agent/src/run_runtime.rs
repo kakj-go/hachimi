@@ -9,7 +9,10 @@ use hachimi_protocol::{
     SandboxCapabilityReport, SessionContextBinding, SessionId, SessionRecord, SkillId,
     TranscriptItem, TranscriptItemKind, WorkloadKind,
 };
-use hachimi_storage::{AgentStore, AgentStoreError, ChannelRunBindingInput, CreatedAgentRun};
+use hachimi_storage::{
+    AgentStore, AgentStoreError, ChannelAgentRunCreateInput, ChannelRunBindingInput,
+    CreatedAgentRun,
+};
 use parking_lot::Mutex;
 use thiserror::Error;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
@@ -215,15 +218,15 @@ impl AgentRunFactory {
         };
         Ok(self
             .store
-            .create_channel_agent_run_idempotent(
-                &request.principal,
-                &request.idempotency_key,
-                &session,
-                &run,
-                &user_item,
-                &request.attachment_ids,
-                &binding,
-            )
+            .create_channel_agent_run_idempotent(ChannelAgentRunCreateInput {
+                principal: &request.principal,
+                idempotency_key: &request.idempotency_key,
+                proposed_session: &session,
+                proposed_run: &run,
+                proposed_user_item: &user_item,
+                attachment_ids: &request.attachment_ids,
+                binding: &binding,
+            })
             .await?)
     }
 

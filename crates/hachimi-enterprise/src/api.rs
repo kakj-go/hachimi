@@ -95,6 +95,29 @@ pub enum EnterpriseMediaKind {
     File,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct EnterpriseDownloadInput<'a> {
+    pub account_id: &'a str,
+    pub credential: &'a EnterpriseCredential,
+    pub event_id: &'a str,
+    pub remote_id: &'a str,
+    pub resource_key: Option<&'a str>,
+    pub destination: &'a Path,
+    pub max_bytes: u64,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct EnterpriseMediaInput<'a> {
+    pub account_id: &'a str,
+    pub credential: &'a EnterpriseCredential,
+    pub target: &'a EnterpriseMessageTarget,
+    pub kind: EnterpriseMediaKind,
+    pub file_name: &'a str,
+    pub mime_type: &'a str,
+    pub bytes: &'a [u8],
+    pub idempotency_key: &'a str,
+}
+
 #[derive(Clone)]
 pub struct EnterpriseApiClient {
     client: Client,
@@ -233,14 +256,17 @@ impl EnterpriseApiClient {
 
     pub async fn download_attachment_to(
         &self,
-        account_id: &str,
-        credential: &EnterpriseCredential,
-        event_id: &str,
-        remote_id: &str,
-        resource_key: Option<&str>,
-        destination: &Path,
-        max_bytes: u64,
+        input: EnterpriseDownloadInput<'_>,
     ) -> Result<EnterpriseDownloadReceipt, EnterpriseApiError> {
+        let EnterpriseDownloadInput {
+            account_id,
+            credential,
+            event_id,
+            remote_id,
+            resource_key,
+            destination,
+            max_bytes,
+        } = input;
         validate_account_id(account_id)?;
         validate_remote_identity(event_id)?;
         validate_remote_identity(remote_id)?;
@@ -597,15 +623,18 @@ impl EnterpriseApiClient {
 
     pub async fn send_media(
         &self,
-        account_id: &str,
-        credential: &EnterpriseCredential,
-        target: &EnterpriseMessageTarget,
-        kind: EnterpriseMediaKind,
-        file_name: &str,
-        mime_type: &str,
-        bytes: &[u8],
-        idempotency_key: &str,
+        input: EnterpriseMediaInput<'_>,
     ) -> Result<Value, EnterpriseApiError> {
+        let EnterpriseMediaInput {
+            account_id,
+            credential,
+            target,
+            kind,
+            file_name,
+            mime_type,
+            bytes,
+            idempotency_key,
+        } = input;
         validate_account_id(account_id)?;
         validate_media(target, file_name, mime_type, bytes, idempotency_key)?;
         let platform = credential.platform();
@@ -1303,16 +1332,16 @@ mod tests {
             group: false,
         };
         client
-            .send_media(
-                "account-1",
-                &credential,
-                &target,
-                EnterpriseMediaKind::Image,
-                "image.png",
-                "image/png",
-                b"image-bytes",
-                "run-1:item-1:0",
-            )
+            .send_media(EnterpriseMediaInput {
+                account_id: "account-1",
+                credential: &credential,
+                target: &target,
+                kind: EnterpriseMediaKind::Image,
+                file_name: "image.png",
+                mime_type: "image/png",
+                bytes: b"image-bytes",
+                idempotency_key: "run-1:item-1:0",
+            })
             .await
             .expect("media delivery");
         server.join().expect("server");

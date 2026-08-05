@@ -339,9 +339,10 @@ describe("Hachimi Agent product tool reachability", () => {
   it("exposes the Codex-style branch and commit controls while a Project Run is active", async () => {
     await startProjectTask("[desktop-e2e:schedule-wait] keep the Project Run active for Git UI");
     await waitForRun("running", 30_000);
-    if (!(await isDisplayed('[data-testid="workbench-git-branch-trigger"]'))) {
+    const summaryPin = await $('[data-testid="workbench-pin-summary"]');
+    const pinClasses = (await summaryPin.getAttribute("class"))?.split(/\s+/) ?? [];
+    if (!pinClasses.includes("active"))
       await clickWhenReady('[data-testid="workbench-pin-summary"]');
-    }
     await waitForDisplayed('[data-testid="workbench-git-branch-trigger"]', 20_000);
     await clickWhenReady('[data-testid="workbench-git-branch-trigger"]');
     await waitForDisplayed(".workbench-git-popover.branch", 20_000);

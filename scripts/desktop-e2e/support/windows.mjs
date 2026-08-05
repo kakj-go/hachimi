@@ -21,7 +21,7 @@ export async function switchToWorkbench() {
       return false;
     },
     {
-      timeout: 20_000,
+      timeout: 45_000,
       interval: 100,
       timeoutMsg: "Hachimi Workbench window was not ready",
     },

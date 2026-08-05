@@ -6,8 +6,9 @@ use hachimi_channel_providers::{
     WecomAiBotTransport, WecomAiBotTransportEvent,
 };
 use hachimi_enterprise::{
-    EnterpriseApiClient, EnterpriseCredential, EnterpriseEventAuth, EnterpriseMediaKind,
-    EnterpriseMessageTarget, EnterpriseRawEvent, spawn_enterprise_stream, verify_enterprise_event,
+    EnterpriseApiClient, EnterpriseCredential, EnterpriseEventAuth, EnterpriseMediaInput,
+    EnterpriseMediaKind, EnterpriseMessageTarget, EnterpriseRawEvent, spawn_enterprise_stream,
+    verify_enterprise_event,
 };
 use hachimi_protocol::{ChannelMessagePart, IntegrationProviderId};
 use serde::Deserialize;
@@ -242,16 +243,16 @@ async fn send_enterprise_media(
             .file_name()
             .and_then(|value| value.to_str())
             .expect("fixture file name");
-        api.send_media(
-            &connection.account_id,
+        api.send_media(EnterpriseMediaInput {
+            account_id: &connection.account_id,
             credential,
             target,
             kind,
             file_name,
-            mime,
-            &bytes,
-            &format!("{}:{key}", connection.account_id),
-        )
+            mime_type: mime,
+            bytes: &bytes,
+            idempotency_key: &format!("{}:{key}", connection.account_id),
+        })
         .await
         .expect("enterprise media delivery");
     }

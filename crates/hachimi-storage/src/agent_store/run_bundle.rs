@@ -29,19 +29,33 @@ pub struct ChannelRunBindingInput {
     pub timestamp_ms: i64,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct ChannelAgentRunCreateInput<'a> {
+    pub principal: &'a str,
+    pub idempotency_key: &'a str,
+    pub proposed_session: &'a SessionRecord,
+    pub proposed_run: &'a RunRecord,
+    pub proposed_user_item: &'a TranscriptItem,
+    pub attachment_ids: &'a [AttachmentId],
+    pub binding: &'a ChannelRunBindingInput,
+}
+
 impl AgentStore {
     /// Creates the Channel Session/Run/User Item, updates its deterministic
     /// binding, and records the ingress Run in one SQLite transaction.
     pub async fn create_channel_agent_run_idempotent(
         &self,
-        principal: &str,
-        idempotency_key: &str,
-        proposed_session: &SessionRecord,
-        proposed_run: &RunRecord,
-        proposed_user_item: &TranscriptItem,
-        attachment_ids: &[AttachmentId],
-        binding: &ChannelRunBindingInput,
+        input: ChannelAgentRunCreateInput<'_>,
     ) -> Result<CreatedAgentRun, AgentStoreError> {
+        let ChannelAgentRunCreateInput {
+            principal,
+            idempotency_key,
+            proposed_session,
+            proposed_run,
+            proposed_user_item,
+            attachment_ids,
+            binding,
+        } = input;
         let mut transaction = self.pool.begin().await?;
         if let Some(existing_id) = sqlx::query_scalar::<_, String>(
             "SELECT resource_id FROM idempotency_records WHERE principal = ? AND method = 'run.start' AND idempotency_key = ?",
@@ -758,15 +772,15 @@ mod tests {
         seed_ingress(&store, "message-1").await;
         let (session, run, item) = proposed("1");
         let created = store
-            .create_channel_agent_run_idempotent(
-                "channel",
-                "event-1",
-                &session,
-                &run,
-                &item,
-                &[],
-                &binding("message-1"),
-            )
+            .create_channel_agent_run_idempotent(ChannelAgentRunCreateInput {
+                principal: "channel",
+                idempotency_key: "event-1",
+                proposed_session: &session,
+                proposed_run: &run,
+                proposed_user_item: &item,
+                attachment_ids: &[],
+                binding: &binding("message-1"),
+            })
             .await
             .expect("created");
         assert_eq!(created.session.id, session.id);
@@ -794,15 +808,15 @@ mod tests {
 
         let (duplicate_session, duplicate_run, duplicate_item) = proposed("duplicate");
         let duplicate = store
-            .create_channel_agent_run_idempotent(
-                "channel",
-                "event-1",
-                &duplicate_session,
-                &duplicate_run,
-                &duplicate_item,
-                &[],
-                &binding("message-1"),
-            )
+            .create_channel_agent_run_idempotent(ChannelAgentRunCreateInput {
+                principal: "channel",
+                idempotency_key: "event-1",
+                proposed_session: &duplicate_session,
+                proposed_run: &duplicate_run,
+                proposed_user_item: &duplicate_item,
+                attachment_ids: &[],
+                binding: &binding("message-1"),
+            })
             .await
             .expect("idempotent");
         assert_eq!(duplicate.run.id, run.id);
@@ -815,30 +829,30 @@ mod tests {
         seed_ingress(&store, "message-1").await;
         let (first_session, first_run, first_item) = proposed("1");
         let first = store
-            .create_channel_agent_run_idempotent(
-                "channel",
-                "event-1",
-                &first_session,
-                &first_run,
-                &first_item,
-                &[],
-                &binding("message-1"),
-            )
+            .create_channel_agent_run_idempotent(ChannelAgentRunCreateInput {
+                principal: "channel",
+                idempotency_key: "event-1",
+                proposed_session: &first_session,
+                proposed_run: &first_run,
+                proposed_user_item: &first_item,
+                attachment_ids: &[],
+                binding: &binding("message-1"),
+            })
             .await
             .expect("first");
         complete_run(&store, &first.run.id).await;
         seed_ingress(&store, "message-2").await;
         let (second_session, second_run, second_item) = proposed("2");
         let second = store
-            .create_channel_agent_run_idempotent(
-                "channel",
-                "event-2",
-                &second_session,
-                &second_run,
-                &second_item,
-                &[],
-                &binding("message-2"),
-            )
+            .create_channel_agent_run_idempotent(ChannelAgentRunCreateInput {
+                principal: "channel",
+                idempotency_key: "event-2",
+                proposed_session: &second_session,
+                proposed_run: &second_run,
+                proposed_user_item: &second_item,
+                attachment_ids: &[],
+                binding: &binding("message-2"),
+            })
             .await
             .expect("second");
         assert_eq!(second.session.id, first.session.id);
@@ -858,15 +872,15 @@ mod tests {
         seed_ingress(&store, "message-3").await;
         let (third_session, third_run, third_item) = proposed("3");
         let third = store
-            .create_channel_agent_run_idempotent(
-                "channel",
-                "event-3",
-                &third_session,
-                &third_run,
-                &third_item,
-                &[],
-                &binding("message-3"),
-            )
+            .create_channel_agent_run_idempotent(ChannelAgentRunCreateInput {
+                principal: "channel",
+                idempotency_key: "event-3",
+                proposed_session: &third_session,
+                proposed_run: &third_run,
+                proposed_user_item: &third_item,
+                attachment_ids: &[],
+                binding: &binding("message-3"),
+            })
             .await
             .expect("third");
         assert_eq!(third.session.id, third_session.id);
@@ -880,15 +894,15 @@ mod tests {
         let (session, run, item) = proposed("rollback");
         assert!(
             store
-                .create_channel_agent_run_idempotent(
-                    "channel",
-                    "event-rollback",
-                    &session,
-                    &run,
-                    &item,
-                    &[],
-                    &binding("missing"),
-                )
+                .create_channel_agent_run_idempotent(ChannelAgentRunCreateInput {
+                    principal: "channel",
+                    idempotency_key: "event-rollback",
+                    proposed_session: &session,
+                    proposed_run: &run,
+                    proposed_user_item: &item,
+                    attachment_ids: &[],
+                    binding: &binding("missing"),
+                })
                 .await
                 .is_err()
         );

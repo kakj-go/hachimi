@@ -635,7 +635,7 @@ impl DesktopAppDomainHandler {
                     )
                     .await
                     .map_err(domain_error("computer_control_state_failed"))?;
-                Ok(ComputerAppResponse::Frame(frame))
+                Ok(ComputerAppResponse::Frame(Box::new(frame)))
             }
             ComputerAppRequest::Act { run_id, request } => {
                 self.require_feature(self.features.computer_control, "computer_control_disabled")?;

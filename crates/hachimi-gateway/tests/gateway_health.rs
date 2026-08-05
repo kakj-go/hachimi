@@ -1,4 +1,4 @@
-use hachimi_gateway::{CLAIM_TTL_MS, GatewayHost};
+use hachimi_gateway::{CLAIM_TTL_MS, ChannelDeliveryOutcome, GatewayHost, ReactiveDeliverySource};
 use hachimi_protocol::{
     ChannelAccessPolicyUpsert, ChannelAccountState, ChannelActor, ChannelAuthorizationTarget,
     ChannelChatKind, ChannelConversationAddress, ChannelDmPolicy, ChannelEventKey, ChannelGrant,
@@ -198,10 +198,12 @@ async fn delivery_is_typed_idempotent_and_retryable() {
         .expect("reactive ingress");
     let first = gateway
         .enqueue_reactive_delivery(
-            &incoming.event_key,
+            ReactiveDeliverySource {
+                event_key: &incoming.event_key,
+                run_id: None,
+                final_item_id: "assistant-1",
+            },
             address(),
-            None,
-            "assistant-1",
             0,
             payload.clone(),
             10,
@@ -210,10 +212,12 @@ async fn delivery_is_typed_idempotent_and_retryable() {
         .expect("enqueue");
     let replay = gateway
         .enqueue_reactive_delivery(
-            &incoming.event_key,
+            ReactiveDeliverySource {
+                event_key: &incoming.event_key,
+                run_id: None,
+                final_item_id: "assistant-1",
+            },
             address(),
-            None,
-            "assistant-1",
             0,
             payload,
             10,
@@ -227,7 +231,17 @@ async fn delivery_is_typed_idempotent_and_retryable() {
         .expect("claim")
         .expect("delivery");
     let retry = gateway
-        .finish_delivery(&claimed.id, false, true, false, Some("offline"), None, 10)
+        .finish_delivery(
+            &claimed.id,
+            ChannelDeliveryOutcome {
+                delivered: false,
+                retryable: true,
+                indeterminate: false,
+                result_code: "offline".into(),
+                provider_receipt: None,
+            },
+            10,
+        )
         .await
         .expect("retry");
     assert_eq!(retry.status, DeliveryAttemptStatus::RetryScheduled);
@@ -258,10 +272,12 @@ async fn queued_reply_is_blocked_when_its_authorization_revision_changes() {
         .expect("authorized ingress");
     let delivery = gateway
         .enqueue_reactive_text_delivery(
-            &connected.event_key,
+            ReactiveDeliverySource {
+                event_key: &connected.event_key,
+                run_id: None,
+                final_item_id: "control-response",
+            },
             address(),
-            None,
-            "control-response",
             "connected",
             None,
             21,
@@ -306,10 +322,12 @@ async fn outbox_recovery_retries_only_before_external_dispatch() {
         .expect("first ingress");
     let first = gateway
         .enqueue_reactive_text_delivery(
-            &first_message.event_key,
+            ReactiveDeliverySource {
+                event_key: &first_message.event_key,
+                run_id: None,
+                final_item_id: "assistant-safe",
+            },
             address(),
-            None,
-            "assistant-safe",
             "reply",
             None,
             11,
@@ -346,10 +364,12 @@ async fn outbox_recovery_retries_only_before_external_dispatch() {
         .expect("second ingress");
     let second = gateway
         .enqueue_reactive_text_delivery(
-            &second_message.event_key,
+            ReactiveDeliverySource {
+                event_key: &second_message.event_key,
+                run_id: None,
+                final_item_id: "assistant-unknown",
+            },
             address(),
-            None,
-            "assistant-unknown",
             "reply",
             None,
             21,

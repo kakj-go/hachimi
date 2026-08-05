@@ -1,7 +1,8 @@
 use std::{collections::BTreeSet, env, fs, time::Duration};
 
 use hachimi_enterprise::{
-    EnterpriseApiClient, EnterpriseCredential, EnterpriseMessageTarget, spawn_enterprise_stream,
+    EnterpriseApiClient, EnterpriseCredential, EnterpriseDownloadInput, EnterpriseMessageTarget,
+    spawn_enterprise_stream,
 };
 use hachimi_protocol::IntegrationProviderId;
 use serde::Deserialize;
@@ -154,15 +155,15 @@ async fn enterprise_product_adapters_conform_against_staging() {
             let destination = root.path().join("enterprise-attachment.part");
             let download_credential = load_credential(connection);
             let receipt = api
-                .download_attachment_to(
-                    &connection.account_id,
-                    &download_credential,
-                    &event.event_id,
-                    &attachment.remote_id,
-                    attachment.resource_key.as_deref(),
-                    &destination,
-                    25 * 1024 * 1024,
-                )
+                .download_attachment_to(EnterpriseDownloadInput {
+                    account_id: &connection.account_id,
+                    credential: &download_credential,
+                    event_id: &event.event_id,
+                    remote_id: &attachment.remote_id,
+                    resource_key: attachment.resource_key.as_deref(),
+                    destination: &destination,
+                    max_bytes: 25 * 1024 * 1024,
+                })
                 .await
                 .expect("download real allowed attachment through the product transport");
             assert!(receipt.byte_size > 0 && receipt.byte_size <= 25 * 1024 * 1024);

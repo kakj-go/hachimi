@@ -28,6 +28,13 @@ struct OutboxProvenance {
     part_index: Option<u32>,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct ReactiveDeliverySource<'a> {
+    pub event_key: &'a ChannelEventKey,
+    pub run_id: Option<&'a RunId>,
+    pub final_item_id: &'a str,
+}
+
 impl GatewayHost {
     pub async fn ingest_provider(
         &self,
@@ -387,14 +394,17 @@ impl GatewayHost {
 
     pub async fn enqueue_reactive_delivery(
         &self,
-        event_key: &ChannelEventKey,
+        source: ReactiveDeliverySource<'_>,
         address: ChannelConversationAddress,
-        run_id: Option<&RunId>,
-        final_item_id: &str,
         part_index: u32,
         payload: ChannelOutboundPayload,
         timestamp_ms: i64,
     ) -> Result<DeliveryAttempt, GatewayError> {
+        let ReactiveDeliverySource {
+            event_key,
+            run_id,
+            final_item_id,
+        } = source;
         if final_item_id.trim().is_empty() || final_item_id.len() > 256 {
             return Err(GatewayError::InvalidMessage);
         }
@@ -514,19 +524,15 @@ impl GatewayHost {
 
     pub async fn enqueue_reactive_text_delivery(
         &self,
-        event_key: &ChannelEventKey,
+        source: ReactiveDeliverySource<'_>,
         address: ChannelConversationAddress,
-        run_id: Option<&RunId>,
-        final_item_id: &str,
         text: &str,
         reply_to: Option<String>,
         timestamp_ms: i64,
     ) -> Result<DeliveryAttempt, GatewayError> {
         self.enqueue_reactive_delivery(
-            event_key,
+            source,
             address,
-            run_id,
-            final_item_id,
             0,
             ChannelOutboundPayload {
                 parts: vec![ChannelMessagePart::Text { text: text.into() }],
@@ -751,11 +757,7 @@ impl GatewayHost {
     pub async fn finish_delivery(
         &self,
         id: &ChannelDeliveryId,
-        delivered: bool,
-        retryable: bool,
-        indeterminate: bool,
-        error_code: Option<&str>,
-        provider_receipt: Option<&str>,
+        outcome: ChannelDeliveryOutcome,
         timestamp_ms: i64,
     ) -> Result<DeliveryAttempt, GatewayError> {
         let current = self
@@ -765,11 +767,11 @@ impl GatewayHost {
         if current.status != DeliveryAttemptStatus::Claimed {
             return Err(GatewayError::DeliveryConflict);
         }
-        let (status, next_attempt) = if delivered {
+        let (status, next_attempt) = if outcome.delivered {
             ("delivered", None)
-        } else if indeterminate {
+        } else if outcome.indeterminate {
             ("indeterminate", None)
-        } else if retryable && current.attempt < MAX_DELIVERY_ATTEMPTS {
+        } else if outcome.retryable && current.attempt < MAX_DELIVERY_ATTEMPTS {
             (
                 "retry_scheduled",
                 Some(timestamp_ms.saturating_add(retry_delay_ms(current.attempt))),
@@ -780,8 +782,8 @@ impl GatewayHost {
         let updated = sqlx::query("UPDATE channel_outbox SET status = ?, claim_token = NULL, claim_expires_at_ms = NULL, next_attempt_at_ms = ?, error_code = ?, provider_receipt = ?, updated_at_ms = ? WHERE id = ? AND status = 'claimed' AND claim_token = ?")
             .bind(status)
             .bind(next_attempt)
-            .bind(error_code)
-            .bind(provider_receipt)
+            .bind((!outcome.delivered).then_some(outcome.result_code.as_str()))
+            .bind(outcome.provider_receipt.as_deref())
             .bind(timestamp_ms)
             .bind(id.as_str())
             .bind(current.claim_token.as_deref())
@@ -847,11 +849,13 @@ impl GatewayHost {
                     return self
                         .finish_delivery(
                             &delivery.id,
-                            false,
-                            false,
-                            true,
-                            Some("provider_dispatch_error"),
-                            None,
+                            ChannelDeliveryOutcome {
+                                delivered: false,
+                                retryable: false,
+                                indeterminate: true,
+                                result_code: "provider_dispatch_error".into(),
+                                provider_receipt: None,
+                            },
                             timestamp_ms,
                         )
                         .await
@@ -881,16 +885,8 @@ impl GatewayHost {
         outcome: ChannelDeliveryOutcome,
         timestamp_ms: i64,
     ) -> Result<DeliveryAttempt, GatewayError> {
-        self.finish_delivery(
-            &delivery.id,
-            outcome.delivered,
-            outcome.retryable,
-            outcome.indeterminate,
-            (!outcome.delivered).then_some(outcome.result_code.as_str()),
-            outcome.provider_receipt.as_deref(),
-            timestamp_ms,
-        )
-        .await
+        self.finish_delivery(&delivery.id, outcome, timestamp_ms)
+            .await
     }
 
     pub async fn reconcile_startup(&self, timestamp_ms: i64) -> Result<(), GatewayError> {

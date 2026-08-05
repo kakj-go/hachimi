@@ -3,7 +3,9 @@ use std::{fs, io::Read as _, path::Path};
 use aes::{Aes128, Aes256};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use cbc::cipher::{BlockDecryptMut as _, KeyIvInit as _, block_padding::Pkcs7};
-use hachimi_enterprise::{EnterpriseApiClient, EnterpriseApiError, EnterpriseCredential};
+use hachimi_enterprise::{
+    EnterpriseApiClient, EnterpriseApiError, EnterpriseCredential, EnterpriseDownloadInput,
+};
 use hachimi_protocol::{
     ArtifactId, ArtifactKind, ArtifactRecord, AttachmentId, AttachmentRecord, ConnectorAccountId,
     EnterpriseAttachmentDownloadRequest, EnterpriseAttachmentDownloadResult, IntegrationProviderId,
@@ -82,15 +84,15 @@ impl PluginHost {
                 return Err(ExtensionHostError::EnterpriseAttachmentDrift);
             }
             self.enterprise_api
-                .download_attachment_to(
-                    &request.account_id,
-                    &credential,
-                    &request.event_id,
-                    &request.remote_id,
-                    metadata.resource_key.as_deref(),
-                    &staging,
-                    MAX_ATTACHMENT_BYTES,
-                )
+                .download_attachment_to(EnterpriseDownloadInput {
+                    account_id: &request.account_id,
+                    credential: &credential,
+                    event_id: &request.event_id,
+                    remote_id: &request.remote_id,
+                    resource_key: metadata.resource_key.as_deref(),
+                    destination: &staging,
+                    max_bytes: MAX_ATTACHMENT_BYTES,
+                })
                 .await
         } else {
             download_encrypted_channel_attachment(self, request, &staging).await

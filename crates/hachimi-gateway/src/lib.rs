@@ -6,7 +6,7 @@ mod routing;
 mod sidecar_provider;
 
 pub use builtin::{LocalBuiltinProviders, LoopbackWebhookChannel, MockPollChannel};
-pub use durable::remote_media_metadata_hash;
+pub use durable::{ReactiveDeliverySource, remote_media_metadata_hash};
 pub use official_provider::OfficialChannelProvider;
 pub use provider::{
     ChannelDeliveryOutcome, ChannelProvider, ChannelProviderFuture, ChannelProviderRegistry,

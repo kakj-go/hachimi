@@ -35,6 +35,34 @@ async function textFieldByLabel(label) {
   throw new Error(`Text field not found: ${label}`);
 }
 
+async function selectIntegrationProvider(providerId, label) {
+  const triggerSelector = `button[role="tab"][aria-label="${label}"]`;
+  const panelSelector = `[data-testid="integration-provider-${providerId}"]`;
+  await waitForDisplayed(triggerSelector);
+  await browser.waitUntil(
+    async () => {
+      const selected = await browser.execute(
+        (trigger, panel) => {
+          const content = document.querySelector(panel);
+          if (content instanceof HTMLElement && content.offsetParent !== null) return true;
+          const tab = document.querySelector(trigger);
+          if (!(tab instanceof HTMLElement)) return false;
+          tab.click();
+          return false;
+        },
+        triggerSelector,
+        panelSelector,
+      );
+      return selected;
+    },
+    {
+      timeout: 20_000,
+      interval: 100,
+      timeoutMsg: `Integration Provider did not become active: ${providerId}`,
+    },
+  );
+}
+
 async function waitForIntegrationAccount(providerId, displayName, present, timeoutMs = 30_000) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
@@ -770,22 +798,18 @@ describe("Hachimi platform integrations", () => {
       ["wecom_app", "企微自建应用"],
       ["wechat_ilink", "微信 iLink / ClawBot"],
     ]) {
-      await clickWhenReady(`button[role="tab"][aria-label="${label}"]`);
-      await waitForDisplayed(`[data-testid="integration-provider-${providerId}"]`);
+      await selectIntegrationProvider(providerId, label);
       await expect($(`[data-testid="integration-connect-${providerId}"]`)).toBeDisplayed();
     }
   });
 
-  it("creates, restores, and removes a wecom_app account through the six-step wizard", async () => {
+  it("creates, restores, and removes a wecom_app account through the connection form", async () => {
     await openHostSettings("integrations");
-    await clickWhenReady('button[role="tab"][aria-label="企微自建应用"]');
-    await waitForDisplayed('[data-testid="integration-provider-wecom_app"]');
+    await selectIntegrationProvider("wecom_app", "企微自建应用");
     await clickWhenReady('[data-testid="integration-connect-wecom_app"]');
-    await waitForDisplayed('.integration-wizard[data-step="1"]');
+    await waitForDisplayed(".integration-connect-form");
 
     await (await textFieldByLabel("账户名称")).setValue("Desktop E2E 企业微信");
-    await clickWhenReady('[data-testid="integration-wizard-primary-action"]');
-    await waitForDisplayed('.integration-wizard[data-step="2"]');
     await (await textFieldByLabel("Corp ID")).setValue("desktop-e2e-corp");
     await (await textFieldByLabel("Corp Secret")).setValue("desktop-e2e-secret");
     await (await textFieldByLabel("Agent ID")).setValue("1000002");
@@ -797,20 +821,12 @@ describe("Hachimi platform integrations", () => {
       await textFieldByLabel("External HTTPS URL")
     ).setValue("https://127.0.0.1:42371/channels/wecom");
     await clickWhenReady('[data-testid="integration-wizard-primary-action"]');
-    await waitForDisplayed('.integration-wizard[data-step="3"]');
-    await clickWhenReady('[data-testid="integration-wizard-primary-action"]');
-    await waitForDisplayed('.integration-wizard[data-step="4"]');
-    await clickWhenReady('[data-testid="integration-wizard-primary-action"]');
-    await waitForDisplayed('.integration-wizard[data-step="5"]');
-    await clickWhenReady('[data-testid="integration-wizard-primary-action"]');
-    await waitForDisplayed('.integration-wizard[data-step="6"]');
-    await clickWhenReady('[data-testid="integration-wizard-primary-action"]');
 
     await waitForIntegrationAccount("wecom_app", "Desktop E2E 企业微信", true);
 
     await restartApplication();
     await openHostSettings("integrations");
-    await clickWhenReady('button[role="tab"][aria-label="企微自建应用"]');
+    await selectIntegrationProvider("wecom_app", "企微自建应用");
     await expect($('[data-testid="integration-provider-wecom_app"]')).toHaveText(
       expect.stringContaining("Desktop E2E 企业微信"),
     );

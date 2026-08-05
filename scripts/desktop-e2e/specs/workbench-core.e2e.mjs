@@ -69,11 +69,11 @@ async function openProjectSessions() {
 
 async function openInspectorToolLauncher() {
   if (await isDisplayed('[data-testid="workbench-resource-menu"]')) return;
-  if (await isDisplayed(".workbench-inspector")) {
+  if (!(await isDisplayed(".workbench-inspector"))) {
     await clickWhenReady('[data-testid="workbench-toggle-inspector"]');
-    await browser.waitUntil(async () => !(await isDisplayed(".workbench-inspector")));
+    await waitForDisplayed(".workbench-inspector");
   }
-  await clickWhenReady('[data-testid="workbench-toggle-inspector"]');
+  await clickWhenReady('[data-testid="workbench-inspector-new-tab"]');
   await waitForDisplayed('[data-testid="workbench-resource-menu"]');
 }
 
@@ -346,7 +346,10 @@ describe("Hachimi Workbench core lifecycle", () => {
     await browser.pause(5_000);
     expect(existsSync(childSurvived)).toBe(false);
 
-    await clickWhenReady('[aria-label="新建终端"], [aria-label="New terminal"]');
+    await openInspectorToolLauncher();
+    await clickWhenReady(
+      '//*[@data-testid="workbench-resource-menu"]//button[contains(., "终端") or contains(., "Terminal")]',
+    );
     await waitForDisplayed(".terminal-session.active .xterm");
     await writeTerminal("Start-Sleep -Seconds 30");
     await browser.refresh();

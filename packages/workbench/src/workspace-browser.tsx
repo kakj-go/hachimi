@@ -446,10 +446,10 @@ export function WorkspaceBrowser(props: {
   });
 
   createEffect(() => {
-    props.mode;
+    const mode = props.mode;
     diffScope();
     diffBaseBranch();
-    if (props.mode === "review") void loadDiff();
+    if (mode === "review") void loadDiff();
   });
 
   return (

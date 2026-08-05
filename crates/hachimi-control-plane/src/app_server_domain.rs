@@ -200,7 +200,7 @@ pub enum ComputerAppResponse {
     Rules(Vec<ComputerAppRule>),
     Windows(Vec<ComputerWindowIdentity>),
     Removed(bool),
-    Frame(ComputerFrame),
+    Frame(Box<ComputerFrame>),
     Action(ComputerActionResult),
     TakenOver(u64),
 }

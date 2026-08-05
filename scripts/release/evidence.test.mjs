@@ -209,10 +209,7 @@ test("evidence verification defaults to all six release gate classes", () => {
     "windows_standard_user",
     "windows_elevated",
   ]) {
-    writeFileSync(
-      join(root, `${gateKind}.summary.json`),
-      JSON.stringify(summary(gateKind)),
-    );
+    writeFileSync(join(root, `${gateKind}.summary.json`), JSON.stringify(summary(gateKind)));
   }
 
   assert.throws(() => verifyEvidence(root), /release_evidence_missing:channels/);

@@ -125,10 +125,12 @@ pub(super) async fn process_ingress(
                 .await?;
             gateway
                 .enqueue_reactive_text_delivery(
-                    &message.event_key,
+                    hachimi_gateway::ReactiveDeliverySource {
+                        event_key: &message.event_key,
+                        run_id: Some(&run.id),
+                        final_item_id: "grant-needs-attention",
+                    },
                     message.address.clone(),
-                    Some(&run.id),
-                    "grant-needs-attention",
                     "此会话的工具授权已变更，需要在 Hachimi 中重新确认。",
                     Some(message.event_key.external_message_id.clone()),
                     now_ms(),
@@ -152,10 +154,12 @@ pub(super) async fn process_ingress(
                 .await?;
             gateway
                 .enqueue_reactive_text_delivery(
-                    &message.event_key,
+                    hachimi_gateway::ReactiveDeliverySource {
+                        event_key: &message.event_key,
+                        run_id: Some(&run.id),
+                        final_item_id: "attachment-needs-attention",
+                    },
                     message.address.clone(),
-                    Some(&run.id),
-                    "attachment-needs-attention",
                     "附件已安全接收，但需要在 Hachimi 中继续处理。",
                     Some(message.event_key.external_message_id.clone()),
                     now_ms(),
@@ -220,10 +224,12 @@ pub(super) async fn process_ingress(
     };
     gateway
         .enqueue_reactive_text_delivery(
-            &message.event_key,
+            hachimi_gateway::ReactiveDeliverySource {
+                event_key: &message.event_key,
+                run_id: Some(&run.id),
+                final_item_id: &final_item_id,
+            },
             message.address.clone(),
-            Some(&run.id),
-            &final_item_id,
             &text,
             Some(message.event_key.external_message_id.clone()),
             now_ms(),
@@ -391,10 +397,12 @@ async fn process_control_command(
     };
     gateway
         .enqueue_reactive_text_delivery(
-            &message.event_key,
+            hachimi_gateway::ReactiveDeliverySource {
+                event_key: &message.event_key,
+                run_id: None,
+                final_item_id: "control-response",
+            },
             message.address.clone(),
-            None,
-            "control-response",
             &response,
             Some(message.event_key.external_message_id.clone()),
             now_ms(),

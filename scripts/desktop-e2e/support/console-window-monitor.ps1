@@ -55,22 +55,38 @@ public static class HachimiWindowProbe {
 '@
 
 $resolvedApplication = [System.IO.Path]::GetFullPath($ApplicationPath)
-$knownTreePids = [System.Collections.Generic.HashSet[int]]::new()
+$knownTreeIdentities = @{}
 $seenHandles = [System.Collections.Generic.HashSet[long]]::new()
 $findings = [System.Collections.Generic.List[object]]::new()
 
 while (-not [System.IO.File]::Exists($StopFile)) {
-    $processes = @(Get-CimInstance Win32_Process | Select-Object ProcessId, ParentProcessId, ExecutablePath, CommandLine)
+    $processes = @(Get-CimInstance Win32_Process | Select-Object ProcessId, ParentProcessId, CreationDate, ExecutablePath, CommandLine)
     $processById = @{}
-    foreach ($process in $processes) { $processById[[int]$process.ProcessId] = $process }
+    $processIdentityById = @{}
+    $treePids = [System.Collections.Generic.HashSet[int]]::new()
+    foreach ($process in $processes) {
+        $processId = [int]$process.ProcessId
+        $createdAt = if ($null -eq $process.CreationDate) {
+            0
+        } else {
+            ([datetime]$process.CreationDate).ToUniversalTime().Ticks
+        }
+        $identity = '{0}:{1}' -f $processId, $createdAt
+        $processById[$processId] = $process
+        $processIdentityById[$processId] = $identity
+    }
     $remaining = [System.Collections.Generic.List[object]]::new()
     foreach ($process in $processes) {
+        $processId = [int]$process.ProcessId
         $executable = [string]$process.ExecutablePath
-        if ($executable -and [System.StringComparer]::OrdinalIgnoreCase.Equals(
+        $isApplication = $executable -and [System.StringComparer]::OrdinalIgnoreCase.Equals(
                 [System.IO.Path]::GetFullPath($executable),
                 $resolvedApplication
-            )) {
-            [void]$knownTreePids.Add([int]$process.ProcessId)
+            )
+        $wasKnown = $knownTreeIdentities.ContainsKey($processId) -and
+            $knownTreeIdentities[$processId] -eq $processIdentityById[$processId]
+        if ($isApplication -or $wasKnown) {
+            [void]$treePids.Add($processId)
         } else {
             $remaining.Add($process)
         }
@@ -79,8 +95,8 @@ while (-not [System.IO.File]::Exists($StopFile)) {
     for ($pass = 0; $pass -lt 8 -and $remaining.Count -gt 0; $pass++) {
         $next = [System.Collections.Generic.List[object]]::new()
         foreach ($process in $remaining) {
-            if ($knownTreePids.Contains([int]$process.ParentProcessId)) {
-                [void]$knownTreePids.Add([int]$process.ProcessId)
+            if ($treePids.Contains([int]$process.ParentProcessId)) {
+                [void]$treePids.Add([int]$process.ProcessId)
             } else {
                 $next.Add($process)
             }
@@ -89,14 +105,23 @@ while (-not [System.IO.File]::Exists($StopFile)) {
         $remaining = $next
     }
 
+    $nextTreeIdentities = @{}
+    foreach ($processId in $treePids) {
+        if ($processIdentityById.ContainsKey($processId)) {
+            $nextTreeIdentities[$processId] = $processIdentityById[$processId]
+        }
+    }
+    $knownTreeIdentities = $nextTreeIdentities
+
     foreach ($window in [HachimiWindowProbe]::ListTopLevelWindows()) {
         if ($window.ClassName -ne 'ConsoleWindowClass') { continue }
         if (-not $window.Visible) { continue }
-        if (-not $knownTreePids.Contains($window.ProcessId)) { continue }
-        if (-not $seenHandles.Add($window.Handle)) { continue }
+        if (-not $treePids.Contains($window.ProcessId)) { continue }
         $owner = $processById[$window.ProcessId]
+        if ($null -eq $owner) { continue }
         $ownerName = [System.IO.Path]::GetFileName([string]$owner.ExecutablePath)
         if ($ownerName -in @('hachimi-desktop.exe', 'msedgewebview2.exe')) { continue }
+        if (-not $seenHandles.Add($window.Handle)) { continue }
         $findings.Add([pscustomobject]@{
                 handle = $window.Handle
                 processId = $window.ProcessId

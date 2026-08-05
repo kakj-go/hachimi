@@ -398,7 +398,7 @@ fn domain_to_response(
             LocalHostCommandResponse::Removed(value)
         }
         AppServerDomainResponse::Computer(ComputerAppResponse::Frame(value)) => {
-            LocalHostCommandResponse::ComputerFrame(value)
+            LocalHostCommandResponse::ComputerFrame(*value)
         }
         AppServerDomainResponse::Computer(ComputerAppResponse::Action(value)) => {
             LocalHostCommandResponse::ComputerAction(value)

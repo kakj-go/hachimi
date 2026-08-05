@@ -98,9 +98,9 @@ function LocationOption(props: {
 
 function handoffBlockedText(reason: string, locale: "zh-CN" | "en-US") {
   const zh = locale === "zh-CN";
-  if (reason === "active_run") return zh ? "运行结束后才能切换位置。" : "Wait for the Run to finish.";
-  if (reason === "write_lease") return zh
-    ? "当前目录仍被写入操作占用。"
-    : "The checkout still has an active write lease.";
+  if (reason === "active_run")
+    return zh ? "运行结束后才能切换位置。" : "Wait for the Run to finish.";
+  if (reason === "write_lease")
+    return zh ? "当前目录仍被写入操作占用。" : "The checkout still has an active write lease.";
   return zh ? "当前无法切换位置。" : "The work location cannot be changed right now.";
 }

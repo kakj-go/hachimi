@@ -77,7 +77,7 @@ pub use plugin_hooks::{
 };
 pub use recovery::RecoveryToolFence;
 use row_decode::*;
-pub use run_bundle::{ChannelRunBindingInput, CreatedAgentRun};
+pub use run_bundle::{ChannelAgentRunCreateInput, ChannelRunBindingInput, CreatedAgentRun};
 pub use schedule::{IdempotentMutationClaim, ScheduleInvocationClaim};
 pub use schedule_event::{ScheduleEventIngestClaim, ScheduleEventLaunchClaim};
 use transaction_helpers::*;

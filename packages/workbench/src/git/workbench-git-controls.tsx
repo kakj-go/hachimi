@@ -154,11 +154,7 @@ export function WorkbenchGitControls(props: {
               <Button
                 class="workbench-branch-row"
                 classList={{ current: reference.current }}
-                disabled={
-                  busy() ||
-                  reference.current ||
-                  props.environment.git.uncommittedFiles > 0
-                }
+                disabled={busy() || reference.current || props.environment.git.uncommittedFiles > 0}
                 title={reference.name}
                 onClick={() =>
                   void executeBranch({
@@ -302,10 +298,9 @@ export function WorkbenchGitControls(props: {
         data-testid="workbench-git-compare"
         disabled={!props.environment.git.defaultComparisonRef}
         onClick={() =>
-          props.onOpenDiff(
-            props.environment.git.defaultComparisonRef ?? undefined,
-            [...new Set(props.environment.git.refs.map((reference) => reference.name))],
-          )
+          props.onOpenDiff(props.environment.git.defaultComparisonRef ?? undefined, [
+            ...new Set(props.environment.git.refs.map((reference) => reference.name)),
+          ])
         }
       >
         <GitFork size={16} />

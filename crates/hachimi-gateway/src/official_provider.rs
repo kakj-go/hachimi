@@ -12,8 +12,8 @@ use hachimi_channel_providers::{
     official_adapters,
 };
 use hachimi_enterprise::{
-    EnterpriseApiClient, EnterpriseApiError, EnterpriseCredential, EnterpriseMediaKind,
-    EnterpriseMessageTarget, EnterpriseStreamEvent, spawn_enterprise_stream,
+    EnterpriseApiClient, EnterpriseApiError, EnterpriseCredential, EnterpriseMediaInput,
+    EnterpriseMediaKind, EnterpriseMessageTarget, EnterpriseStreamEvent, spawn_enterprise_stream,
 };
 use hachimi_protocol::{
     ChannelConversationAddress, ChannelMessagePart, ChannelProviderAccount, ChannelProviderHealth,
@@ -973,30 +973,30 @@ async fn deliver_enterprise(
             }
             ChannelMessagePart::Image { media } => {
                 let media = managed_outbound_media(store, &attempt.address, media).await?;
-                api.send_media(
-                    &attempt.address.account_id,
-                    &credential,
-                    &target,
-                    EnterpriseMediaKind::Image,
-                    &media.file_name,
-                    &media.mime_type,
-                    &media.bytes,
-                    &idempotency_key,
-                )
+                api.send_media(EnterpriseMediaInput {
+                    account_id: &attempt.address.account_id,
+                    credential: &credential,
+                    target: &target,
+                    kind: EnterpriseMediaKind::Image,
+                    file_name: &media.file_name,
+                    mime_type: &media.mime_type,
+                    bytes: &media.bytes,
+                    idempotency_key: &idempotency_key,
+                })
                 .await
             }
             ChannelMessagePart::File { media } => {
                 let media = managed_outbound_media(store, &attempt.address, media).await?;
-                api.send_media(
-                    &attempt.address.account_id,
-                    &credential,
-                    &target,
-                    EnterpriseMediaKind::File,
-                    &media.file_name,
-                    &media.mime_type,
-                    &media.bytes,
-                    &idempotency_key,
-                )
+                api.send_media(EnterpriseMediaInput {
+                    account_id: &attempt.address.account_id,
+                    credential: &credential,
+                    target: &target,
+                    kind: EnterpriseMediaKind::File,
+                    file_name: &media.file_name,
+                    mime_type: &media.mime_type,
+                    bytes: &media.bytes,
+                    idempotency_key: &idempotency_key,
+                })
                 .await
             }
             ChannelMessagePart::Audio { .. } | ChannelMessagePart::Video { .. } => {
