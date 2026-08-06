@@ -15,6 +15,7 @@ mod ids;
 mod lifecycle;
 mod local_hosts;
 mod mcp;
+mod permissions;
 mod plugins;
 mod process;
 mod project_git;
@@ -25,6 +26,7 @@ mod sandbox_runtime;
 mod schedule;
 mod skills;
 mod workbench;
+mod workspace;
 
 pub use agent_tasks::*;
 pub use enterprise::*;
@@ -35,6 +37,7 @@ pub use ids::*;
 pub use lifecycle::*;
 pub use local_hosts::*;
 pub use mcp::*;
+pub use permissions::*;
 pub use plugins::*;
 pub use process::*;
 pub use project_git::*;
@@ -45,6 +48,7 @@ pub use sandbox_runtime::*;
 pub use schedule::*;
 pub use skills::*;
 pub use workbench::*;
+pub use workspace::*;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -143,24 +147,27 @@ pub enum ApprovalPolicy {
 pub enum PermissionProfile {
     ReadOnly,
     #[default]
-    WorkspaceWrite,
-    ExternalSandbox,
+    Writable,
+    FullAccess,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionPermissionConfig {
+    pub policy: AgentPermissionPolicy,
+    #[serde(default)]
+    pub extra_authorizations: Vec<SessionExtraAuthorizationSummary>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
-pub struct SessionPermissionConfig {
-    pub permission_profile: PermissionProfile,
-    pub approval_policy: ApprovalPolicy,
-}
-
-impl Default for SessionPermissionConfig {
-    fn default() -> Self {
-        Self {
-            permission_profile: PermissionProfile::ReadOnly,
-            approval_policy: ApprovalPolicy::OnlyWhenNeeded,
-        }
-    }
+pub struct SessionExtraAuthorizationSummary {
+    pub id: ApprovalId,
+    pub action: String,
+    pub resource: String,
+    pub target_host: String,
+    #[specta(type = specta_typescript::Number)]
+    pub granted_at_ms: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]

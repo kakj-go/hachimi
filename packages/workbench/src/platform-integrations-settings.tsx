@@ -47,6 +47,7 @@ import { AuthorizationEditor } from "./platform-integration-authorization-editor
 import { ChannelGrantEditor } from "./platform-integration-grant-editor";
 import { integrationFailureMessage } from "./platform-integration-errors";
 import { IntegrationAccountWizard } from "./platform-integration-wizard";
+import { createPermissionPolicy } from "./permission-policy-editor";
 import { RuntimeHealthBanner } from "./runtime-health";
 
 type AccountDialogMode = "create" | "credentials" | "capabilities";
@@ -75,6 +76,7 @@ interface IlinkQrDialogState {
 }
 
 const EMPTY_GRANT: ChannelGrant = {
+  permissionPolicy: createPermissionPolicy(),
   skillIds: [],
   mcpServerIds: [],
   connectorSelections: [],

@@ -519,14 +519,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn descriptors_match_the_coding_profile_and_plan_effects() {
+    async fn descriptors_are_available_to_every_entry_and_keep_effect_metadata() {
         for tool in agent_git_forge_tool_executors(context(true, true).await) {
             let descriptor = tool.descriptor();
-            assert!(hachimi_agent::profile_allows_tool(
-                EntryProfile::Workbench,
-                WorkloadKind::Coding,
-                &descriptor.name
-            ));
+            assert!(!descriptor.name.is_empty());
             assert_eq!(
                 descriptor.parallel_safe,
                 descriptor.effect == ToolEffect::ReadOnly
@@ -535,7 +531,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tool_plan_keeps_queries_and_removes_remote_mutations() {
+    async fn tool_plan_is_profile_independent_and_plan_mode_removes_mutations() {
         let descriptors = agent_git_forge_tool_executors(context(true, true).await)
             .into_iter()
             .map(|tool| tool.descriptor())
@@ -544,31 +540,13 @@ mod tests {
             tool_calls: true,
             ..ProviderCapabilities::default()
         };
-        let names = ToolPlan::build(
-            EntryProfile::Workbench,
-            WorkloadKind::Coding,
-            BehaviorMode::Plan,
-            provider,
-            descriptors.clone(),
-            ToolPlanConstraints {
-                run_allowlist: None,
-                disabled_tool_names: &[],
-                capability_grants: None,
-                host_ready: true,
-            },
-        )
-        .descriptors()
-        .iter()
-        .map(|descriptor| descriptor.name.clone())
-        .collect::<Vec<_>>();
-        assert_eq!(names, vec!["forge.change.query", "git.remotes"]);
-        assert!(
+        let names = |entry_profile, workload, behavior_mode| {
             ToolPlan::build(
-                EntryProfile::Workbench,
-                WorkloadKind::Office,
-                BehaviorMode::Default,
+                entry_profile,
+                workload,
+                behavior_mode,
                 provider,
-                descriptors,
+                descriptors.clone(),
                 ToolPlanConstraints {
                     run_allowlist: None,
                     disabled_tool_names: &[],
@@ -577,7 +555,38 @@ mod tests {
                 },
             )
             .descriptors()
-            .is_empty()
+            .iter()
+            .map(|descriptor| descriptor.name.clone())
+            .collect::<Vec<_>>()
+        };
+        let coding = names(
+            EntryProfile::Workbench,
+            WorkloadKind::Coding,
+            BehaviorMode::Default,
+        );
+        assert_eq!(
+            coding,
+            names(
+                EntryProfile::Workbench,
+                WorkloadKind::Office,
+                BehaviorMode::Default
+            )
+        );
+        assert_eq!(
+            coding,
+            names(
+                EntryProfile::PetConversation,
+                WorkloadKind::General,
+                BehaviorMode::Default
+            )
+        );
+        assert_eq!(
+            names(
+                EntryProfile::Workbench,
+                WorkloadKind::Coding,
+                BehaviorMode::Plan
+            ),
+            vec!["forge.change.query", "git.remotes"]
         );
     }
 

@@ -131,27 +131,29 @@ export function EnvironmentSummary(props: {
             <b class="diff-deletions">-{props.environment.changes.deletions}</b>
           </span>
         </Button>
-        <EnvironmentLocationMenu
-          environment={props.environment}
-          locale={props.locale}
-          busy={props.handoffBusy}
-          failure={props.handoffFailure}
-          onHandoff={props.onHandoff}
-        />
-        <WorkbenchGitControls
-          environment={props.environment}
-          controller={props.controller}
-          locale={props.locale}
-          remotePushEnabled={props.remotePushEnabled}
-          onOpenDiff={(branch, branches) =>
-            props.onOpenInspector({
-              kind: "review",
-              diffScope: "branch",
-              ...(branch ? { diffBaseBranch: branch } : {}),
-              ...(branches ? { diffBranches: branches } : {}),
-            })
-          }
-        />
+        <Show when={props.environment.checkout}>
+          <EnvironmentLocationMenu
+            environment={props.environment}
+            locale={props.locale}
+            busy={props.handoffBusy}
+            failure={props.handoffFailure}
+            onHandoff={props.onHandoff}
+          />
+          <WorkbenchGitControls
+            environment={props.environment}
+            controller={props.controller}
+            locale={props.locale}
+            remotePushEnabled={props.remotePushEnabled}
+            onOpenDiff={(branch, branches) =>
+              props.onOpenInspector({
+                kind: "review",
+                diffScope: "branch",
+                ...(branch ? { diffBaseBranch: branch } : {}),
+                ...(branches ? { diffBranches: branches } : {}),
+              })
+            }
+          />
+        </Show>
       </section>
 
       <Show when={props.environment.activity}>

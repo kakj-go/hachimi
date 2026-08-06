@@ -1,22 +1,17 @@
 import {
+  type AgentPermissionPolicy,
   commandFailure,
-  type BrowserCapability,
   type ConnectorAccount,
   type ConnectorDriverDescriptor,
+  type ConnectorRevisionSelection,
   type DeliveryPolicy,
-  type GitRefRecord,
   type McpServerView,
   type McpToolSelection,
   type McpToolView,
-  type ProjectGitSnapshot,
-  type ProjectRecord,
   type ScheduleDefinition,
-  type ScheduleBrowserGrant,
-  type ScheduleConnectorSelection,
   type ScheduleEventReceipt,
   type ScheduleEventSourceKind,
   type ScheduleSpec,
-  type SessionRecord,
   type SkillRecord,
   type TaskRunRecord,
 } from "@hachimi/contracts";
@@ -27,6 +22,7 @@ import {
   ChevronDown,
   Checkbox,
   Dialog,
+  FolderOpen,
   PageHeading,
   Plus,
   ShieldCheck,
@@ -34,19 +30,11 @@ import {
   TextArea,
   TextField,
 } from "@hachimi/ui";
-import {
-  For,
-  Show,
-  createEffect,
-  createMemo,
-  createSignal,
-  onCleanup,
-  onMount,
-  untrack,
-} from "solid-js";
+import { For, Show, createMemo, createSignal, onCleanup, onMount } from "solid-js";
 
 import type { WorkbenchCommandPort } from "./workbench-command-port";
 import { directUserMutationContext } from "./mutation-context";
+import { PermissionPolicyEditor, createPermissionPolicy } from "./permission-policy-editor";
 import { TaskCard } from "./task-card";
 import { TaskHistoryDialog } from "./task-history-dialog";
 import { TaskEventForm } from "./task-event-form";
@@ -54,8 +42,6 @@ import { RuntimeHealthBanner } from "./runtime-health";
 import "./task-center.css";
 
 type ScheduleFrequency = "once" | "daily" | "weekly" | "cron" | "event";
-type ScheduleContext = "general" | "project" | "session_continuation";
-
 type TaskMcpTool = {
   server: McpServerView;
   tool: McpToolView;
@@ -68,25 +54,8 @@ type TaskConnector = {
   contentHash: string;
 };
 
-const BROWSER_CAPABILITIES: BrowserCapability[] = [
-  "observe",
-  "act",
-  "download",
-  "cookie_storage",
-  "cdp",
-];
-
-const CORE_READ_TOOLS = [
-  "workspace_read_file",
-  "workspace_list_directory",
-  "workspace_search_text",
-  "workspace_git_status",
-  "workspace_git_diff",
-];
-
 export function TaskCenter(props: {
   commandPort: WorkbenchCommandPort;
-  projects: ProjectRecord[];
   skills: SkillRecord[];
   onOpenSession: (sessionId: string) => void;
 }) {
@@ -123,17 +92,17 @@ export function TaskCenter(props: {
   const [eventResourceId, setEventResourceId] = createSignal("");
   const [eventResourceRevision, setEventResourceRevision] = createSignal("");
   const [deliveryPolicy, setDeliveryPolicy] = createSignal<DeliveryPolicy>("task_tab_only");
-  const [contextKind, setContextKind] = createSignal<ScheduleContext>("general");
-  const [sessions, setSessions] = createSignal<SessionRecord[]>([]);
-  const [sessionId, setSessionId] = createSignal<string>();
   const [profile, setProfile] = createSignal<"" | "office" | "coding">("");
-  const [projectId, setProjectId] = createSignal<string>();
-  const [executionKind, setExecutionKind] = createSignal<"local" | "managed_worktree">("local");
-  const [gitRefs, setGitRefs] = createSignal<GitRefRecord[]>([]);
-  const [projectGit, setProjectGit] = createSignal<ProjectGitSnapshot>();
-  const [baseRevision, setBaseRevision] = createSignal("");
-  const [allowWrite, setAllowWrite] = createSignal(false);
-  const [allowExec, setAllowExec] = createSignal(false);
+  const [workspaceKind, setWorkspaceKind] = createSignal<"managed" | "selected_directory">(
+    "managed",
+  );
+  const [workspacePath, setWorkspacePath] = createSignal("");
+  const [conversationMode, setConversationMode] = createSignal<
+    "shared_session" | "per_run_session"
+  >("per_run_session");
+  const [permissionPolicy, setPermissionPolicy] = createSignal<AgentPermissionPolicy>(
+    createPermissionPolicy("read_only"),
+  );
   const [selectedSkillIds, setSelectedSkillIds] = createSignal<string[]>([]);
   const [mcpTools, setMcpTools] = createSignal<TaskMcpTool[]>([]);
   const [selectedMcpTools, setSelectedMcpTools] = createSignal<McpToolSelection[]>([]);
@@ -141,14 +110,9 @@ export function TaskCenter(props: {
   const [selectedConnectorActions, setSelectedConnectorActions] = createSignal<
     Record<string, string[]>
   >({});
-  const [browserUnattended, setBrowserUnattended] = createSignal(false);
-  const [browserDocumentOrigins, setBrowserDocumentOrigins] = createSignal("");
-  const [browserResourceOrigins, setBrowserResourceOrigins] = createSignal("");
-  const [browserCapabilities, setBrowserCapabilities] = createSignal<BrowserCapability[]>([
-    "observe",
-    "act",
-  ]);
-  const [browserPrivateNetwork, setBrowserPrivateNetwork] = createSignal(false);
+  const [selectedReadOnlyConnectorActions, setSelectedReadOnlyConnectorActions] = createSignal<
+    Record<string, string[]>
+  >({});
   const [maxOccurrences, setMaxOccurrences] = createSignal("");
   const [endAt, setEndAt] = createSignal("");
   const [stopAfterSuccess, setStopAfterSuccess] = createSignal(false);
@@ -163,40 +127,16 @@ export function TaskCenter(props: {
       receipt.matchedScheduleIds.includes(selectedScheduleId() ?? ""),
     ),
   );
-  const projectGitDescription = createMemo(() => {
-    const state = projectGit()?.state;
-    if (state?.kind !== "unborn") return "";
-    return zh()
-      ? `${state.branch} 尚无提交，请先在工作台创建空首提。`
-      : `${state.branch} has no commits; create the empty initial commit in Workbench first.`;
-  });
-
   async function refresh() {
     try {
-      const [nextSchedules, nextRuns, nextEvents, sessionPage] = await Promise.all([
+      const [nextSchedules, nextRuns, nextEvents] = await Promise.all([
         props.commandPort.listSchedules(),
         props.commandPort.listTaskRuns(null, 200),
         Promise.resolve(props.commandPort.listScheduleEventReceipts?.(100) ?? []),
-        props.commandPort.searchAgentSessions({
-          projectId: null,
-          query: null,
-          archived: false,
-          before: null,
-          limit: 200,
-        }),
       ]);
       setSchedules(nextSchedules);
       setTaskRuns(nextRuns);
       setEventReceipts(nextEvents);
-      const eligibleSessions = sessionPage.items.filter(
-        (session) => session.entryProfile === "workbench",
-      );
-      setSessions(eligibleSessions);
-      setSessionId((current) =>
-        current && eligibleSessions.some((session) => session.id === current)
-          ? current
-          : eligibleSessions[0]?.id,
-      );
       setSelectedScheduleId((current) =>
         current && nextSchedules.some((schedule) => schedule.id === current) ? current : undefined,
       );
@@ -265,40 +205,6 @@ export function TaskCenter(props: {
     onCleanup(() => window.clearInterval(timer));
   });
 
-  async function loadProjectGitState(nextProjectId: string) {
-    try {
-      const snapshot = await props.commandPort.inspectProjectGit(nextProjectId);
-      if (untrack(projectId) !== nextProjectId) return;
-      setProjectGit(snapshot);
-      if (snapshot.state.kind !== "ready") {
-        setExecutionKind("local");
-        setGitRefs([]);
-        setBaseRevision("");
-        return;
-      }
-      const refs = await props.commandPort.listProjectGitRefs(nextProjectId);
-      if (untrack(projectId) !== nextProjectId) return;
-      setGitRefs(refs);
-      const preferred = refs.find((reference) => reference.current) ?? refs[0];
-      setBaseRevision((current) =>
-        refs.some((reference) => reference.name === current) ? current : (preferred?.name ?? ""),
-      );
-    } catch (error) {
-      setFailure(commandFailure(error).message);
-    }
-  }
-
-  createEffect(() => {
-    const nextProjectId = projectId() ?? props.projects[0]?.id;
-    if (!projectId() && nextProjectId) setProjectId(nextProjectId);
-    if (contextKind() !== "project" || !nextProjectId) {
-      setGitRefs([]);
-      setProjectGit(undefined);
-      return;
-    }
-    void loadProjectGitState(nextProjectId);
-  });
-
   function resetForm() {
     setEditingScheduleId(undefined);
     setName(zh() ? "每日任务" : "Daily task");
@@ -316,19 +222,15 @@ export function TaskCenter(props: {
     setEventResourceId("");
     setEventResourceRevision("");
     setDeliveryPolicy("task_tab_only");
-    setContextKind("general");
+    setWorkspaceKind("managed");
+    setWorkspacePath("");
+    setConversationMode("per_run_session");
     setProfile("");
-    setExecutionKind("local");
-    setAllowWrite(false);
-    setAllowExec(false);
+    setPermissionPolicy(createPermissionPolicy("read_only"));
     setSelectedSkillIds([]);
     setSelectedMcpTools([]);
     setSelectedConnectorActions({});
-    setBrowserUnattended(false);
-    setBrowserDocumentOrigins("");
-    setBrowserResourceOrigins("");
-    setBrowserCapabilities(["observe", "act"]);
-    setBrowserPrivateNetwork(false);
+    setSelectedReadOnlyConnectorActions({});
     setMaxOccurrences("");
     setEndAt("");
     setStopAfterSuccess(false);
@@ -348,18 +250,8 @@ export function TaskCenter(props: {
     setNameError(undefined);
     setPromptError(undefined);
     setFailure(undefined);
-    if (contextKind() === "project" && !projectId()) {
-      setFailure(zh() ? "请选择项目。" : "Select a project.");
-      setAdvancedOpen(true);
-      return;
-    }
-    if (contextKind() === "session_continuation" && !sessionId()) {
-      setFailure(zh() ? "请选择要续接的对话。" : "Select a Session to continue.");
-      setAdvancedOpen(true);
-      return;
-    }
-    if (executionKind() === "managed_worktree" && !baseRevision()) {
-      setFailure(zh() ? "请选择 Worktree 基础分支。" : "Select a Worktree base branch.");
+    if (workspaceKind() === "selected_directory" && !workspacePath().trim()) {
+      setFailure(zh() ? "请选择任务目录。" : "Choose a task directory.");
       setAdvancedOpen(true);
       return;
     }
@@ -400,7 +292,15 @@ export function TaskCenter(props: {
       setAdvancedOpen(true);
       return;
     }
-    if (browserUnattended() && parseOrigins(browserDocumentOrigins()).length === 0) {
+    const browserPolicy = permissionPolicy().rules.browser;
+    if (
+      permissionPolicy().level !== "full_access" &&
+      (browserPolicy.observe ||
+        browserPolicy.act ||
+        browserPolicy.upload ||
+        browserPolicy.download) &&
+      (browserPolicy.origins ?? []).length === 0
+    ) {
       setFailure(
         zh()
           ? "无人值守 Browser 至少需要一个精确的文档 Origin。"
@@ -419,7 +319,6 @@ export function TaskCenter(props: {
         await props.commandPort.createSchedule({
           context: directUserMutationContext(),
           definition: draft,
-          authorize: true,
         });
       }
       await refresh();
@@ -444,16 +343,14 @@ export function TaskCenter(props: {
       entryProfile: draft.entryProfile,
       workloadOverride: draft.workloadOverride,
       contextTemplate: draft.contextTemplate,
-      toolAllowlist: draft.toolAllowlist,
       skillAllowlist: draft.skillAllowlist,
+      skillRevisions: [],
       mcpToolAllowlist: draft.mcpToolAllowlist,
       contributionRevisions: draft.contributionRevisions ?? [],
-      hostGrant: draft.hostGrant ?? {
+      hostRevisionSnapshot: draft.hostRevisionSnapshot ?? {
         connectors: [],
-        browser: null,
-        computerUnattended: false,
       },
-      permissionConfig: draft.permissionConfig,
+      permissionPolicy: draft.permissionPolicy,
       deliveryPolicy: draft.deliveryPolicy,
       ...(draft.stopConditions ? { stopConditions: draft.stopConditions } : {}),
     };
@@ -462,9 +359,6 @@ export function TaskCenter(props: {
       definition,
       expectedConfigRevision: current.configRevision,
     });
-    if (authorizationScopeChanged(current, updated)) {
-      await props.commandPort.reauthorizeSchedule(directUserMutationContext(), updated.id);
-    }
     return { definition: updated };
   }
 
@@ -475,55 +369,38 @@ export function TaskCenter(props: {
     setPrompt(schedule.prompt);
     setDeliveryPolicy(schedule.deliveryPolicy);
     applyScheduleToForm(schedule.schedule);
-    if (schedule.contextTemplate.kind === "project") {
-      setContextKind("project");
-      setProjectId(schedule.contextTemplate.project_id);
-      setProfile(
-        schedule.workloadOverride === "coding" || schedule.workloadOverride === "office"
-          ? schedule.workloadOverride
-          : "",
-      );
-      const target = schedule.contextTemplate.execution_target;
-      setExecutionKind(target.kind);
-      setBaseRevision(target.kind === "managed_worktree" ? target.base_revision : "");
-    } else if (schedule.contextTemplate.kind === "session_continuation") {
-      setContextKind("session_continuation");
-      setSessionId(schedule.contextTemplate.session_id);
-      setProfile(
-        schedule.workloadOverride === "coding" || schedule.workloadOverride === "office"
-          ? schedule.workloadOverride
-          : "",
-      );
-      setExecutionKind("local");
-    } else {
-      setContextKind("general");
-      setProfile(
-        schedule.workloadOverride === "coding" || schedule.workloadOverride === "office"
-          ? schedule.workloadOverride
-          : "",
-      );
-      setExecutionKind("local");
-    }
-    setAllowWrite(schedule.permissionConfig.allowFileWrite);
-    setAllowExec(schedule.permissionConfig.allowExec);
+    if (schedule.contextTemplate.kind !== "workspace") return;
+    setWorkspaceKind(schedule.contextTemplate.workspace.kind);
+    setWorkspacePath(
+      schedule.contextTemplate.workspace.kind === "selected_directory"
+        ? schedule.contextTemplate.workspace.root_path
+        : "",
+    );
+    setConversationMode(schedule.contextTemplate.conversation_mode);
+    setProfile(
+      schedule.workloadOverride === "coding" || schedule.workloadOverride === "office"
+        ? schedule.workloadOverride
+        : "",
+    );
+    setPermissionPolicy(schedule.permissionPolicy);
     setSelectedSkillIds([...schedule.skillAllowlist]);
     setSelectedMcpTools([...schedule.mcpToolAllowlist]);
     setSelectedConnectorActions(
       Object.fromEntries(
-        (schedule.hostGrant?.connectors ?? []).map((selection) => [
+        (schedule.hostRevisionSnapshot?.connectors ?? []).map((selection) => [
           selection.accountId,
           [...selection.allowedActions],
         ]),
       ),
     );
-    const browser = schedule.hostGrant?.browser;
-    setBrowserUnattended(Boolean(browser?.enabled));
-    setBrowserDocumentOrigins(browser?.documentOrigins.join("\n") ?? "");
-    setBrowserResourceOrigins(browser?.resourceOrigins.join("\n") ?? "");
-    setBrowserCapabilities(
-      browser?.capabilities.length ? [...browser.capabilities] : ["observe", "act"],
+    setSelectedReadOnlyConnectorActions(
+      Object.fromEntries(
+        schedule.permissionPolicy.rules.connectors.map((rule) => [
+          rule.accountId,
+          [...rule.readOnlyActions],
+        ]),
+      ),
     );
-    setBrowserPrivateNetwork(Boolean(browser?.allowPrivateNetwork));
     setMaxOccurrences(schedule.stopConditions?.maxOccurrences?.toString() ?? "");
     setEndAt(
       schedule.stopConditions?.endAtMs ? toLocalDateTime(schedule.stopConditions.endAtMs) : "",
@@ -573,28 +450,15 @@ export function TaskCenter(props: {
 
   function buildDefinition(): ScheduleDefinition {
     const now = Date.now();
-    const selectedProjectId = projectId();
-    const projectContext = contextKind() === "project" && selectedProjectId;
-    const continuationSessionId =
-      contextKind() === "session_continuation" ? sessionId() : undefined;
-    const projectSideEffects = Boolean(projectContext && (allowWrite() || allowExec()));
-    const mcpToolAllowlist = [...selectedMcpTools()].sort((left, right) =>
+    const policy = permissionPolicy();
+    const fullAccess = policy.level === "full_access";
+    const mcpToolAllowlist = (fullAccess ? [] : [...selectedMcpTools()]).sort((left, right) =>
       `${left.serverId}\0${left.toolName}\0${left.schemaHash}\0${left.hostIdentityHash}`.localeCompare(
         `${right.serverId}\0${right.toolName}\0${right.schemaHash}\0${right.hostIdentityHash}`,
       ),
     );
-    const externalMcpTools = mcpToolAllowlist.filter((selection) => {
-      const catalog = mcpTools().find(
-        (entry) =>
-          entry.server.configuration.id === selection.serverId &&
-          entry.tool.name === selection.toolName &&
-          entry.tool.schemaHash === selection.schemaHash &&
-          entry.tool.hostIdentityHash === selection.hostIdentityHash,
-      );
-      return !catalog?.readOnly;
-    });
-    const connectorSelections = connectors()
-      .map((entry): ScheduleConnectorSelection | undefined => {
+    const connectorSelections = (fullAccess ? [] : connectors())
+      .map((entry): ConnectorRevisionSelection | undefined => {
         const allowedActions = selectedConnectorActions()[entry.account.id] ?? [];
         if (allowedActions.length === 0) return undefined;
         return {
@@ -611,23 +475,34 @@ export function TaskCenter(props: {
           allowedActions: [...allowedActions].sort(),
         };
       })
-      .filter((selection): selection is ScheduleConnectorSelection => Boolean(selection));
-    const browserGrant: ScheduleBrowserGrant | null = browserUnattended()
-      ? {
-          enabled: true,
-          documentOrigins: parseOrigins(browserDocumentOrigins()),
-          resourceOrigins: parseOrigins(browserResourceOrigins()),
-          capabilities: [...browserCapabilities()].sort(),
-          allowPrivateNetwork: browserPrivateNetwork(),
-        }
-      : null;
-    const toolAllowlist = projectContext
-      ? [
-          ...CORE_READ_TOOLS,
-          ...(allowWrite() ? ["workspace_write_file", "workspace_replace_text"] : []),
-          ...(allowExec() ? ["workspace_exec"] : []),
-        ]
-      : [];
+      .filter((selection): selection is ConnectorRevisionSelection => Boolean(selection));
+    const policyWithExtensions: AgentPermissionPolicy = {
+      ...policy,
+      rules: {
+        ...policy.rules,
+        mcp: mcpToolAllowlist.map((selection) => ({
+          serverId: selection.serverId,
+          toolName: selection.toolName,
+          schemaHash: selection.schemaHash,
+          readOnly:
+            mcpTools().find(
+              (entry) =>
+                entry.server.configuration.id === selection.serverId &&
+                entry.tool.name === selection.toolName &&
+                entry.tool.schemaHash === selection.schemaHash &&
+                entry.tool.hostIdentityHash === selection.hostIdentityHash,
+            )?.readOnly ?? false,
+        })),
+        connectors: connectorSelections.map((selection) => ({
+          accountId: selection.accountId,
+          actions: [...selection.allowedActions].sort(),
+          readOnlyActions: [...(selectedReadOnlyConnectorActions()[selection.accountId] ?? [])]
+            .filter((action) => selection.allowedActions.includes(action))
+            .sort(),
+          contributionRevision: selection.contributionRevision.actionHash ?? "",
+        })),
+      },
+    };
     return {
       id: crypto.randomUUID(),
       name: name().trim(),
@@ -636,44 +511,21 @@ export function TaskCenter(props: {
       schedule: scheduleSpec(),
       entryProfile: "workbench",
       workloadOverride: profile() || null,
-      contextTemplate: projectContext
-        ? {
-            kind: "project",
-            project_id: selectedProjectId,
-            execution_target:
-              executionKind() === "managed_worktree"
-                ? {
-                    kind: "managed_worktree",
-                    project_id: selectedProjectId,
-                    base_revision: baseRevision(),
-                  }
-                : { kind: "local", project_id: selectedProjectId },
-          }
-        : continuationSessionId
-          ? { kind: "session_continuation", session_id: continuationSessionId }
-          : { kind: "general" },
-      toolAllowlist,
-      skillAllowlist: selectedSkillIds(),
-      mcpToolAllowlist,
-      permissionConfig: {
-        permissionProfile:
-          externalMcpTools.length > 0 || connectorSelections.length > 0 || browserGrant
-            ? "external_sandbox"
-            : projectSideEffects
-              ? "workspace_write"
-              : "read_only",
-        allowFileRead: Boolean(projectContext),
-        allowFileWrite: Boolean(projectContext && allowWrite()),
-        allowExec: Boolean(projectContext && allowExec()),
-        externalTargets: externalMcpTools.map(
-          (selection) => `mcp:${selection.serverId}:${selection.toolName}`,
-        ),
+      contextTemplate: {
+        kind: "workspace",
+        workspace:
+          workspaceKind() === "managed"
+            ? { kind: "managed" }
+            : { kind: "selected_directory", root_path: workspacePath().trim() },
+        conversation_mode: conversationMode(),
       },
+      skillAllowlist: selectedSkillIds(),
+      skillRevisions: [],
+      mcpToolAllowlist,
+      permissionPolicy: policyWithExtensions,
       contributionRevisions: connectorSelections.map((selection) => selection.contributionRevision),
-      hostGrant: {
+      hostRevisionSnapshot: {
         connectors: connectorSelections,
-        browser: browserGrant,
-        computerUnattended: false,
       },
       permissionRevision: 0,
       timeoutMs: 30 * 60 * 1_000,
@@ -828,18 +680,17 @@ export function TaskCenter(props: {
               }}
             />
             <SelectField
-              label={zh() ? "执行范围" : "Context"}
-              testId="task-context"
-              value={contextKind()}
+              label={zh() ? "任务目录" : "Task workspace"}
+              testId="task-workspace-kind"
+              value={workspaceKind()}
               options={[
-                { value: "general", label: zh() ? "通用办公" : "General office" },
-                { value: "project", label: zh() ? "项目" : "Project" },
+                { value: "managed", label: zh() ? "应用内置目录" : "Managed workspace" },
                 {
-                  value: "session_continuation",
-                  label: zh() ? "现有对话续接" : "Existing Session continuation",
+                  value: "selected_directory",
+                  label: zh() ? "选择普通目录" : "Selected directory",
                 },
               ]}
-              onChange={(value) => setContextKind(value as ScheduleContext)}
+              onChange={(value) => setWorkspaceKind(value as "managed" | "selected_directory")}
             />
             <SelectField
               label={zh() ? "频率" : "Frequency"}
@@ -901,85 +752,57 @@ export function TaskCenter(props: {
               onResourceRevision={setEventResourceRevision}
             />
           </Show>
-          <Show when={contextKind() === "project"}>
-            <div class="task-form-grid task-project-options">
-              <SelectField
-                label={zh() ? "项目" : "Project"}
-                testId="task-project"
-                value={projectId() ?? ""}
-                options={props.projects.map((project) => ({
-                  value: project.id,
-                  label: project.displayName,
-                }))}
-                onChange={setProjectId}
+          <div class="task-form-grid task-project-options">
+            <SelectField
+              label={zh() ? "会话模式" : "Conversation mode"}
+              testId="task-conversation-mode"
+              value={conversationMode()}
+              options={[
+                {
+                  value: "per_run_session",
+                  label: zh() ? "每次新建会话" : "New session per run",
+                },
+                {
+                  value: "shared_session",
+                  label: zh() ? "复用同一会话" : "Shared session",
+                },
+              ]}
+              onChange={(value) =>
+                setConversationMode(value as "shared_session" | "per_run_session")
+              }
+            />
+            <SelectField
+              label={zh() ? "工作负载" : "Workload"}
+              testId="task-profile"
+              value={profile()}
+              options={[
+                { value: "", label: zh() ? "自动判断" : "Automatic" },
+                { value: "coding", label: "Coding" },
+                { value: "office", label: "Office" },
+              ]}
+              onChange={(value) => setProfile(value as "" | "office" | "coding")}
+            />
+          </div>
+          <Show when={workspaceKind() === "selected_directory"}>
+            <div class="task-directory-picker">
+              <TextField
+                label={zh() ? "目录" : "Directory"}
+                testId="task-workspace-path"
+                value={workspacePath()}
+                disabled
               />
-              <SelectField
-                label={zh() ? "工作负载" : "Workload"}
-                testId="task-profile"
-                value={profile()}
-                options={[
-                  { value: "", label: zh() ? "自动判断" : "Automatic" },
-                  { value: "coding", label: "Coding" },
-                  { value: "office", label: "Office" },
-                ]}
-                onChange={(value) => setProfile(value as "" | "office" | "coding")}
-              />
-              <SelectField
-                label={zh() ? "工作区" : "Workspace"}
-                testId="task-execution-target"
-                value={executionKind()}
-                options={[
-                  { value: "local", label: "Local" },
-                  {
-                    value: "managed_worktree",
-                    label: "Managed Worktree",
-                    disabled: projectGit()?.state.kind !== "ready",
-                  },
-                ]}
-                description={projectGitDescription()}
-                onChange={(value) => setExecutionKind(value as "local" | "managed_worktree")}
-              />
-              <Show when={executionKind() === "managed_worktree"}>
-                <SelectField
-                  label={zh() ? "基础分支" : "Base branch"}
-                  testId="task-base-revision"
-                  value={baseRevision()}
-                  options={gitRefs().map((reference) => ({
-                    value: reference.name,
-                    label: reference.name,
-                  }))}
-                  onChange={setBaseRevision}
-                />
-              </Show>
-            </div>
-          </Show>
-          <Show when={contextKind() === "session_continuation"}>
-            <div class="task-form-grid task-project-options">
-              <SelectField
-                label={zh() ? "对话" : "Session"}
-                testId="task-session-continuation"
-                value={sessionId() ?? ""}
-                options={sessions().map((session) => ({
-                  value: session.id,
-                  label: `${session.title} · ${session.id.slice(0, 8)}`,
-                }))}
-                description={
-                  zh()
-                    ? "每次触发都在同一 lane 创建 fresh Run，不恢复旧审批、临时权限或 Host lease。"
-                    : "Each occurrence creates a fresh Run in the same lane without restoring approvals, temporary grants, or Host leases."
-                }
-                onChange={setSessionId}
-              />
-              <SelectField
-                label={zh() ? "工作负载" : "Workload"}
-                value={profile()}
-                options={[
-                  { value: "", label: zh() ? "自动判断" : "Automatic" },
-                  { value: "coding", label: "Coding" },
-                  { value: "office", label: "Office" },
-                ]}
-                onChange={(value) => setProfile(value as "" | "office" | "coding")}
-              />
+              <Button
+                type="button"
+                variant="default"
+                onClick={() => {
+                  void commandPort
+                    .chooseScheduleWorkspaceDirectory()
+                    .then((path) => path && setWorkspacePath(path))
+                    .catch((error) => setFailure(commandFailure(error).message));
+                }}
+              >
+                <FolderOpen size={16} /> {zh() ? "选择" : "Choose"}
+              </Button>
             </div>
           </Show>
           <TextArea
@@ -1009,8 +832,8 @@ export function TaskCenter(props: {
                 <strong>{zh() ? "高级设置" : "Advanced settings"}</strong>
                 <small>
                   {zh()
-                    ? `${selectedSkillIds().length + selectedMcpTools().length} 项扩展 · ${allowWrite() || allowExec() ? "扩展权限" : "只读"}`
-                    : `${selectedSkillIds().length + selectedMcpTools().length} extensions · ${allowWrite() || allowExec() ? "elevated" : "read only"}`}
+                    ? `${selectedSkillIds().length + selectedMcpTools().length} 项扩展 · ${permissionPolicy().level}`
+                    : `${selectedSkillIds().length + selectedMcpTools().length} extensions · ${permissionPolicy().level}`}
                 </small>
               </span>
               <ChevronDown size={16} aria-hidden="true" />
@@ -1058,20 +881,17 @@ export function TaskCenter(props: {
                 checked={stopAfterSuccess()}
                 onChange={(event) => setStopAfterSuccess(event.currentTarget.checked)}
               />
-              <Show when={contextKind() === "project"}>
-                <Checkbox
-                  class="task-check"
-                  label={zh() ? "允许项目写入" : "Allow project writes"}
-                  checked={allowWrite()}
-                  onChange={(event) => setAllowWrite(event.currentTarget.checked)}
-                />
-                <Checkbox
-                  class="task-check"
-                  label={zh() ? "允许受限命令" : "Allow restricted commands"}
-                  checked={allowExec()}
-                  onChange={(event) => setAllowExec(event.currentTarget.checked)}
-                />
-              </Show>
+              <PermissionPolicyEditor
+                value={permissionPolicy()}
+                testId="task-permission"
+                zh={zh()}
+                onChange={(policy) => {
+                  setPermissionPolicy(policy);
+                  if (policy.level === "read_only") {
+                    setSelectedReadOnlyConnectorActions({ ...selectedConnectorActions() });
+                  }
+                }}
+              />
               <div class="task-skill-grid">
                 <For each={props.skills.filter((skill) => skill.enabled)}>
                   {(skill) => (
@@ -1090,7 +910,7 @@ export function TaskCenter(props: {
                   )}
                 </For>
               </div>
-              <Show when={mcpTools().length > 0}>
+              <Show when={mcpTools().length > 0 && permissionPolicy().level !== "full_access"}>
                 <div class="task-extension-heading">
                   <strong>{zh() ? "MCP 工具" : "MCP tools"}</strong>
                   <small>
@@ -1117,6 +937,7 @@ export function TaskCenter(props: {
                             entry.readOnly ? (zh() ? "（只读）" : " (read only)") : ""
                           }`}
                           checked={selected()}
+                          disabled={!entry.readOnly && permissionPolicy().level === "read_only"}
                           onChange={(event) => {
                             const selection: McpToolSelection = {
                               serverId: entry.server.configuration.id,
@@ -1139,7 +960,7 @@ export function TaskCenter(props: {
                   </For>
                 </div>
               </Show>
-              <Show when={connectors().length > 0}>
+              <Show when={connectors().length > 0 && permissionPolicy().level !== "full_access"}>
                 <div class="task-extension-heading">
                   <strong>{zh() ? "Connector" : "Connectors"}</strong>
                   <small>
@@ -1158,87 +979,69 @@ export function TaskCenter(props: {
                         </small>
                         <div class="task-skill-grid">
                           <For each={entry.descriptor.actions}>
-                            {(action) => (
-                              <Checkbox
-                                class="task-check"
-                                label={action}
-                                checked={(
-                                  selectedConnectorActions()[entry.account.id] ?? []
-                                ).includes(action)}
-                                onChange={(event) =>
-                                  setSelectedConnectorActions((current) => {
-                                    const selected = current[entry.account.id] ?? [];
-                                    const next = event.currentTarget.checked
-                                      ? [...new Set([...selected, action])]
-                                      : selected.filter((value) => value !== action);
-                                    return { ...current, [entry.account.id]: next };
-                                  })
-                                }
-                              />
-                            )}
+                            {(action) => {
+                              const selected = () =>
+                                (selectedConnectorActions()[entry.account.id] ?? []).includes(
+                                  action,
+                                );
+                              const readOnly = () =>
+                                (
+                                  selectedReadOnlyConnectorActions()[entry.account.id] ?? []
+                                ).includes(action);
+                              return (
+                                <div class="task-connector-action">
+                                  <Checkbox
+                                    class="task-check"
+                                    label={action}
+                                    checked={selected()}
+                                    onChange={(event) => {
+                                      const checked = event.currentTarget.checked;
+                                      setSelectedConnectorActions((current) => {
+                                        const values = current[entry.account.id] ?? [];
+                                        const next = checked
+                                          ? [...new Set([...values, action])]
+                                          : values.filter((value) => value !== action);
+                                        return { ...current, [entry.account.id]: next };
+                                      });
+                                      setSelectedReadOnlyConnectorActions((current) => {
+                                        const values = current[entry.account.id] ?? [];
+                                        const shouldReadOnly =
+                                          checked && permissionPolicy().level === "read_only";
+                                        const next = shouldReadOnly
+                                          ? [...new Set([...values, action])]
+                                          : checked
+                                            ? values
+                                            : values.filter((value) => value !== action);
+                                        return { ...current, [entry.account.id]: next };
+                                      });
+                                    }}
+                                  />
+                                  <Show
+                                    when={selected() && permissionPolicy().level === "writable"}
+                                  >
+                                    <Checkbox
+                                      class="task-check"
+                                      label={zh() ? "只读" : "Read only"}
+                                      checked={readOnly()}
+                                      onChange={(event) =>
+                                        setSelectedReadOnlyConnectorActions((current) => {
+                                          const values = current[entry.account.id] ?? [];
+                                          const next = event.currentTarget.checked
+                                            ? [...new Set([...values, action])]
+                                            : values.filter((value) => value !== action);
+                                          return { ...current, [entry.account.id]: next };
+                                        })
+                                      }
+                                    />
+                                  </Show>
+                                </div>
+                              );
+                            }}
                           </For>
                         </div>
                       </div>
                     )}
                   </For>
-                </div>
-              </Show>
-              <div class="task-extension-heading">
-                <strong>
-                  {zh() ? "内置 Browser（无人值守）" : "Embedded Browser (unattended)"}
-                </strong>
-                <small>
-                  {zh()
-                    ? "默认关闭；定时任务只使用内置 Browser。Origin 和能力会固定到 ScheduleGrant，Computer 无人值守始终不支持。"
-                    : "Off by default; scheduled tasks use only the embedded Browser. Origins and capabilities are pinned to the ScheduleGrant; unattended Computer remains unsupported."}
-                </small>
-              </div>
-              <Checkbox
-                class="task-check"
-                label={zh() ? "启用无人值守 Browser" : "Enable unattended Browser"}
-                checked={browserUnattended()}
-                onChange={(event) => setBrowserUnattended(event.currentTarget.checked)}
-              />
-              <Show when={browserUnattended()}>
-                <div class="task-browser-grant" data-testid="task-browser-grant">
-                  <TextArea
-                    label={zh() ? "文档 Origin（每行一个）" : "Document origins (one per line)"}
-                    value={browserDocumentOrigins()}
-                    onInput={(event) => setBrowserDocumentOrigins(event.currentTarget.value)}
-                    placeholder="https://example.com"
-                  />
-                  <TextArea
-                    label={zh() ? "资源 Origin（每行一个）" : "Resource origins (one per line)"}
-                    value={browserResourceOrigins()}
-                    onInput={(event) => setBrowserResourceOrigins(event.currentTarget.value)}
-                    placeholder="https://static.example.com"
-                  />
-                  <div class="task-skill-grid">
-                    <For each={BROWSER_CAPABILITIES}>
-                      {(capability) => (
-                        <Checkbox
-                          class="task-check"
-                          label={capability}
-                          checked={browserCapabilities().includes(capability)}
-                          onChange={(event) =>
-                            setBrowserCapabilities((current) =>
-                              event.currentTarget.checked
-                                ? [...new Set([...current, capability])]
-                                : current.filter((value) => value !== capability),
-                            )
-                          }
-                        />
-                      )}
-                    </For>
-                  </div>
-                  <Checkbox
-                    class="task-check"
-                    label={
-                      zh() ? "允许已列出的私网 Origin" : "Allow listed private-network origins"
-                    }
-                    checked={browserPrivateNetwork()}
-                    onChange={(event) => setBrowserPrivateNetwork(event.currentTarget.checked)}
-                  />
                 </div>
               </Show>
             </div>
@@ -1303,7 +1106,6 @@ export function TaskCenter(props: {
               <TaskCard
                 schedule={schedule}
                 recentRun={taskRuns().find((task) => task.scheduleId === schedule.id)}
-                projects={props.projects}
                 zh={zh()}
                 busy={busyId() === schedule.id}
                 onRun={() =>
@@ -1326,12 +1128,6 @@ export function TaskCenter(props: {
                 }
                 onEdit={() => beginEdit(schedule)}
                 onDelete={() => setRemoveScheduleId(schedule.id)}
-                onReauthorize={() =>
-                  void mutate(
-                    schedule.id,
-                    props.commandPort.reauthorizeSchedule(directUserMutationContext(), schedule.id),
-                  )
-                }
               />
             )}
           </For>
@@ -1420,51 +1216,6 @@ function toLocalDateTime(timestampMs: number): string {
   const date = new Date(timestampMs);
   const local = new Date(date.getTime() - date.getTimezoneOffset() * 60_000);
   return local.toISOString().slice(0, 16);
-}
-
-function authorizationScopeChanged(
-  current: ScheduleDefinition,
-  updated: ScheduleDefinition,
-): boolean {
-  const snapshot = (schedule: ScheduleDefinition) =>
-    JSON.stringify({
-      entryProfile: schedule.entryProfile,
-      workloadOverride: schedule.workloadOverride,
-      contextTemplate: schedule.contextTemplate,
-      toolAllowlist: [...schedule.toolAllowlist].sort(),
-      skillAllowlist: [...schedule.skillAllowlist].sort(),
-      mcpToolAllowlist: [...schedule.mcpToolAllowlist].sort((left, right) =>
-        `${left.serverId}\0${left.toolName}\0${left.schemaHash}\0${left.hostIdentityHash}`.localeCompare(
-          `${right.serverId}\0${right.toolName}\0${right.schemaHash}\0${right.hostIdentityHash}`,
-        ),
-      ),
-      contributionRevisions: [...(schedule.contributionRevisions ?? [])].sort((left, right) =>
-        `${left.pluginId}\0${left.contributionId}\0${left.accountId ?? ""}`.localeCompare(
-          `${right.pluginId}\0${right.contributionId}\0${right.accountId ?? ""}`,
-        ),
-      ),
-      hostGrant: schedule.hostGrant ?? {
-        connectors: [],
-        browser: null,
-        computerUnattended: false,
-      },
-      permissionConfig: {
-        ...schedule.permissionConfig,
-        externalTargets: [...schedule.permissionConfig.externalTargets].sort(),
-      },
-    });
-  return snapshot(current) !== snapshot(updated);
-}
-
-function parseOrigins(value: string): string[] {
-  return [
-    ...new Set(
-      value
-        .split(/[\r\n,]+/)
-        .map((origin) => origin.trim())
-        .filter(Boolean),
-    ),
-  ].sort();
 }
 
 function sameMcpTool(left: McpToolSelection, right: McpToolSelection): boolean {

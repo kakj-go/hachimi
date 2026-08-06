@@ -84,8 +84,6 @@ pub enum AgentStoreError {
     ScheduleEventConflict,
     #[error("idempotency key was already used for another resource")]
     IdempotencyConflict,
-    #[error("schedule grant does not exist: {0}")]
-    ScheduleGrantNotFound(hachimi_protocol::ScheduleGrantId),
     #[error("task run does not exist: {0}")]
     TaskRunNotFound(hachimi_protocol::TaskRunId),
     #[error("review does not exist: {0}")]

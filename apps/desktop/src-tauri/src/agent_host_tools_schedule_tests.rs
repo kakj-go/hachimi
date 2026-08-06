@@ -6,16 +6,16 @@ use std::{
 };
 
 use hachimi_agent::{
-    AgentRunCreateRequest, AgentRunFactory, ToolCall, ToolExecutor, ToolInvocation,
-    ToolResultStatus,
+    AgentRunCreateRequest, AgentRunLaunchRequest, AgentRunLauncher, ToolCall, ToolExecutor,
+    ToolInvocation, ToolResultStatus,
 };
 use hachimi_enterprise::EnterpriseApiClient;
 use hachimi_protocol::{
-    ApprovalPolicy, BehaviorMode, ConnectorAccountId, ConnectorAccountUpsert, ContributionRevision,
-    EntryProfile, LlmSettings, ModelToolCall, PermissionProfile, PluginContribution,
+    AgentPermissionPolicy, ApprovalPolicy, AuthorityMode, BehaviorMode, ConnectorAccountId,
+    ConnectorAccountUpsert, ConnectorRevisionSelection, ContributionRevision, EntryProfile,
+    HostRevisionSnapshot, LlmSettings, ModelToolCall, PermissionProfile, PluginContribution,
     PluginContributionKind, PluginId, PluginManifest, ProviderCapabilities, RunBudget,
-    RunEventPayload, RunOrigin, RunPurpose, ScheduleConnectorSelection, ScheduleHostGrant,
-    SessionContextBinding, ToolCallId, WorkloadKind,
+    RunEventPayload, RunOrigin, RunPurpose, SessionContextBinding, ToolCallId, WorkloadKind,
 };
 use serde_json::json;
 use tokio_util::sync::CancellationToken;
@@ -34,7 +34,7 @@ struct Fixture {
     host: hachimi_extensions::PluginHost,
     session_id: hachimi_protocol::SessionId,
     run_id: hachimi_protocol::RunId,
-    selection: ScheduleConnectorSelection,
+    selection: ConnectorRevisionSelection,
     server: Option<thread::JoinHandle<()>>,
 }
 
@@ -78,7 +78,7 @@ impl Fixture {
             .connector_driver_descriptor(&installed.manifest.id, CONNECTOR_ID)
             .await
             .expect("descriptor");
-        let selection = ScheduleConnectorSelection {
+        let selection = ConnectorRevisionSelection {
             account_id: connector_account_id,
             contribution_revision: ContributionRevision {
                 plugin_id: installed.manifest.id.clone(),
@@ -89,37 +89,50 @@ impl Fixture {
                 schema_hash: Some(descriptor.revision.schema_hash),
                 action_hash: Some(descriptor.revision.action_hash),
             },
-            allowed_actions: vec![crate::schedule_host_grants::ENTERPRISE_ATTACHMENT_ACTION.into()],
+            allowed_actions: vec![
+                crate::host_revision_snapshots::ENTERPRISE_ATTACHMENT_ACTION.into(),
+            ],
         };
         let pinned_account = selection.account_id.clone();
         let mut selection = selection;
         selection.contribution_revision.account_id = Some(pinned_account);
 
-        let created = AgentRunFactory::new(store.clone())
-            .create(AgentRunCreateRequest {
-                principal: "service:scheduler".into(),
-                idempotency_key: "scheduled-attachment-fixture".into(),
-                context: SessionContextBinding::General,
-                origin: RunOrigin::Interactive,
-                title: "Scheduled attachment fixture".into(),
-                prompt: "download one attachment".into(),
-                attachment_ids: Vec::new(),
-                parent_session_id: None,
-                source_run_id: None,
-                purpose: RunPurpose::Task,
-                model_snapshot: LlmSettings::default(),
-                entry_profile: EntryProfile::Workbench,
-                workload_override: Some(WorkloadKind::General),
-                behavior_mode: BehaviorMode::Default,
-                execution_target: None,
-                approval_policy: ApprovalPolicy::NeverPrompt,
-                permission_profile: PermissionProfile::ExternalSandbox,
-                budget: RunBudget::default(),
-                requested_capabilities: ProviderCapabilities::default(),
-                created_at_ms: 1_800_000_000_000,
+        let created = AgentRunLauncher::new(store.clone())
+            .launch_new(AgentRunLaunchRequest {
+                policy: AgentPermissionPolicy {
+                    level: PermissionProfile::FullAccess,
+                    rules: Default::default(),
+                    revision: 1,
+                },
+                authority_mode: AuthorityMode::Unattended,
+                create: AgentRunCreateRequest {
+                    principal: "service:scheduler".into(),
+                    idempotency_key: "scheduled-attachment-fixture".into(),
+                    context: SessionContextBinding::Workspace {
+                        workspace_id: hachimi_protocol::WorkspaceId::random(),
+                    },
+                    origin: RunOrigin::Manual,
+                    title: "Scheduled attachment fixture".into(),
+                    prompt: "download one attachment".into(),
+                    attachment_ids: Vec::new(),
+                    parent_session_id: None,
+                    source_run_id: None,
+                    purpose: RunPurpose::Task,
+                    model_snapshot: LlmSettings::default(),
+                    entry_profile: EntryProfile::Workbench,
+                    workload_override: Some(WorkloadKind::General),
+                    behavior_mode: BehaviorMode::Default,
+                    execution_target: None,
+                    approval_policy: ApprovalPolicy::NeverPrompt,
+                    permission_profile: PermissionProfile::FullAccess,
+                    budget: RunBudget::default(),
+                    requested_capabilities: ProviderCapabilities::default(),
+                    created_at_ms: 1_800_000_000_000,
+                },
             })
             .await
-            .expect("run");
+            .expect("run")
+            .created;
         seed_attachment_metadata(&store).await;
         Self {
             _source: source,
@@ -133,20 +146,20 @@ impl Fixture {
         }
     }
 
-    fn tool(&self, grant: ScheduleHostGrant) -> EnterpriseAttachmentDownloadTool {
+    fn tool(&self, grant: HostRevisionSnapshot) -> EnterpriseAttachmentDownloadTool {
         EnterpriseAttachmentDownloadTool {
             host: self.host.clone(),
             store: self.store.clone(),
             session_id: self.session_id.clone(),
             run_id: self.run_id.clone(),
-            schedule_host_grant: Some(grant),
+            host_revision_snapshot: Some(grant),
         }
     }
 
     fn invocation(&self, idempotency_key: &str) -> ToolInvocation {
         let call = ModelToolCall {
             id: ToolCallId::random(),
-            name: crate::schedule_host_grants::ENTERPRISE_ATTACHMENT_TOOL.into(),
+            name: crate::host_revision_snapshots::ENTERPRISE_ATTACHMENT_TOOL.into(),
             arguments: json!({
                 "providerId": "wecom_app",
                 "accountId": INTEGRATION_ID,
@@ -194,36 +207,30 @@ async fn scheduled_attachment_download_is_exactly_fenced_and_creates_an_artifact
     let fixture = Fixture::new().await;
 
     let missing = fixture
-        .tool(ScheduleHostGrant::default())
+        .tool(HostRevisionSnapshot::default())
         .execute(fixture.invocation("attachment-missing-grant"))
         .await
         .expect_err("missing grant must fail");
     assert!(
         missing
             .to_string()
-            .contains("schedule_enterprise_attachment_not_authorized")
+            .contains("agent_connector_action_not_authorized")
     );
 
     let mut drifted = fixture.selection.clone();
     drifted.contribution_revision.content_hash = "drifted-content".into();
     let drift = fixture
-        .tool(ScheduleHostGrant {
+        .tool(HostRevisionSnapshot {
             connectors: vec![drifted],
-            ..ScheduleHostGrant::default()
         })
         .execute(fixture.invocation("attachment-drift"))
         .await
         .expect_err("revision drift must fail");
-    assert!(
-        drift
-            .to_string()
-            .contains("schedule_connector_action_drift")
-    );
+    assert!(drift.to_string().contains("agent_connector_revision_drift"));
 
     let result = fixture
-        .tool(ScheduleHostGrant {
+        .tool(HostRevisionSnapshot {
             connectors: vec![fixture.selection.clone()],
-            ..ScheduleHostGrant::default()
         })
         .execute(fixture.invocation("attachment-success"))
         .await
@@ -252,7 +259,10 @@ async fn scheduled_attachment_download_is_exactly_fenced_and_creates_an_artifact
         .list_events(&fixture.session_id, 0)
         .await
         .expect("events");
-    assert!(crate::scheduler_commands::has_schedule_host_grant_attention(&events, &fixture.run_id));
+    assert!(crate::scheduler_commands::has_host_revision_attention(
+        &events,
+        &fixture.run_id
+    ));
     assert_eq!(
         crate::scheduler_commands::scheduled_completion_status(
             hachimi_protocol::RunStatus::Succeeded,
@@ -265,7 +275,7 @@ async fn scheduled_attachment_download_is_exactly_fenced_and_creates_an_artifact
         .iter()
         .filter_map(|event| match &event.payload {
             RunEventPayload::Generic { event, data }
-                if event == crate::schedule_host_grants::SCHEDULE_HOST_GRANT_ATTENTION_EVENT =>
+                if event == crate::host_revision_snapshots::HOST_REVISION_ATTENTION_EVENT =>
             {
                 data.get("code").and_then(serde_json::Value::as_str)
             }
@@ -275,8 +285,8 @@ async fn scheduled_attachment_download_is_exactly_fenced_and_creates_an_artifact
     assert_eq!(
         codes,
         vec![
-            "schedule_enterprise_attachment_not_authorized",
-            "schedule_connector_action_drift"
+            "agent_connector_action_not_authorized",
+            "agent_connector_revision_drift"
         ]
     );
 }

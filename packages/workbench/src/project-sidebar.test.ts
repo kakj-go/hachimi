@@ -9,7 +9,7 @@ function session(
 ): SessionRecord {
   return {
     id,
-    context: { kind: "general" },
+    context: { kind: "workspace", workspace_id: `workspace-${id}` },
     entryProfile: "workbench",
     title: id,
     archived: false,

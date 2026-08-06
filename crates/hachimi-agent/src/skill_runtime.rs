@@ -366,9 +366,10 @@ mod tests {
     use std::{fs, path::Path};
 
     use hachimi_protocol::{
-        ApprovalPolicy, BehaviorMode, EntryProfile, LlmSettings, PermissionProfile,
-        ProviderCapabilities, RunBudget, RunOrigin, RunPurpose, SandboxCapabilityReport,
-        SandboxReadiness, SessionContextBinding, ToolCallId, WorkloadResolution,
+        AgentPermissionPolicy, ApprovalPolicy, AuthorityMode, BehaviorMode, EntryProfile,
+        LlmSettings, PermissionProfile, ProviderCapabilities, RunBudget, RunOrigin, RunPurpose,
+        SandboxCapabilityReport, SandboxReadiness, SessionContextBinding, ToolCallId,
+        WorkloadResolution,
     };
     use hachimi_skills::{SkillCatalogRoot, SkillHost};
     use serde_json::json;
@@ -377,8 +378,8 @@ mod tests {
 
     use super::*;
     use crate::{
-        AgentInstructionLayer, AgentRunCreateRequest, AgentRunFactory, StepWorldState, ToolCall,
-        ToolResultStatus,
+        AgentInstructionLayer, AgentRunCreateRequest, AgentRunLaunchRequest, AgentRunLauncher,
+        StepWorldState, ToolCall, ToolResultStatus,
     };
 
     fn write_skill(root: &Path, name: &str) {
@@ -474,31 +475,38 @@ mod tests {
         host.set_catalog_roots(vec![SkillCatalogRoot::new(&built_in, SkillScope::BuiltIn)])
             .expect("catalog root");
         let records = host.list().await.expect("catalog");
-        let created = AgentRunFactory::new(store.clone())
-            .create(AgentRunCreateRequest {
-                principal: "test".into(),
-                idempotency_key: "skill-runtime-fixture".into(),
-                context: SessionContextBinding::General,
-                origin: RunOrigin::Interactive,
-                title: "Skill runtime".into(),
-                prompt: "Create a document".into(),
-                attachment_ids: Vec::new(),
-                parent_session_id: None,
-                source_run_id: None,
-                purpose: RunPurpose::Task,
-                model_snapshot: LlmSettings::default(),
-                entry_profile: EntryProfile::Workbench,
-                workload_override: None,
-                behavior_mode: BehaviorMode::Default,
-                execution_target: None,
-                approval_policy: ApprovalPolicy::NeverPrompt,
-                permission_profile: PermissionProfile::ReadOnly,
-                budget: RunBudget::default(),
-                requested_capabilities: ProviderCapabilities::default(),
-                created_at_ms: now_ms(),
+        let created = AgentRunLauncher::new(store.clone())
+            .launch_new(AgentRunLaunchRequest {
+                policy: AgentPermissionPolicy::default(),
+                authority_mode: AuthorityMode::Interactive,
+                create: AgentRunCreateRequest {
+                    principal: "test".into(),
+                    idempotency_key: "skill-runtime-fixture".into(),
+                    context: SessionContextBinding::Workspace {
+                        workspace_id: hachimi_protocol::WorkspaceId::random(),
+                    },
+                    origin: RunOrigin::Manual,
+                    title: "Skill runtime".into(),
+                    prompt: "Create a document".into(),
+                    attachment_ids: Vec::new(),
+                    parent_session_id: None,
+                    source_run_id: None,
+                    purpose: RunPurpose::Task,
+                    model_snapshot: LlmSettings::default(),
+                    entry_profile: EntryProfile::Workbench,
+                    workload_override: None,
+                    behavior_mode: BehaviorMode::Default,
+                    execution_target: None,
+                    approval_policy: ApprovalPolicy::NeverPrompt,
+                    permission_profile: PermissionProfile::ReadOnly,
+                    budget: RunBudget::default(),
+                    requested_capabilities: ProviderCapabilities::default(),
+                    created_at_ms: now_ms(),
+                },
             })
             .await
-            .expect("Run bundle");
+            .expect("Run bundle")
+            .created;
         (temp, store, host, created.run.id, records, state())
     }
 

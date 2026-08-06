@@ -257,12 +257,11 @@ fn evaluate_direct_user_policy(
         workload: WorkloadKind::Coding,
         behavior_mode: BehaviorMode::Default,
         approval_policy: ApprovalPolicy::OnlyWhenNeeded,
-        permission_profile: PermissionProfile::WorkspaceWrite,
+        permission_profile: PermissionProfile::Writable,
         effect: ToolEffect::WorkspaceWrite,
         action,
         resource,
         capability_host: Some("workspace-worker"),
-        schedule_grant_hash: None,
     });
     match decision {
         PolicyDecision::Allow => Ok(()),
@@ -274,7 +273,7 @@ fn evaluate_direct_user_policy(
 
 fn interactive_grants(workspace: &ResolvedWorkspace, source: &str) -> CapabilityGrantSet {
     let mut grants = expand_permission_profile(
-        PermissionProfile::WorkspaceWrite,
+        PermissionProfile::Writable,
         BehaviorMode::Default,
         workspace.session_id.clone(),
         workspace.run.id.clone(),

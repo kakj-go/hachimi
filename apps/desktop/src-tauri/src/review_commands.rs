@@ -4,12 +4,14 @@
 // @ 4c43465133428898aa84f0bfc02c306ed65fb66a.
 // Modified for Hachimi: Tauri adapter, persisted Review Run, and detached lineage.
 
-use hachimi_agent::{AgentRunCreateRequest, AgentRunFactory, build_review_prompt};
+use hachimi_agent::{
+    AgentRunCreateRequest, AgentRunLaunchRequest, AgentRunLauncher, build_review_prompt,
+};
 use hachimi_protocol::{
-    ApprovalPolicy, BehaviorMode, ItemId, ItemPayload, ItemRelations, ItemStatus,
-    PermissionProfile, ReviewDelivery, ReviewFinding, ReviewFindingUpdateRequest, ReviewId,
-    ReviewRecord, ReviewSnapshot, ReviewStartRequest, ReviewStartSnapshot, RunId, RunOrigin,
-    RunPurpose, RunRecord, RunStatus, TranscriptItem, TranscriptItemKind, WorkbenchTaskSnapshot,
+    AgentPermissionPolicy, ApprovalPolicy, AuthorityMode, BehaviorMode, PermissionProfile,
+    ReviewDelivery, ReviewFinding, ReviewFindingUpdateRequest, ReviewId, ReviewRecord,
+    ReviewSnapshot, ReviewStartRequest, ReviewStartSnapshot, RunOrigin, RunPurpose, RunStatus,
+    ScopedPermissionRules, WorkbenchTaskSnapshot,
 };
 use tauri::{AppHandle, State, WebviewWindow};
 
@@ -168,95 +170,88 @@ pub(super) async fn start_review_inner(
     let prompt = build_review_prompt(&request.target);
     let now = i64::try_from(epoch_millis()).unwrap_or(i64::MAX);
     let model_snapshot = state.settings.read().llm.clone();
+    let mut review_policy = state
+        .agent_store
+        .permission_policy(&format!("session:{}", source.session.id))
+        .await
+        .map_err(|error| review_error("review_policy_failed", error))?
+        .unwrap_or(AgentPermissionPolicy {
+            level: PermissionProfile::ReadOnly,
+            rules: ScopedPermissionRules::default(),
+            revision: 0,
+        });
+    review_policy.level = PermissionProfile::ReadOnly;
+    let launcher = AgentRunLauncher::new(state.agent_store.clone());
     let (session, run) = match request.delivery {
         ReviewDelivery::Detached => {
-            let created = AgentRunFactory::new(state.agent_store.clone())
-                .create(AgentRunCreateRequest {
-                    principal: client.client_id.0.clone(),
-                    idempotency_key: request.context.idempotency_key.clone(),
-                    context: source.session.context.clone(),
-                    origin: RunOrigin::Handoff {
-                        source_session_id: source.session.id.clone(),
-                        source_run_id: source_run.id.clone(),
+            let launched = launcher
+                .launch_new(AgentRunLaunchRequest {
+                    create: AgentRunCreateRequest {
+                        principal: client.client_id.0.clone(),
+                        idempotency_key: request.context.idempotency_key.clone(),
+                        context: source.session.context.clone(),
+                        origin: RunOrigin::Project,
+                        title: format!("Review: {}", source.session.title)
+                            .chars()
+                            .take(200)
+                            .collect(),
+                        prompt: prompt.clone(),
+                        attachment_ids: Vec::new(),
+                        parent_session_id: Some(source.session.id.clone()),
+                        source_run_id: Some(source_run.id.clone()),
+                        purpose: RunPurpose::Review,
+                        model_snapshot,
+                        entry_profile: source.session.entry_profile,
+                        workload_override: source_run.configuration.workload_override,
+                        behavior_mode: BehaviorMode::Default,
+                        execution_target: source_run.configuration.execution_target.clone(),
+                        approval_policy: ApprovalPolicy::NeverPrompt,
+                        permission_profile: PermissionProfile::ReadOnly,
+                        budget: source_run.configuration.budget.clone(),
+                        requested_capabilities: source_run.requested_capabilities,
+                        created_at_ms: now,
                     },
-                    title: format!("Review: {}", source.session.title)
-                        .chars()
-                        .take(200)
-                        .collect(),
-                    prompt: prompt.clone(),
-                    attachment_ids: Vec::new(),
-                    parent_session_id: Some(source.session.id.clone()),
-                    source_run_id: Some(source_run.id.clone()),
-                    purpose: RunPurpose::Review,
-                    model_snapshot,
-                    entry_profile: source.session.entry_profile,
-                    workload_override: source_run.configuration.workload_override,
-                    behavior_mode: BehaviorMode::Default,
-                    execution_target: source_run.configuration.execution_target.clone(),
-                    approval_policy: ApprovalPolicy::NeverPrompt,
-                    permission_profile: PermissionProfile::ReadOnly,
-                    budget: source_run.configuration.budget.clone(),
-                    requested_capabilities: source_run.requested_capabilities,
-                    created_at_ms: now,
+                    policy: review_policy.clone(),
+                    authority_mode: AuthorityMode::Unattended,
                 })
                 .await
                 .map_err(|error| review_error("review_run_create_failed", error))?;
-            (created.session, created.run)
+            (launched.created.session, launched.created.run)
         }
         ReviewDelivery::Inline => {
-            let mut configuration = source_run.configuration.clone();
-            configuration.model_snapshot = model_snapshot;
-            configuration.behavior_mode = BehaviorMode::Default;
-            configuration.approval_policy = ApprovalPolicy::NeverPrompt;
-            configuration.permission_profile = PermissionProfile::ReadOnly;
-            configuration.accepted_plan_id = None;
-            configuration.accepted_plan_revision = None;
-            let candidate = RunRecord {
-                id: RunId::random(),
-                session_id: source.session.id.clone(),
-                status: RunStatus::Queued,
-                purpose: RunPurpose::Review,
-                origin: RunOrigin::Interactive,
-                generation: 1,
-                configuration,
-                requested_capabilities: source_run.requested_capabilities,
-                negotiated_capabilities: hachimi_protocol::ProviderCapabilities::default(),
-                provider_capability_probe: None,
-                capability_degradations: Vec::new(),
-                failure_code: None,
-                created_at_ms: now,
-                updated_at_ms: now,
-            };
-            let run = state
-                .agent_store
-                .create_run_idempotent(
-                    &client.client_id.0,
-                    &request.context.idempotency_key,
-                    &candidate,
+            let launched = launcher
+                .launch_in_session_transient_policy(
+                    AgentRunLaunchRequest {
+                        create: AgentRunCreateRequest {
+                            principal: client.client_id.0.clone(),
+                            idempotency_key: request.context.idempotency_key.clone(),
+                            context: source.session.context.clone(),
+                            origin: source_run.origin.clone(),
+                            title: source.session.title.clone(),
+                            prompt: prompt.clone(),
+                            attachment_ids: Vec::new(),
+                            parent_session_id: None,
+                            source_run_id: None,
+                            purpose: RunPurpose::Review,
+                            model_snapshot,
+                            entry_profile: source.session.entry_profile,
+                            workload_override: source_run.configuration.workload_override,
+                            behavior_mode: BehaviorMode::Default,
+                            execution_target: source_run.configuration.execution_target.clone(),
+                            approval_policy: ApprovalPolicy::NeverPrompt,
+                            permission_profile: PermissionProfile::ReadOnly,
+                            budget: source_run.configuration.budget.clone(),
+                            requested_capabilities: source_run.requested_capabilities,
+                            created_at_ms: now,
+                        },
+                        policy: review_policy,
+                        authority_mode: AuthorityMode::Unattended,
+                    },
+                    source.session.clone(),
                 )
                 .await
                 .map_err(|error| review_error("review_run_create_failed", error))?;
-            if run.id == candidate.id {
-                state
-                    .agent_store
-                    .append_transcript_item(TranscriptItem {
-                        id: ItemId::random(),
-                        session_id: source.session.id.clone(),
-                        run_id: Some(run.id.clone()),
-                        sequence: 0,
-                        kind: TranscriptItemKind::User,
-                        status: ItemStatus::Completed,
-                        payload: ItemPayload::User {
-                            text: prompt.clone(),
-                            attachment_ids: Vec::new(),
-                        },
-                        relations: ItemRelations::default(),
-                        created_at_ms: now,
-                    })
-                    .await
-                    .map_err(|error| review_error("review_item_create_failed", error))?;
-            }
-            (source.session.clone(), run)
+            (launched.created.session, launched.created.run)
         }
     };
     let review = state

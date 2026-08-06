@@ -1,4 +1,3 @@
-// Keep Windows GUI builds free of an extra console window.
 #![cfg_attr(windows, windows_subsystem = "windows")]
 #![cfg_attr(all(feature = "desktop-e2e", not(debug_assertions)), allow(dead_code))]
 #[cfg(all(feature = "desktop-e2e", not(debug_assertions)))]
@@ -34,6 +33,7 @@ mod gateway_process;
 mod gateway_runtime;
 mod git_forge_host;
 mod host_domain_commands;
+mod host_revision_snapshots;
 mod integration_commands;
 mod local_host_commands;
 mod managed_sandbox_runtime;
@@ -41,6 +41,7 @@ mod mcp_commands;
 mod mcp_runtime;
 mod media_commands;
 mod optional_resource_runtime;
+mod permission_runtime;
 mod plugin_content_protocol;
 mod process_commands;
 mod project_git_commands;
@@ -48,7 +49,6 @@ mod project_tool_commands;
 mod review_commands;
 mod runtime_supervisor;
 mod sandbox_commands;
-mod schedule_host_grants;
 mod scheduler_commands;
 mod scheduler_runtime;
 mod shutdown_coordinator;
@@ -112,7 +112,6 @@ use hachimi_llm::{
     ApiKeyStore, SystemApiKeyStore, apply_secret_change, test_connection, validate_input,
 };
 use hachimi_motion::{InspectedMotion, MotionCatalog, inspect_motion};
-use hachimi_policy::expand_permission_profile;
 use hachimi_process::ProcessRegistry;
 use hachimi_protocol::{
     AppSettings, ApprovalDecisionRequest, ApprovalResolution, ApprovalStatus, AttachmentRecord,
@@ -986,12 +985,13 @@ fn main() {
         panic!("{error}");
     }
     let storage_layout = resolve_storage_layout();
+    if let Err(error) = prepare_schema_epoch(&storage_layout) {
+        eprintln!("Hachimi V2 initialization could not be completed: {error}");
+        std::process::exit(1);
+    }
     if std::env::args_os().any(|argument| argument == "--gateway") {
         gateway_process::run(&storage_layout.root);
         return;
-    }
-    if let Err(error) = perform_pending_reset(&storage_layout) {
-        eprintln!("Hachimi reset could not be completed: {error}");
     }
     configure_webview_storage(&storage_layout);
     let log_dir = initialize_logging(storage_layout.logs());
@@ -1233,14 +1233,13 @@ fn main() {
             list_reviews,
             update_review_finding,
             create_schedule,
+            choose_schedule_workspace_directory,
             get_schedule,
             list_schedules,
             preview_schedule,
             update_schedule,
             set_schedule_enabled,
             remove_schedule,
-            reauthorize_schedule,
-            revoke_schedule_grant,
             run_schedule_now,
             ingest_schedule_event,
             list_schedule_event_receipts,
@@ -1343,7 +1342,9 @@ fn main() {
             get_motion_runtime_asset,
             get_session_permission_config,
             update_session_permission_config,
+            clear_session_extra_authorizations,
             start_pet_turn,
+            recover_pet_turn,
             cancel_pet_turn,
             list_voice_models,
             inspect_voice_model,
@@ -1410,6 +1411,7 @@ fn main() {
             let agent_store = tauri::async_runtime::block_on(AgentStore::connect(
                 data_dir.join("agent-v2.sqlite3"),
             ))?;
+            tauri::async_runtime::block_on(agent_store.reconcile_managed_workspaces())?;
             let runtime_supervisor = RuntimeSupervisor::new(app.handle().clone());
             let run_activity = agent_store.subscribe_run_activity();
             let mut recovery = tauri::async_runtime::block_on(

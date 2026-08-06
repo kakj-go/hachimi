@@ -733,7 +733,7 @@ mod tests {
             session_id: session.id.clone(),
             status: RunStatus::Queued,
             purpose: RunPurpose::Task,
-            origin: hachimi_protocol::RunOrigin::Interactive,
+            origin: hachimi_protocol::RunOrigin::Manual,
             generation: 4,
             configuration: RunConfiguration {
                 model_snapshot: LlmSettings::default(),

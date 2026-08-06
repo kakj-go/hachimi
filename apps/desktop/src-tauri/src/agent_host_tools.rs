@@ -5,13 +5,14 @@ use std::sync::Arc;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use hachimi_agent::{ToolExecutor, ToolFuture, ToolInvocation, ToolResult};
 use hachimi_protocol::{
-    BrowserAction, BrowserActionRequest, BrowserAutomationLeaseId, BrowserAutomationPreference,
-    BrowserAutomationSurfaceKind, BrowserCapability, BrowserNetworkPolicy, BrowserNetworkRule,
-    BrowserNetworkRuleKind, BrowserObservationId, BrowserPermissionDecision, BrowserProfileKind,
-    CapabilityGrantSet, ClientId, ComputerActionRequest, ComputerAppRule,
-    ConnectorInvocationRequest, EnterpriseAttachmentDownloadRequest, HostPolicyDecision,
-    IntegrationProviderId, ModelInputImage, MutationContext, RequestId, ScheduleHostGrant,
-    SessionId, SessionSourceOrigin, ToolDescriptor, ToolEffect,
+    AuthorityMode, BrowserAction, BrowserActionRequest, BrowserAutomationLeaseId,
+    BrowserAutomationPreference, BrowserAutomationSurfaceKind, BrowserCapability,
+    BrowserNetworkPolicy, BrowserNetworkRule, BrowserNetworkRuleKind, BrowserObservationId,
+    BrowserPermissionDecision, BrowserProfileKind, CapabilityGrantSet, ClientId,
+    ComputerActionRequest, ComputerAppRule, ConnectorInvocationRequest,
+    EnterpriseAttachmentDownloadRequest, HostPolicyDecision, HostRevisionSnapshot,
+    IntegrationProviderId, ModelInputImage, MutationContext, RequestId, SessionId,
+    SessionSourceOrigin, ToolDescriptor, ToolEffect,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -20,6 +21,7 @@ use sqlx::Row;
 use crate::agent_host_tools_support::{
     browser_error_code, browser_target_summary, computer_action_category, computer_error_code,
     computer_target_summary, connector_source, now_ms, object_schema, stable_hash,
+    unattended_computer_target_allowed,
 };
 
 #[path = "agent_host_tools_registry.rs"]
@@ -44,8 +46,8 @@ struct BrowserStartTool {
     session_id: SessionId,
     run_id: hachimi_protocol::RunId,
     grants: CapabilityGrantSet,
+    authority_mode: AuthorityMode,
     sandbox: hachimi_protocol::SandboxCapabilityReport,
-    schedule_host_grant: Option<ScheduleHostGrant>,
     environment_change_sink: EnvironmentChangeSink,
 }
 
@@ -74,8 +76,8 @@ impl ToolExecutor for BrowserStartTool {
         let session_id = self.session_id.clone();
         let run_id = self.run_id.clone();
         let grants = self.grants.clone();
+        let authority_mode = self.authority_mode;
         let sandbox = self.sandbox.clone();
-        let schedule_host_grant = self.schedule_host_grant.clone();
         let environment_change_sink = Arc::clone(&self.environment_change_sink);
         Box::pin(async move {
             let args: BrowserStartArgs =
@@ -112,7 +114,7 @@ impl ToolExecutor for BrowserStartTool {
                 args.surface,
                 embedded.runtime_available(),
                 pairing.is_some(),
-                schedule_host_grant.is_some(),
+                authority_mode == AuthorityMode::Unattended,
             ) {
                 Ok(surface) => surface,
                 Err(error) => return Ok(ToolResult::failed(&invocation.call, error)),
@@ -123,30 +125,20 @@ impl ToolExecutor for BrowserStartTool {
             } else {
                 BrowserProfileKind::Isolated
             };
-            let scheduled_browser = schedule_host_grant
-                .as_ref()
-                .and_then(|grant| grant.browser.as_ref());
             let initial_origin = match hachimi_browser::normalized_origin(args.initial_url.trim()) {
                 Ok(origin) => origin,
                 Err(error) => {
                     return Ok(ToolResult::failed(&invocation.call, error.to_string()));
                 }
             };
-            if let Some(browser) = scheduled_browser {
-                if !browser.enabled || !browser.document_origins.contains(&initial_origin) {
-                    return Ok(ToolResult::failed(
-                        &invocation.call,
-                        "scheduled Browser origin is outside the persisted document-origin grant",
-                    ));
+            if authority_mode == AuthorityMode::Unattended {
+                if let Err(error) = crate::browser_tool_policy::unattended_browser_target_access(
+                    &grants,
+                    &initial_origin,
+                ) {
+                    return Ok(ToolResult::failed(&invocation.call, error));
                 }
-            } else if schedule_host_grant.is_some() {
-                return Ok(ToolResult::failed(
-                    &invocation.call,
-                    "scheduled Browser access is not authorized",
-                ));
-            }
-            if schedule_host_grant.is_none()
-                && !grants.browser.origins.is_empty()
+            } else if !grants.browser.origins.is_empty()
                 && !grants
                     .browser
                     .origins
@@ -177,8 +169,14 @@ impl ToolExecutor for BrowserStartTool {
             if grants.browser.cdp {
                 capabilities.push(BrowserCapability::Cdp);
             }
-            let allow_private_network = if let Some(browser) = scheduled_browser {
-                browser.allow_private_network
+            let allow_private_network = if authority_mode == AuthorityMode::Unattended {
+                match crate::browser_tool_policy::unattended_browser_target_access(
+                    &grants,
+                    &initial_origin,
+                ) {
+                    Ok(allow_private_network) => allow_private_network,
+                    Err(error) => return Ok(ToolResult::failed(&invocation.call, error)),
+                }
             } else {
                 match crate::browser_tool_policy::require_interactive_browser_access(
                     &store,
@@ -239,42 +237,30 @@ impl ToolExecutor for BrowserStartTool {
                     content,
                 ));
             }
-            let network_rules = scheduled_browser.map_or_else(
-                || {
-                    vec![
+            let network_origins = if authority_mode == AuthorityMode::Unattended
+                && grants.profile != hachimi_protocol::PermissionProfile::FullAccess
+            {
+                grants.browser.origins.clone()
+            } else {
+                vec![initial_origin.clone()]
+            };
+            let network_rules = network_origins
+                .into_iter()
+                .flat_map(|origin| {
+                    [
                         (
-                            initial_origin.clone(),
+                            origin.clone(),
                             BrowserNetworkRuleKind::Document,
                             allow_private_network,
                         ),
                         (
-                            initial_origin.clone(),
+                            origin,
                             BrowserNetworkRuleKind::Resource,
                             allow_private_network,
                         ),
                     ]
-                },
-                |browser| {
-                    browser
-                        .document_origins
-                        .iter()
-                        .map(|origin| {
-                            (
-                                origin.clone(),
-                                BrowserNetworkRuleKind::Document,
-                                browser.allow_private_network,
-                            )
-                        })
-                        .chain(browser.resource_origins.iter().map(|origin| {
-                            (
-                                origin.clone(),
-                                BrowserNetworkRuleKind::Resource,
-                                browser.allow_private_network,
-                            )
-                        }))
-                        .collect()
-                },
-            );
+                })
+                .collect::<Vec<_>>();
             let initial_network_policy = BrowserNetworkPolicy {
                 rules: network_rules
                     .iter()
@@ -322,8 +308,8 @@ impl ToolExecutor for BrowserStartTool {
                         BrowserPermissionDecision::AllowSession,
                         network_kind,
                         allow_private_network,
-                        if scheduled_browser.is_some() {
-                            "schedule:unattended-browser-grant"
+                        if authority_mode == AuthorityMode::Unattended {
+                            "run:preauthorized-background-browser-grant"
                         } else {
                             "run:approved-browser-start"
                         },
@@ -414,7 +400,7 @@ struct BrowserObserveTool {
     session_id: SessionId,
     run_id: hachimi_protocol::RunId,
     grants: CapabilityGrantSet,
-    schedule_host_grant: Option<ScheduleHostGrant>,
+    authority_mode: AuthorityMode,
     environment_change_sink: EnvironmentChangeSink,
 }
 
@@ -437,7 +423,7 @@ impl ToolExecutor for BrowserObserveTool {
         let session_id = self.session_id.clone();
         let run_id = self.run_id.clone();
         let grants = self.grants.clone();
-        let schedule_host_grant = self.schedule_host_grant.clone();
+        let authority_mode = self.authority_mode;
         let environment_change_sink = Arc::clone(&self.environment_change_sink);
         Box::pin(async move {
             let args: BrowserSessionArgs =
@@ -468,7 +454,7 @@ impl ToolExecutor for BrowserObserveTool {
                             invocation.run_generation,
                             crate::browser_tool_policy::embedded_origin_policy(
                                 &grants,
-                                schedule_host_grant.as_ref(),
+                                authority_mode,
                             ),
                         )
                         .await
@@ -506,7 +492,8 @@ impl ToolExecutor for BrowserObserveTool {
             if let Err(error) = crate::browser_tool_policy::require_external_session_access(
                 &store,
                 &current_session,
-                schedule_host_grant.as_ref(),
+                authority_mode,
+                &grants,
                 invocation.run_generation,
                 &[BrowserCapability::Observe],
             )
@@ -593,7 +580,7 @@ struct BrowserActTool {
     session_id: SessionId,
     run_id: hachimi_protocol::RunId,
     grants: CapabilityGrantSet,
-    schedule_host_grant: Option<ScheduleHostGrant>,
+    authority_mode: AuthorityMode,
     environment_change_sink: EnvironmentChangeSink,
 }
 
@@ -626,7 +613,7 @@ impl ToolExecutor for BrowserActTool {
         let session_id = self.session_id.clone();
         let run_id = self.run_id.clone();
         let grants = self.grants.clone();
-        let schedule_host_grant = self.schedule_host_grant.clone();
+        let authority_mode = self.authority_mode;
         let environment_change_sink = Arc::clone(&self.environment_change_sink);
         Box::pin(async move {
             let requested_lease_id = match invocation
@@ -682,7 +669,8 @@ impl ToolExecutor for BrowserActTool {
                 if let Err(error) = crate::browser_tool_policy::require_external_session_access(
                     &store,
                     &current_session,
-                    schedule_host_grant.as_ref(),
+                    authority_mode,
+                    &grants,
                     invocation.run_generation,
                     &[required_capability],
                 )
@@ -720,19 +708,15 @@ impl ToolExecutor for BrowserActTool {
                             return Ok(ToolResult::failed(&invocation.call, error.to_string()));
                         }
                     };
-                    let allow_private_network = if let Some(schedule_browser) = schedule_host_grant
-                        .as_ref()
-                        .and_then(|grant| grant.browser.as_ref())
-                    {
-                        if !schedule_browser.enabled
-                            || !schedule_browser.document_origins.contains(&origin)
-                        {
-                            return Ok(ToolResult::failed(
-                                &invocation.call,
-                                "scheduled Browser navigation exceeds its exact Origin grant",
-                            ));
+                    let allow_private_network = if authority_mode == AuthorityMode::Unattended {
+                        match crate::browser_tool_policy::unattended_browser_target_access(
+                            &grants, &origin,
+                        ) {
+                            Ok(allow_private_network) => allow_private_network,
+                            Err(error) => {
+                                return Ok(ToolResult::failed(&invocation.call, error));
+                            }
                         }
-                        schedule_browser.allow_private_network
                     } else {
                         match crate::browser_tool_policy::require_interactive_browser_access(
                             &store,
@@ -770,7 +754,7 @@ impl ToolExecutor for BrowserActTool {
                             action: &request.action,
                             origin_policy: crate::browser_tool_policy::embedded_origin_policy(
                                 &grants,
-                                schedule_host_grant.as_ref(),
+                                authority_mode,
                             ),
                         },
                     )
@@ -842,18 +826,7 @@ impl ToolExecutor for BrowserActTool {
                     BrowserCapability::Cdp => grants.browser.cdp,
                 },
             };
-            let schedule_capability_allowed = schedule_host_grant
-                .as_ref()
-                .map(|grant| {
-                    grant.browser.as_ref().is_some_and(|browser| {
-                        browser.enabled
-                            && browser
-                                .capabilities
-                                .contains(&request.action.required_capability())
-                    })
-                })
-                .unwrap_or(true);
-            if !capability_allowed || !schedule_capability_allowed {
+            if !capability_allowed {
                 return Ok(ToolResult::failed(
                     &invocation.call,
                     "Browser action exceeds the active Run capability grant",
@@ -868,20 +841,6 @@ impl ToolExecutor for BrowserActTool {
                         return Ok(ToolResult::failed(&invocation.call, error.to_string()));
                     }
                 };
-                let origin_allowed = schedule_host_grant.as_ref().map_or_else(
-                    || true,
-                    |grant| {
-                        grant.browser.as_ref().is_some_and(|browser| {
-                            browser.enabled && browser.document_origins.contains(&target_origin)
-                        })
-                    },
-                );
-                if !origin_allowed {
-                    return Ok(ToolResult::failed(
-                        &invocation.call,
-                        "Cross-origin navigation exceeds the exact active Run origin grant",
-                    ));
-                }
                 let session = match host.session_snapshot(&request.browser_session_id, &run_id) {
                     Ok(session) if session.owner_session_id == session_id => session,
                     Ok(_) => {
@@ -898,19 +857,18 @@ impl ToolExecutor for BrowserActTool {
                 if grants.browser.observe {
                     capabilities.push(BrowserCapability::Observe);
                 }
-                let network_kinds = if schedule_host_grant.is_some() {
-                    vec![BrowserNetworkRuleKind::Document]
-                } else {
-                    vec![
-                        BrowserNetworkRuleKind::Document,
-                        BrowserNetworkRuleKind::Resource,
-                    ]
-                };
-                let allow_private_network = if let Some(schedule_browser) = schedule_host_grant
-                    .as_ref()
-                    .and_then(|grant| grant.browser.as_ref())
-                {
-                    schedule_browser.allow_private_network
+                let network_kinds = vec![
+                    BrowserNetworkRuleKind::Document,
+                    BrowserNetworkRuleKind::Resource,
+                ];
+                let allow_private_network = if authority_mode == AuthorityMode::Unattended {
+                    match crate::browser_tool_policy::unattended_browser_target_access(
+                        &grants,
+                        &target_origin,
+                    ) {
+                        Ok(allow_private_network) => allow_private_network,
+                        Err(error) => return Ok(ToolResult::failed(&invocation.call, error)),
+                    }
                 } else {
                     match crate::browser_tool_policy::require_interactive_browser_access(
                         &store,
@@ -944,8 +902,8 @@ impl ToolExecutor for BrowserActTool {
                             BrowserPermissionDecision::AllowSession,
                             network_kind,
                             allow_private_network,
-                            if schedule_host_grant.is_some() {
-                                "schedule:approved-navigation"
+                            if authority_mode == AuthorityMode::Unattended {
+                                "run:preauthorized-background-navigation"
                             } else {
                                 "run:approved-navigation"
                             },
@@ -1193,6 +1151,7 @@ struct ComputerObserveTool {
     session_id: SessionId,
     run_id: hachimi_protocol::RunId,
     grants: CapabilityGrantSet,
+    authority_mode: AuthorityMode,
     sandbox: hachimi_protocol::SandboxCapabilityReport,
 }
 
@@ -1220,6 +1179,7 @@ impl ToolExecutor for ComputerObserveTool {
         let session_id = self.session_id.clone();
         let run_id = self.run_id.clone();
         let grants = self.grants.clone();
+        let authority_mode = self.authority_mode;
         let sandbox = self.sandbox.clone();
         Box::pin(async move {
             let args: ComputerObserveArgs =
@@ -1278,51 +1238,60 @@ impl ToolExecutor for ComputerObserveTool {
                 }
             };
             let app = target.app.clone();
-            match store
-                .computer_host_policy_decision(&app, &session_id, &run_id)
-                .await
-                .map_err(|error| hachimi_agent::ToolExecutionError::Failed(error.to_string()))?
-            {
-                HostPolicyDecision::Block => {
+            if authority_mode == AuthorityMode::Unattended {
+                if !unattended_computer_target_allowed(&grants, &target) {
                     return Ok(ToolResult::failed(
                         &invocation.call,
-                        format!(
-                            "Computer application is blocked by policy: {}",
-                            app.display_name
-                        ),
+                        "Computer window is outside the preconfigured background grant",
                     ));
                 }
-                HostPolicyDecision::Ask => {
-                    let request = store
-                        .create_computer_host_access_request(
-                            &session_id,
-                            &run_id,
-                            invocation.run_generation,
-                            &app,
-                        )
-                        .await
-                        .map_err(|error| {
-                            hachimi_agent::ToolExecutionError::Failed(error.to_string())
-                        })?;
-                    let _ = store
-                        .append_event(
-                            &session_id,
-                            Some(&run_id),
-                            "host.access_required",
-                            serde_json::to_value(&request).map_err(|error| {
+            } else {
+                match store
+                    .computer_host_policy_decision(&app, &session_id, &run_id)
+                    .await
+                    .map_err(|error| hachimi_agent::ToolExecutionError::Failed(error.to_string()))?
+                {
+                    HostPolicyDecision::Block => {
+                        return Ok(ToolResult::failed(
+                            &invocation.call,
+                            format!(
+                                "Computer application is blocked by policy: {}",
+                                app.display_name
+                            ),
+                        ));
+                    }
+                    HostPolicyDecision::Ask => {
+                        let request = store
+                            .create_computer_host_access_request(
+                                &session_id,
+                                &run_id,
+                                invocation.run_generation,
+                                &app,
+                            )
+                            .await
+                            .map_err(|error| {
                                 hachimi_agent::ToolExecutionError::Failed(error.to_string())
-                            })?,
-                        )
-                        .await;
-                    return Ok(ToolResult::failed(
-                        &invocation.call,
-                        format!(
-                            "Computer application access requires user confirmation: {}",
-                            request.id
-                        ),
-                    ));
+                            })?;
+                        let _ = store
+                            .append_event(
+                                &session_id,
+                                Some(&run_id),
+                                "host.access_required",
+                                serde_json::to_value(&request).map_err(|error| {
+                                    hachimi_agent::ToolExecutionError::Failed(error.to_string())
+                                })?,
+                            )
+                            .await;
+                        return Ok(ToolResult::failed(
+                            &invocation.call,
+                            format!(
+                                "Computer application access requires user confirmation: {}",
+                                request.id
+                            ),
+                        ));
+                    }
+                    HostPolicyDecision::Allow => {}
                 }
-                HostPolicyDecision::Allow => {}
             }
             host.set_app_rule(
                 &session_id,
@@ -1331,7 +1300,12 @@ impl ToolExecutor for ComputerObserveTool {
                     observe: true,
                     act: grants.computer.act,
                     always_allowed: false,
-                    granted_by: "host:resolved-computer-policy".into(),
+                    granted_by: if authority_mode == AuthorityMode::Unattended {
+                        "run:unattended-computer-grant"
+                    } else {
+                        "host:resolved-computer-policy"
+                    }
+                    .into(),
                     updated_at_ms: now_ms(),
                 },
             );
@@ -1597,7 +1571,7 @@ impl ToolExecutor for ComputerStopTool {
 #[derive(Debug)]
 struct ConnectorListTool {
     host: hachimi_extensions::PluginHost,
-    schedule_host_grant: Option<ScheduleHostGrant>,
+    host_revision_snapshot: Option<HostRevisionSnapshot>,
 }
 
 impl ToolExecutor for ConnectorListTool {
@@ -1614,11 +1588,11 @@ impl ToolExecutor for ConnectorListTool {
 
     fn execute(&self, invocation: ToolInvocation) -> ToolFuture {
         let host = self.host.clone();
-        let schedule_host_grant = self.schedule_host_grant.clone();
+        let host_revision_snapshot = self.host_revision_snapshot.clone();
         Box::pin(async move {
             match host.list_connector_accounts().await {
                 Ok(mut accounts) => {
-                    if let Some(grant) = &schedule_host_grant {
+                    if let Some(grant) = &host_revision_snapshot {
                         accounts.retain(|account| {
                             grant
                                 .connectors
@@ -1650,7 +1624,7 @@ struct ConnectorInvokeTool {
     store: hachimi_storage::AgentStore,
     session_id: SessionId,
     run_id: hachimi_protocol::RunId,
-    schedule_host_grant: Option<ScheduleHostGrant>,
+    host_revision_snapshot: Option<HostRevisionSnapshot>,
     environment_change_sink: EnvironmentChangeSink,
 }
 
@@ -1671,7 +1645,7 @@ struct EnterpriseAttachmentDownloadTool {
     store: hachimi_storage::AgentStore,
     session_id: SessionId,
     run_id: hachimi_protocol::RunId,
-    schedule_host_grant: Option<ScheduleHostGrant>,
+    host_revision_snapshot: Option<HostRevisionSnapshot>,
 }
 
 impl ToolExecutor for EnterpriseAttachmentDownloadTool {
@@ -1701,7 +1675,7 @@ impl ToolExecutor for EnterpriseAttachmentDownloadTool {
         let store = self.store.clone();
         let session_id = self.session_id.clone();
         let run_id = self.run_id.clone();
-        let schedule_host_grant = self.schedule_host_grant.clone();
+        let host_revision_snapshot = self.host_revision_snapshot.clone();
         Box::pin(async move {
             let args: EnterpriseAttachmentDownloadArgs =
                 match serde_json::from_value(invocation.call.arguments.clone()) {
@@ -1713,9 +1687,9 @@ impl ToolExecutor for EnterpriseAttachmentDownloadTool {
                         ));
                     }
                 };
-            if let Some(grant) = &schedule_host_grant
+            if let Some(grant) = &host_revision_snapshot
                 && let Err(error) =
-                    crate::schedule_host_grants::authorize_enterprise_attachment_download(
+                    crate::host_revision_snapshots::authorize_enterprise_attachment_download(
                         &host,
                         &grant.connectors,
                         &args.account_id,
@@ -1726,13 +1700,13 @@ impl ToolExecutor for EnterpriseAttachmentDownloadTool {
                     .append_event(
                         &session_id,
                         Some(&run_id),
-                        crate::schedule_host_grants::SCHEDULE_HOST_GRANT_ATTENTION_EVENT,
+                        crate::host_revision_snapshots::HOST_REVISION_ATTENTION_EVENT,
                         json!({ "code": error.code, "message": error.message }),
                     )
                     .await
                     .map_err(|store_error| {
                         hachimi_agent::ToolExecutionError::Failed(format!(
-                            "schedule_host_grant_event_failed:{store_error}"
+                            "host_revision_snapshot_event_failed:{store_error}"
                         ))
                     })?;
                 return Err(hachimi_agent::ToolExecutionError::Failed(format!(
@@ -1813,7 +1787,7 @@ impl ToolExecutor for ConnectorInvokeTool {
         let store = self.store.clone();
         let session_id = self.session_id.clone();
         let run_id = self.run_id.clone();
-        let schedule_host_grant = self.schedule_host_grant.clone();
+        let host_revision_snapshot = self.host_revision_snapshot.clone();
         let environment_change_sink = Arc::clone(&self.environment_change_sink);
         Box::pin(async move {
             let request: ConnectorInvocationRequest =
@@ -1826,13 +1800,13 @@ impl ToolExecutor for ConnectorInvokeTool {
                         ));
                     }
                 };
-            if request.action == crate::schedule_host_grants::ENTERPRISE_ATTACHMENT_ACTION {
+            if request.action == crate::host_revision_snapshots::ENTERPRISE_ATTACHMENT_ACTION {
                 return Ok(ToolResult::rejected(
                     &invocation.call,
                     "download_attachment is available only through enterprise.download_attachment",
                 ));
             }
-            if let Some(grant) = &schedule_host_grant {
+            if let Some(grant) = &host_revision_snapshot {
                 let Some(selection) = grant
                     .connectors
                     .iter()
@@ -1840,7 +1814,7 @@ impl ToolExecutor for ConnectorInvokeTool {
                 else {
                     return Ok(ToolResult::failed(
                         &invocation.call,
-                        "Connector account is outside the persisted ScheduleHostGrant",
+                        "Connector account is outside the persisted HostRevisionSnapshot",
                     ));
                 };
                 let revision = &selection.contribution_revision;
@@ -1853,7 +1827,7 @@ impl ToolExecutor for ConnectorInvokeTool {
                 if !selection.allowed_actions.contains(&request.action) || !revision_matches {
                     return Ok(ToolResult::failed(
                         &invocation.call,
-                        "Connector action or revision is outside the persisted ScheduleHostGrant",
+                        "Connector action or revision is outside the persisted HostRevisionSnapshot",
                     ));
                 }
             }

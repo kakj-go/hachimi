@@ -171,7 +171,7 @@ impl DesktopAppDomainHandler {
                     .origins
                     .iter()
                     .any(|allowed| allowed == &normalized_origin)
-                    || (grants.profile == hachimi_protocol::PermissionProfile::ExternalSandbox
+                    || (grants.profile == hachimi_protocol::PermissionProfile::FullAccess
                         && grants.browser.origins.is_empty());
                 if !exact_origin_allowed
                     || capabilities.iter().any(|capability| match capability {

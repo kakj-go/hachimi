@@ -333,7 +333,7 @@ mod tests {
             checkout_id: CheckoutId::from("checkout-sandbox"),
             checkout_root: root.to_owned(),
             grants: CapabilityGrantSet {
-                profile: PermissionProfile::WorkspaceWrite,
+                profile: PermissionProfile::Writable,
                 scope: PermissionGrantScope::Run,
                 session_id,
                 run_id: Some(run_id),

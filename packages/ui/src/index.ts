@@ -5,6 +5,7 @@ export * from "./components/forms";
 export * from "./components/layout";
 export * from "./components/popover";
 export * from "./components/patterns";
+export * from "./components/permission-policy";
 export * from "./components/tabs";
 export * from "./components/workbench";
 export * from "./components/surfaces";

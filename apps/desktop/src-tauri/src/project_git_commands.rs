@@ -7,13 +7,13 @@
 use std::{path::Path, sync::Arc, time::Duration};
 
 use hachimi_policy::{
-    DefaultPolicy, PolicyContext, PolicyDecision, PolicyEngine, expand_permission_profile,
+    DefaultPolicy, PolicyContext, PolicyDecision, PolicyEngine, expand_permission_policy,
 };
 use hachimi_protocol::{
-    ApprovalPolicy, BehaviorMode, CapabilityGrantSet, ClientContext, ClientId, ControlMethod,
-    EntryProfile, PermissionProfile, ProjectGitInitialCommitRequest,
-    ProjectGitInitialCommitResponse, ProjectGitSnapshot, ProjectGitState, ProjectId, RunId, Scope,
-    SessionId, ToolEffect, WorkloadKind,
+    AgentPermissionPolicy, ApprovalPolicy, AuthorityMode, BehaviorMode, CapabilityGrantSet,
+    ClientContext, ClientId, ControlMethod, EntryProfile, PermissionProfile,
+    ProjectGitInitialCommitRequest, ProjectGitInitialCommitResponse, ProjectGitSnapshot,
+    ProjectGitState, ProjectId, RunId, Scope, SessionId, ToolEffect, WorkloadKind,
 };
 use hachimi_storage::{AgentStoreError, IdempotentMutationClaim};
 use hachimi_workspace::{
@@ -118,12 +118,11 @@ fn evaluate_policy(
         workload: WorkloadKind::Coding,
         behavior_mode: BehaviorMode::Default,
         approval_policy: ApprovalPolicy::OnlyWhenNeeded,
-        permission_profile: PermissionProfile::WorkspaceWrite,
+        permission_profile: PermissionProfile::Writable,
         effect: ToolEffect::WorkspaceWrite,
         action: "project.git.create_empty_initial_commit",
         resource: &project.root_path,
         capability_host: Some("workspace-worker"),
-        schedule_grant_hash: None,
     }) {
         PolicyDecision::Allow => Ok(()),
         PolicyDecision::Deny { code } | PolicyDecision::RequireApproval { code } => Err(
@@ -312,8 +311,12 @@ pub(super) async fn create_project_empty_initial_commit(
             &read_only_roots,
         )
         .map_err(|error| CommandError::operation("sandbox_workspace_attestation_failed", error))?;
-        let mut grants: CapabilityGrantSet = expand_permission_profile(
-            PermissionProfile::WorkspaceWrite,
+        let mut grants: CapabilityGrantSet = expand_permission_policy(
+            &AgentPermissionPolicy {
+                level: PermissionProfile::Writable,
+                ..AgentPermissionPolicy::default()
+            },
+            AuthorityMode::Interactive,
             BehaviorMode::Default,
             session_id.clone(),
             run_id.clone(),

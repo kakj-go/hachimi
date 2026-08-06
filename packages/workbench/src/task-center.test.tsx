@@ -4,6 +4,7 @@ import { render } from "solid-js/web";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { TaskCenter } from "./task-center";
+import { createPermissionPolicy } from "./permission-policy-editor";
 import type { WorkbenchCommandPort } from "./workbench-command-port";
 
 vi.mock("@hachimi/ui", () => {
@@ -31,6 +32,7 @@ vi.mock("@hachimi/ui", () => {
         <input
           type="checkbox"
           checked={props.checked as boolean | undefined}
+          disabled={props.disabled as boolean | undefined}
           onChange={(event) => (props.onChange as ((event: Event) => void) | undefined)?.(event)}
         />
         {props.label as never}
@@ -47,6 +49,13 @@ vi.mock("@hachimi/ui", () => {
       </Show>
     ),
     ExternalLink: Icon,
+    FolderOpen: Icon,
+    FormField: (props: Record<string, unknown>) => (
+      <label>
+        {props.label as never}
+        {props.children as never}
+      </label>
+    ),
     GitBranch: Icon,
     History: Icon,
     IconButton: (props: Record<string, unknown>) => (
@@ -70,6 +79,27 @@ vi.mock("@hachimi/ui", () => {
         <div>{props.actions as never}</div>
       </header>
     ),
+    PermissionPolicyEditor: (props: Record<string, unknown>) => (
+      <label>
+        {props.zh ? "权限档位" : "Permission level"}
+        <select
+          aria-label={props.zh ? "权限档位" : "Permission level"}
+          data-testid={props.testId as string | undefined}
+          disabled={props.disabled as boolean | undefined}
+          value={(props.value as { level: string }).level}
+          onChange={(event) =>
+            (props.onChange as ((next: Record<string, unknown>) => void) | undefined)?.({
+              ...(props.value as Record<string, unknown>),
+              level: event.currentTarget.value,
+            })
+          }
+        >
+          <option value="read_only">Read only</option>
+          <option value="writable">Writable</option>
+          <option value="full_access">Full access</option>
+        </select>
+      </label>
+    ),
     Play: Icon,
     Pencil: Icon,
     Plus: Icon,
@@ -81,6 +111,22 @@ vi.mock("@hachimi/ui", () => {
         {props.label as never}
         <select
           data-testid={props.testId as string | undefined}
+          value={props.value as string}
+          onChange={(event) =>
+            (props.onChange as ((value: string) => void) | undefined)?.(event.currentTarget.value)
+          }
+        >
+          <For each={props.options as Array<{ value: string; label: string }>}>
+            {(option) => <option value={option.value}>{option.label}</option>}
+          </For>
+        </select>
+      </label>
+    ),
+    SegmentedControl: (props: Record<string, unknown>) => (
+      <label>
+        {props.label as never}
+        <select
+          aria-label={props.label as string}
           value={props.value as string}
           onChange={(event) =>
             (props.onChange as ((value: string) => void) | undefined)?.(event.currentTarget.value)
@@ -152,7 +198,6 @@ describe("TaskCenter", () => {
   it("creates an Event schedule with an exact typed matcher and no future timestamp", async () => {
     const createSchedule = vi.fn(async (request) => ({
       definition: request.definition,
-      activeGrant: null,
       recentRuns: [],
     }));
     const port = {
@@ -169,12 +214,7 @@ describe("TaskCenter", () => {
     const dispose = render(
       () => (
         <I18nProvider initialLocale="en-US">
-          <TaskCenter
-            commandPort={port}
-            projects={[]}
-            skills={[]}
-            onOpenSession={() => undefined}
-          />
+          <TaskCenter commandPort={port} skills={[]} onOpenSession={() => undefined} />
         </I18nProvider>
       ),
       root,
@@ -223,7 +263,6 @@ describe("TaskCenter", () => {
   it("creates an authorized General Office prompt schedule", async () => {
     const createSchedule = vi.fn(async (request) => ({
       definition: request.definition,
-      activeGrant: null,
       recentRuns: [],
     }));
     const port = {
@@ -240,12 +279,7 @@ describe("TaskCenter", () => {
     const dispose = render(
       () => (
         <I18nProvider initialLocale="zh-CN">
-          <TaskCenter
-            commandPort={port}
-            projects={[]}
-            skills={[]}
-            onOpenSession={() => undefined}
-          />
+          <TaskCenter commandPort={port} skills={[]} onOpenSession={() => undefined} />
         </I18nProvider>
       ),
       root,
@@ -261,11 +295,14 @@ describe("TaskCenter", () => {
     );
     await vi.waitFor(() => expect(createSchedule).toHaveBeenCalledTimes(1));
     const request = createSchedule.mock.calls[0]![0];
-    expect(request.authorize).toBe(true);
-    expect(request.definition.contextTemplate).toEqual({ kind: "general" });
+    expect(request.definition.contextTemplate).toEqual({
+      kind: "workspace",
+      workspace: { kind: "managed" },
+      conversation_mode: "per_run_session",
+    });
     expect(request.definition.entryProfile).toBe("workbench");
     expect(request.definition.workloadOverride).toBeNull();
-    expect(request.definition.permissionConfig.permissionProfile).toBe("read_only");
+    expect(request.definition.permissionPolicy.level).toBe("read_only");
     expect(request.definition.schedule.kind).toBe("cron");
     dispose();
   });
@@ -279,17 +316,14 @@ describe("TaskCenter", () => {
       schedule: { kind: "cron", expression: "0 0 9 * * *", timezone: "UTC" },
       entryProfile: "workbench",
       workloadOverride: null,
-      contextTemplate: { kind: "general" },
-      toolAllowlist: [],
+      contextTemplate: {
+        kind: "workspace",
+        workspace: { kind: "managed" },
+        conversation_mode: "per_run_session",
+      },
       skillAllowlist: [],
       mcpToolAllowlist: [],
-      permissionConfig: {
-        permissionProfile: "read_only",
-        allowFileRead: false,
-        allowFileWrite: false,
-        allowExec: false,
-        externalTargets: [],
-      },
+      permissionPolicy: createPermissionPolicy("read_only"),
       permissionRevision: 1,
       timeoutMs: 120_000,
       misfirePolicy: "skip",
@@ -306,7 +340,6 @@ describe("TaskCenter", () => {
       ...request.definition,
       configRevision: 2,
     }));
-    const reauthorizeSchedule = vi.fn();
     const port = {
       listSchedules: vi.fn(async () => [schedule]),
       listTaskRuns: vi.fn(async () => []),
@@ -315,19 +348,13 @@ describe("TaskCenter", () => {
       listMcpServers: vi.fn(async () => []),
       listMcpTools: vi.fn(async () => []),
       updateSchedule,
-      reauthorizeSchedule,
     } as unknown as WorkbenchCommandPort;
     const root = document.createElement("div");
     document.body.append(root);
     const dispose = render(
       () => (
         <I18nProvider initialLocale="zh-CN">
-          <TaskCenter
-            commandPort={port}
-            projects={[]}
-            skills={[]}
-            onOpenSession={() => undefined}
-          />
+          <TaskCenter commandPort={port} skills={[]} onOpenSession={() => undefined} />
         </I18nProvider>
       ),
       root,
@@ -349,7 +376,6 @@ describe("TaskCenter", () => {
     await vi.waitFor(() => expect(updateSchedule).toHaveBeenCalledTimes(1));
     expect(updateSchedule.mock.calls[0]![0].definition.id).toBe(schedule.id);
     expect(updateSchedule.mock.calls[0]![0].definition.prompt).toBe("New prompt");
-    expect(reauthorizeSchedule).not.toHaveBeenCalled();
     dispose();
   });
 
@@ -359,7 +385,6 @@ describe("TaskCenter", () => {
       ...request.definition,
       configRevision: request.definition.configRevision + 1,
     }));
-    const reauthorizeSchedule = vi.fn();
     const port = {
       listSchedules: vi.fn(async () => [schedule]),
       listTaskRuns: vi.fn(async () => []),
@@ -368,19 +393,13 @@ describe("TaskCenter", () => {
       listMcpServers: vi.fn(async () => []),
       listMcpTools: vi.fn(async () => []),
       updateSchedule,
-      reauthorizeSchedule,
     } as unknown as WorkbenchCommandPort;
     const root = document.createElement("div");
     document.body.append(root);
     const dispose = render(
       () => (
         <I18nProvider initialLocale="zh-CN">
-          <TaskCenter
-            commandPort={port}
-            projects={[]}
-            skills={[]}
-            onOpenSession={() => undefined}
-          />
+          <TaskCenter commandPort={port} skills={[]} onOpenSession={() => undefined} />
         </I18nProvider>
       ),
       root,
@@ -405,14 +424,12 @@ describe("TaskCenter", () => {
     expect(updateSchedule.mock.calls[0]![0].definition.deliveryPolicy).toBe(
       "task_tab_and_system_notification",
     );
-    expect(reauthorizeSchedule).not.toHaveBeenCalled();
     dispose();
   });
 
-  it("pins a selected MCP side effect to server, tool and schema in the ScheduleGrant", async () => {
+  it("pins a selected MCP side effect to server, tool and schema in the Schedule definition", async () => {
     const createSchedule = vi.fn(async (request) => ({
       definition: request.definition,
-      activeGrant: null,
       recentRuns: [],
     }));
     const server = {
@@ -484,12 +501,7 @@ describe("TaskCenter", () => {
     const dispose = render(
       () => (
         <I18nProvider initialLocale="zh-CN">
-          <TaskCenter
-            commandPort={port}
-            projects={[]}
-            skills={[]}
-            onOpenSession={() => undefined}
-          />
+          <TaskCenter commandPort={port} skills={[]} onOpenSession={() => undefined} />
         </I18nProvider>
       ),
       root,
@@ -497,6 +509,9 @@ describe("TaskCenter", () => {
 
     await vi.waitFor(() => expect(port.listMcpTools).toHaveBeenCalledWith("office-mcp"));
     (root.querySelector('[data-testid="task-create-toggle"]') as HTMLButtonElement).click();
+    const permissionLevel = root.querySelector<HTMLSelectElement>('select[aria-label="权限档位"]')!;
+    permissionLevel.value = "writable";
+    permissionLevel.dispatchEvent(new Event("change", { bubbles: true }));
     const textarea = root.querySelector("textarea") as HTMLTextAreaElement;
     textarea.value = "Create and send the report";
     textarea.dispatchEvent(new InputEvent("input", { bubbles: true }));
@@ -519,15 +534,63 @@ describe("TaskCenter", () => {
         hostIdentityHash: "office-host-v1",
       },
     ]);
-    expect(definition.permissionConfig.permissionProfile).toBe("external_sandbox");
-    expect(definition.permissionConfig.externalTargets).toEqual(["mcp:office-mcp:send_document"]);
+    expect(definition.permissionPolicy.level).toBe("writable");
+    expect(definition.permissionPolicy.rules.mcp).toEqual([
+      {
+        serverId: "office-mcp",
+        toolName: "send_document",
+        schemaHash: "send-schema",
+        readOnly: false,
+      },
+    ]);
     dispose();
+
+    createSchedule.mockClear();
+    vi.mocked(port.listMcpTools).mockClear();
+    const fullAccessRoot = document.createElement("div");
+    document.body.append(fullAccessRoot);
+    const disposeFullAccess = render(
+      () => (
+        <I18nProvider initialLocale="zh-CN">
+          <TaskCenter commandPort={port} skills={[]} onOpenSession={() => undefined} />
+        </I18nProvider>
+      ),
+      fullAccessRoot,
+    );
+    await vi.waitFor(() => expect(port.listMcpTools).toHaveBeenCalledWith("office-mcp"));
+    (
+      fullAccessRoot.querySelector('[data-testid="task-create-toggle"]') as HTMLButtonElement
+    ).click();
+    const fullAccessLevel = fullAccessRoot.querySelector<HTMLSelectElement>(
+      'select[aria-label="权限档位"]',
+    )!;
+    fullAccessLevel.value = "writable";
+    fullAccessLevel.dispatchEvent(new Event("change", { bubbles: true }));
+    const fullAccessSendLabel = [...fullAccessRoot.querySelectorAll("label")].find((label) =>
+      label.textContent?.includes("send_document"),
+    )!;
+    (fullAccessSendLabel.querySelector('input[type="checkbox"]') as HTMLInputElement).click();
+    fullAccessLevel.value = "full_access";
+    fullAccessLevel.dispatchEvent(new Event("change", { bubbles: true }));
+    expect(fullAccessRoot.querySelector('[data-testid="task-mcp-tools"]')).toBeNull();
+    const fullAccessPrompt = fullAccessRoot.querySelector("textarea") as HTMLTextAreaElement;
+    fullAccessPrompt.value = "Use any configured integration";
+    fullAccessPrompt.dispatchEvent(new InputEvent("input", { bubbles: true }));
+    (fullAccessRoot.querySelector("form") as HTMLFormElement).dispatchEvent(
+      new Event("submit", { bubbles: true, cancelable: true }),
+    );
+    await vi.waitFor(() => expect(createSchedule).toHaveBeenCalledTimes(1));
+    const fullAccessDefinition = createSchedule.mock.calls[0]![0].definition;
+    expect(fullAccessDefinition.permissionPolicy.level).toBe("full_access");
+    expect(fullAccessDefinition.mcpToolAllowlist).toEqual([]);
+    expect(fullAccessDefinition.permissionPolicy.rules.mcp).toEqual([]);
+    expect(fullAccessDefinition.hostRevisionSnapshot.connectors).toEqual([]);
+    disposeFullAccess();
   });
 
   it("serializes an advanced Cron expression with the local IANA timezone", async () => {
     const createSchedule = vi.fn(async (request) => ({
       definition: request.definition,
-      activeGrant: null,
       recentRuns: [],
     }));
     const port = {
@@ -544,12 +607,7 @@ describe("TaskCenter", () => {
     const dispose = render(
       () => (
         <I18nProvider initialLocale="zh-CN">
-          <TaskCenter
-            commandPort={port}
-            projects={[]}
-            skills={[]}
-            onOpenSession={() => undefined}
-          />
+          <TaskCenter commandPort={port} skills={[]} onOpenSession={() => undefined} />
         </I18nProvider>
       ),
       root,
@@ -620,7 +678,7 @@ describe("TaskCenter", () => {
     const dispose = render(
       () => (
         <I18nProvider initialLocale="zh-CN">
-          <TaskCenter commandPort={port} projects={[]} skills={[]} onOpenSession={onOpenSession} />
+          <TaskCenter commandPort={port} skills={[]} onOpenSession={onOpenSession} />
         </I18nProvider>
       ),
       root,
@@ -684,7 +742,7 @@ describe("TaskCenter", () => {
     const dispose = render(
       () => (
         <I18nProvider initialLocale="zh-CN">
-          <TaskCenter commandPort={port} projects={[]} skills={[]} onOpenSession={onOpenSession} />
+          <TaskCenter commandPort={port} skills={[]} onOpenSession={onOpenSession} />
         </I18nProvider>
       ),
       root,
@@ -735,17 +793,14 @@ function scheduleFixture(now: number) {
     schedule: { kind: "cron", expression: "0 0 9 * * *", timezone: "UTC" },
     entryProfile: "workbench",
     workloadOverride: null,
-    contextTemplate: { kind: "general" },
-    toolAllowlist: [],
+    contextTemplate: {
+      kind: "workspace",
+      workspace: { kind: "managed" },
+      conversation_mode: "per_run_session",
+    },
     skillAllowlist: [],
     mcpToolAllowlist: [],
-    permissionConfig: {
-      permissionProfile: "read_only",
-      allowFileRead: false,
-      allowFileWrite: false,
-      allowExec: false,
-      externalTargets: [],
-    },
+    permissionPolicy: createPermissionPolicy("read_only"),
     permissionRevision: 1,
     timeoutMs: 120_000,
     misfirePolicy: "skip",

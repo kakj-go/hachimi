@@ -55,7 +55,7 @@ async fn store_with_run() -> (AgentStore, SessionRecord, RunRecord) {
         session_id: session.id.clone(),
         status: RunStatus::Queued,
         purpose: RunPurpose::Task,
-        origin: RunOrigin::Interactive,
+        origin: RunOrigin::Manual,
         generation: 1,
         configuration: RunConfiguration {
             model_snapshot: LlmSettings::default(),
@@ -65,7 +65,7 @@ async fn store_with_run() -> (AgentStore, SessionRecord, RunRecord) {
             behavior_mode: BehaviorMode::Default,
             execution_target: None,
             approval_policy: ApprovalPolicy::OnlyWhenNeeded,
-            permission_profile: PermissionProfile::WorkspaceWrite,
+            permission_profile: PermissionProfile::Writable,
             budget: RunBudget::default(),
             accepted_plan_id: None,
             accepted_plan_revision: None,

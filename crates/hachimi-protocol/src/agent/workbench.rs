@@ -163,7 +163,10 @@ pub struct EnvironmentHandoffState {
 #[serde(rename_all = "camelCase")]
 pub struct WorkbenchEnvironmentSnapshot {
     pub session_id: super::SessionId,
-    pub checkout: CheckoutRecord,
+    /// Project sessions expose their checkout here. Workspace sessions leave this empty.
+    pub checkout: Option<CheckoutRecord>,
+    /// Non-Project sessions expose their managed or selected Workspace here.
+    pub workspace: Option<super::AgentWorkspace>,
     #[specta(type = specta_typescript::Number)]
     pub binding_revision: u64,
     pub baseline_revision: Option<String>,
@@ -230,12 +233,17 @@ pub struct WorkbenchTaskStartRequest {
     pub prompt: String,
     pub execution_target: Option<ExecutionTarget>,
     pub behavior_mode: BehaviorMode,
-    pub approval_policy: super::ApprovalPolicy,
+    #[serde(default = "default_interactive_permission")]
+    pub permission_profile: super::PermissionProfile,
     pub attachment_ids: Vec<AttachmentId>,
     /// Explicit Skill identities selected by the user. This is authoritative
     /// when names collide; `$name` remains only an unambiguous text shortcut.
     #[serde(default)]
     pub skill_ids: Vec<SkillId>,
+}
+
+fn default_interactive_permission() -> super::PermissionProfile {
+    super::PermissionProfile::Writable
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Type)]

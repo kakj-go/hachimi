@@ -615,6 +615,7 @@ export interface SegmentOption<T extends string> {
 
 export function SegmentedControl<T extends string>(props: {
   label: string;
+  testId?: string;
   value: T;
   options: readonly SegmentOption<T>[];
   disabled?: boolean;
@@ -630,6 +631,7 @@ export function SegmentedControl<T extends string>(props: {
     <div
       class="ui-segmented"
       data-component="segmented-control"
+      data-testid={props.testId}
       data-variant={props.variant ?? "default"}
       data-size={props.size ?? "normal"}
       data-tone={props.tone ?? "neutral"}
@@ -646,6 +648,7 @@ export function SegmentedControl<T extends string>(props: {
             classList={{ selected: props.value === option.value }}
             type="button"
             aria-pressed={props.value === option.value}
+            data-testid={props.testId ? `${props.testId}-${option.value}` : undefined}
             disabled={props.disabled || props.loading}
             onClick={() => props.onChange?.(option.value)}
           >

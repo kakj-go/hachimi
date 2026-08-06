@@ -437,7 +437,6 @@ impl DesktopAppDomainHandler {
                         plugin.content_hash, contribution.id
                     ),
                     draft,
-                    false,
                 )
                 .await
                 .map_err(domain_error("plugin_schedule_template_register_failed"))?;
@@ -736,9 +735,9 @@ const fn default_message_limit() -> u64 {
 mod tests {
     use super::*;
     use hachimi_protocol::{
-        ContributionRuntimeState, DeliveryPolicy, EntryProfile, MisfirePolicy, PermissionProfile,
-        PluginManifest, PluginStatus, ScheduleContextTemplate, ScheduleHealth, ScheduleHostGrant,
-        SchedulePermissionConfig, ScheduleSpec, ScheduleStopConditions,
+        AgentPermissionPolicy, ContributionRuntimeState, DeliveryPolicy, EntryProfile,
+        HostRevisionSnapshot, MisfirePolicy, PermissionProfile, PluginManifest, PluginStatus,
+        ScheduleContextTemplate, ScheduleHealth, ScheduleSpec, ScheduleStopConditions,
     };
 
     fn plugin() -> InstalledPlugin {
@@ -845,15 +844,18 @@ mod tests {
             },
             entry_profile: EntryProfile::Workbench,
             workload_override: None,
-            context_template: ScheduleContextTemplate::General,
-            tool_allowlist: Vec::new(),
+            context_template: ScheduleContextTemplate::Workspace {
+                workspace: hachimi_protocol::ScheduleWorkspaceSpec::Managed,
+                conversation_mode: hachimi_protocol::ScheduleConversationMode::PerRunSession,
+            },
             skill_allowlist: Vec::new(),
+            skill_revisions: Vec::new(),
             mcp_tool_allowlist: Vec::new(),
             contribution_revisions: Vec::new(),
-            host_grant: ScheduleHostGrant::default(),
-            permission_config: SchedulePermissionConfig {
-                permission_profile: PermissionProfile::ReadOnly,
-                ..SchedulePermissionConfig::default()
+            host_revision_snapshot: HostRevisionSnapshot::default(),
+            permission_policy: AgentPermissionPolicy {
+                level: PermissionProfile::ReadOnly,
+                ..AgentPermissionPolicy::default()
             },
             permission_revision: 99,
             timeout_ms: 60_000,

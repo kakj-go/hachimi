@@ -1033,8 +1033,8 @@ mod tests {
     use std::process::Command;
 
     use hachimi_protocol::{
-        ApprovalPolicy, BehaviorMode, CheckoutId, EntryProfile, LlmSettings, RunStatus, SessionId,
-        WorkbenchEnvironmentSnapshot, WorkbenchTaskStartRequest,
+        BehaviorMode, CheckoutId, EntryProfile, LlmSettings, PermissionProfile, RunStatus,
+        SessionId, WorkbenchEnvironmentSnapshot, WorkbenchTaskStartRequest,
     };
     use hachimi_storage::AgentStore;
 
@@ -1099,7 +1099,7 @@ mod tests {
                         project_id: project.id,
                     }),
                     behavior_mode: BehaviorMode::Default,
-                    approval_policy: ApprovalPolicy::OnlyWhenNeeded,
+                    permission_profile: PermissionProfile::Writable,
                     attachment_ids: Vec::new(),
                     skill_ids: Vec::new(),
                 },
@@ -1143,7 +1143,12 @@ mod tests {
         WorkbenchHandoffRequest {
             idempotency_key: idempotency_key.into(),
             session_id: environment.session_id.clone(),
-            source_checkout_id: environment.checkout.id.clone(),
+            source_checkout_id: environment
+                .checkout
+                .as_ref()
+                .expect("Project environment checkout")
+                .id
+                .clone(),
             target_kind,
             expected_head: environment.git.head_sha.clone(),
             status_fingerprint: environment.git.status_fingerprint.clone(),

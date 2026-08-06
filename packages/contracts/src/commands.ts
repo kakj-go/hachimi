@@ -146,6 +146,7 @@ import type {
   MotionRuntimeAsset,
   MutationContext,
   PetContextMenuRequest,
+  PetTurnEvent,
   PetTurnRequest,
   PlanAcceptanceRequest,
   PlanRevisionRequest,
@@ -170,6 +171,7 @@ import type {
   ReviewSnapshot,
   ReviewStartRequest,
   ReviewStartSnapshot,
+  RunId,
   RunRecord,
   RunControlRequest,
   RunRecoveryDecisionRequest,
@@ -180,7 +182,6 @@ import type {
   ScheduleDefinition,
   ScheduleEventIngressRequest,
   ScheduleEventReceipt,
-  ScheduleGrantRecord,
   ScheduleId,
   SchedulePreview,
   ScheduleSnapshot,
@@ -567,6 +568,8 @@ export const commands = {
   getSchedule: (scheduleId: ScheduleId) =>
     invoke<ScheduleSnapshot | null>("get_schedule", { scheduleId }),
   listSchedules: () => invoke<ScheduleDefinition[]>("list_schedules"),
+  chooseScheduleWorkspaceDirectory: () =>
+    invoke<string | null>("choose_schedule_workspace_directory"),
   previewSchedule: (schedule: ScheduleSpec, count = 5) =>
     invoke<SchedulePreview>("preview_schedule", { schedule, count }),
   updateSchedule: (request: ScheduleUpdateRequest) =>
@@ -585,10 +588,6 @@ export const commands = {
     }),
   removeSchedule: (context: MutationContext, scheduleId: ScheduleId) =>
     invoke<boolean>("remove_schedule", { context, scheduleId }),
-  reauthorizeSchedule: (context: MutationContext, scheduleId: ScheduleId) =>
-    invoke<ScheduleGrantRecord>("reauthorize_schedule", { context, scheduleId }),
-  revokeScheduleGrant: (context: MutationContext, scheduleId: ScheduleId) =>
-    invoke<ScheduleGrantRecord | null>("revoke_schedule_grant", { context, scheduleId }),
   runScheduleNow: (context: MutationContext, scheduleId: ScheduleId) =>
     invoke<TaskRunRecord>("run_schedule_now", { context, scheduleId }),
   ingestScheduleEvent: (request: ScheduleEventIngressRequest) =>
@@ -673,11 +672,15 @@ export const commands = {
   getMotionRuntimeAsset: (id: string) =>
     invoke<MotionRuntimeAsset | null>("get_motion_runtime_asset", { request: { id } }),
   startPetTurn: (request: PetTurnRequest) => invoke<void>("start_pet_turn", { request }),
+  recoverPetTurn: (runId: string, sessionId: SessionId, agentRunId: RunId) =>
+    invoke<PetTurnEvent | null>("recover_pet_turn", { runId, sessionId, agentRunId }),
   cancelPetTurn: () => invoke<void>("cancel_pet_turn"),
   getSessionPermissionConfig: (request: SessionPermissionConfigRequest) =>
     invoke<SessionPermissionConfig>("get_session_permission_config", { request }),
   updateSessionPermissionConfig: (request: SessionPermissionConfigUpdate) =>
     invoke<SessionPermissionConfig>("update_session_permission_config", { request }),
+  clearSessionExtraAuthorizations: (sessionId: SessionId) =>
+    invoke<SessionPermissionConfig>("clear_session_extra_authorizations", { sessionId }),
   getVoiceRuntimeState: () => invoke<VoiceRuntimeState>("get_voice_runtime_state"),
   getSpeechRecognitionState: () =>
     invoke<SpeechRecognitionRuntimeState>("get_speech_recognition_state"),

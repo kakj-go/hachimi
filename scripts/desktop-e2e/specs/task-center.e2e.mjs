@@ -45,7 +45,32 @@ async function waitForSchedule(name) {
 }
 
 async function clickScheduleAction(name, action) {
-  await clickWhenReady(`${scheduleCardSelector(name)}//*[@data-testid="${action}"]`);
+  await browser.waitUntil(
+    async () =>
+      browser.execute(
+        (scheduleName, actionTestId) => {
+          const card = [...document.querySelectorAll('[data-testid="task-schedule-card"]')].find(
+            (candidate) => candidate.getAttribute("data-schedule-name") === scheduleName,
+          );
+          const button = card?.querySelector(`[data-testid="${actionTestId}"]`);
+          if (
+            !(button instanceof HTMLButtonElement) ||
+            button.disabled ||
+            button.offsetParent === null
+          ) {
+            return false;
+          }
+          button.click();
+          return true;
+        },
+        name,
+        action,
+      ),
+    {
+      timeout: 20_000,
+      timeoutMsg: `Schedule action did not dispatch: ${name} / ${action}`,
+    },
+  );
 }
 
 async function closeTaskHistory() {
@@ -195,8 +220,25 @@ async function createGeneralTask(name, prompt, { systemNotification = false } = 
 }
 
 async function selectSchedule(name) {
-  await clickScheduleAction(name, "task-history");
-  await waitForDisplayed('[data-testid="task-run-history"]');
+  await browser.waitUntil(
+    async () =>
+      browser.execute((scheduleName) => {
+        const history = document.querySelector('[data-testid="task-run-history"]');
+        if (history instanceof HTMLElement && history.offsetParent !== null) return true;
+        const card = [...document.querySelectorAll('[data-testid="task-schedule-card"]')].find(
+          (candidate) => candidate.getAttribute("data-schedule-name") === scheduleName,
+        );
+        const button = card?.querySelector('[data-testid="task-history"]');
+        if (!(button instanceof HTMLButtonElement) || button.disabled) return false;
+        button.click();
+        return false;
+      }, name),
+    {
+      timeout: 20_000,
+      interval: 200,
+      timeoutMsg: `Task history did not open for ${name}`,
+    },
+  );
 }
 
 async function checkOptionContaining(labelText) {
@@ -481,6 +523,14 @@ describe("Hachimi scheduled Agent tasks", () => {
     await setValueWhenReady(
       '[data-testid="task-prompt"]',
       "[desktop-e2e:office-skills] use the document, spreadsheet, presentation, PDF and file organizer Skills to create and validate artifacts, then deliver the PDF",
+    );
+    await clickWhenReady(".task-advanced-section > summary");
+    await clickWhenReady('[data-testid="task-permission-writable"]');
+    await browser.waitUntil(
+      async () =>
+        (await $('[data-testid="task-permission-writable"]').getAttribute("aria-pressed")) ===
+        "true",
+      { timeout: 10_000, timeoutMsg: "Scheduled Office permission did not become writable" },
     );
     for (const skill of [
       "office-documents",
@@ -783,11 +833,8 @@ describe("Hachimi scheduled Agent tasks", () => {
 
   it("implicitly activates an Office Skill and recovers from a bounded resource failure", async () => {
     await switchToWorkbench();
-    const backVisible = await browser.execute(() => {
-      const back = document.querySelector(".back-home");
-      return back instanceof HTMLElement && back.offsetParent !== null;
-    });
-    if (backVisible) await clickWhenReady(".back-home");
+    await browser.refresh();
+    await switchToWorkbench();
     const projectExists = await browser.execute(
       () => document.querySelector(".project-row") !== null,
     );
@@ -796,7 +843,7 @@ describe("Hachimi scheduled Agent tasks", () => {
     }
     await waitForDisplayed(".project-row");
     await browser.execute(() => globalThis.document.querySelector(".project-row")?.focus());
-    await clickWhenReady(".project-new-task");
+    await clickWhenReady('[data-testid^="project-new-task-"]');
     await setValueWhenReady(
       '[data-testid="workbench-composer-input"]',
       "[desktop-e2e:office-implicit-recovery] discover the document Skill, create a validated document, and recover safely if its MCP dependency fails",

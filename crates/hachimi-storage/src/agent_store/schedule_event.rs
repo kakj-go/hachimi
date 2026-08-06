@@ -1,9 +1,9 @@
 //! Transactional event ingress ledger and Event Schedule fan-out.
 
 use hachimi_protocol::{
-    DeliveryPolicy, DeliveryStatus, ScheduleContextTemplate, ScheduleDefinition,
-    ScheduleEventContext, ScheduleEventMatcher, ScheduleEventReceipt, ScheduleEventReceiptStatus,
-    ScheduleSpec, TaskRunId, TaskRunRecord, TaskRunStatus, TaskRunTrigger,
+    DeliveryPolicy, DeliveryStatus, ScheduleDefinition, ScheduleEventContext, ScheduleEventMatcher,
+    ScheduleEventReceipt, ScheduleEventReceiptStatus, ScheduleSpec, TaskRunId, TaskRunRecord,
+    TaskRunStatus, TaskRunTrigger,
 };
 use sha2::{Digest, Sha256};
 use sqlx::Row;
@@ -106,7 +106,7 @@ impl AgentStore {
         .await?;
 
         let rows = sqlx::query(
-            "SELECT * FROM schedule_definitions WHERE enabled = 1 AND health IN ('healthy', 'needs_authorization') ORDER BY id",
+            "SELECT * FROM schedule_definitions WHERE enabled = 1 AND health = 'healthy' ORDER BY id",
         )
         .fetch_all(&mut *transaction)
         .await?;
@@ -301,13 +301,9 @@ fn event_task_record(schedule: &ScheduleDefinition, event: &ScheduleEventContext
         scheduled_for_ms: Some(event.occurred_at_ms),
         event_context: Some(event.clone()),
         invocation_key,
-        requester_session_id: match &schedule.context_template {
-            ScheduleContextTemplate::SessionContinuation { session_id } => Some(session_id.clone()),
-            _ => None,
-        },
+        requester_session_id: None,
         execution_session_id: None,
         run_id: None,
-        permission_snapshot_hash: None,
         status: TaskRunStatus::Queued,
         progress_percent: None,
         result_summary: None,

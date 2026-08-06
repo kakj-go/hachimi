@@ -9,8 +9,9 @@ pub(crate) struct LocalHostToolContext {
     pub(crate) session_id: SessionId,
     pub(crate) run_id: hachimi_protocol::RunId,
     pub(crate) grants: CapabilityGrantSet,
+    pub(crate) authority_mode: hachimi_protocol::AuthorityMode,
     pub(crate) sandbox: hachimi_protocol::SandboxCapabilityReport,
-    pub(crate) schedule_host_grant: Option<ScheduleHostGrant>,
+    pub(crate) host_revision_snapshot: Option<HostRevisionSnapshot>,
     pub(crate) browser_enabled: bool,
     pub(crate) computer_observe_enabled: bool,
     pub(crate) computer_control_enabled: bool,
@@ -31,8 +32,9 @@ pub(crate) fn local_host_tool_executors(
         session_id,
         run_id,
         grants,
+        authority_mode,
         sandbox,
-        schedule_host_grant,
+        host_revision_snapshot,
         browser_enabled,
         computer_observe_enabled,
         computer_control_enabled,
@@ -45,14 +47,14 @@ pub(crate) fn local_host_tool_executors(
         tools.extend([
             Arc::new(ConnectorListTool {
                 host: plugins.clone(),
-                schedule_host_grant: schedule_host_grant.clone(),
+                host_revision_snapshot: host_revision_snapshot.clone(),
             }),
             Arc::new(ConnectorInvokeTool {
                 host: plugins.clone(),
                 store: store.clone(),
                 session_id: session_id.clone(),
                 run_id: run_id.clone(),
-                schedule_host_grant: schedule_host_grant.clone(),
+                host_revision_snapshot: host_revision_snapshot.clone(),
                 environment_change_sink: source_environment_change_sink,
             }),
             Arc::new(EnterpriseAttachmentDownloadTool {
@@ -60,7 +62,7 @@ pub(crate) fn local_host_tool_executors(
                 store: store.clone(),
                 session_id: session_id.clone(),
                 run_id: run_id.clone(),
-                schedule_host_grant: schedule_host_grant.clone(),
+                host_revision_snapshot: host_revision_snapshot.clone(),
             }),
         ] as [Arc<dyn ToolExecutor>; 3]);
     }
@@ -73,8 +75,8 @@ pub(crate) fn local_host_tool_executors(
                 session_id: session_id.clone(),
                 run_id: run_id.clone(),
                 grants: grants.clone(),
+                authority_mode,
                 sandbox: sandbox.clone(),
-                schedule_host_grant: schedule_host_grant.clone(),
                 environment_change_sink: Arc::clone(&browser_environment_change_sink),
             }),
             Arc::new(BrowserObserveTool {
@@ -84,7 +86,7 @@ pub(crate) fn local_host_tool_executors(
                 session_id: session_id.clone(),
                 run_id: run_id.clone(),
                 grants: grants.clone(),
-                schedule_host_grant: schedule_host_grant.clone(),
+                authority_mode,
                 environment_change_sink: Arc::clone(&browser_environment_change_sink),
             }),
             Arc::new(BrowserActTool {
@@ -94,7 +96,7 @@ pub(crate) fn local_host_tool_executors(
                 session_id: session_id.clone(),
                 run_id: run_id.clone(),
                 grants: grants.clone(),
-                schedule_host_grant: schedule_host_grant.clone(),
+                authority_mode,
                 environment_change_sink: Arc::clone(&browser_environment_change_sink),
             }),
             Arc::new(BrowserStopTool {
@@ -118,6 +120,7 @@ pub(crate) fn local_host_tool_executors(
                 session_id: session_id.clone(),
                 run_id: run_id.clone(),
                 grants: grants.clone(),
+                authority_mode,
                 sandbox,
             }),
         ] as [Arc<dyn ToolExecutor>; 2]);

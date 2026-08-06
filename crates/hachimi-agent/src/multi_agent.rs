@@ -8,19 +8,22 @@ use std::{
 
 use hachimi_protocol::{
     AgentTaskId, AgentTaskMessageId, AgentTaskMessageRecord, AgentTaskRecord, AgentTaskStatus,
-    BehaviorMode, CapabilityGrantSet, ClientId, EntryProfile, FileSystemAccess, MutationContext,
-    PermissionGrantScope, PermissionProfile, ProcessGrant, RequestId, RunBudget, RunId, RunOrigin,
-    RunPurpose, RunRecoveryDecisionAction, RunRecoveryDecisionRequest, RunRecoveryState, RunStatus,
-    SkillId, ToolDescriptor, ToolEffect, ToolRecoveryPolicy,
+    AuthorityMode, BehaviorMode, CapabilityGrantSet, ClientId, FileSystemAccess, MutationContext,
+    PermissionGrantScope, PermissionProfile, ProcessGrant, RequestId, RunBudget, RunId, RunPurpose,
+    RunRecoveryDecisionAction, RunRecoveryDecisionRequest, RunRecoveryState, RunStatus, SkillId,
+    ToolDescriptor, ToolEffect, ToolRecoveryPolicy,
 };
+#[cfg(test)]
+use hachimi_protocol::{EntryProfile, RunOrigin};
 use hachimi_storage::AgentStore;
 use parking_lot::Mutex;
 use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    AgentRunCreateRequest, AgentRunExecutor, AgentRunFactory, AgentRunPriority, AgentRunRequest,
-    ToolExecutionError, ToolExecutor, ToolFuture, ToolInvocation, ToolResult,
+    AgentRunCreateRequest, AgentRunExecutor, AgentRunLaunchRequest, AgentRunLauncher,
+    AgentRunPriority, AgentRunRequest, ToolExecutionError, ToolExecutor, ToolFuture,
+    ToolInvocation, ToolResult, UserInputAvailability,
 };
 
 pub const AGENT_SPAWN_TOOL: &str = "agent.spawn";
@@ -76,13 +79,7 @@ impl MultiAgentCoordinator {
 
     #[must_use]
     pub fn tools_for_parent(&self, parent: AgentRunRequest) -> Vec<Arc<dyn ToolExecutor>> {
-        if parent.agent_depth >= 3
-            || parent.run.configuration.entry_profile != EntryProfile::Workbench
-            || !matches!(
-                parent.run.origin,
-                RunOrigin::Interactive | RunOrigin::Scheduled { .. }
-            )
-        {
+        if parent.agent_depth >= 3 {
             return Vec::new();
         }
         [
@@ -299,19 +296,20 @@ impl MultiAgentCoordinator {
                     report.failed = report.failed.saturating_add(1);
                     continue;
                 };
-                if matches!(child_run.origin, RunOrigin::Scheduled { .. })
-                    && matches!(
-                        recovery.recovery.previous_status,
-                        RunStatus::WaitingApproval | RunStatus::WaitingUserInput
-                    )
-                {
+                // Every child Agent run is launched with unattended authority,
+                // regardless of the parent/source. It must never resume a
+                // state that requires a user prompt after restart.
+                if matches!(
+                    recovery.recovery.previous_status,
+                    RunStatus::WaitingApproval | RunStatus::WaitingUserInput
+                ) {
                     let _ = self
                         .store
                         .transition_agent_task(
                             &task.id,
                             AgentTaskStatus::NeedsAttention,
                             None,
-                            Some("scheduled_child_interaction_required"),
+                            Some("unattended_child_interaction_required"),
                             now_ms(),
                         )
                         .await;
@@ -416,6 +414,13 @@ impl MultiAgentCoordinator {
         {
             return Err("agent_task_recovery_grant_invalid".into());
         }
+        let authority = self
+            .store
+            .authority_snapshot(&run.id)
+            .await
+            .map_err(|error| format!("agent_task_authority_lookup_failed:{error}"))?
+            .filter(|authority| authority.session_id == session.id && authority.run_id == run.id)
+            .ok_or_else(|| "agent_task_recovery_authority_snapshot_missing".to_owned())?;
         let sandbox = self
             .store
             .latest_sandbox_report(&run.id)
@@ -435,13 +440,16 @@ impl MultiAgentCoordinator {
             .into_iter()
             .map(|attachment| attachment.attachment.id)
             .collect();
-        let schedule_host_grant =
-            matches!(run.origin, RunOrigin::Scheduled { .. }).then(Default::default);
+        // Child runs are always unattended, so Host revision drift must be
+        // pinned for every source, not only Scheduled runs.
+        let host_revision_snapshot = Some(Default::default());
         Ok(AgentRunRequest {
             principal: "system:multi-agent-recovery".into(),
             session,
             run,
+            authority,
             priority: AgentRunPriority::Background,
+            user_input_availability: UserInputAvailability::Unavailable,
             capability_grants: grants,
             sandbox_snapshot: sandbox,
             attachment_ids,
@@ -450,7 +458,7 @@ impl MultiAgentCoordinator {
             // Tool/Skill/MCP allowlists were not present before v29; restart is
             // deliberately fail-closed while the model consumes durable results.
             run_tool_allowlist: Some(Vec::new()),
-            schedule_host_grant,
+            host_revision_snapshot,
             workload_override: None,
             recovery_checkpoint,
             parent_agent_task_id: Some(task.id.clone()),
@@ -615,31 +623,38 @@ async fn spawn_child(
     );
     let skill_allowlist = intersect_skills(&parent.skill_allowlist, requested_skills.as_deref());
     let now = now_ms();
-    let created = AgentRunFactory::new(coordinator.store.clone())
-        .create(AgentRunCreateRequest {
-            principal: parent.principal.clone(),
-            idempotency_key: format!("agent-spawn:{}:{}", parent.run.id, invocation.call.id),
-            context: parent.session.context.clone(),
-            origin: parent.run.origin.clone(),
-            title: title.clone(),
-            prompt,
-            attachment_ids: Vec::new(),
-            parent_session_id: Some(parent.session.id.clone()),
-            source_run_id: Some(parent.run.id.clone()),
-            purpose: RunPurpose::Task,
-            model_snapshot: parent.run.configuration.model_snapshot.clone(),
-            entry_profile: EntryProfile::Workbench,
-            workload_override: parent.workload_override,
-            behavior_mode: BehaviorMode::Default,
-            execution_target: parent.run.configuration.execution_target.clone(),
-            approval_policy: parent.run.configuration.approval_policy,
-            permission_profile,
-            budget: budget.clone(),
-            requested_capabilities: parent.run.requested_capabilities,
-            created_at_ms: now,
+    let mut child_policy = parent.authority.policy.clone();
+    child_policy.level = permission_profile;
+    let launched = AgentRunLauncher::new(coordinator.store.clone())
+        .launch_new_transient_policy(AgentRunLaunchRequest {
+            create: AgentRunCreateRequest {
+                principal: parent.principal.clone(),
+                idempotency_key: format!("agent-spawn:{}:{}", parent.run.id, invocation.call.id),
+                context: parent.session.context.clone(),
+                origin: parent.run.origin.clone(),
+                title: title.clone(),
+                prompt,
+                attachment_ids: Vec::new(),
+                parent_session_id: Some(parent.session.id.clone()),
+                source_run_id: Some(parent.run.id.clone()),
+                purpose: RunPurpose::Task,
+                model_snapshot: parent.run.configuration.model_snapshot.clone(),
+                entry_profile: parent.run.configuration.entry_profile,
+                workload_override: parent.workload_override,
+                behavior_mode: BehaviorMode::Default,
+                execution_target: parent.run.configuration.execution_target.clone(),
+                approval_policy: parent.run.configuration.approval_policy,
+                permission_profile,
+                budget: budget.clone(),
+                requested_capabilities: parent.run.requested_capabilities,
+                created_at_ms: now,
+            },
+            policy: child_policy,
+            authority_mode: AuthorityMode::Unattended,
         })
         .await
         .map_err(|error| failed(error.to_string()))?;
+    let created = launched.created;
     if let Some(existing) = coordinator
         .store
         .get_agent_task_by_child_run(&created.run.id)
@@ -695,6 +710,7 @@ async fn spawn_child(
         &created.run.id,
         permission_profile,
     );
+    let child_authority = launched.authority;
     coordinator
         .store
         .persist_run_security_snapshot(&child_grants, &parent.sandbox_snapshot, now)
@@ -709,14 +725,16 @@ async fn spawn_child(
         principal: parent.principal.clone(),
         session: created.session,
         run: created.run,
+        authority: child_authority,
         priority: AgentRunPriority::Background,
+        user_input_availability: UserInputAvailability::Unavailable,
         capability_grants: child_grants,
         sandbox_snapshot: parent.sandbox_snapshot,
         attachment_ids: Vec::new(),
         skill_allowlist,
         mcp_tool_allowlist: parent.mcp_tool_allowlist,
         run_tool_allowlist: tool_allowlist,
-        schedule_host_grant: parent.schedule_host_grant,
+        host_revision_snapshot: parent.host_revision_snapshot,
         workload_override: parent.workload_override,
         recovery_checkpoint: None,
         parent_agent_task_id: Some(task_id.clone()),
@@ -1149,10 +1167,11 @@ mod tests {
 
     use futures_util::stream;
     use hachimi_protocol::{
-        ApprovalPolicy, LlmSettings, ModelEvent, ModelFinishReason, ModelMessage, ModelRequest,
-        ProviderCapabilities, RecoveryRevisionSnapshot, RunStepCheckpoint, RunStepCheckpointId,
-        RunStepPhase, SandboxCapabilityReport, SandboxReadiness, SessionContextBinding, TokenUsage,
-        WorkloadKind, WorkloadResolution, WorkloadResolutionSource,
+        AgentPermissionPolicy, ApprovalPolicy, AuthorityMode, LlmSettings, ModelEvent,
+        ModelFinishReason, ModelMessage, ModelRequest, ProviderCapabilities,
+        RecoveryRevisionSnapshot, RunStepCheckpoint, RunStepCheckpointId, RunStepPhase,
+        SandboxCapabilityReport, SandboxReadiness, ScopedPermissionRules, SessionContextBinding,
+        TokenUsage, WorkloadKind, WorkloadResolution, WorkloadResolutionSource,
     };
     use hachimi_protocol::{BrowserGrant, ComputerGrant, FileSystemGrant, NetworkGrant, SessionId};
     use sha2::{Digest, Sha256};
@@ -1290,35 +1309,49 @@ mod tests {
             &hachimi_protocol::RunRecord,
         )>,
     ) -> hachimi_storage::CreatedAgentRun {
-        AgentRunFactory::new(store.clone())
-            .create(AgentRunCreateRequest {
-                principal: "test".into(),
-                idempotency_key: idempotency_key.into(),
-                context: SessionContextBinding::General,
-                origin,
-                title: title.into(),
-                prompt: title.into(),
-                attachment_ids: Vec::new(),
-                parent_session_id: parent.map(|(session, _)| session.id.clone()),
-                source_run_id: parent.map(|(_, run)| run.id.clone()),
-                purpose: RunPurpose::Task,
-                model_snapshot: LlmSettings::default(),
-                entry_profile: EntryProfile::Workbench,
-                workload_override: None,
-                behavior_mode: BehaviorMode::Default,
-                execution_target: None,
-                approval_policy: ApprovalPolicy::NeverPrompt,
-                permission_profile: PermissionProfile::ReadOnly,
-                budget: RunBudget::default(),
-                requested_capabilities: ProviderCapabilities {
-                    text_input: true,
-                    streaming_usage: true,
-                    ..ProviderCapabilities::default()
+        crate::AgentRunLauncher::new(store.clone())
+            .launch_new(crate::AgentRunLaunchRequest {
+                create: AgentRunCreateRequest {
+                    principal: "test".into(),
+                    idempotency_key: idempotency_key.into(),
+                    context: parent.map_or_else(
+                        || SessionContextBinding::Workspace {
+                            workspace_id: hachimi_protocol::WorkspaceId::random(),
+                        },
+                        |(session, _)| session.context.clone(),
+                    ),
+                    origin,
+                    title: title.into(),
+                    prompt: title.into(),
+                    attachment_ids: Vec::new(),
+                    parent_session_id: parent.map(|(session, _)| session.id.clone()),
+                    source_run_id: parent.map(|(_, run)| run.id.clone()),
+                    purpose: RunPurpose::Task,
+                    model_snapshot: LlmSettings::default(),
+                    entry_profile: EntryProfile::Workbench,
+                    workload_override: None,
+                    behavior_mode: BehaviorMode::Default,
+                    execution_target: None,
+                    approval_policy: ApprovalPolicy::NeverPrompt,
+                    permission_profile: PermissionProfile::ReadOnly,
+                    budget: RunBudget::default(),
+                    requested_capabilities: ProviderCapabilities {
+                        text_input: true,
+                        streaming_usage: true,
+                        ..ProviderCapabilities::default()
+                    },
+                    created_at_ms: now_ms(),
                 },
-                created_at_ms: now_ms(),
+                policy: AgentPermissionPolicy {
+                    level: PermissionProfile::ReadOnly,
+                    rules: ScopedPermissionRules::default(),
+                    revision: 0,
+                },
+                authority_mode: AuthorityMode::Unattended,
             })
             .await
             .expect("test run")
+            .created
     }
 
     fn provider_revision(capabilities: &ProviderCapabilities) -> String {
@@ -1367,13 +1400,12 @@ mod tests {
         let fixture = tempfile::tempdir().expect("fixture");
         let database = fixture.path().join("agent.sqlite3");
         let store = AgentStore::connect(&database).await.expect("store");
-        let parent =
-            create_test_run(&store, "parent", "Parent", RunOrigin::Interactive, None).await;
+        let parent = create_test_run(&store, "parent", "Parent", RunOrigin::Manual, None).await;
         let child = create_test_run(
             &store,
             "child",
             "Child",
-            RunOrigin::Interactive,
+            RunOrigin::Manual,
             Some((&parent.session, &parent.run)),
         )
         .await;
@@ -1503,19 +1535,13 @@ mod tests {
     #[tokio::test]
     async fn startup_reconciliation_cascades_parent_cancellation() {
         let store = AgentStore::connect_in_memory().await.expect("store");
-        let parent = create_test_run(
-            &store,
-            "cancel-parent",
-            "Parent",
-            RunOrigin::Interactive,
-            None,
-        )
-        .await;
+        let parent =
+            create_test_run(&store, "cancel-parent", "Parent", RunOrigin::Manual, None).await;
         let child = create_test_run(
             &store,
             "cancel-child",
             "Child",
-            RunOrigin::Interactive,
+            RunOrigin::Manual,
             Some((&parent.session, &parent.run)),
         )
         .await;
@@ -1559,30 +1585,31 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn scheduled_child_waiting_for_approval_becomes_needs_attention() {
+    async fn unattended_child_waiting_for_approval_becomes_needs_attention() {
         let store = AgentStore::connect_in_memory().await.expect("store");
         let parent = create_test_run(
             &store,
             "scheduled-parent",
             "Parent",
-            RunOrigin::Interactive,
+            RunOrigin::Manual,
             None,
         )
         .await;
         let child = create_test_run(
             &store,
-            "scheduled-child",
+            "background-child",
             "Child",
-            RunOrigin::Scheduled {
-                schedule_id: hachimi_protocol::ScheduleId::from("schedule-test"),
-                task_run_id: hachimi_protocol::TaskRunId::from("task-run-test"),
-                scheduled_for_ms: now_ms(),
-                event_context: None,
+            RunOrigin::Channel {
+                channel: "test".into(),
+                account: "account".into(),
+                peer: "peer".into(),
+                thread: "thread".into(),
+                message_id: hachimi_protocol::ChannelMessageId::from("message"),
             },
             Some((&parent.session, &parent.run)),
         )
         .await;
-        let task = test_task("task-scheduled", &parent, &child, AgentTaskStatus::Queued);
+        let task = test_task("task-background", &parent, &child, AgentTaskStatus::Queued);
         store.create_agent_task(&task).await.expect("task");
         store
             .transition_agent_task(&task.id, AgentTaskStatus::Running, None, None, now_ms())
@@ -1621,7 +1648,7 @@ mod tests {
         assert_eq!(reconciled.status, AgentTaskStatus::NeedsAttention);
         assert_eq!(
             reconciled.error_code.as_deref(),
-            Some("scheduled_child_interaction_required")
+            Some("unattended_child_interaction_required")
         );
     }
 
@@ -1646,7 +1673,7 @@ mod tests {
     fn read_only_child_grants_remove_every_mutating_authority() {
         let parent_run_id = RunId::from("parent-run");
         let parent = CapabilityGrantSet {
-            profile: PermissionProfile::WorkspaceWrite,
+            profile: PermissionProfile::Writable,
             scope: PermissionGrantScope::Run,
             session_id: SessionId::from("parent-session"),
             run_id: Some(parent_run_id),

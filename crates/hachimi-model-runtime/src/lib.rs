@@ -51,6 +51,8 @@ pub enum ModelRuntimeError {
     ContextOverflow,
     #[error("model provider returned an invalid stream: {0}")]
     InvalidStream(String),
+    #[error("agent run requires attention: {0}")]
+    NeedsAttention(String),
 }
 
 pub trait ModelRuntime: Send + Sync {

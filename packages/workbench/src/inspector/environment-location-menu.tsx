@@ -11,7 +11,7 @@ export function EnvironmentLocationMenu(props: {
 }) {
   const [open, setOpen] = createSignal(false);
   const zh = () => props.locale === "zh-CN";
-  const currentKind = () => props.environment.checkout.kind;
+  const currentKind = () => props.environment.checkout?.kind ?? "local";
   const label = () =>
     currentKind() === "local" ? (zh() ? "本地" : "Local") : zh() ? "工作树" : "Worktree";
 

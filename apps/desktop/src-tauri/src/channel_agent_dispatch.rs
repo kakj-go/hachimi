@@ -1,12 +1,14 @@
 //! AppServer-owned Channel ingress dispatch into the unified Agent Runtime.
 
-use hachimi_agent::{AgentRunCreateRequest, AgentRunFactory, AgentRunPriority, AgentRunRequest};
+use hachimi_agent::{
+    AgentRunCreateRequest, AgentRunLaunchRequest, AgentRunLauncher, AgentRunPriority,
+    AgentRunRequest,
+};
 use hachimi_protocol::{
-    ApprovalPolicy, AttachmentId, BehaviorMode, CONTROL_PROTOCOL_VERSION, CapabilityGrantSet,
-    ChannelMessagePart, ClientId, ComputerGrant, EnterpriseAttachmentDownloadRequest, EntryProfile,
-    FileSystemAccess, FileSystemGrant, ItemPayload, ItemStatus, McpToolSelection, MutationContext,
-    NetworkGrant, PermissionGrantScope, PermissionProfile, ProcessGrant, ProviderCapabilities,
-    RequestId, RunBudget, RunOrigin, RunPurpose, RunStatus, ScheduleHostGrant,
+    ApprovalPolicy, AttachmentId, AuthorityMode, BehaviorMode, CONTROL_PROTOCOL_VERSION,
+    ChannelMessagePart, ClientId, EnterpriseAttachmentDownloadRequest, EntryProfile,
+    HostRevisionSnapshot, ItemPayload, ItemStatus, McpToolSelection, MutationContext,
+    ProviderCapabilities, RequestId, RunBudget, RunOrigin, RunPurpose, RunStatus,
     SessionContextBinding, SessionRecord, SkillId, StructuredOutputMode, TranscriptItemKind,
     VerifiedChannelMessage, WorkloadKind,
 };
@@ -27,6 +29,32 @@ pub(super) async fn process_ingress(
         return process_control_command(&store, gateway, message, command).await;
     }
     let channel_grant = gateway.ingress_grant_snapshot(&message.event_key).await?;
+    let binding = gateway.resolve_binding(message).await?;
+    let existing_session = match binding.session_id.as_ref() {
+        Some(session_id) => Some(
+            store
+                .get_session(session_id)
+                .await?
+                .ok_or("Channel Session disappeared")?,
+        ),
+        None => None,
+    };
+    let context = existing_session.as_ref().map_or_else(
+        || SessionContextBinding::Workspace {
+            workspace_id: hachimi_protocol::WorkspaceId::random(),
+        },
+        |session| session.context.clone(),
+    );
+    let authorization_revision = binding
+        .authorization
+        .as_ref()
+        .map_or(1, |authorization| authorization.revision);
+    let authorization_id = binding
+        .authorization
+        .as_ref()
+        .map(|authorization| authorization.id.clone());
+    let mut permission_policy = channel_grant.permission_policy.clone();
+    permission_policy.revision = authorization_revision;
     let runtime_grants = prepare_runtime_grants(&state, &channel_grant).await;
     let settings = state.settings.read().llm.clone();
     let create_request = AgentRunCreateRequest {
@@ -37,7 +65,7 @@ pub(super) async fn process_ingress(
             message.event_key.account_id,
             message.event_key.external_message_id
         ),
-        context: SessionContextBinding::General,
+        context,
         origin: RunOrigin::Channel {
             channel: message.address.provider_id.clone(),
             account: message.address.account_id.clone(),
@@ -68,51 +96,34 @@ pub(super) async fn process_ingress(
         behavior_mode: BehaviorMode::Default,
         execution_target: None,
         approval_policy: ApprovalPolicy::NeverPrompt,
-        permission_profile: PermissionProfile::ReadOnly,
+        permission_profile: permission_policy.level,
         budget: RunBudget::default(),
         requested_capabilities: requested_capabilities(&settings),
         created_at_ms: now_ms(),
     };
-    let factory = AgentRunFactory::new(store.clone());
-    let (session, run) = if let Some((session_id, run_id)) =
-        gateway.ingress_run(&message.event_key).await?
-    {
-        let session = store
-            .get_session(&session_id)
-            .await?
-            .ok_or("Channel Session disappeared")?;
-        let run = store
-            .get_run(&run_id)
-            .await?
-            .ok_or("Channel Run disappeared")?;
-        if run.session_id != session.id {
-            return Err("Channel ingress Run lineage changed".into());
-        }
-        (session, run)
-    } else {
-        let binding = gateway.resolve_binding(message).await?;
-        let authorization_revision = binding
-            .authorization
-            .as_ref()
-            .map_or(1, |authorization| authorization.revision);
-        let created = factory
-            .create_channel(
-                create_request,
-                hachimi_storage::ChannelRunBindingInput {
-                    event_key: message.event_key.clone(),
-                    binding_key_hash: binding.binding_key_hash,
-                    binding_key_json: binding.binding_key_json,
-                    account_id: message.address.account_id.clone(),
-                    authorization_id: binding.authorization.map(|authorization| authorization.id),
-                    authorization_revision,
-                    identity_group_id: binding.identity_group_id,
-                    timestamp_ms: now_ms(),
-                },
-            )
-            .await?;
-        (created.session, created.run)
-    };
-    let (mcp_tool_allowlist, host_grant) = match runtime_grants {
+    let launched = AgentRunLauncher::new(store.clone())
+        .launch_channel(
+            AgentRunLaunchRequest {
+                create: create_request,
+                policy: permission_policy,
+                authority_mode: AuthorityMode::Unattended,
+            },
+            hachimi_storage::ChannelRunBindingInput {
+                event_key: message.event_key.clone(),
+                binding_key_hash: binding.binding_key_hash,
+                binding_key_json: binding.binding_key_json,
+                account_id: message.address.account_id.clone(),
+                authorization_id,
+                authorization_revision,
+                identity_group_id: binding.identity_group_id,
+                timestamp_ms: now_ms(),
+            },
+        )
+        .await?;
+    let session = launched.created.session;
+    let run = launched.created.run;
+    let authority = launched.authority;
+    let (mcp_tool_allowlist, host_revision_snapshot) = match runtime_grants {
         Ok(value) => value,
         Err(error) => {
             tracing::warn!(run_id = %run.id, %error, "Channel grant snapshot is unavailable or drifted");
@@ -179,8 +190,10 @@ pub(super) async fn process_ingress(
                 principal: principal.to_owned(),
                 session: session.clone(),
                 run: run.clone(),
+                authority,
                 priority: AgentRunPriority::Background,
-                capability_grants: read_only_grants(&session.id, &run.id, &channel_grant),
+                user_input_availability: hachimi_agent::UserInputAvailability::Unavailable,
+                capability_grants: launched.capability_grants,
                 sandbox_snapshot: state.sandbox_snapshot().report,
                 attachment_ids: attachment_ids.clone(),
                 skill_allowlist: channel_grant
@@ -190,11 +203,8 @@ pub(super) async fn process_ingress(
                     .map(SkillId::new)
                     .collect(),
                 mcp_tool_allowlist: mcp_tool_allowlist.clone(),
-                run_tool_allowlist: Some(channel_tool_allowlist(
-                    &channel_grant,
-                    &mcp_tool_allowlist,
-                )),
-                schedule_host_grant: host_grant,
+                run_tool_allowlist: None,
+                host_revision_snapshot,
                 workload_override: Some(WorkloadKind::General),
                 recovery_checkpoint: None,
                 parent_agent_task_id: None,
@@ -424,9 +434,19 @@ async fn create_control_session(
     label: &str,
 ) -> Result<SessionRecord, hachimi_storage::AgentStoreError> {
     let timestamp_ms = now_ms();
+    let session_id = hachimi_protocol::SessionId::random();
+    let workspace = store
+        .ensure_managed_workspace(
+            hachimi_protocol::WorkspaceId::random(),
+            hachimi_storage::WorkspaceOwnerRef::Session(&session_id),
+            timestamp_ms,
+        )
+        .await?;
     let session = SessionRecord {
-        id: hachimi_protocol::SessionId::random(),
-        context: SessionContextBinding::General,
+        id: session_id,
+        context: SessionContextBinding::Workspace {
+            workspace_id: workspace.id,
+        },
         entry_profile: EntryProfile::Workbench,
         title: format!("{} · {}", message.address.provider_id, label),
         archived: false,
@@ -439,47 +459,13 @@ async fn create_control_session(
     store.create_session(&session).await
 }
 
-fn read_only_grants(
-    session_id: &hachimi_protocol::SessionId,
-    run_id: &hachimi_protocol::RunId,
-    grant: &hachimi_protocol::ChannelGrant,
-) -> CapabilityGrantSet {
-    let file_system = (!grant.read_only_workspace_roots.is_empty())
-        .then(|| FileSystemGrant {
-            access: FileSystemAccess::Read,
-            roots: grant.read_only_workspace_roots.clone(),
-            globs: Vec::new(),
-            special_roots: Vec::new(),
-        })
-        .into_iter()
-        .collect();
-    CapabilityGrantSet {
-        profile: PermissionProfile::ReadOnly,
-        scope: PermissionGrantScope::Run,
-        session_id: session_id.clone(),
-        run_id: Some(run_id.clone()),
-        source: "channel_grant_snapshot".into(),
-        file_system,
-        network: NetworkGrant {
-            enabled: !grant.network_hosts.is_empty(),
-            hosts: grant.network_hosts.clone(),
-            protocols: (!grant.network_hosts.is_empty())
-                .then(|| "https".into())
-                .into_iter()
-                .collect(),
-        },
-        process: ProcessGrant::default(),
-        browser: Default::default(),
-        computer: ComputerGrant::default(),
-        review_each_command: true,
-        expires_at_ms: None,
-    }
-}
-
 async fn prepare_runtime_grants(
     state: &DesktopState,
     grant: &hachimi_protocol::ChannelGrant,
-) -> Result<(Vec<McpToolSelection>, Option<ScheduleHostGrant>), String> {
+) -> Result<(Vec<McpToolSelection>, Option<HostRevisionSnapshot>), String> {
+    if grant.permission_policy.level == hachimi_protocol::PermissionProfile::FullAccess {
+        return Ok((Vec::new(), None));
+    }
     let mut mcp_tools = Vec::new();
     if !grant.mcp_server_ids.is_empty() {
         if !state.control_plane.feature_flags().mcp_runtime {
@@ -497,11 +483,23 @@ async fn prepare_runtime_grants(
                 .ok_or_else(|| format!("MCP server {requested} is not ready"))?;
             let host_identity_hash =
                 hachimi_control_plane::mcp_host_identity_hash(&runtime.configuration);
-            mcp_tools.extend(runtime.tools.iter().map(|tool| McpToolSelection {
-                server_id: runtime.configuration.id.clone(),
-                tool_name: tool.name.clone(),
-                schema_hash: json_hash(&tool.input_schema),
-                host_identity_hash: host_identity_hash.clone(),
+            mcp_tools.extend(runtime.tools.iter().filter_map(|tool| {
+                let schema_hash = json_hash(&tool.input_schema);
+                let requires_write = !runtime.configuration.read_only_tools.contains(&tool.name);
+                grant
+                    .permission_policy
+                    .allows_mcp(
+                        &runtime.configuration.id,
+                        &tool.name,
+                        &schema_hash,
+                        requires_write,
+                    )
+                    .then(|| McpToolSelection {
+                        server_id: runtime.configuration.id.clone(),
+                        tool_name: tool.name.clone(),
+                        schema_hash,
+                        host_identity_hash: host_identity_hash.clone(),
+                    })
             }));
         }
     }
@@ -512,47 +510,40 @@ async fn prepare_runtime_grants(
         left.server_id == right.server_id && left.tool_name == right.tool_name
     });
 
-    let host_grant = if grant.connector_selections.is_empty() {
-        None
-    } else {
-        crate::schedule_host_grants::validate_schedule_connector_selections(
+    let host_revision_snapshot = crate::host_revision_snapshots::snapshot_from_permission_policy(
+        &grant.permission_policy,
+        &grant.connector_selections,
+    );
+    if let Some(snapshot) = &host_revision_snapshot {
+        for selection in &snapshot.connectors {
+            for action in &selection.allowed_actions {
+                let requires_write = !grant.permission_policy.rules.connectors.iter().any(|rule| {
+                    rule.account_id == selection.account_id
+                        && rule
+                            .read_only_actions
+                            .iter()
+                            .any(|read_only| read_only == action)
+                });
+                if !grant.permission_policy.allows_connector(
+                    &selection.account_id,
+                    action,
+                    requires_write,
+                ) {
+                    return Err(format!(
+                        "Connector action {action} on {} is outside the Channel permission policy",
+                        selection.account_id
+                    ));
+                }
+            }
+        }
+        crate::host_revision_snapshots::validate_connector_revision_selections(
             &state.plugin_host,
-            &grant.connector_selections,
+            &snapshot.connectors,
         )
         .await
         .map_err(|error| format!("{}: {}", error.code, error.message))?;
-        Some(ScheduleHostGrant {
-            connectors: grant.connector_selections.clone(),
-            browser: None,
-            computer_unattended: false,
-        })
-    };
-    Ok((mcp_tools, host_grant))
-}
-
-fn channel_tool_allowlist(
-    grant: &hachimi_protocol::ChannelGrant,
-    mcp_tools: &[McpToolSelection],
-) -> Vec<String> {
-    let mut tools = Vec::new();
-    if !grant.skill_ids.is_empty() {
-        tools.extend([
-            hachimi_agent::SKILLS_LIST_TOOL.into(),
-            hachimi_agent::SKILLS_READ_TOOL.into(),
-        ]);
     }
-    tools.extend(mcp_tools.iter().map(|selection| {
-        hachimi_capabilities::mcp_exposed_tool_name(
-            selection.server_id.as_str(),
-            &selection.tool_name,
-        )
-    }));
-    if !grant.connector_selections.is_empty() {
-        tools.push("connector_invoke".into());
-    }
-    tools.sort();
-    tools.dedup();
-    tools
+    Ok((mcp_tools, host_revision_snapshot))
 }
 
 fn json_hash(value: &(impl serde::Serialize + ?Sized)) -> String {

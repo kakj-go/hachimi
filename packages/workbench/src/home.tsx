@@ -1,7 +1,7 @@
 import {
   CONTROL_PROTOCOL_VERSION,
   commandFailure,
-  type ApprovalPolicy,
+  type PermissionProfile,
   type ApprovalRequestRecord,
   type ApprovalStatus,
   type BehaviorMode,
@@ -13,6 +13,7 @@ import {
   type RunRecord,
   type RunRecoveryDecisionAction,
   type RunRecoverySnapshot,
+  type SessionPermissionConfig,
   type SessionRecord,
   type SkillRecord,
   type UserInputAnswer,
@@ -56,7 +57,7 @@ import { createProjectGitController } from "./project-git-controller";
 import { SandboxReadinessBanner } from "./sandbox-readiness-banner";
 import { ComposerAttachmentList, type ComposerAttachmentPreview } from "./composer-attachments";
 import {
-  ApprovalPolicyPopover,
+  PermissionProfilePopover,
   ComposerContextControls,
   ComposerOptionsPopover,
   PlanModeChip,
@@ -192,7 +193,9 @@ export function HomePage(props: {
   );
   const [sessionProjectionRevision, setSessionProjectionRevision] = createSignal(0);
   const [behaviorMode, setBehaviorMode] = createSignal<BehaviorMode>("default");
-  const [approvalPolicy, setApprovalPolicy] = createSignal<ApprovalPolicy>("only_when_needed");
+  const [permissionProfile, setPermissionProfile] = createSignal<PermissionProfile>("writable");
+  const [sessionPermissionConfig, setSessionPermissionConfig] =
+    createSignal<SessionPermissionConfig>();
   const [activePopover, setActivePopover] = createSignal<ComposerPopoverId>();
   const [skills, setSkills] = createSignal<SkillRecord[]>([]);
   const [skillsLoading, setSkillsLoading] = createSignal(true);
@@ -354,6 +357,28 @@ export function HomePage(props: {
     if (bottomPanelOpen() && projectId) void projectTools.ensure(projectId);
   });
   createEffect(() => persistSessionSelection(SELECTED_SESSION_STORAGE_KEY, selectedSessionId()));
+  createEffect(() => {
+    const sessionId = selectedSessionId();
+    if (!sessionId) {
+      setSessionPermissionConfig(undefined);
+      return;
+    }
+    let disposed = false;
+    void commandPort
+      .getSessionPermissionConfig({ sessionId, entryProfile: "workbench" })
+      .then((config) => {
+        if (!disposed && untrack(selectedSessionId) === sessionId) {
+          setSessionPermissionConfig(config);
+          setPermissionProfile(config.policy.level);
+        }
+      })
+      .catch((error) => {
+        if (!disposed) setFailure(commandFailure(error).message);
+      });
+    onCleanup(() => {
+      disposed = true;
+    });
+  });
   createEffect(() => persistLocalJson(PINNED_PROJECTS_STORAGE_KEY, pinnedProjectIds()));
   createEffect(() => persistLocalJson(REMOVED_PROJECTS_STORAGE_KEY, removedProjectIds()));
   createEffect(() => persistLocalJson(READ_SESSIONS_STORAGE_KEY, readSessions()));
@@ -424,6 +449,16 @@ export function HomePage(props: {
       setSkillsError(commandFailure(error).message);
     } finally {
       setSkillsLoading(false);
+    }
+  }
+
+  async function clearSessionExtraAuthorizations() {
+    const sessionId = selectedSessionId();
+    if (!sessionId) return;
+    try {
+      setSessionPermissionConfig(await commandPort.clearSessionExtraAuthorizations(sessionId));
+    } catch (error) {
+      setFailure(commandFailure(error).message);
     }
   }
 
@@ -1015,7 +1050,7 @@ export function HomePage(props: {
               ? { kind: "local", project_id: project.id }
               : null,
         behaviorMode: behaviorMode(),
-        approvalPolicy: approvalPolicy(),
+        permissionProfile: behaviorMode() === "plan" ? "read_only" : permissionProfile(),
         attachmentIds: attachments().flatMap((attachment) =>
           attachment.attachmentId ? [attachment.attachmentId] : [],
         ),
@@ -1292,7 +1327,6 @@ export function HomePage(props: {
         <Show when={activeView() === "tasks"}>
           <TaskCenter
             commandPort={commandPort}
-            projects={visibleProjects()}
             skills={skills()}
             onOpenSession={(sessionId) => {
               void commandPort
@@ -1602,11 +1636,13 @@ export function HomePage(props: {
                       }}
                       onToggleSkill={toggleSkill}
                     />
-                    <ApprovalPolicyPopover
+                    <PermissionProfilePopover
                       activePopover={activePopover()}
                       onOpenChange={updatePopover}
-                      value={approvalPolicy()}
-                      onChange={setApprovalPolicy}
+                      value={permissionProfile()}
+                      onChange={setPermissionProfile}
+                      extraAuthorizations={sessionPermissionConfig()?.extraAuthorizations ?? []}
+                      onClearExtraAuthorizations={() => void clearSessionExtraAuthorizations()}
                     />
                     <Show when={behaviorMode() === "plan"}>
                       <PlanModeChip onDisable={() => setBehaviorMode("default")} />

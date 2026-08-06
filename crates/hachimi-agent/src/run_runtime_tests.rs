@@ -1,20 +1,20 @@
 use std::sync::{Arc, Mutex};
 
 use futures_util::stream;
-use hachimi_policy::expand_permission_profile;
 use hachimi_protocol::{
-    ApprovalPolicy, BehaviorMode, EntryProfile, LlmSettings, ModelEvent, ModelFinishReason,
-    ModelMessage, ModelRequest, PermissionProfile, ProviderCapabilities, RunBudget, RunOrigin,
-    RunPurpose, RunStatus, SandboxCapabilityReport, SandboxReadiness, SessionContextBinding,
-    TokenUsage, WorkloadKind, WorkloadResolution, WorkloadResolutionSource,
+    AgentPermissionPolicy, ApprovalPolicy, AuthorityMode, BehaviorMode, EntryProfile, LlmSettings,
+    ModelEvent, ModelFinishReason, ModelMessage, ModelRequest, PermissionProfile,
+    ProviderCapabilities, RunBudget, RunOrigin, RunPurpose, RunStatus, SandboxCapabilityReport,
+    SandboxReadiness, ScopedPermissionRules, SessionContextBinding, TokenUsage, WorkloadKind,
+    WorkloadResolution, WorkloadResolutionSource,
 };
 use tokio_util::sync::CancellationToken;
 
 use crate::{
     AgentInstructionLayer, AgentPreparationFuture, AgentRunCreateRequest, AgentRunExecutor,
-    AgentRunFactory, AgentRunPreparer, AgentRunPriority, AgentRunRequest, ModelClientFuture,
-    ModelEventStream, ModelRuntime, ModelRuntimeError, ModelRuntimeFactory, PreparedAgentRun,
-    StepRuntimeState, StepWorldState,
+    AgentRunLaunchRequest, AgentRunLauncher, AgentRunPreparer, AgentRunPriority, AgentRunRequest,
+    ModelClientFuture, ModelEventStream, ModelRuntime, ModelRuntimeError, ModelRuntimeFactory,
+    PreparedAgentRun, StepRuntimeState, StepWorldState, UserInputAvailability,
 };
 
 #[derive(Debug, Default)]
@@ -136,40 +136,51 @@ async fn service_principal_executes_a_background_run_without_a_window_transport(
     let store = hachimi_storage::AgentStore::connect_in_memory()
         .await
         .expect("store");
-    let created = AgentRunFactory::new(store.clone())
-        .create(AgentRunCreateRequest {
-            principal: "service:scheduler".into(),
-            idempotency_key: "windowless-scheduled-run".into(),
-            context: SessionContextBinding::General,
-            origin: RunOrigin::Scheduled {
-                schedule_id: hachimi_protocol::ScheduleId::from("schedule-windowless"),
-                task_run_id: hachimi_protocol::TaskRunId::from("task-windowless"),
-                scheduled_for_ms: 1_800_000_000_000,
-                event_context: None,
+    let launched = AgentRunLauncher::new(store.clone())
+        .launch_new(AgentRunLaunchRequest {
+            create: AgentRunCreateRequest {
+                principal: "service:scheduler".into(),
+                idempotency_key: "windowless-scheduled-run".into(),
+                context: SessionContextBinding::Workspace {
+                    workspace_id: hachimi_protocol::WorkspaceId::random(),
+                },
+                origin: RunOrigin::Scheduled {
+                    schedule_id: hachimi_protocol::ScheduleId::from("schedule-windowless"),
+                    task_run_id: hachimi_protocol::TaskRunId::from("task-windowless"),
+                    scheduled_for_ms: 1_800_000_000_000,
+                    event_context: None,
+                },
+                title: "Windowless scheduled Run".into(),
+                prompt: "run the scheduled task".into(),
+                attachment_ids: Vec::new(),
+                parent_session_id: None,
+                source_run_id: None,
+                purpose: RunPurpose::Task,
+                model_snapshot: LlmSettings::default(),
+                entry_profile: EntryProfile::Workbench,
+                workload_override: None,
+                behavior_mode: BehaviorMode::Default,
+                execution_target: None,
+                approval_policy: ApprovalPolicy::NeverPrompt,
+                permission_profile: PermissionProfile::ReadOnly,
+                budget: RunBudget::default(),
+                requested_capabilities: ProviderCapabilities {
+                    text_input: true,
+                    streaming_usage: true,
+                    ..ProviderCapabilities::default()
+                },
+                created_at_ms: 1_800_000_000_000,
             },
-            title: "Windowless scheduled Run".into(),
-            prompt: "run the scheduled task".into(),
-            attachment_ids: Vec::new(),
-            parent_session_id: None,
-            source_run_id: None,
-            purpose: RunPurpose::Task,
-            model_snapshot: LlmSettings::default(),
-            entry_profile: EntryProfile::Workbench,
-            workload_override: None,
-            behavior_mode: BehaviorMode::Default,
-            execution_target: None,
-            approval_policy: ApprovalPolicy::NeverPrompt,
-            permission_profile: PermissionProfile::ReadOnly,
-            budget: RunBudget::default(),
-            requested_capabilities: ProviderCapabilities {
-                text_input: true,
-                streaming_usage: true,
-                ..ProviderCapabilities::default()
+            policy: AgentPermissionPolicy {
+                level: PermissionProfile::ReadOnly,
+                rules: ScopedPermissionRules::default(),
+                revision: 1,
             },
-            created_at_ms: 1_800_000_000_000,
+            authority_mode: AuthorityMode::Unattended,
         })
         .await
         .expect("Run bundle");
+    let created = launched.created;
     let model = Arc::new(WindowlessModel::default());
     let preparer = Arc::new(WindowlessPreparer::default());
     let registry = Arc::new(crate::AgentExecutorRegistry::new(2));
@@ -179,21 +190,15 @@ async fn service_principal_executes_a_background_run_without_a_window_transport(
         Arc::new(WindowlessFactory(Arc::clone(&model))),
         preparer.clone(),
     );
-    let grants = expand_permission_profile(
-        PermissionProfile::ReadOnly,
-        BehaviorMode::Default,
-        created.session.id.clone(),
-        created.run.id.clone(),
-        "general://windowless".into(),
-    );
-
     executor
         .execute(AgentRunRequest {
             principal: "service:scheduler".into(),
             session: created.session.clone(),
             run: created.run.clone(),
+            authority: launched.authority,
             priority: AgentRunPriority::Background,
-            capability_grants: grants,
+            user_input_availability: UserInputAvailability::Unavailable,
+            capability_grants: launched.capability_grants,
             sandbox_snapshot: SandboxCapabilityReport {
                 backend: "test".into(),
                 readiness: SandboxReadiness::Unavailable,
@@ -209,7 +214,7 @@ async fn service_principal_executes_a_background_run_without_a_window_transport(
             skill_allowlist: Vec::new(),
             mcp_tool_allowlist: Vec::new(),
             run_tool_allowlist: Some(Vec::new()),
-            schedule_host_grant: Some(hachimi_protocol::ScheduleHostGrant::default()),
+            host_revision_snapshot: Some(hachimi_protocol::HostRevisionSnapshot::default()),
             workload_override: None,
             recovery_checkpoint: None,
             parent_agent_task_id: None,

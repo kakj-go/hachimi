@@ -4,6 +4,9 @@ mod attachment_host;
 mod environment;
 mod git_mutation;
 mod handoff;
+mod plan_acceptance;
+#[cfg(test)]
+mod workspace_plan_tests;
 
 pub use attachment_host::AttachmentModelContext;
 
@@ -17,18 +20,19 @@ use std::{
 };
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
-use hachimi_agent::{AgentRunCreateRequest, AgentRunFactory, AgentRunFactoryError};
+use hachimi_agent::{
+    AgentRunCreateRequest, AgentRunFactoryError, AgentRunLaunchRequest, AgentRunLauncher,
+};
 use hachimi_process_policy::{ProcessPolicy, tokio_command};
 use hachimi_protocol::{
-    AttachmentId, AttachmentRecord, CheckoutId, CheckoutKind, CheckoutRecord, CheckoutStatus,
-    ExecutionTarget, GitRefRecord, ItemId, ItemPayload, ItemRelations, ItemStatus, LlmSettings,
-    PermissionProfile, PlanAcceptanceRequest, PlanRevisionRequest, ProjectId, ProjectRecord,
-    ProviderCapabilities, RunBudget, RunId, RunOrigin, RunPurpose, RunRecord, RunStatus,
-    SessionContextBinding, SessionId, TranscriptItem, TranscriptItemKind,
+    AgentPermissionPolicy, AttachmentId, AttachmentRecord, AuthorityMode, CheckoutId, CheckoutKind,
+    CheckoutRecord, CheckoutStatus, ExecutionTarget, GitRefRecord, ItemPayload, LlmSettings,
+    PlanRevisionRequest, ProjectId, ProjectRecord, ProviderCapabilities, RunBudget, RunId,
+    RunOrigin, RunPurpose, ScopedPermissionRules, SessionContextBinding, SessionId,
     WorkbenchAttachmentPreview, WorkbenchGitAction, WorkbenchGitPhaseResult,
-    WorkbenchGitPhaseStatus, WorkbenchGitRequest, WorkbenchGitResponse,
-    WorkbenchPlanAcceptanceSnapshot, WorkbenchSessionListItem, WorkbenchSessionSnapshot,
-    WorkbenchTaskSnapshot, WorkbenchTaskStartRequest, WorkloadKind,
+    WorkbenchGitPhaseStatus, WorkbenchGitRequest, WorkbenchGitResponse, WorkbenchSessionListItem,
+    WorkbenchSessionSnapshot, WorkbenchTaskSnapshot, WorkbenchTaskStartRequest, WorkloadKind,
+    WorkspaceId,
 };
 use hachimi_storage::{AgentStore, AgentStoreError, IdempotentMutationClaim};
 use sha2::{Digest, Sha256};
@@ -50,8 +54,10 @@ pub enum WorkbenchError {
     ProjectNotFound(ProjectId),
     #[error("session does not exist: {0}")]
     SessionNotFound(SessionId),
-    #[error("coding Workbench requires a Project-bound Session")]
+    #[error("this operation requires a Project-bound Session")]
     ProjectContextRequired,
+    #[error("workspace is unavailable: {0}")]
+    WorkspaceUnavailable(String),
     #[error("archived Sessions must be restored before they can continue")]
     SessionArchived,
     #[error("the selected Session context does not match the requested task context")]
@@ -348,117 +354,6 @@ impl WorkbenchService {
         })
     }
 
-    pub async fn accept_plan(
-        &self,
-        request: &PlanAcceptanceRequest,
-        model_snapshot: LlmSettings,
-        principal: &str,
-    ) -> Result<WorkbenchPlanAcceptanceSnapshot, WorkbenchError> {
-        let plan = self
-            .store
-            .get_proposed_plan(&request.plan_id)
-            .await?
-            .ok_or_else(|| AgentStoreError::ProposedPlanNotFound(request.plan_id.clone()))?;
-        if plan.revision != request.expected_revision {
-            return Err(WorkbenchError::StalePlanRevision);
-        }
-        let user_message = request.user_message.trim();
-        if user_message.is_empty() || user_message.chars().count() > 200 {
-            return Err(WorkbenchError::InvalidPrompt);
-        }
-        let source_run = self
-            .store
-            .get_run(&plan.run_id)
-            .await?
-            .ok_or_else(|| AgentStoreError::RunNotFound(plan.run_id.clone()))?;
-        if source_run.status != RunStatus::Succeeded
-            || source_run.configuration.behavior_mode != hachimi_protocol::BehaviorMode::Plan
-        {
-            return Err(WorkbenchError::Store(
-                AgentStoreError::ProposedPlanNotAcceptable(plan.id),
-            ));
-        }
-        let session = self
-            .store
-            .get_session(&plan.session_id)
-            .await?
-            .ok_or_else(|| WorkbenchError::SessionNotFound(plan.session_id.clone()))?;
-        let checkout_id = session
-            .context
-            .checkout_id()
-            .ok_or(WorkbenchError::ProjectContextRequired)?;
-        let project_id = session
-            .context
-            .project_id()
-            .ok_or(WorkbenchError::ProjectContextRequired)?;
-        let checkout = self
-            .store
-            .get_checkout(checkout_id)
-            .await?
-            .ok_or_else(|| WorkbenchError::CheckoutNotFound(checkout_id.clone()))?;
-        let project = self.project(project_id).await?;
-        let now = now_ms();
-        let requested_capabilities = source_run.requested_capabilities;
-        let mut configuration = source_run.configuration;
-        configuration.model_snapshot = model_snapshot;
-        configuration.behavior_mode = hachimi_protocol::BehaviorMode::Default;
-        configuration.permission_profile = PermissionProfile::WorkspaceWrite;
-        configuration.accepted_plan_id = Some(plan.id.clone());
-        configuration.accepted_plan_revision = Some(plan.revision);
-        let candidate = RunRecord {
-            id: RunId::random(),
-            session_id: session.id.clone(),
-            status: RunStatus::Queued,
-            purpose: RunPurpose::Task,
-            origin: RunOrigin::Interactive,
-            generation: 1,
-            configuration,
-            requested_capabilities,
-            negotiated_capabilities: ProviderCapabilities::default(),
-            provider_capability_probe: None,
-            capability_degradations: Vec::new(),
-            failure_code: None,
-            created_at_ms: now,
-            updated_at_ms: now,
-        };
-        let (accepted_plan, run) = self
-            .store
-            .accept_proposed_plan_idempotent(
-                principal,
-                &request.idempotency_key,
-                &plan.id,
-                &candidate,
-            )
-            .await?;
-        if run.id == candidate.id {
-            self.store
-                .append_transcript_item(TranscriptItem {
-                    id: ItemId::random(),
-                    session_id: session.id.clone(),
-                    run_id: Some(run.id.clone()),
-                    sequence: 0,
-                    kind: TranscriptItemKind::User,
-                    status: ItemStatus::Completed,
-                    payload: ItemPayload::User {
-                        text: user_message.to_owned(),
-                        attachment_ids: Vec::new(),
-                    },
-                    relations: ItemRelations::default(),
-                    created_at_ms: now,
-                })
-                .await?;
-        }
-        Ok(WorkbenchPlanAcceptanceSnapshot {
-            plan: accepted_plan,
-            task: WorkbenchTaskSnapshot {
-                project: Some(project),
-                checkout: Some(checkout),
-                session,
-                run,
-            },
-        })
-    }
-
     pub async fn revise_plan(
         &self,
         request: &PlanRevisionRequest,
@@ -511,10 +406,7 @@ impl WorkbenchService {
                 };
                 (Some(project_id.clone()), Some(target))
             }
-            SessionContextBinding::General => (None, None),
-            SessionContextBinding::Avatar { .. } => {
-                return Err(WorkbenchError::SessionContextMismatch);
-            }
+            SessionContextBinding::Workspace { .. } => (None, None),
         };
         let attachment_ids = self
             .store
@@ -532,7 +424,7 @@ impl WorkbenchService {
                 prompt: instructions.to_owned(),
                 execution_target,
                 behavior_mode: hachimi_protocol::BehaviorMode::Plan,
-                approval_policy: source_run.configuration.approval_policy,
+                permission_profile: source_run.configuration.permission_profile,
                 attachment_ids,
                 skill_ids: Vec::new(),
             },
@@ -987,14 +879,11 @@ impl WorkbenchService {
                             Some(WorkloadKind::Coding),
                         )
                     }
-                    SessionContextBinding::General => {
+                    SessionContextBinding::Workspace { .. } => {
                         if request.project_id.is_some() || request.execution_target.is_some() {
                             return Err(WorkbenchError::SessionContextMismatch);
                         }
-                        (None, None, SessionContextBinding::General, None, None)
-                    }
-                    SessionContextBinding::Avatar { .. } => {
-                        return Err(WorkbenchError::SessionContextMismatch);
+                        (None, None, session.context.clone(), None, None)
                     }
                 };
                 existing_session = Some(session);
@@ -1023,7 +912,15 @@ impl WorkbenchService {
                 if request.execution_target.is_some() {
                     return Err(WorkbenchError::ProjectTargetMismatch);
                 }
-                (None, None, SessionContextBinding::General, None, None)
+                (
+                    None,
+                    None,
+                    SessionContextBinding::Workspace {
+                        workspace_id: WorkspaceId::random(),
+                    },
+                    None,
+                    None,
+                )
             };
         let now = now_ms();
         let requested_capabilities = requested_provider_capabilities(&model_snapshot);
@@ -1031,7 +928,7 @@ impl WorkbenchService {
             principal: principal.to_owned(),
             idempotency_key: idempotency_key.to_owned(),
             context,
-            origin: RunOrigin::Interactive,
+            origin: RunOrigin::Manual,
             title: existing_session.as_ref().map_or_else(
                 || prompt.chars().take(80).collect(),
                 |session| session.title.clone(),
@@ -1046,24 +943,52 @@ impl WorkbenchService {
             workload_override,
             behavior_mode: request.behavior_mode,
             execution_target,
-            approval_policy: request.approval_policy,
-            permission_profile: if request.behavior_mode == hachimi_protocol::BehaviorMode::Plan {
-                PermissionProfile::ReadOnly
-            } else if project.is_none() {
-                PermissionProfile::ExternalSandbox
-            } else {
-                PermissionProfile::WorkspaceWrite
-            },
+            approval_policy: hachimi_protocol::ApprovalPolicy::OnlyWhenNeeded,
+            permission_profile: request.permission_profile,
             budget: RunBudget::default(),
             requested_capabilities,
             created_at_ms: now,
         };
-        let factory = AgentRunFactory::new(self.store.clone());
-        let created = if let Some(session) = existing_session {
-            factory.create_in_session(create_request, session).await?
+        let selected_level = create_request.permission_profile;
+        let mut policy = if let Some(session) = existing_session.as_ref() {
+            self.store
+                .permission_policy(&format!("session:{}", session.id))
+                .await?
+                .unwrap_or_default()
         } else {
-            factory.create(create_request).await?
+            AgentPermissionPolicy {
+                level: selected_level,
+                rules: ScopedPermissionRules::default(),
+                revision: 0,
+            }
         };
+        if policy.level != selected_level {
+            policy.level = selected_level;
+            policy.rules = ScopedPermissionRules::default();
+            policy.revision = policy.revision.saturating_add(1);
+        }
+        let launcher = AgentRunLauncher::new(self.store.clone());
+        let launched = if let Some(session) = existing_session {
+            launcher
+                .launch_in_session(
+                    AgentRunLaunchRequest {
+                        create: create_request,
+                        policy,
+                        authority_mode: AuthorityMode::Interactive,
+                    },
+                    session,
+                )
+                .await?
+        } else {
+            launcher
+                .launch_new(AgentRunLaunchRequest {
+                    create: create_request,
+                    policy,
+                    authority_mode: AuthorityMode::Interactive,
+                })
+                .await?
+        };
+        let created = launched.created;
         if let Some(checkout) = checkout.as_ref() {
             self.store
                 .ensure_session_environment_state(
@@ -1317,8 +1242,8 @@ mod tests {
     use std::process::Command as StdCommand;
 
     use hachimi_protocol::{
-        ApprovalPolicy, BehaviorMode, EntryProfile, PlanAcceptanceRequest, PlanId, ProposedPlan,
-        ProposedPlanStatus, WorkbenchTaskStartRequest,
+        BehaviorMode, EntryProfile, PermissionProfile, PlanAcceptanceRequest, PlanId, ProposedPlan,
+        ProposedPlanStatus, RunRecord, RunStatus, WorkbenchTaskStartRequest,
     };
 
     use super::*;
@@ -1389,7 +1314,7 @@ mod tests {
                     prompt: "Inspect the project".into(),
                     execution_target: Some(target),
                     behavior_mode: BehaviorMode::Plan,
-                    approval_policy: ApprovalPolicy::NeverPrompt,
+                    permission_profile: PermissionProfile::ReadOnly,
                     attachment_ids: vec![attachment.id.clone()],
                     skill_ids: Vec::new(),
                 },
@@ -1537,7 +1462,7 @@ mod tests {
                         project_id: project.id,
                     }),
                     behavior_mode: BehaviorMode::Default,
-                    approval_policy: ApprovalPolicy::OnlyWhenNeeded,
+                    permission_profile: PermissionProfile::Writable,
                     attachment_ids: Vec::new(),
                     skill_ids: Vec::new(),
                 },
@@ -1635,7 +1560,7 @@ mod tests {
                         project_id: project.id,
                     }),
                     behavior_mode: BehaviorMode::Default,
-                    approval_policy: ApprovalPolicy::OnlyWhenNeeded,
+                    permission_profile: PermissionProfile::Writable,
                     attachment_ids: Vec::new(),
                     skill_ids: Vec::new(),
                 },
@@ -1815,7 +1740,7 @@ mod tests {
                     prompt: "Start a general conversation".into(),
                     execution_target: None,
                     behavior_mode: BehaviorMode::Default,
-                    approval_policy: ApprovalPolicy::OnlyWhenNeeded,
+                    permission_profile: PermissionProfile::Writable,
                     attachment_ids: Vec::new(),
                     skill_ids: Vec::new(),
                 },
@@ -1828,7 +1753,10 @@ mod tests {
             .expect("general task");
         assert!(first.project.is_none());
         assert!(first.checkout.is_none());
-        assert_eq!(first.session.context, SessionContextBinding::General);
+        assert!(matches!(
+            first.session.context,
+            SessionContextBinding::Workspace { .. }
+        ));
 
         let continuation = WorkbenchTaskStartRequest {
             idempotency_key: "general-2".into(),
@@ -1838,7 +1766,7 @@ mod tests {
             prompt: "Continue in the same session".into(),
             execution_target: None,
             behavior_mode: BehaviorMode::Default,
-            approval_policy: ApprovalPolicy::OnlyWhenNeeded,
+            permission_profile: PermissionProfile::Writable,
             attachment_ids: Vec::new(),
             skill_ids: Vec::new(),
         };

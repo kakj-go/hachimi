@@ -8,7 +8,7 @@ use hachimi_protocol::{
     ChannelIdentityTransferMember, ChannelIdentityTransferPreview, ChannelIdentityTransferResult,
     ChannelMentionKind, ChannelMentionPolicy, ChannelMessagePart, ChannelPairingCode,
     ChannelPairingCodeRequest, ChannelTopicPolicy, EntryProfile, SessionContextBinding, SessionId,
-    SessionRecord, VerifiedChannelMessage,
+    SessionRecord, VerifiedChannelMessage, WorkspaceId,
 };
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -193,9 +193,10 @@ impl GatewayHost {
 
     pub async fn upsert_access_policy(
         &self,
-        input: ChannelAccessPolicyUpsert,
+        mut input: ChannelAccessPolicyUpsert,
         timestamp_ms: i64,
     ) -> Result<ChannelAccessPolicy, GatewayError> {
+        normalize_full_access_grant(&mut input.grant_ceiling);
         validate_policy_input(&input)?;
         let result = sqlx::query("UPDATE channel_access_policies SET dm_policy = ?, allowlist_actor_ids_json = ?, grant_ceiling_json = ?, revision = revision + 1, updated_at_ms = ? WHERE account_id = ? AND revision = ?")
             .bind(dm_policy_str(input.dm_policy))
@@ -261,10 +262,11 @@ impl GatewayHost {
 
     pub async fn upsert_authorization(
         &self,
-        input: ChannelAuthorizationUpsert,
+        mut input: ChannelAuthorizationUpsert,
         source: &str,
         timestamp_ms: i64,
     ) -> Result<ChannelAuthorization, GatewayError> {
+        normalize_full_access_grant(&mut input.grant);
         validate_authorization_input(&input)?;
         let ceiling = self.grant_ceiling(&input.account_id).await?;
         if !grant_is_subset(&input.grant, &ceiling) {
@@ -567,9 +569,20 @@ impl GatewayHost {
         {
             return Err(GatewayError::InvalidMessage);
         }
+        let session_id = SessionId::random();
+        let workspace = self
+            .store
+            .ensure_managed_workspace(
+                WorkspaceId::random(),
+                hachimi_storage::WorkspaceOwnerRef::Session(&session_id),
+                timestamp_ms,
+            )
+            .await?;
         let session = SessionRecord {
-            id: SessionId::random(),
-            context: SessionContextBinding::General,
+            id: session_id,
+            context: SessionContextBinding::Workspace {
+                workspace_id: workspace.id,
+            },
             entry_profile: EntryProfile::Workbench,
             title: "跨平台共享会话".into(),
             archived: false,
@@ -1101,6 +1114,17 @@ fn validate_grant(grant: &ChannelGrant) -> Result<(), GatewayError> {
     Ok(())
 }
 
+fn normalize_full_access_grant(grant: &mut ChannelGrant) {
+    if grant.permission_policy.level != hachimi_protocol::PermissionProfile::FullAccess {
+        return;
+    }
+    grant.permission_policy.rules = Default::default();
+    grant.mcp_server_ids.clear();
+    grant.connector_selections.clear();
+    grant.read_only_workspace_roots.clear();
+    grant.network_hosts.clear();
+}
+
 fn valid_values(values: &[String], max_items: usize, max_chars: usize) -> bool {
     if values.len() > max_items {
         return false;
@@ -1116,7 +1140,8 @@ fn valid_values(values: &[String], max_items: usize, max_chars: usize) -> bool {
 }
 
 fn grant_is_subset(grant: &ChannelGrant, ceiling: &ChannelGrant) -> bool {
-    is_subset(&grant.skill_ids, &ceiling.skill_ids)
+    permission_policy_is_subset(&grant.permission_policy, &ceiling.permission_policy)
+        && is_subset(&grant.skill_ids, &ceiling.skill_ids)
         && is_subset(&grant.mcp_server_ids, &ceiling.mcp_server_ids)
         && grant.connector_selections.iter().all(|selection| {
             ceiling.connector_selections.iter().any(|allowed| {
@@ -1132,7 +1157,55 @@ fn grant_is_subset(grant: &ChannelGrant, ceiling: &ChannelGrant) -> bool {
         && is_subset(&grant.network_hosts, &ceiling.network_hosts)
 }
 
-fn valid_connector_selections(selections: &[hachimi_protocol::ScheduleConnectorSelection]) -> bool {
+fn permission_policy_is_subset(
+    grant: &hachimi_protocol::AgentPermissionPolicy,
+    ceiling: &hachimi_protocol::AgentPermissionPolicy,
+) -> bool {
+    use hachimi_protocol::PermissionProfile;
+
+    let rank = |level| match level {
+        PermissionProfile::ReadOnly => 0,
+        PermissionProfile::Writable => 1,
+        PermissionProfile::FullAccess => 2,
+    };
+    if rank(grant.level) > rank(ceiling.level) {
+        return false;
+    }
+    if ceiling.level == PermissionProfile::FullAccess {
+        return true;
+    }
+    let grant = &grant.rules;
+    let ceiling = &ceiling.rules;
+    grant
+        .file_system
+        .iter()
+        .all(|rule| ceiling.file_system.contains(rule))
+        && (!grant.network.enabled || ceiling.network.enabled)
+        && is_subset(&grant.network.hosts, &ceiling.network.hosts)
+        && is_subset(&grant.network.protocols, &ceiling.network.protocols)
+        && (!grant.process.spawn || ceiling.process.spawn)
+        && (!grant.process.interactive || ceiling.process.interactive)
+        && is_subset(
+            &grant.process.allowed_commands,
+            &ceiling.process.allowed_commands,
+        )
+        && (!grant.browser.observe || ceiling.browser.observe)
+        && (!grant.browser.act || ceiling.browser.act)
+        && (!grant.browser.upload || ceiling.browser.upload)
+        && (!grant.browser.download || ceiling.browser.download)
+        && (!grant.browser.cookie_storage || ceiling.browser.cookie_storage)
+        && (!grant.browser.cdp || ceiling.browser.cdp)
+        && is_subset(&grant.browser.origins, &ceiling.browser.origins)
+        && (!grant.computer.observe || ceiling.computer.observe)
+        && (!grant.computer.act || ceiling.computer.act)
+        && grant.mcp.iter().all(|rule| ceiling.mcp.contains(rule))
+        && grant
+            .connectors
+            .iter()
+            .all(|rule| ceiling.connectors.contains(rule))
+}
+
+fn valid_connector_selections(selections: &[hachimi_protocol::ConnectorRevisionSelection]) -> bool {
     selections.len() <= 64
         && selections.iter().all(|selection| {
             !selection.account_id.as_str().trim().is_empty()
@@ -1452,6 +1525,22 @@ mod tests {
         }
     }
 
+    #[test]
+    fn full_access_channel_grants_drop_legacy_scope_fields() {
+        let mut grant = ChannelGrant::default();
+        grant.permission_policy.level = hachimi_protocol::PermissionProfile::FullAccess;
+        grant.mcp_server_ids.push("server".into());
+        grant.read_only_workspace_roots.push("C:/legacy".into());
+        grant.network_hosts.push("example.com".into());
+        grant.permission_policy.rules.network.enabled = true;
+        normalize_full_access_grant(&mut grant);
+        assert!(grant.mcp_server_ids.is_empty());
+        assert!(grant.connector_selections.is_empty());
+        assert!(grant.read_only_workspace_roots.is_empty());
+        assert!(grant.network_hosts.is_empty());
+        assert!(!grant.permission_policy.rules.network.enabled);
+    }
+
     #[tokio::test]
     async fn group_binding_keys_respect_shared_sender_and_topic_scopes() {
         let store = hachimi_storage::AgentStore::connect_in_memory()
@@ -1525,7 +1614,9 @@ mod tests {
     fn identity_session(id: &str) -> SessionRecord {
         SessionRecord {
             id: SessionId::new(id),
-            context: SessionContextBinding::General,
+            context: SessionContextBinding::Workspace {
+                workspace_id: WorkspaceId::random(),
+            },
             entry_profile: EntryProfile::Workbench,
             title: id.into(),
             archived: false,

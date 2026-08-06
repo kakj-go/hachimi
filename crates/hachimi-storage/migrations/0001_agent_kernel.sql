@@ -2,7 +2,7 @@ PRAGMA foreign_keys = ON;
 
 CREATE TABLE sessions (
     id TEXT PRIMARY KEY NOT NULL,
-    context_kind TEXT NOT NULL CHECK (context_kind IN ('general', 'project', 'avatar')),
+    context_kind TEXT NOT NULL CHECK (context_kind IN ('workspace', 'project')),
     context_json TEXT NOT NULL,
     entry_profile TEXT NOT NULL CHECK (entry_profile IN ('workbench', 'pet_conversation')),
     title TEXT NOT NULL,

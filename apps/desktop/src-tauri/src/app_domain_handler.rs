@@ -17,10 +17,9 @@ use hachimi_control_plane::{
 use hachimi_core::FeatureFlags;
 use hachimi_protocol::{
     CheckoutId, CheckoutRecord, ClientContext, DiffScope, McpServerHealthState, McpServerTransport,
-    MutationContext, PermissionProfile, ReviewStartRequest, ReviewStartSnapshot, RunDiffSnapshot,
-    RunRecord, ScheduleAuthorizationScope, ScheduleContextTemplate, ScheduleDefinition,
-    ScheduleSkillSelection, SessionId, SkillDiagnosticSeverity, TaskInteractiveContinuation,
-    TaskRunId,
+    MutationContext, ReviewStartRequest, ReviewStartSnapshot, RunDiffSnapshot, RunRecord,
+    ScheduleContextTemplate, ScheduleDefinition, ScheduleSkillSelection, SessionId,
+    SkillDiagnosticSeverity, TaskInteractiveContinuation, TaskRunId,
 };
 use hachimi_storage::{AgentStore, AgentStoreError, IdempotentMutationClaim};
 use parking_lot::Mutex;
@@ -442,16 +441,15 @@ impl DesktopAppDomainHandler {
         .await
     }
 
-    async fn schedule_scope(
+    async fn pin_schedule_runtime_revisions(
         &self,
-        schedule: &ScheduleDefinition,
-    ) -> Result<ScheduleAuthorizationScope, AppServerDomainError> {
-        validate_schedule_host_grant(schedule)?;
-        crate::schedule_host_grants::validate_enterprise_attachment_scope(schedule)
+        schedule: &mut ScheduleDefinition,
+    ) -> Result<(), AppServerDomainError> {
+        crate::host_revision_snapshots::validate_enterprise_attachment_scope(schedule)
             .map_err(|error| AppServerDomainError::new(error.code, error.message))?;
-        crate::schedule_host_grants::validate_schedule_connector_selections(
+        crate::host_revision_snapshots::validate_connector_revision_selections(
             &self.plugins,
-            &schedule.host_grant.connectors,
+            &schedule.host_revision_snapshot.connectors,
         )
         .await
         .map_err(|error| AppServerDomainError::new(error.code, error.message))?;
@@ -460,54 +458,23 @@ impl DesktopAppDomainHandler {
             .await
             .map_err(domain_error("schedule_contribution_drift"))?;
         let skill_context = match &schedule.context_template {
-            ScheduleContextTemplate::General => hachimi_skills::SkillCatalogContext::default(),
-            ScheduleContextTemplate::Project { project_id, .. } => {
-                let project = self
-                    .store
-                    .get_project(project_id)
-                    .await
-                    .map_err(domain_error("schedule_project_lookup_failed"))?
-                    .ok_or_else(|| {
-                        AppServerDomainError::new(
-                            "schedule_project_unavailable",
-                            "Schedule Project no longer exists",
-                        )
-                    })?;
-                hachimi_skills::SkillCatalogContext {
-                    project_root: Some(PathBuf::from(project.root_path)),
-                    checkout_root: None,
-                }
-            }
-            ScheduleContextTemplate::SessionContinuation { session_id } => {
-                let session = self
-                    .store
-                    .get_session(session_id)
-                    .await
-                    .map_err(domain_error("schedule_session_lookup_failed"))?
-                    .ok_or_else(|| {
-                        AppServerDomainError::new(
-                            "schedule_session_unavailable",
-                            "Schedule continuation Session no longer exists",
-                        )
-                    })?;
-                if let Some(project_id) = session.context.project_id() {
-                    let project = self
+            ScheduleContextTemplate::Workspace { workspace, .. } => {
+                let project_root = match workspace {
+                    hachimi_protocol::ScheduleWorkspaceSpec::Managed => self
                         .store
-                        .get_project(project_id)
+                        .workspace_for_owner(hachimi_storage::WorkspaceOwnerRef::Schedule(
+                            &schedule.id,
+                        ))
                         .await
-                        .map_err(domain_error("schedule_project_lookup_failed"))?
-                        .ok_or_else(|| {
-                            AppServerDomainError::new(
-                                "schedule_project_unavailable",
-                                "Schedule continuation Project no longer exists",
-                            )
-                        })?;
-                    hachimi_skills::SkillCatalogContext {
-                        project_root: Some(PathBuf::from(project.root_path)),
-                        checkout_root: None,
+                        .map_err(domain_error("schedule_workspace_lookup_failed"))?
+                        .map(|workspace| PathBuf::from(workspace.root_path)),
+                    hachimi_protocol::ScheduleWorkspaceSpec::SelectedDirectory { root_path } => {
+                        Some(PathBuf::from(root_path))
                     }
-                } else {
-                    hachimi_skills::SkillCatalogContext::default()
+                };
+                hachimi_skills::SkillCatalogContext {
+                    project_root,
+                    checkout_root: None,
                 }
             }
         };
@@ -593,35 +560,39 @@ impl DesktopAppDomainHandler {
                         ),
                     ));
                 };
-                if !runtime
+                let requires_write = !runtime
                     .configuration
                     .read_only_tools
-                    .contains(&selection.tool_name)
-                {
-                    let target = format!(
-                        "mcp:{}:{}",
-                        selection.server_id.as_str(),
-                        selection.tool_name
-                    );
-                    if schedule.permission_config.permission_profile
-                        != PermissionProfile::ExternalSandbox
-                        || !schedule
-                            .permission_config
-                            .external_targets
-                            .contains(&target)
-                    {
-                        return Err(AppServerDomainError::new(
-                            "schedule_mcp_side_effect_not_authorized",
-                            "MCP side effects require an exact persisted target",
-                        ));
-                    }
+                    .contains(&selection.tool_name);
+                if !schedule.permission_policy.allows_mcp(
+                    &selection.server_id,
+                    &selection.tool_name,
+                    &selection.schema_hash,
+                    requires_write,
+                ) {
+                    return Err(AppServerDomainError::new(
+                        "schedule_mcp_tool_not_authorized",
+                        "MCP tools require an exact persisted rule",
+                    ));
                 }
             }
         }
-        let mut scope = base_schedule_scope(schedule);
-        scope.skill_revisions = skill_revisions;
-        normalize_scope(&mut scope);
-        Ok(scope)
+        for selection in &schedule.host_revision_snapshot.connectors {
+            for action in &selection.allowed_actions {
+                if !schedule
+                    .permission_policy
+                    .allows_connector(&selection.account_id, action, true)
+                {
+                    return Err(AppServerDomainError::new(
+                        "schedule_connector_action_not_authorized",
+                        "Connector actions require an exact persisted writable rule",
+                    ));
+                }
+            }
+        }
+        schedule.skill_revisions = skill_revisions;
+        hachimi_scheduler::normalize_schedule_definition(schedule);
+        Ok(())
     }
 
     async fn dispatch_schedule(
@@ -634,11 +605,8 @@ impl DesktopAppDomainHandler {
             ScheduleAppRequest::Create(request) => {
                 let mut definition = request.definition;
                 hachimi_scheduler::normalize_schedule_definition(&mut definition);
-                let fingerprint = mutation_fingerprint(
-                    definition.id.as_str(),
-                    &(&definition, request.authorize),
-                )?;
-                let authorize = request.authorize;
+                self.pin_schedule_runtime_revisions(&mut definition).await?;
+                let fingerprint = mutation_fingerprint(definition.id.as_str(), &definition)?;
                 ScheduleAppResponse::Created(
                     self.idempotent(
                         context,
@@ -646,17 +614,11 @@ impl DesktopAppDomainHandler {
                         "schedule.create.command",
                         &fingerprint,
                         || async {
-                            let scope = if authorize {
-                                Some(self.schedule_scope(&definition).await?)
-                            } else {
-                                None
-                            };
                             self.scheduler
-                                .create_with_grant_scope(
+                                .create(
                                     &context.principal,
                                     &request.context.idempotency_key,
                                     definition,
-                                    scope,
                                 )
                                 .await
                                 .map_err(domain_error("scheduler_failed"))
@@ -683,6 +645,7 @@ impl DesktopAppDomainHandler {
             ScheduleAppRequest::Update(request) => {
                 let mut definition = request.definition;
                 hachimi_scheduler::normalize_schedule_definition(&mut definition);
+                self.pin_schedule_runtime_revisions(&mut definition).await?;
                 let fingerprint = mutation_fingerprint(
                     definition.id.as_str(),
                     &(&definition, request.expected_config_revision),
@@ -742,64 +705,6 @@ impl DesktopAppDomainHandler {
                             .await
                             .map_err(domain_error("scheduler_failed"))
                     })
-                    .await?,
-                )
-            }
-            ScheduleAppRequest::Reauthorize {
-                context: mutation,
-                schedule_id,
-            } => {
-                let resource = schedule_id.as_str().to_owned();
-                ScheduleAppResponse::Grant(Some(
-                    self.idempotent(
-                        context,
-                        &mutation,
-                        "schedule.reauthorize",
-                        &resource,
-                        || async {
-                            let schedule = self
-                                .store
-                                .get_schedule(&schedule_id)
-                                .await
-                                .map_err(domain_error("scheduler_store_failed"))?
-                                .ok_or_else(|| {
-                                    AppServerDomainError::new(
-                                        "schedule_not_found",
-                                        "Schedule does not exist",
-                                    )
-                                })?;
-                            let scope = self.schedule_scope(&schedule).await?;
-                            self.scheduler
-                                .reauthorize_with_grant_scope(
-                                    &schedule_id,
-                                    &context.principal,
-                                    scope,
-                                )
-                                .await
-                                .map_err(domain_error("scheduler_failed"))
-                        },
-                    )
-                    .await?,
-                ))
-            }
-            ScheduleAppRequest::RevokeGrant {
-                context: mutation,
-                schedule_id,
-            } => {
-                let resource = schedule_id.as_str().to_owned();
-                ScheduleAppResponse::Grant(
-                    self.idempotent(
-                        context,
-                        &mutation,
-                        "schedule.revoke_grant",
-                        &resource,
-                        || async {
-                            self.scheduler
-                                .revoke_grant(&schedule_id)
-                                .await
-                                .map_err(domain_error("scheduler_failed"))
-                        },
-                    )
                     .await?,
                 )
             }
@@ -1643,119 +1548,6 @@ fn mutation_fingerprint<T: Serialize>(
         .map(|byte| format!("{byte:02x}"))
         .collect::<String>();
     Ok(format!("{resource_id}:{hash}"))
-}
-
-fn base_schedule_scope(schedule: &ScheduleDefinition) -> ScheduleAuthorizationScope {
-    ScheduleAuthorizationScope {
-        entry_profile: schedule.entry_profile,
-        workload_override: schedule.workload_override,
-        context_template: schedule.context_template.clone(),
-        tool_allowlist: schedule.tool_allowlist.clone(),
-        skill_allowlist: schedule.skill_allowlist.clone(),
-        skill_revisions: Vec::new(),
-        mcp_tool_allowlist: schedule.mcp_tool_allowlist.clone(),
-        permission_config: schedule.permission_config.clone(),
-        contribution_revisions: schedule.contribution_revisions.clone(),
-        host_grant: schedule.host_grant.clone(),
-    }
-}
-
-fn validate_schedule_host_grant(schedule: &ScheduleDefinition) -> Result<(), AppServerDomainError> {
-    if schedule.host_grant.computer_unattended {
-        return Err(AppServerDomainError::new(
-            "computer_unattended_unsupported",
-            "Computer Host cannot be authorized for unattended schedules",
-        ));
-    }
-    let Some(browser) = schedule.host_grant.browser.as_ref() else {
-        return Ok(());
-    };
-    if !browser.enabled {
-        return Ok(());
-    }
-    if browser.document_origins.is_empty() || browser.capabilities.is_empty() {
-        return Err(AppServerDomainError::new(
-            "schedule_browser_grant_invalid",
-            "an unattended Browser grant requires a document origin and capability",
-        ));
-    }
-    for origin in browser
-        .document_origins
-        .iter()
-        .chain(browser.resource_origins.iter())
-    {
-        let normalized = hachimi_browser::normalized_origin(origin).map_err(|_| {
-            AppServerDomainError::new(
-                "schedule_browser_origin_invalid",
-                format!("Browser origin {origin} is not a valid HTTP(S) origin"),
-            )
-        })?;
-        if normalized != *origin {
-            return Err(AppServerDomainError::new(
-                "schedule_browser_origin_not_canonical",
-                format!("Browser origin must be stored as {normalized}"),
-            ));
-        }
-    }
-    Ok(())
-}
-
-fn normalize_scope(scope: &mut ScheduleAuthorizationScope) {
-    scope.tool_allowlist.sort();
-    scope.tool_allowlist.dedup();
-    scope.skill_allowlist.sort();
-    scope.skill_allowlist.dedup();
-    scope
-        .skill_revisions
-        .sort_by(|left, right| left.skill_id.cmp(&right.skill_id));
-    scope
-        .skill_revisions
-        .dedup_by(|left, right| left.skill_id == right.skill_id);
-    scope.mcp_tool_allowlist.sort_by(|left, right| {
-        (
-            &left.server_id,
-            &left.tool_name,
-            &left.schema_hash,
-            &left.host_identity_hash,
-        )
-            .cmp(&(
-                &right.server_id,
-                &right.tool_name,
-                &right.schema_hash,
-                &right.host_identity_hash,
-            ))
-    });
-    scope.mcp_tool_allowlist.dedup();
-    scope.contribution_revisions.sort_by(|left, right| {
-        (&left.plugin_id, &left.contribution_id, &left.account_id).cmp(&(
-            &right.plugin_id,
-            &right.contribution_id,
-            &right.account_id,
-        ))
-    });
-    scope.contribution_revisions.dedup_by(|left, right| {
-        left.plugin_id == right.plugin_id
-            && left.contribution_id == right.contribution_id
-            && left.account_id == right.account_id
-    });
-    scope
-        .host_grant
-        .connectors
-        .sort_by(|left, right| left.account_id.cmp(&right.account_id));
-    for connector in &mut scope.host_grant.connectors {
-        connector.allowed_actions.sort();
-        connector.allowed_actions.dedup();
-    }
-    if let Some(browser) = &mut scope.host_grant.browser {
-        browser.document_origins.sort();
-        browser.document_origins.dedup();
-        browser.resource_origins.sort();
-        browser.resource_origins.dedup();
-        browser.capabilities.sort();
-        browser.capabilities.dedup();
-    }
-    scope.permission_config.external_targets.sort();
-    scope.permission_config.external_targets.dedup();
 }
 
 fn mcp_dependency_available(

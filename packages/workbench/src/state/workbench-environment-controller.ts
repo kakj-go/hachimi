@@ -39,7 +39,7 @@ export function createWorkbenchEnvironmentController(options: {
   const latestRun = createMemo(() => options.snapshot().runs.at(-1));
   const watchBinding = createMemo(() => {
     const current = environment();
-    return current ? `${current.sessionId}:${current.checkout.id}` : undefined;
+    return current?.checkout ? `${current.sessionId}:${current.checkout.id}` : undefined;
   });
 
   function applySnapshot(next: WorkbenchEnvironmentSnapshot) {
@@ -88,7 +88,7 @@ export function createWorkbenchEnvironmentController(options: {
   ): Promise<WorkbenchGitResponse> {
     const current = environment();
     const run = latestRun();
-    if (!current || !run) throw new Error("workbench_git_context_missing");
+    if (!current?.checkout || !run) throw new Error("workbench_git_context_missing");
     const context = runMutationContext(run);
     const response = await options.commandPort.executeWorkbenchGit({
       context,
@@ -111,7 +111,7 @@ export function createWorkbenchEnvironmentController(options: {
   }): Promise<GitPushResponse> {
     const current = environment();
     const run = latestRun();
-    if (!current || !run) throw new Error("workbench_push_context_missing");
+    if (!current?.checkout || !run) throw new Error("workbench_push_context_missing");
     const head = input?.head ?? current.git.headSha;
     const branch = input?.branch ?? current.git.branch;
     const remote =
@@ -138,7 +138,7 @@ export function createWorkbenchEnvironmentController(options: {
 
   async function handoff(targetKind: CheckoutKind): Promise<WorkbenchHandoffResponse> {
     const current = environment();
-    if (!current) throw new Error("workbench_handoff_context_missing");
+    if (!current?.checkout) throw new Error("workbench_handoff_context_missing");
     const response = await options.commandPort.handoffWorkbenchSession({
       idempotencyKey: crypto.randomUUID(),
       sessionId: current.sessionId,
@@ -184,7 +184,7 @@ export function createWorkbenchEnvironmentController(options: {
     const binding = watchBinding();
     if (!binding) return;
     const current = untrack(environment);
-    if (!current) return;
+    if (!current?.checkout) return;
     let disposed = false;
     let watchId: string | undefined;
     let stopWorkspace: (() => void) | undefined;

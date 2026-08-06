@@ -31,11 +31,10 @@ use hachimi_protocol::{
     ProcessWriteRequest, ProjectId, ReviewFinding, ReviewFindingUpdateRequest, ReviewId,
     ReviewSnapshot, ReviewStartRequest, ReviewStartSnapshot, RunDiffSnapshot,
     ScheduleCreateRequest, ScheduleDefinition, ScheduleEventIngressRequest, ScheduleEventReceipt,
-    ScheduleGrantRecord, ScheduleId, SchedulePreview, ScheduleSnapshot, ScheduleSpec,
-    ScheduleUpdateRequest, SessionId, SkillEntryCreateRequest, SkillEntryRenameRequest,
-    SkillFileSnapshot, SkillFileWriteRequest, SkillId, SkillPreviewResource,
-    SkillPreviewResourceRequest, SkillRecord, SkillTreeNode, TaskInteractiveContinuation,
-    TaskRunId, TaskRunRecord, VerifiedChannelMessage,
+    ScheduleId, SchedulePreview, ScheduleSnapshot, ScheduleSpec, ScheduleUpdateRequest, SessionId,
+    SkillEntryCreateRequest, SkillEntryRenameRequest, SkillFileSnapshot, SkillFileWriteRequest,
+    SkillId, SkillPreviewResource, SkillPreviewResourceRequest, SkillRecord, SkillTreeNode,
+    TaskInteractiveContinuation, TaskRunId, TaskRunRecord, VerifiedChannelMessage,
 };
 
 use crate::AppServerContext;
@@ -459,14 +458,6 @@ pub enum ScheduleAppRequest {
         context: MutationContext,
         schedule_id: ScheduleId,
     },
-    Reauthorize {
-        context: MutationContext,
-        schedule_id: ScheduleId,
-    },
-    RevokeGrant {
-        context: MutationContext,
-        schedule_id: ScheduleId,
-    },
     RunNow {
         context: MutationContext,
         schedule_id: ScheduleId,
@@ -485,7 +476,6 @@ pub enum ScheduleAppResponse {
     Preview(SchedulePreview),
     Schedule(ScheduleDefinition),
     Removed(bool),
-    Grant(Option<ScheduleGrantRecord>),
     Task(TaskRunRecord),
     EventReceipt(ScheduleEventReceipt),
     EventReceipts(Vec<ScheduleEventReceipt>),

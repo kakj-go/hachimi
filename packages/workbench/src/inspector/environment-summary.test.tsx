@@ -70,6 +70,7 @@ function environment(
       createdAtMs: 1,
       updatedAtMs: 1,
     },
+    workspace: null,
     bindingRevision: 1,
     baselineRevision: "a".repeat(40),
     changes: { changedFiles: 3, additions: 7, deletions: 2, truncated: false },

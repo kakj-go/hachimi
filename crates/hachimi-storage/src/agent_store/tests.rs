@@ -1,25 +1,33 @@
 use hachimi_protocol::{
-    ApprovalGrantScope, ApprovalPolicy, BehaviorMode, CapabilityGrantSet, CheckoutId, CheckoutKind,
-    CheckoutStatus, ClientId, ComputerGrant, DeliveryPolicy, DeliveryStatus, DiffScope,
-    EntryProfile, ExecutionTarget, FileDiffStatus, FileDiffSummary, FileSystemAccess,
-    FileSystemGrant, ItemId, LlmSettings, MisfirePolicy, MutationContext, NetworkGrant,
-    PermissionGrantScope, PermissionProfile, ProcessGrant, ProcessSessionId, ProcessSessionRecord,
-    ProcessStatus, ProjectId, ProviderCapabilities, RequestId, ReviewDelivery, ReviewFinding,
-    ReviewFindingId, ReviewFindingStatus, ReviewId, ReviewOutput, ReviewRecord, ReviewSeverity,
-    ReviewTarget, RunBudget, RunConfiguration, RunDiffSnapshot, RunDriverKind, RunOrigin,
-    RunPurpose, RunRecoveryDecisionAction, RunRecoveryDecisionRequest, RunRecoveryState,
-    RunStepCheckpoint, RunStepCheckpointId, RunStepPhase, SandboxCapabilityReport,
-    SandboxReadiness, ScheduleContextTemplate, ScheduleDefinition, ScheduleHealth, ScheduleId,
-    SchedulePermissionConfig, ScheduleSpec, SessionContextBinding, SideEffectExecutionId,
-    SideEffectExecutionRecord, SideEffectExecutionStatus, SkillId, SkillRecord, TaskRunId,
-    TaskRunRecord, TaskRunStatus, TaskRunTrigger, ToolRecoveryPolicy, UserInputQuestion,
-    UserInputRequestId, UserInputRequestRecord, UserInputStatus, WorkloadKind,
+    AgentPermissionPolicy, AgentWorkspaceKind, AgentWorkspaceStatus, ApprovalGrantScope,
+    ApprovalPolicy, BehaviorMode, CapabilityGrantSet, CheckoutId, CheckoutKind, CheckoutStatus,
+    ClientId, ComputerGrant, DeliveryPolicy, DeliveryStatus, DiffScope, EntryProfile,
+    ExecutionTarget, FileDiffStatus, FileDiffSummary, FileSystemAccess, FileSystemGrant, ItemId,
+    LlmSettings, MisfirePolicy, MutationContext, NetworkGrant, PermissionGrantScope,
+    PermissionProfile, ProcessGrant, ProcessSessionId, ProcessSessionRecord, ProcessStatus,
+    ProjectId, ProviderCapabilities, RequestId, ReviewDelivery, ReviewFinding, ReviewFindingId,
+    ReviewFindingStatus, ReviewId, ReviewOutput, ReviewRecord, ReviewSeverity, ReviewTarget,
+    RunBudget, RunConfiguration, RunDiffSnapshot, RunDriverKind, RunOrigin, RunPurpose,
+    RunRecoveryDecisionAction, RunRecoveryDecisionRequest, RunRecoveryState, RunStepCheckpoint,
+    RunStepCheckpointId, RunStepPhase, SandboxCapabilityReport, SandboxReadiness,
+    ScheduleContextTemplate, ScheduleDefinition, ScheduleHealth, ScheduleId, ScheduleSpec,
+    SessionContextBinding, SideEffectExecutionId, SideEffectExecutionRecord,
+    SideEffectExecutionStatus, SkillId, SkillRecord, TaskRunId, TaskRunRecord, TaskRunStatus,
+    TaskRunTrigger, ToolRecoveryPolicy, UserInputQuestion, UserInputRequestId,
+    UserInputRequestRecord, UserInputStatus, WorkloadKind,
 };
 
 use super::*;
 
+#[path = "workspace_authority_tests.rs"]
+mod workspace_authority_tests;
+
 pub(super) async fn seeded_store() -> (AgentStore, SessionRecord) {
     seed_store(AgentStore::connect_in_memory().await.expect("store")).await
+}
+
+pub(super) async fn seeded_store_at(path: &std::path::Path) -> (AgentStore, SessionRecord) {
+    seed_store(AgentStore::connect(path).await.expect("store")).await
 }
 
 async fn seed_store(store: AgentStore) -> (AgentStore, SessionRecord) {
@@ -64,109 +72,6 @@ async fn seed_store(store: AgentStore) -> (AgentStore, SessionRecord) {
     };
     store.create_session(&session).await.expect("session");
     (store, session)
-}
-
-#[tokio::test]
-async fn fresh_database_applies_all_registered_kernel_migrations() {
-    let store = AgentStore::connect_in_memory().await.expect("fresh store");
-    let migration_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM _sqlx_migrations")
-        .fetch_one(store.pool())
-        .await
-        .expect("migration count");
-    assert_eq!(migration_count, 39);
-
-    let hardened_outbox_columns: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM pragma_table_info('channel_outbox') WHERE name IN ('authorization_revision', 'account_config_revision', 'run_id', 'final_item_id', 'part_index', 'dispatched_at_ms')",
-    )
-    .fetch_one(store.pool())
-    .await
-    .expect("hardened outbox columns");
-    assert_eq!(hardened_outbox_columns, 6);
-
-    let provider_diagnostic_columns: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM pragma_table_info('channel_provider_runtime_health') WHERE name IN ('last_handshake_at_ms', 'last_frame_at_ms', 'last_error_code')",
-    )
-    .fetch_one(store.pool())
-    .await
-    .expect("provider diagnostic columns");
-    assert_eq!(provider_diagnostic_columns, 3);
-
-    let payload_columns: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM pragma_table_info('transcript_items') WHERE name = 'payload_json'",
-    )
-    .fetch_one(store.pool())
-    .await
-    .expect("typed payload column");
-    let legacy_columns: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM pragma_table_info('transcript_items') WHERE name IN ('content_json', 'item_type_v2', 'payload_version', 'typed_payload')",
-    )
-    .fetch_one(store.pool())
-    .await
-    .expect("legacy columns");
-    assert_eq!(payload_columns, 1);
-    assert_eq!(legacy_columns, 0);
-
-    let enterprise_secret_columns: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM pragma_table_info('integration_provider_accounts') WHERE lower(name) LIKE '%secret%' OR lower(name) LIKE '%credential_json%' OR lower(name) LIKE '%credential_body%'",
-    )
-    .fetch_one(store.pool())
-    .await
-    .expect("enterprise credential columns");
-    assert_eq!(enterprise_secret_columns, 0);
-
-    sqlx::query("INSERT INTO plugin_installations(plugin_id, manifest_json, content_hash, root_path, status, diagnostics_json, installed_at_ms, updated_at_ms) VALUES('wecom_app', '{}', 'hash', 'fixture', 'enabled', '[]', 1, 1)")
-        .execute(store.pool())
-        .await
-        .expect("plugin installation");
-    sqlx::query("INSERT INTO plugin_runtime_bindings(plugin_id, contribution_id, resource_kind, resource_id, runtime_revision, metadata_json, enabled, updated_at_ms) VALUES('wecom_app', 'messages', 'builtin_channel', 'wecom_app', 'revision', '{}', 1, 1)")
-        .execute(store.pool())
-        .await
-        .expect("built-in channel binding");
-}
-
-#[tokio::test]
-async fn task_requester_binding_is_idempotent_for_session_continuations() {
-    let (store, session) = seeded_store().await;
-    let now = now_ms();
-    let task = TaskRunRecord {
-        id: TaskRunId::from("task-requester-idempotent"),
-        schedule_id: None,
-        schedule_revision: None,
-        trigger: TaskRunTrigger::Manual,
-        scheduled_for_ms: Some(now),
-        event_context: None,
-        invocation_key: "requester-idempotent".into(),
-        requester_session_id: Some(session.id.clone()),
-        execution_session_id: None,
-        run_id: None,
-        permission_snapshot_hash: None,
-        status: TaskRunStatus::NeedsAttention,
-        progress_percent: None,
-        result_summary: None,
-        error_code: Some("connector_revision_drift".into()),
-        error_summary: Some("Connector revision drifted".into()),
-        artifact_ids: Vec::new(),
-        delivery_status: DeliveryStatus::NotRequested,
-        delivery_error_code: None,
-        created_at_ms: now,
-        started_at_ms: None,
-        finished_at_ms: Some(now),
-        updated_at_ms: now,
-    };
-    store.create_task_run(&task).await.expect("create task");
-
-    let rebound = store
-        .bind_task_run_requester(&task.id, &session.id, now + 1)
-        .await
-        .expect("same requester is idempotent");
-    assert_eq!(rebound.requester_session_id, Some(session.id));
-    assert_eq!(rebound.updated_at_ms, now + 1);
-
-    let error = store
-        .bind_task_run_requester(&task.id, &SessionId::from("different-session"), now + 2)
-        .await
-        .expect_err("a different requester must remain fail closed");
-    assert!(matches!(error, AgentStoreError::InvalidTaskRunTransition));
 }
 
 #[tokio::test]
@@ -347,7 +252,7 @@ pub(super) fn run(session: &SessionRecord, id: &str) -> RunRecord {
         session_id: session.id.clone(),
         status: RunStatus::Queued,
         purpose: RunPurpose::Task,
-        origin: RunOrigin::Interactive,
+        origin: RunOrigin::Manual,
         generation: 1,
         configuration: RunConfiguration {
             model_snapshot: LlmSettings::default(),
@@ -359,7 +264,7 @@ pub(super) fn run(session: &SessionRecord, id: &str) -> RunRecord {
                 project_id: session.context.project_id().expect("project").clone(),
             }),
             approval_policy: ApprovalPolicy::OnlyWhenNeeded,
-            permission_profile: PermissionProfile::WorkspaceWrite,
+            permission_profile: PermissionProfile::Writable,
             budget: RunBudget::default(),
             accepted_plan_id: None,
             accepted_plan_revision: None,
@@ -378,7 +283,7 @@ pub(super) fn run(session: &SessionRecord, id: &str) -> RunRecord {
     }
 }
 
-fn side_effect(
+pub(super) fn side_effect(
     session: &SessionRecord,
     run: &RunRecord,
     id: &str,
@@ -404,7 +309,11 @@ fn side_effect(
     }
 }
 
-async fn create_running_run(store: &AgentStore, session: &SessionRecord, id: &str) -> RunRecord {
+pub(super) async fn create_running_run(
+    store: &AgentStore,
+    session: &SessionRecord,
+    id: &str,
+) -> RunRecord {
     let run = run(session, id);
     store
         .create_run_idempotent("user", id, &run)
@@ -616,6 +525,89 @@ async fn concurrent_pet_and_workbench_approval_resolution_has_one_winner() {
         .filter(|event| event.event_name() == "approval.resolved")
         .count();
     assert_eq!(event_count, 1);
+}
+
+#[tokio::test]
+async fn approved_session_tool_authority_is_reusable_and_clearable() {
+    let (store, session) = seeded_store().await;
+    let run = create_running_run(&store, &session, "run-session-authority").await;
+    store
+        .transition_run(&run.id, RunStatus::WaitingApproval, None)
+        .await
+        .expect("waiting approval");
+    let timestamp = now_ms();
+    let approval = ApprovalRequestRecord {
+        id: ApprovalId::from("session-authority"),
+        session_id: session.id.clone(),
+        run_id: run.id.clone(),
+        tool_call_id: ToolCallId::from("session-authority-call"),
+        run_generation: run.generation,
+        status: ApprovalStatus::Pending,
+        action: "mcp_server_read_schema".into(),
+        resource: "mcp:server:tool:read:schema:abc".into(),
+        parameter_hash: "sha256:session-authority".into(),
+        risk_summary: "read MCP data".into(),
+        target_host: "mcp:server".into(),
+        required_scopes: vec!["connectors.invoke".into()],
+        grant_scope: ApprovalGrantScope::Session,
+        uses_remaining: u32::MAX,
+        requester_principal: "user".into(),
+        resolved_by: None,
+        expires_at_ms: None,
+        created_at_ms: timestamp,
+        resolved_at_ms: None,
+    };
+    store.create_approval(&approval).await.expect("approval");
+    store
+        .resolve_approval(&ApprovalResolution {
+            approval_id: approval.id.clone(),
+            decision: ApprovalStatus::Approved,
+            parameter_hash: approval.parameter_hash.clone(),
+            run_generation: run.generation,
+            resolved_by: "window:workbench".into(),
+            resolved_at_ms: timestamp + 1,
+        })
+        .await
+        .expect("resolve");
+
+    let reusable = store
+        .approved_session_tool_authority(
+            &session.id,
+            &approval.action,
+            &approval.resource,
+            &approval.target_host,
+        )
+        .await
+        .expect("lookup")
+        .expect("reusable authority");
+    assert_eq!(reusable.id, approval.id);
+    assert_eq!(
+        store
+            .list_session_tool_authorities(&session.id)
+            .await
+            .expect("summary")
+            .len(),
+        1
+    );
+    assert_eq!(
+        store
+            .clear_session_tool_authorities(&session.id, timestamp + 2)
+            .await
+            .expect("clear"),
+        1
+    );
+    assert!(
+        store
+            .approved_session_tool_authority(
+                &session.id,
+                &approval.action,
+                &approval.resource,
+                &approval.target_host,
+            )
+            .await
+            .expect("cleared lookup")
+            .is_none()
+    );
 }
 
 #[tokio::test]
@@ -864,7 +856,6 @@ async fn restart_marks_active_work_lost_without_restoring_authority() {
             requester_session_id: Some(session.id.clone()),
             execution_session_id: Some(session.id.clone()),
             run_id: Some(run.id.clone()),
-            permission_snapshot_hash: None,
             status: TaskRunStatus::Running,
             progress_percent: None,
             result_summary: None,
@@ -1236,13 +1227,16 @@ async fn retained_worktree_count_only_includes_dirty_schedule_checkouts() {
         },
         entry_profile: EntryProfile::Workbench,
         workload_override: Some(WorkloadKind::Coding),
-        context_template: ScheduleContextTemplate::General,
-        tool_allowlist: Vec::new(),
+        context_template: ScheduleContextTemplate::Workspace {
+            workspace: hachimi_protocol::ScheduleWorkspaceSpec::Managed,
+            conversation_mode: hachimi_protocol::ScheduleConversationMode::PerRunSession,
+        },
         skill_allowlist: Vec::new(),
+        skill_revisions: Vec::new(),
         mcp_tool_allowlist: Vec::new(),
         contribution_revisions: Vec::new(),
-        host_grant: hachimi_protocol::ScheduleHostGrant::default(),
-        permission_config: SchedulePermissionConfig::default(),
+        host_revision_snapshot: hachimi_protocol::HostRevisionSnapshot::default(),
+        permission_policy: AgentPermissionPolicy::default(),
         permission_revision: 1,
         timeout_ms: 120_000,
         misfire_policy: MisfirePolicy::Skip,
@@ -1251,13 +1245,13 @@ async fn retained_worktree_count_only_includes_dirty_schedule_checkouts() {
         config_revision: 1,
         created_by: "user".into(),
         next_run_at_ms: None,
-        health: ScheduleHealth::NeedsAuthorization,
+        health: ScheduleHealth::NeedsAttention,
         health_reason: Some("test".into()),
         created_at_ms: now,
         updated_at_ms: now,
     };
     store
-        .create_schedule_idempotent("user", "retained", &schedule, None)
+        .create_schedule_idempotent("user", "retained", &schedule)
         .await
         .expect("schedule");
     store
@@ -1272,7 +1266,6 @@ async fn retained_worktree_count_only_includes_dirty_schedule_checkouts() {
             requester_session_id: None,
             execution_session_id: Some(session.id),
             run_id: None,
-            permission_snapshot_hash: None,
             status: TaskRunStatus::Succeeded,
             progress_percent: Some(100),
             result_summary: None,
@@ -1760,7 +1753,7 @@ async fn security_snapshot_is_recoverable_and_grants_can_be_invalidated_once() {
         .await
         .expect("run");
     let grants = CapabilityGrantSet {
-        profile: PermissionProfile::WorkspaceWrite,
+        profile: PermissionProfile::Writable,
         scope: PermissionGrantScope::Run,
         session_id: session.id.clone(),
         run_id: Some(run.id.clone()),

@@ -1,7 +1,23 @@
 use hachimi_protocol::{
-    BrowserAction, BrowserAutomationSurfaceKind, BrowserCapability, CapabilityGrantSet,
-    HostPolicyDecision, RunId, ScheduleHostGrant, SessionId,
+    AuthorityMode, BrowserAction, BrowserAutomationSurfaceKind, BrowserCapability,
+    CapabilityGrantSet, HostPolicyDecision, PermissionProfile, RunId, SessionId,
 };
+
+pub(super) fn unattended_browser_target_access(
+    grants: &CapabilityGrantSet,
+    origin: &str,
+) -> Result<bool, String> {
+    if grants.profile == PermissionProfile::FullAccess {
+        return Ok(true);
+    }
+    grants
+        .browser
+        .origins
+        .iter()
+        .any(|allowed| allowed == origin)
+        .then_some(false)
+        .ok_or_else(|| "Browser Origin is outside the preconfigured background grant".into())
+}
 
 pub(super) async fn require_interactive_browser_access(
     store: &hachimi_storage::AgentStore,
@@ -59,7 +75,8 @@ pub(super) async fn require_interactive_browser_access(
 pub(super) async fn require_external_session_access(
     store: &hachimi_storage::AgentStore,
     session: &hachimi_protocol::BrowserSession,
-    schedule_host_grant: Option<&ScheduleHostGrant>,
+    authority_mode: AuthorityMode,
+    grants: &CapabilityGrantSet,
     run_generation: u64,
     capabilities: &[BrowserCapability],
 ) -> Result<(), String> {
@@ -70,16 +87,11 @@ pub(super) async fn require_external_session_access(
         return Ok(());
     }
     let origin = hachimi_browser::normalized_origin(url).map_err(|error| error.to_string())?;
-    if let Some(browser) = schedule_host_grant.and_then(|grant| grant.browser.as_ref()) {
-        if !browser.enabled || !browser.document_origins.contains(&origin) {
-            return Err("External Chrome Origin is outside the scheduled Browser grant".into());
-        }
-        return hachimi_browser::validate_agent_browser_target(url, browser.allow_private_network)
+    if authority_mode == AuthorityMode::Unattended {
+        let allow_private_network = unattended_browser_target_access(grants, &origin)?;
+        return hachimi_browser::validate_agent_browser_target(url, allow_private_network)
             .await
             .map_err(|error| error.to_string());
-    }
-    if schedule_host_grant.is_some() {
-        return Err("Scheduled Browser access is not authorized".into());
     }
     require_interactive_browser_access(
         store,
@@ -96,13 +108,14 @@ pub(super) async fn require_external_session_access(
 
 pub(super) fn embedded_origin_policy<'a>(
     grants: &'a CapabilityGrantSet,
-    schedule_host_grant: Option<&'a ScheduleHostGrant>,
+    authority_mode: AuthorityMode,
 ) -> crate::embedded_browser_agent::EmbeddedBrowserOriginPolicy<'a> {
-    if let Some(browser) = schedule_host_grant.and_then(|grant| grant.browser.as_ref()) {
+    if authority_mode == AuthorityMode::Unattended {
+        let full_access = grants.profile == PermissionProfile::FullAccess;
         crate::embedded_browser_agent::EmbeddedBrowserOriginPolicy {
-            allowed_origins: &browser.document_origins,
-            allow_unlisted_origin: false,
-            allow_private_network: browser.allow_private_network,
+            allowed_origins: &grants.browser.origins,
+            allow_unlisted_origin: full_access,
+            allow_private_network: full_access,
             require_site_permission: false,
         }
     } else {
@@ -156,5 +169,35 @@ pub(super) const fn browser_capability_allowed(
         BrowserCapability::Download => grants.browser.download,
         BrowserCapability::CookieStorage => grants.browser.cookie_storage,
         BrowserCapability::Cdp => grants.browser.cdp,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unattended_restricted_browser_requires_an_exact_origin() {
+        let mut grants = CapabilityGrantSet::default();
+        grants.browser.origins = vec!["https://example.com".into()];
+
+        assert_eq!(
+            unattended_browser_target_access(&grants, "https://example.com"),
+            Ok(false)
+        );
+        assert!(unattended_browser_target_access(&grants, "https://other.example").is_err());
+    }
+
+    #[test]
+    fn unattended_full_access_allows_any_validated_origin() {
+        let grants = CapabilityGrantSet {
+            profile: PermissionProfile::FullAccess,
+            ..CapabilityGrantSet::default()
+        };
+
+        assert_eq!(
+            unattended_browser_target_access(&grants, "https://example.com"),
+            Ok(true)
+        );
     }
 }

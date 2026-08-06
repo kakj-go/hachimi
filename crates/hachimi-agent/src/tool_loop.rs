@@ -484,6 +484,7 @@ impl ToolLoopDriver {
             });
             let results = join_all(executions).await;
             let mut ephemeral_images = Vec::new();
+            let mut needs_attention = None;
             for (call, result) in results {
                 report_checkpoint(
                     &checkpoint_reporter,
@@ -508,6 +509,21 @@ impl ToolLoopDriver {
                 )
                 .await?;
                 emit(LoopEvent::ToolCompleted(result.clone()));
+                if result
+                    .structured_content
+                    .get("needsAttention")
+                    .and_then(Value::as_bool)
+                    == Some(true)
+                {
+                    needs_attention = Some(
+                        result
+                            .structured_content
+                            .get("code")
+                            .and_then(Value::as_str)
+                            .unwrap_or("authority_needs_attention")
+                            .to_owned(),
+                    );
+                }
                 ephemeral_images.extend(result.model_images.iter().cloned());
                 let model_call = ModelToolCall {
                     id: call.id,
@@ -515,6 +531,9 @@ impl ToolLoopDriver {
                     arguments: Value::Null,
                 };
                 messages.push(ModelMessage::tool(&model_call, result.model_content));
+            }
+            if let Some(code) = needs_attention {
+                return Err(ModelRuntimeError::NeedsAttention(code));
             }
             if !ephemeral_images.is_empty() {
                 let labels = ephemeral_images
@@ -744,8 +763,10 @@ mod tests {
                 },
             ),
             mode: BehaviorMode::Default,
-            origin: RunOrigin::Interactive,
-            context: SessionContextBinding::General,
+            origin: RunOrigin::Manual,
+            context: SessionContextBinding::Workspace {
+                workspace_id: hachimi_protocol::WorkspaceId::random(),
+            },
             run_generation: 1,
             budget,
             run_tool_allowlist: None,
@@ -870,6 +891,8 @@ mod tests {
 
     struct CountingEcho(Arc<AtomicUsize>);
 
+    struct NeedsAttentionTool;
+
     struct ChangeAfterSampling(AtomicUsize);
 
     #[derive(Default)]
@@ -914,6 +937,27 @@ mod tests {
                 &invocation.call,
                 "echoed",
                 Value::Null,
+            ))))
+        }
+    }
+
+    impl ToolExecutor for NeedsAttentionTool {
+        fn descriptor(&self) -> ToolDescriptor {
+            ToolDescriptor {
+                name: "authority_probe".into(),
+                description: "returns a background authority blocker".into(),
+                input_schema: serde_json::json!({ "type": "object" }),
+                effect: ToolEffect::ExternalSideEffect,
+                parallel_safe: false,
+                required_scopes: Vec::new(),
+            }
+        }
+
+        fn execute(&self, invocation: ToolInvocation) -> ToolFuture {
+            Box::pin(future::ready(Ok(ToolResult::needs_attention(
+                &invocation.call,
+                "authority_test",
+                "background authority requires attention",
             ))))
         }
     }
@@ -1042,6 +1086,39 @@ mod tests {
                 .iter()
                 .any(|event| matches!(event, LoopEvent::ToolCompleted(_)))
         );
+    }
+
+    #[tokio::test]
+    async fn needs_attention_tool_result_stops_the_loop_without_a_follow_up_model_call() {
+        let model = Arc::new(ScriptedModel(Mutex::new(VecDeque::from([vec![
+            ModelEvent::ToolCallCompleted {
+                call: ModelToolCall {
+                    id: ToolCallId::from("authority-call"),
+                    name: "authority_probe".into(),
+                    arguments: serde_json::json!({}),
+                },
+            },
+            ModelEvent::Completed {
+                finish_reason: ModelFinishReason::ToolCalls,
+            },
+        ]]))));
+        let mut registry = ToolRegistry::new();
+        registry
+            .register(Arc::new(NeedsAttentionTool))
+            .expect("tool");
+        let driver = ToolLoopDriver::new(model, Arc::new(ToolRuntime::new(Arc::new(registry))));
+        let error = driver
+            .run(
+                vec![ModelMessage::user("trigger authority blocker")],
+                run_options(&RunBudget::default()),
+                |_| {},
+            )
+            .await
+            .expect_err("authority blocker");
+        assert!(matches!(
+            error,
+            ModelRuntimeError::NeedsAttention(code) if code == "authority_test"
+        ));
     }
 
     #[tokio::test]

@@ -22,7 +22,7 @@ async fn system_clock_at_every_and_six_field_cron_soak_without_duplicate_invocat
         timestamp_ms: now + 800,
     };
     service
-        .create("release-soak", "system-clock-at", at, true)
+        .create("release-soak", "system-clock-at", at)
         .await
         .expect("At schedule");
 
@@ -34,7 +34,7 @@ async fn system_clock_at_every_and_six_field_cron_soak_without_duplicate_invocat
         anchor_ms: now + 300,
     };
     service
-        .create("release-soak", "system-clock-every", every, true)
+        .create("release-soak", "system-clock-every", every)
         .await
         .expect("Every schedule");
 
@@ -46,7 +46,7 @@ async fn system_clock_at_every_and_six_field_cron_soak_without_duplicate_invocat
         timezone: "UTC".into(),
     };
     service
-        .create("release-soak", "system-clock-cron", cron, true)
+        .create("release-soak", "system-clock-cron", cron)
         .await
         .expect("Cron schedule");
 

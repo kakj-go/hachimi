@@ -43,6 +43,7 @@ macro_rules! string_id {
 string_id!(ProjectId);
 string_id!(CheckoutId);
 string_id!(SessionId);
+string_id!(WorkspaceId);
 string_id!(RunId);
 string_id!(ItemId);
 string_id!(ToolCallId);
@@ -77,7 +78,7 @@ string_id!(ProviderAccountId);
 string_id!(ProviderCapabilityProbeId);
 string_id!(AvatarId);
 string_id!(ScheduleId);
-string_id!(ScheduleGrantId);
+string_id!(AuthoritySnapshotId);
 string_id!(BrowserSessionId);
 string_id!(BrowserObservationId);
 string_id!(BrowserPairingId);

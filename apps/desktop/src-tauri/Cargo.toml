@@ -70,5 +70,10 @@ url.workspace = true
 uuid.workspace = true
 zeroize.workspace = true
 
+[target.'cfg(windows)'.dependencies]
+windows = { workspace = true, features = [
+  "Win32_Security_Credentials",
+] }
+
 [dev-dependencies]
 tempfile.workspace = true

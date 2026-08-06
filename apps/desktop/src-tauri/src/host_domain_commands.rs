@@ -157,6 +157,14 @@ pub(super) async fn list_connector_accounts(
     window: WebviewWindow,
     state: State<'_, DesktopState>,
 ) -> Result<Vec<ConnectorAccount>, CommandError> {
+    if window.label() == "pet" {
+        state.authorize(&window, ControlMethod::LlmChat)?;
+        return state
+            .plugin_host
+            .list_connector_accounts()
+            .await
+            .map_err(|error| CommandError::operation("connector_account_list_failed", error));
+    }
     match execute(
         &window,
         &state,
@@ -176,6 +184,14 @@ pub(super) async fn get_connector_driver_descriptor(
     plugin_id: hachimi_protocol::PluginId,
     connector_id: String,
 ) -> Result<ConnectorDriverDescriptor, CommandError> {
+    if window.label() == "pet" {
+        state.authorize(&window, ControlMethod::LlmChat)?;
+        return state
+            .plugin_host
+            .connector_driver_descriptor(&plugin_id, &connector_id)
+            .await
+            .map_err(|error| CommandError::operation("connector_driver_descriptor_failed", error));
+    }
     match execute(
         &window,
         &state,

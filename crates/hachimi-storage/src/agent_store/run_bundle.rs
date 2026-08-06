@@ -1,8 +1,10 @@
 use hachimi_protocol::{
-    AttachmentId, ChannelEventKey, RunEventPayload, RunId, RunRecord, SessionId, SessionRecord,
-    TranscriptItem,
+    AgentPermissionPolicy, AgentWorkspace, AgentWorkspaceKind, AgentWorkspaceOwner, AttachmentId,
+    AuthorityMode, AuthoritySnapshotId, ChannelEventKey, RunAuthoritySnapshot, RunEventPayload,
+    RunId, RunRecord, SessionContextBinding, SessionId, SessionRecord, TranscriptItem,
 };
 use serde_json::json;
+use sqlx::{Sqlite, Transaction};
 
 use super::{
     AgentStore, AgentStoreError, append_event_tx, append_event_typed_tx, enum_to_db, get_run_tx,
@@ -15,6 +17,17 @@ pub struct CreatedAgentRun {
     pub session: SessionRecord,
     pub run: RunRecord,
     pub user_item: TranscriptItem,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct AtomicRunLaunchInput<'a> {
+    pub proposed_workspace: Option<&'a AgentWorkspace>,
+    pub workspace_owner: Option<&'a AgentWorkspaceOwner>,
+    pub stored_policy_owner_key: Option<&'a str>,
+    pub stored_policy: Option<&'a AgentPermissionPolicy>,
+    pub effective_policy: &'a AgentPermissionPolicy,
+    pub authority_mode: AuthorityMode,
+    pub workspace_root: &'a str,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -46,6 +59,23 @@ impl AgentStore {
     pub async fn create_channel_agent_run_idempotent(
         &self,
         input: ChannelAgentRunCreateInput<'_>,
+    ) -> Result<CreatedAgentRun, AgentStoreError> {
+        self.create_channel_agent_run_inner(input, None).await
+    }
+
+    pub async fn create_channel_agent_run_authorized_idempotent(
+        &self,
+        input: ChannelAgentRunCreateInput<'_>,
+        launch: AtomicRunLaunchInput<'_>,
+    ) -> Result<CreatedAgentRun, AgentStoreError> {
+        self.create_channel_agent_run_inner(input, Some(launch))
+            .await
+    }
+
+    async fn create_channel_agent_run_inner(
+        &self,
+        input: ChannelAgentRunCreateInput<'_>,
+        launch: Option<AtomicRunLaunchInput<'_>>,
     ) -> Result<CreatedAgentRun, AgentStoreError> {
         let ChannelAgentRunCreateInput {
             principal,
@@ -80,6 +110,9 @@ impl AgentStore {
             .fetch_one(&mut *transaction)
             .await?;
             let existing_item = transcript_item_from_row(&item_row, &existing_session.id)?;
+            if launch.is_some() {
+                require_authority_snapshot_tx(&mut transaction, &existing_run.id).await?;
+            }
             let updated = sqlx::query("UPDATE channel_ingress SET status = 'run_created', session_id = ?, run_id = ?, result_code = 'run_created', updated_at_ms = ? WHERE provider_id = ? AND account_id = ? AND external_message_id = ? AND status IN ('claimed', 'run_created') AND (run_id IS NULL OR run_id = ?)")
                 .bind(existing_session.id.as_str())
                 .bind(existing_run.id.as_str())
@@ -301,6 +334,9 @@ impl AgentStore {
             .bind(session.id.as_str())
             .execute(&mut *transaction)
             .await?;
+        if let Some(launch) = launch {
+            insert_atomic_launch_state_tx(&mut transaction, &session, &run, launch).await?;
+        }
         transaction.commit().await?;
         Ok(CreatedAgentRun {
             session,
@@ -319,6 +355,54 @@ impl AgentStore {
         run: &RunRecord,
         user_item: &TranscriptItem,
         attachment_ids: &[AttachmentId],
+    ) -> Result<CreatedAgentRun, AgentStoreError> {
+        self.create_agent_run_in_session_inner(
+            principal,
+            idempotency_key,
+            session,
+            run,
+            user_item,
+            attachment_ids,
+            None,
+        )
+        .await
+    }
+
+    // The explicit transaction inputs keep the Session, Workspace, policy, and authority
+    // commit visible at this boundary for every launcher source.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn create_agent_run_in_session_authorized_idempotent(
+        &self,
+        principal: &str,
+        idempotency_key: &str,
+        session: &SessionRecord,
+        run: &RunRecord,
+        user_item: &TranscriptItem,
+        attachment_ids: &[AttachmentId],
+        launch: AtomicRunLaunchInput<'_>,
+    ) -> Result<CreatedAgentRun, AgentStoreError> {
+        self.create_agent_run_in_session_inner(
+            principal,
+            idempotency_key,
+            session,
+            run,
+            user_item,
+            attachment_ids,
+            Some(launch),
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn create_agent_run_in_session_inner(
+        &self,
+        principal: &str,
+        idempotency_key: &str,
+        session: &SessionRecord,
+        run: &RunRecord,
+        user_item: &TranscriptItem,
+        attachment_ids: &[AttachmentId],
+        launch: Option<AtomicRunLaunchInput<'_>>,
     ) -> Result<CreatedAgentRun, AgentStoreError> {
         let mut transaction = self.pool.begin().await?;
         if let Some(existing_id) = sqlx::query_scalar::<_, String>(
@@ -339,6 +423,9 @@ impl AgentStore {
             .fetch_one(&mut *transaction)
             .await?;
             let existing_item = transcript_item_from_row(&item_row, &session.id)?;
+            if launch.is_some() {
+                require_authority_snapshot_tx(&mut transaction, &existing_run.id).await?;
+            }
             transaction.commit().await?;
             return Ok(CreatedAgentRun {
                 session: session.clone(),
@@ -460,6 +547,9 @@ impl AgentStore {
             .bind(session.id.as_str())
             .execute(&mut *transaction)
             .await?;
+        if let Some(launch) = launch {
+            insert_atomic_launch_state_tx(&mut transaction, session, run, launch).await?;
+        }
         transaction.commit().await?;
         Ok(CreatedAgentRun {
             session: session.clone(),
@@ -476,6 +566,54 @@ impl AgentStore {
         run: &RunRecord,
         user_item: &TranscriptItem,
         attachment_ids: &[AttachmentId],
+    ) -> Result<CreatedAgentRun, AgentStoreError> {
+        self.create_agent_run_bundle_inner(
+            principal,
+            idempotency_key,
+            session,
+            run,
+            user_item,
+            attachment_ids,
+            None,
+        )
+        .await
+    }
+
+    // Keep the atomic bundle contract explicit so callers cannot persist run state without
+    // its immutable workspace and authority snapshot.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn create_agent_run_bundle_authorized_idempotent(
+        &self,
+        principal: &str,
+        idempotency_key: &str,
+        session: &SessionRecord,
+        run: &RunRecord,
+        user_item: &TranscriptItem,
+        attachment_ids: &[AttachmentId],
+        launch: AtomicRunLaunchInput<'_>,
+    ) -> Result<CreatedAgentRun, AgentStoreError> {
+        self.create_agent_run_bundle_inner(
+            principal,
+            idempotency_key,
+            session,
+            run,
+            user_item,
+            attachment_ids,
+            Some(launch),
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn create_agent_run_bundle_inner(
+        &self,
+        principal: &str,
+        idempotency_key: &str,
+        session: &SessionRecord,
+        run: &RunRecord,
+        user_item: &TranscriptItem,
+        attachment_ids: &[AttachmentId],
+        launch: Option<AtomicRunLaunchInput<'_>>,
     ) -> Result<CreatedAgentRun, AgentStoreError> {
         let mut transaction = self.pool.begin().await?;
         if let Some(existing_id) = sqlx::query_scalar::<_, String>(
@@ -501,6 +639,9 @@ impl AgentStore {
             .fetch_one(&mut *transaction)
             .await?;
             let existing_item = transcript_item_from_row(&item_row, &existing_session.id)?;
+            if launch.is_some() {
+                require_authority_snapshot_tx(&mut transaction, &existing_run.id).await?;
+            }
             transaction.commit().await?;
             return Ok(CreatedAgentRun {
                 session: existing_session,
@@ -635,6 +776,9 @@ impl AgentStore {
         .bind(run.created_at_ms)
         .execute(&mut *transaction)
         .await?;
+        if let Some(launch) = launch {
+            insert_atomic_launch_state_tx(&mut transaction, session, run, launch).await?;
+        }
         transaction.commit().await?;
         Ok(CreatedAgentRun {
             session: session.clone(),
@@ -644,14 +788,147 @@ impl AgentStore {
     }
 }
 
+pub(super) async fn require_authority_snapshot_tx(
+    transaction: &mut Transaction<'_, Sqlite>,
+    run_id: &RunId,
+) -> Result<(), AgentStoreError> {
+    let exists = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM run_authority_snapshots WHERE run_id = ?",
+    )
+    .bind(run_id.as_str())
+    .fetch_one(&mut **transaction)
+    .await?
+        > 0;
+    if !exists {
+        return Err(AgentStoreError::RunPreconditionFailed);
+    }
+    Ok(())
+}
+
+pub(super) async fn insert_atomic_launch_state_tx(
+    transaction: &mut Transaction<'_, Sqlite>,
+    session: &SessionRecord,
+    run: &RunRecord,
+    launch: AtomicRunLaunchInput<'_>,
+) -> Result<(), AgentStoreError> {
+    if launch.workspace_root.trim().is_empty()
+        || run.session_id != session.id
+        || run.configuration.permission_profile != launch.effective_policy.level
+        || launch.stored_policy_owner_key.is_some() != launch.stored_policy.is_some()
+        || launch
+            .stored_policy_owner_key
+            .is_some_and(|owner_key| owner_key.trim().is_empty())
+    {
+        return Err(AgentStoreError::RunPreconditionFailed);
+    }
+    let workspace_id = match &session.context {
+        SessionContextBinding::Workspace { workspace_id } => Some(workspace_id),
+        SessionContextBinding::Project { .. } => None,
+    };
+    if workspace_id.is_some() != launch.workspace_owner.is_some() {
+        return Err(AgentStoreError::RunPreconditionFailed);
+    }
+    if let Some(workspace) = launch.proposed_workspace {
+        if Some(&workspace.owner) != launch.workspace_owner {
+            return Err(AgentStoreError::RunPreconditionFailed);
+        }
+        let (owner_kind, owner_id) = match &workspace.owner {
+            AgentWorkspaceOwner::Session { session_id } if session_id == &session.id => {
+                ("session", session_id.as_str())
+            }
+            AgentWorkspaceOwner::Schedule { schedule_id }
+                if launch
+                    .stored_policy_owner_key
+                    .and_then(|owner_key| owner_key.strip_prefix("schedule:"))
+                    == Some(schedule_id.as_str()) =>
+            {
+                ("schedule", schedule_id.as_str())
+            }
+            _ => return Err(AgentStoreError::RunPreconditionFailed),
+        };
+        if !matches!(
+            &session.context,
+            SessionContextBinding::Workspace { workspace_id } if workspace_id == &workspace.id
+        ) || workspace.root_path != launch.workspace_root
+        {
+            return Err(AgentStoreError::RunPreconditionFailed);
+        }
+        let kind = match workspace.kind {
+            AgentWorkspaceKind::Managed => "managed",
+            AgentWorkspaceKind::SelectedDirectory => "selected_directory",
+        };
+        sqlx::query("INSERT INTO agent_workspaces(id, kind, owner_kind, owner_id, root_path, status, status_reason, created_at_ms, updated_at_ms) VALUES(?, ?, ?, ?, ?, 'ready', NULL, ?, ?)")
+            .bind(workspace.id.as_str())
+            .bind(kind)
+            .bind(owner_kind)
+            .bind(owner_id)
+            .bind(&workspace.root_path)
+            .bind(workspace.created_at_ms)
+            .bind(workspace.updated_at_ms)
+            .execute(&mut **transaction)
+            .await?;
+    } else if let (Some(workspace_id), Some(expected_owner)) =
+        (workspace_id, launch.workspace_owner)
+    {
+        let workspace = sqlx::query_as::<_, (String, String, String, String)>(
+            "SELECT owner_kind, owner_id, root_path, status FROM agent_workspaces WHERE id = ?",
+        )
+        .bind(workspace_id.as_str())
+        .fetch_optional(&mut **transaction)
+        .await?
+        .filter(|(_, _, root_path, status)| root_path == launch.workspace_root && status == "ready")
+        .ok_or(AgentStoreError::RunPreconditionFailed)?;
+        let owner_matches = match expected_owner {
+            AgentWorkspaceOwner::Session { session_id } => {
+                workspace.0 == "session" && workspace.1 == session_id.as_str()
+            }
+            AgentWorkspaceOwner::Schedule { schedule_id } => {
+                workspace.0 == "schedule" && workspace.1 == schedule_id.as_str()
+            }
+        };
+        if !owner_matches {
+            return Err(AgentStoreError::RunPreconditionFailed);
+        }
+    }
+    if let (Some(owner_key), Some(policy)) = (launch.stored_policy_owner_key, launch.stored_policy)
+    {
+        sqlx::query("INSERT INTO agent_permission_policies(owner_key, policy_json, revision, updated_at_ms) VALUES(?, ?, ?, ?) ON CONFLICT(owner_key) DO UPDATE SET policy_json = excluded.policy_json, revision = excluded.revision, updated_at_ms = excluded.updated_at_ms")
+            .bind(owner_key)
+            .bind(serde_json::to_string(policy)?)
+            .bind(i64::try_from(policy.revision).unwrap_or(i64::MAX))
+            .bind(run.created_at_ms)
+            .execute(&mut **transaction)
+            .await?;
+    }
+    let authority = RunAuthoritySnapshot {
+        id: AuthoritySnapshotId::random(),
+        session_id: session.id.clone(),
+        run_id: run.id.clone(),
+        policy: launch.effective_policy.clone(),
+        mode: launch.authority_mode,
+        source: format!("{:?}", run.origin),
+        workspace_root: launch.workspace_root.to_owned(),
+        created_at_ms: run.created_at_ms,
+    };
+    sqlx::query("INSERT INTO run_authority_snapshots(id, run_id, session_id, snapshot_json, created_at_ms) VALUES(?, ?, ?, ?, ?)")
+        .bind(authority.id.as_str())
+        .bind(run.id.as_str())
+        .bind(session.id.as_str())
+        .bind(serde_json::to_string(&authority)?)
+        .bind(authority.created_at_ms)
+        .execute(&mut **transaction)
+        .await?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use hachimi_protocol::{
-        ApprovalPolicy, BehaviorMode, ChannelMessageId, EntryProfile, ItemId, ItemPayload,
-        ItemRelations, ItemStatus, LlmSettings, PermissionProfile, ProviderCapabilities, RunBudget,
-        RunConfiguration, RunDriverKind, RunOrigin, RunPurpose, RunStatus, SessionContextBinding,
-        TranscriptItemKind, WorkloadKind,
+        AgentWorkspaceStatus, ApprovalPolicy, BehaviorMode, ChannelMessageId, EntryProfile, ItemId,
+        ItemPayload, ItemRelations, ItemStatus, LlmSettings, PermissionProfile,
+        ProviderCapabilities, RunBudget, RunConfiguration, RunDriverKind, RunOrigin, RunPurpose,
+        RunStatus, SessionContextBinding, TranscriptItemKind, WorkloadKind,
     };
 
     async fn seed_account(store: &AgentStore) {
@@ -672,7 +949,9 @@ mod tests {
     fn proposed(suffix: &str) -> (SessionRecord, RunRecord, TranscriptItem) {
         let session = SessionRecord {
             id: SessionId::new(format!("session-{suffix}")),
-            context: SessionContextBinding::General,
+            context: SessionContextBinding::Workspace {
+                workspace_id: hachimi_protocol::WorkspaceId::random(),
+            },
             entry_profile: EntryProfile::Workbench,
             title: "Channel".into(),
             archived: false,
@@ -823,6 +1102,143 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn authorized_bundle_commits_workspace_policy_and_authority_or_rolls_back_all() {
+        let store = AgentStore::connect_in_memory().await.expect("store");
+        let (session, run, item) = proposed("authorized");
+        let workspace_id = match &session.context {
+            SessionContextBinding::Workspace { workspace_id } => workspace_id.clone(),
+            SessionContextBinding::Project { .. } => panic!("workspace context"),
+        };
+        let workspace_root = "C:\\managed\\authorized".to_owned();
+        let workspace = AgentWorkspace {
+            id: workspace_id,
+            kind: AgentWorkspaceKind::Managed,
+            owner: AgentWorkspaceOwner::Session {
+                session_id: session.id.clone(),
+            },
+            root_path: workspace_root.clone(),
+            status: AgentWorkspaceStatus::Ready,
+            status_reason: None,
+            created_at_ms: 1,
+            updated_at_ms: 1,
+        };
+        let policy = AgentPermissionPolicy::default();
+        let policy_owner = "schedule:atomic-owner".to_owned();
+        let created = store
+            .create_agent_run_bundle_authorized_idempotent(
+                "manual",
+                "authorized-bundle",
+                &session,
+                &run,
+                &item,
+                &[],
+                AtomicRunLaunchInput {
+                    proposed_workspace: Some(&workspace),
+                    workspace_owner: Some(&workspace.owner),
+                    stored_policy_owner_key: Some(&policy_owner),
+                    stored_policy: Some(&policy),
+                    effective_policy: &policy,
+                    authority_mode: AuthorityMode::Interactive,
+                    workspace_root: &workspace_root,
+                },
+            )
+            .await
+            .expect("authorized bundle");
+        assert_eq!(created.run.id, run.id);
+        assert_eq!(
+            store
+                .workspace(&workspace.id)
+                .await
+                .expect("workspace")
+                .expect("workspace row"),
+            workspace
+        );
+        assert_eq!(
+            store
+                .permission_policy(&policy_owner)
+                .await
+                .expect("policy"),
+            Some(policy.clone())
+        );
+        assert!(
+            store
+                .permission_policy(&format!("session:{}", session.id))
+                .await
+                .expect("Session policy")
+                .is_none()
+        );
+        let authority = store
+            .authority_snapshot(&run.id)
+            .await
+            .expect("authority")
+            .expect("authority snapshot");
+        assert_eq!(authority.policy, policy);
+        assert_eq!(authority.workspace_root, workspace_root);
+
+        let (rollback_session, rollback_run, rollback_item) = proposed("authorized-rollback");
+        let rollback_workspace_id = match &rollback_session.context {
+            SessionContextBinding::Workspace { workspace_id } => workspace_id.clone(),
+            SessionContextBinding::Project { .. } => panic!("workspace context"),
+        };
+        let rollback_workspace = AgentWorkspace {
+            id: rollback_workspace_id.clone(),
+            kind: AgentWorkspaceKind::Managed,
+            owner: AgentWorkspaceOwner::Session {
+                session_id: rollback_session.id.clone(),
+            },
+            root_path: "C:\\managed\\actual".into(),
+            status: AgentWorkspaceStatus::Ready,
+            status_reason: None,
+            created_at_ms: 1,
+            updated_at_ms: 1,
+        };
+        let rollback_policy_owner = format!("session:{}", rollback_session.id);
+        assert!(
+            store
+                .create_agent_run_bundle_authorized_idempotent(
+                    "manual",
+                    "authorized-bundle-rollback",
+                    &rollback_session,
+                    &rollback_run,
+                    &rollback_item,
+                    &[],
+                    AtomicRunLaunchInput {
+                        proposed_workspace: Some(&rollback_workspace),
+                        workspace_owner: Some(&rollback_workspace.owner),
+                        stored_policy_owner_key: Some(&rollback_policy_owner),
+                        stored_policy: Some(&AgentPermissionPolicy::default()),
+                        effective_policy: &AgentPermissionPolicy::default(),
+                        authority_mode: AuthorityMode::Interactive,
+                        workspace_root: "C:\\managed\\different",
+                    },
+                )
+                .await
+                .is_err()
+        );
+        assert!(
+            store
+                .get_session(&rollback_session.id)
+                .await
+                .expect("session lookup")
+                .is_none()
+        );
+        assert!(
+            store
+                .get_run(&rollback_run.id)
+                .await
+                .expect("run lookup")
+                .is_none()
+        );
+        assert!(
+            store
+                .workspace(&rollback_workspace_id)
+                .await
+                .expect("workspace lookup")
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
     async fn channel_binding_reuses_active_session_and_replaces_archived_session() {
         let store = AgentStore::connect_in_memory().await.expect("store");
         seed_account(&store).await;
@@ -840,9 +1256,19 @@ mod tests {
             })
             .await
             .expect("first");
+        assert_eq!(
+            store
+                .session_for_channel_binding("stable-binding")
+                .await
+                .expect("binding lookup")
+                .expect("bound Session")
+                .id,
+            first.session.id
+        );
         complete_run(&store, &first.run.id).await;
         seed_ingress(&store, "message-2").await;
-        let (second_session, second_run, second_item) = proposed("2");
+        let (mut second_session, second_run, second_item) = proposed("2");
+        second_session.context = first.session.context.clone();
         let second = store
             .create_channel_agent_run_idempotent(ChannelAgentRunCreateInput {
                 principal: "channel",
@@ -869,6 +1295,13 @@ mod tests {
             .update_session_metadata(&first.session.id, None, Some(true), None, 3)
             .await
             .expect("archive");
+        assert!(
+            store
+                .session_for_channel_binding("stable-binding")
+                .await
+                .expect("archived binding lookup")
+                .is_none()
+        );
         seed_ingress(&store, "message-3").await;
         let (third_session, third_run, third_item) = proposed("3");
         let third = store

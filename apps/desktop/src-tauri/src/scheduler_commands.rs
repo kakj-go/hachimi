@@ -2,15 +2,17 @@
 
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
-use hachimi_agent::{AgentRunCreateRequest, AgentRunFactory, AgentRunPriority};
-use hachimi_policy::expand_permission_profile;
+use hachimi_agent::{
+    AgentRunCreateRequest, AgentRunLaunchRequest, AgentRunLauncher, AgentRunPriority,
+    LaunchedAgentRun,
+};
+use hachimi_approvals::ApprovalBroker;
 use hachimi_protocol::{
-    ApprovalPolicy, BehaviorMode, CheckoutKind, EntryProfile, ExecutionTarget, ItemId, ItemPayload,
-    ItemRelations, ItemStatus, LlmSettings, MutationContext, PermissionProfile,
-    ProviderCapabilities, RunBudget, RunOrigin, RunPurpose, RunRecord, RunStatus,
-    ScheduleAuthorizationScope, ScheduleContextTemplate, ScheduleCreateRequest, ScheduleDefinition,
-    ScheduleEventIngressRequest, ScheduleEventReceipt, ScheduleEventReceiptStatus,
-    ScheduleEventSourceKind, ScheduleGrantRecord, ScheduleId, SchedulePreview,
+    ApprovalPolicy, AuthorityMode, BehaviorMode, CheckoutKind, ItemId, ItemPayload, ItemRelations,
+    ItemStatus, LlmSettings, MutationContext, PermissionProfile, ProviderCapabilities, RunBudget,
+    RunOrigin, RunPurpose, RunRecord, RunStatus, ScheduleContextTemplate, ScheduleCreateRequest,
+    ScheduleDefinition, ScheduleEventIngressRequest, ScheduleEventReceipt,
+    ScheduleEventReceiptStatus, ScheduleEventSourceKind, ScheduleId, SchedulePreview,
     ScheduleSkillSelection, ScheduleSnapshot, ScheduleSpec, ScheduleUpdateRequest,
     SessionContextBinding, SkillDiagnosticSeverity, TaskInteractiveContinuation, TaskRunId,
     TaskRunRecord, TaskRunStatus, TranscriptItem, TranscriptItemKind, WorkbenchTaskSnapshot,
@@ -19,6 +21,7 @@ use hachimi_scheduler::{
     NotificationAdapter, NotificationFuture, ScheduleLaunchError, ScheduleLaunchFuture,
     ScheduleRunCompletion, ScheduleRunLauncher, TaskNotification,
 };
+use hachimi_user_input::UserInputBroker;
 use sha2::{Digest, Sha256};
 use tauri::{AppHandle, Emitter, Manager, State, WebviewWindow};
 use tauri_plugin_notification::NotificationExt;
@@ -27,6 +30,23 @@ use tokio_util::sync::CancellationToken;
 use super::{CommandError, ControlMethod, DesktopState, epoch_millis, require_window};
 
 pub(super) const TASK_NOTIFICATION_EVENT: &str = "workbench-task-notification";
+
+#[tauri::command]
+pub(super) async fn choose_schedule_workspace_directory(
+    window: WebviewWindow,
+    state: State<'_, DesktopState>,
+) -> Result<Option<String>, CommandError> {
+    authorize(&window, &state)?;
+    let picked = rfd::AsyncFileDialog::new()
+        .set_title("Schedule Workspace")
+        .pick_folder()
+        .await;
+    let Some(folder) = picked else {
+        return Ok(None);
+    };
+    reject_selected_workspace_inside_data_root(&state, folder.path())?;
+    Ok(Some(folder.path().to_string_lossy().into_owned()))
+}
 
 #[derive(Clone)]
 pub(super) struct DesktopScheduleRunLauncher {
@@ -213,7 +233,10 @@ pub(super) async fn create_schedule(
     )
     .await?
     {
-        hachimi_control_plane::ScheduleAppResponse::Created(snapshot) => Ok(snapshot),
+        hachimi_control_plane::ScheduleAppResponse::Created(snapshot) => {
+            persist_schedule_permission_policy(&state, &snapshot.definition).await?;
+            Ok(snapshot)
+        }
         _ => Err(CommandError::new(
             "schedule_response_mismatch",
             "expected Schedule snapshot",
@@ -301,7 +324,11 @@ pub(super) async fn update_schedule(
     )
     .await?
     {
-        hachimi_control_plane::ScheduleAppResponse::Schedule(schedule) => Ok(schedule),
+        hachimi_control_plane::ScheduleAppResponse::Schedule(schedule) => {
+            persist_schedule_permission_policy(&state, &schedule).await?;
+            cancel_schedule_runs(&state, &schedule.id, "schedule_definition_changed").await?;
+            Ok(schedule)
+        }
         _ => Err(CommandError::new(
             "schedule_response_mismatch",
             "expected Schedule",
@@ -331,7 +358,12 @@ pub(super) async fn set_schedule_enabled(
     )
     .await?
     {
-        hachimi_control_plane::ScheduleAppResponse::Schedule(schedule) => Ok(schedule),
+        hachimi_control_plane::ScheduleAppResponse::Schedule(schedule) => {
+            if !schedule.enabled {
+                cancel_schedule_runs(&state, &schedule.id, "schedule_disabled").await?;
+            }
+            Ok(schedule)
+        }
         _ => Err(CommandError::new(
             "schedule_response_mismatch",
             "expected Schedule",
@@ -352,12 +384,17 @@ pub(super) async fn remove_schedule(
         &app_context(client),
         hachimi_control_plane::ScheduleAppRequest::Remove {
             context,
-            schedule_id,
+            schedule_id: schedule_id.clone(),
         },
     )
     .await?
     {
-        hachimi_control_plane::ScheduleAppResponse::Removed(removed) => Ok(removed),
+        hachimi_control_plane::ScheduleAppResponse::Removed(removed) => {
+            if removed {
+                cancel_schedule_runs(&state, &schedule_id, "schedule_removed").await?;
+            }
+            Ok(removed)
+        }
         _ => Err(CommandError::new(
             "schedule_response_mismatch",
             "expected removal result",
@@ -365,56 +402,32 @@ pub(super) async fn remove_schedule(
     }
 }
 
-#[tauri::command]
-pub(super) async fn reauthorize_schedule(
-    window: WebviewWindow,
-    state: State<'_, DesktopState>,
-    context: MutationContext,
-    schedule_id: ScheduleId,
-) -> Result<ScheduleGrantRecord, CommandError> {
-    let client = authorize(&window, &state)?;
-    match dispatch_schedule(
-        &state,
-        &app_context(client),
-        hachimi_control_plane::ScheduleAppRequest::Reauthorize {
-            context,
-            schedule_id,
-        },
-    )
-    .await?
-    {
-        hachimi_control_plane::ScheduleAppResponse::Grant(Some(grant)) => Ok(grant),
-        _ => Err(CommandError::new(
-            "schedule_response_mismatch",
-            "expected Schedule grant",
-        )),
-    }
+async fn persist_schedule_permission_policy(
+    state: &DesktopState,
+    schedule: &ScheduleDefinition,
+) -> Result<(), CommandError> {
+    let mut policy = schedule.permission_policy.clone();
+    policy.revision = schedule.permission_revision;
+    state
+        .agent_store
+        .store_permission_policy(&format!("schedule:{}", schedule.id), &policy, now_ms())
+        .await
+        .map_err(|error| CommandError::operation("schedule_permission_store_failed", error))
 }
 
-#[tauri::command]
-pub(super) async fn revoke_schedule_grant(
-    window: WebviewWindow,
-    state: State<'_, DesktopState>,
-    context: MutationContext,
-    schedule_id: ScheduleId,
-) -> Result<Option<ScheduleGrantRecord>, CommandError> {
-    let client = authorize(&window, &state)?;
-    match dispatch_schedule(
-        &state,
-        &app_context(client),
-        hachimi_control_plane::ScheduleAppRequest::RevokeGrant {
-            context,
-            schedule_id,
-        },
+async fn cancel_schedule_runs(
+    state: &DesktopState,
+    schedule_id: &ScheduleId,
+    reason: &str,
+) -> Result<(), CommandError> {
+    crate::permission_runtime::cancel_runs_for_permission_owner(
+        state,
+        &format!("schedule:{schedule_id}"),
+        reason,
+        now_ms(),
     )
-    .await?
-    {
-        hachimi_control_plane::ScheduleAppResponse::Grant(grant) => Ok(grant),
-        _ => Err(CommandError::new(
-            "schedule_response_mismatch",
-            "expected Schedule grant",
-        )),
-    }
+    .await
+    .map(|_| ())
 }
 
 #[tauri::command]
@@ -685,31 +698,19 @@ pub(super) async fn continue_task_interactively_inner(
         .await
         .map_err(scheduler_error)?
         .ok_or_else(|| CommandError::new("schedule_not_found", "Schedule does not exist"))?;
-    let source = if let Some(run_id) = &task.run_id {
-        state
-            .agent_store
-            .get_run(run_id)
-            .await
-            .map_err(scheduler_error)?
-    } else {
-        None
-    };
-    let (created, project_snapshot) = create_agent_run_for_schedule(
+    let (launched, project_snapshot) = create_agent_run_for_schedule(
         state,
         &schedule,
         &task,
         ScheduleRunCreateInputs {
             principal: client.client_id.0.clone(),
             idempotency_key,
-            origin: source.map(|source_run| RunOrigin::Handoff {
-                source_session_id: source_run.session_id,
-                source_run_id: source_run.id,
-            }),
+            origin: Some(RunOrigin::Manual),
             interactive: true,
-            cancellation: CancellationToken::new(),
         },
     )
     .await?;
+    let created = launched.created;
     state
         .agent_store
         .bind_task_run_requester(&task.id, &created.session.id, now_ms())
@@ -721,9 +722,9 @@ pub(super) async fn continue_task_interactively_inner(
             client,
             schedule,
             created: created.clone(),
+            authority: launched.authority,
+            capability_grants: launched.capability_grants,
             project_snapshot,
-            schedule_authorization: None,
-            schedule_grant_hash: None,
             cancellation: CancellationToken::new(),
         },
     );
@@ -741,11 +742,11 @@ async fn launch_scheduled_agent_run(
     cancellation: CancellationToken,
 ) -> Result<ScheduleRunCompletion, ScheduleLaunchError> {
     let state = app.state::<DesktopState>();
-    let authorization = match validate_schedule_runtime(&state, &schedule, &task_run).await {
-        Ok(value) => value,
+    match validate_schedule_runtime(&state, &schedule, &task_run).await {
+        Ok(()) => {}
         Err(error) => return Ok(needs_attention_completion(error)),
-    };
-    let (created, project_snapshot) = create_agent_run_for_schedule(
+    }
+    let (launched, project_snapshot) = match create_agent_run_for_schedule(
         &state,
         &schedule,
         &task_run,
@@ -754,11 +755,14 @@ async fn launch_scheduled_agent_run(
             idempotency_key: format!("schedule-run:{}", task_run.id),
             origin: None,
             interactive: false,
-            cancellation: cancellation.child_token(),
         },
     )
     .await
-    .map_err(command_to_launch_error)?;
+    {
+        Ok(value) => value,
+        Err(error) => return schedule_creation_error_outcome(error),
+    };
+    let created = launched.created;
     state
         .agent_store
         .bind_task_run_execution(&task_run.id, &created.session.id, &created.run.id, now_ms())
@@ -814,9 +818,9 @@ async fn launch_scheduled_agent_run(
             client,
             schedule: schedule.clone(),
             created: created.clone(),
+            authority: launched.authority,
+            capability_grants: launched.capability_grants,
             project_snapshot,
-            schedule_authorization: Some(authorization.scope),
-            schedule_grant_hash: Some(authorization.grant_hash),
             cancellation: cancellation.clone(),
         },
     );
@@ -862,17 +866,29 @@ async fn launch_scheduled_agent_run(
                     if event == "runtime.extension_drift.needs_attention"
             )
     });
-    let schedule_grant_needs_attention = has_schedule_host_grant_attention(&run_events, &run.id);
+    let host_revision_needs_attention = has_host_revision_attention(&run_events, &run.id);
+    let authority_needs_attention = run_events.iter().any(|event| {
+        event.run_id.as_ref() == Some(&run.id)
+            && matches!(
+                &event.payload,
+                hachimi_protocol::RunEventPayload::Generic { event, .. }
+                    if event == hachimi_agent::AUTHORITY_NEEDS_ATTENTION_EVENT
+            )
+    }) || run.failure_code.as_deref()
+        == Some("authority_needs_attention");
     let needs_attention = elicitation_needs_attention
         || runtime_drift_needs_attention
-        || schedule_grant_needs_attention;
+        || host_revision_needs_attention
+        || authority_needs_attention;
     let status = scheduled_completion_status(run.status, timed_out, needs_attention);
     let execution_error_code = result.err().map(|error| error.code);
     Ok(ScheduleRunCompletion {
         status,
         result_summary: summary,
-        error_code: if schedule_grant_needs_attention {
-            Some("schedule_host_grant_needs_attention".into())
+        error_code: if authority_needs_attention {
+            Some("authority_needs_attention".into())
+        } else if host_revision_needs_attention {
+            Some("host_revision_snapshot_needs_attention".into())
         } else if runtime_drift_needs_attention {
             Some("runtime_extension_drift_needs_attention".into())
         } else if elicitation_needs_attention {
@@ -880,7 +896,12 @@ async fn launch_scheduled_agent_run(
         } else {
             execution_error_code
         },
-        error_summary: if schedule_grant_needs_attention {
+        error_summary: if authority_needs_attention {
+            Some(
+                "the scheduled Run attempted a filesystem, process, Browser, Computer, MCP, or Connector action outside its configured authority"
+                    .into(),
+            )
+        } else if host_revision_needs_attention {
             Some(
                 "a pinned Connector account, action, or contribution revision no longer authorizes the scheduled attachment download"
                     .into(),
@@ -892,7 +913,7 @@ async fn launch_scheduled_agent_run(
             )
         } else if elicitation_needs_attention {
             Some(
-                "an MCP server requested interactive input outside the persisted ScheduleGrant"
+                "an MCP server requested interactive input outside the persisted Schedule policy"
                     .into(),
             )
         } else {
@@ -906,41 +927,21 @@ async fn launch_scheduled_agent_run(
     })
 }
 
-#[derive(Debug)]
-struct RuntimeAuthorization {
-    scope: ScheduleAuthorizationScope,
-    grant_hash: String,
-}
-
 async fn validate_schedule_runtime(
     state: &DesktopState,
     schedule: &ScheduleDefinition,
     task: &TaskRunRecord,
-) -> Result<RuntimeAuthorization, ScheduleLaunchError> {
-    let grant = state
-        .agent_store
-        .active_schedule_grant(&schedule.id)
-        .await
-        .map_err(store_to_launch_error)?
-        .ok_or_else(|| {
-            attention(
-                "schedule_authorization_required",
-                "Schedule authorization is missing",
-            )
-        })?;
-    let current_scope = schedule_scope_with_extension_snapshots(state, schedule)
-        .await
-        .map_err(|error| attention(error.code, error.message))?;
-    if grant.permission_revision != schedule.permission_revision
-        || task.permission_snapshot_hash.as_deref() != Some(grant.scope_hash.as_str())
-        || grant.scope != current_scope
-    {
+) -> Result<(), ScheduleLaunchError> {
+    if task.schedule_revision != Some(schedule.config_revision) {
         return Err(attention(
-            "schedule_authorization_stale",
-            "the persisted Schedule authorization no longer matches this invocation",
+            "schedule_definition_stale",
+            "the Schedule definition changed after this invocation was claimed",
         ));
     }
-    if schedule.permission_config.permission_profile != PermissionProfile::ReadOnly
+    validate_schedule_runtime_revisions(state, schedule)
+        .await
+        .map_err(|error| attention(error.code, error.message))?;
+    if schedule.permission_policy.level != PermissionProfile::ReadOnly
         && state.sandbox_status() != hachimi_sandbox::SandboxStatus::Enforced
     {
         return Err(attention(
@@ -948,31 +949,10 @@ async fn validate_schedule_runtime(
             "background write, process, network, or external side effects require an enforced Sandbox",
         ));
     }
-    if matches!(
-        schedule.context_template,
-        ScheduleContextTemplate::Project {
-            execution_target: ExecutionTarget::ManagedWorktree { .. },
-            ..
-        }
-    ) && state
-        .agent_store
-        .count_schedule_retained_worktrees(&schedule.id)
-        .await
-        .map_err(store_to_launch_error)?
-        >= 5
-    {
-        return Err(attention(
-            "schedule_dirty_worktree_limit",
-            "five unreviewed dirty Worktrees are already retained for this Schedule",
-        ));
-    }
     validate_schedule_extensions(state, &schedule.id)
         .await
         .map_err(|error| attention(error.code, error.message))?;
-    Ok(RuntimeAuthorization {
-        scope: grant.scope,
-        grant_hash: grant.scope_hash,
-    })
+    Ok(())
 }
 
 async fn validate_schedule_extensions(
@@ -992,89 +972,62 @@ async fn validate_definition_extensions(
     state: &DesktopState,
     schedule: &ScheduleDefinition,
 ) -> Result<(), CommandError> {
-    if schedule
-        .host_grant
-        .browser
-        .as_ref()
-        .is_some_and(|browser| browser.enabled)
+    let browser = &schedule.permission_policy.rules.browser;
+    if schedule.permission_policy.level == hachimi_protocol::PermissionProfile::FullAccess
+        || browser.observe
+        || browser.act
+        || browser.upload
+        || browser.download
+        || browser.cookie_storage
+        || browser.cdp
     {
         state
             .embedded_browser
             .attest()
             .map_err(|error| CommandError::operation("schedule_browser_host_not_ready", error))?;
     }
-    schedule_scope_with_extension_snapshots(state, schedule)
+    validate_schedule_runtime_revisions(state, schedule)
         .await
         .map(|_| ())
 }
 
-async fn schedule_scope_with_extension_snapshots(
+async fn validate_schedule_runtime_revisions(
     state: &DesktopState,
     schedule: &ScheduleDefinition,
-) -> Result<ScheduleAuthorizationScope, CommandError> {
-    validate_schedule_host_grant(schedule)?;
-    crate::schedule_host_grants::validate_enterprise_attachment_scope(schedule)
-        .map_err(|error| CommandError::new(error.code, error.message))?;
-    crate::schedule_host_grants::validate_schedule_connector_selections(
-        &state.plugin_host,
-        &schedule.host_grant.connectors,
-    )
-    .await
-    .map_err(|error| CommandError::new(error.code, error.message))?;
-    state
-        .plugin_host
-        .verify_contribution_revisions(&schedule.contribution_revisions)
+) -> Result<(), CommandError> {
+    let full_access = schedule.permission_policy.level == PermissionProfile::FullAccess;
+    validate_unattended_browser_policy(schedule)?;
+    if !full_access {
+        crate::host_revision_snapshots::validate_enterprise_attachment_scope(schedule)
+            .map_err(|error| CommandError::new(error.code, error.message))?;
+        crate::host_revision_snapshots::validate_connector_revision_selections(
+            &state.plugin_host,
+            &schedule.host_revision_snapshot.connectors,
+        )
         .await
-        .map_err(|error| CommandError::operation("schedule_contribution_drift", error))?;
+        .map_err(|error| CommandError::new(error.code, error.message))?;
+        state
+            .plugin_host
+            .verify_contribution_revisions(&schedule.contribution_revisions)
+            .await
+            .map_err(|error| CommandError::operation("schedule_contribution_drift", error))?;
+    }
     let skill_context = match &schedule.context_template {
-        ScheduleContextTemplate::General => hachimi_skills::SkillCatalogContext::default(),
-        ScheduleContextTemplate::Project { project_id, .. } => {
-            let project = state
-                .agent_store
-                .get_project(project_id)
-                .await
-                .map_err(scheduler_error)?
-                .ok_or_else(|| {
-                    CommandError::new(
-                        "schedule_project_unavailable",
-                        "Schedule Project no longer exists",
-                    )
-                })?;
-            hachimi_skills::SkillCatalogContext {
-                project_root: Some(PathBuf::from(project.root_path)),
-                checkout_root: None,
-            }
-        }
-        ScheduleContextTemplate::SessionContinuation { session_id } => {
-            let session = state
-                .agent_store
-                .get_session(session_id)
-                .await
-                .map_err(scheduler_error)?
-                .ok_or_else(|| {
-                    CommandError::new(
-                        "schedule_session_unavailable",
-                        "Schedule continuation Session no longer exists",
-                    )
-                })?;
-            if let Some(project_id) = session.context.project_id() {
-                let project = state
+        ScheduleContextTemplate::Workspace { workspace, .. } => {
+            let project_root = match workspace {
+                hachimi_protocol::ScheduleWorkspaceSpec::Managed => state
                     .agent_store
-                    .get_project(project_id)
+                    .workspace_for_owner(hachimi_storage::WorkspaceOwnerRef::Schedule(&schedule.id))
                     .await
                     .map_err(scheduler_error)?
-                    .ok_or_else(|| {
-                        CommandError::new(
-                            "schedule_project_unavailable",
-                            "Schedule continuation Project no longer exists",
-                        )
-                    })?;
-                hachimi_skills::SkillCatalogContext {
-                    project_root: Some(PathBuf::from(project.root_path)),
-                    checkout_root: None,
+                    .map(|workspace| PathBuf::from(workspace.root_path)),
+                hachimi_protocol::ScheduleWorkspaceSpec::SelectedDirectory { root_path } => {
+                    Some(PathBuf::from(root_path))
                 }
-            } else {
-                hachimi_skills::SkillCatalogContext::default()
+            };
+            hachimi_skills::SkillCatalogContext {
+                project_root,
+                checkout_root: None,
             }
         }
     };
@@ -1128,13 +1081,16 @@ async fn schedule_scope_with_extension_snapshots(
             tree_revision: skill.tree_revision.clone(),
         });
     }
-    if !schedule.mcp_tool_allowlist.is_empty() && !state.control_plane.feature_flags().mcp_runtime {
+    if !full_access
+        && !schedule.mcp_tool_allowlist.is_empty()
+        && !state.control_plane.feature_flags().mcp_runtime
+    {
         return Err(CommandError::new(
             "schedule_mcp_unavailable",
             "MCP connectors are disabled",
         ));
     }
-    if !schedule.mcp_tool_allowlist.is_empty() {
+    if !full_access && !schedule.mcp_tool_allowlist.is_empty() {
         let runtimes =
             state.mcp_control.ready_runtimes().await.map_err(|error| {
                 CommandError::operation("schedule_mcp_validation_failed", error)
@@ -1158,111 +1114,96 @@ async fn schedule_scope_with_extension_snapshots(
                     ),
                 ));
             };
-            if !runtime
+            let requires_write = !runtime
                 .configuration
                 .read_only_tools
-                .contains(&selection.tool_name)
-            {
-                let exact_target = format!(
-                    "mcp:{}:{}",
-                    selection.server_id.as_str(),
-                    selection.tool_name
-                );
-                if schedule.permission_config.permission_profile
-                    != PermissionProfile::ExternalSandbox
-                    || !schedule
-                        .permission_config
-                        .external_targets
-                        .contains(&exact_target)
-                {
+                .contains(&selection.tool_name);
+            if !schedule.permission_policy.allows_mcp(
+                &selection.server_id,
+                &selection.tool_name,
+                &selection.schema_hash,
+                requires_write,
+            ) {
+                return Err(CommandError::new(
+                    "schedule_mcp_tool_not_authorized",
+                    format!(
+                        "MCP tool {} on {} requires an exact persisted rule",
+                        selection.tool_name, selection.server_id
+                    ),
+                ));
+            }
+        }
+    }
+    if !full_access {
+        for selection in &schedule.host_revision_snapshot.connectors {
+            for action in &selection.allowed_actions {
+                let requires_write =
+                    !schedule
+                        .permission_policy
+                        .rules
+                        .connectors
+                        .iter()
+                        .any(|rule| {
+                            rule.account_id == selection.account_id
+                                && rule
+                                    .read_only_actions
+                                    .iter()
+                                    .any(|read_only| read_only == action)
+                        });
+                if !schedule.permission_policy.allows_connector(
+                    &selection.account_id,
+                    action,
+                    requires_write,
+                ) {
                     return Err(CommandError::new(
-                        "schedule_mcp_side_effect_not_authorized",
+                        "schedule_connector_action_not_authorized",
                         format!(
-                            "MCP side-effect tool {} on {} requires an exact persisted target and ExternalSandbox permission",
-                            selection.tool_name, selection.server_id
+                            "Connector action {} on {} requires an exact persisted rule",
+                            action, selection.account_id
                         ),
                     ));
                 }
             }
         }
     }
-    let mut scope = schedule_scope(schedule);
-    scope.skill_revisions = skill_revisions;
-    scope.tool_allowlist.sort();
-    scope.tool_allowlist.dedup();
-    scope.skill_allowlist.sort();
-    scope.skill_allowlist.dedup();
-    scope
-        .skill_revisions
-        .sort_by(|left, right| left.skill_id.cmp(&right.skill_id));
-    scope
-        .skill_revisions
-        .dedup_by(|left, right| left.skill_id == right.skill_id);
-    scope.mcp_tool_allowlist.sort_by(|left, right| {
-        (
-            &left.server_id,
-            &left.tool_name,
-            &left.schema_hash,
-            &left.host_identity_hash,
-        )
-            .cmp(&(
-                &right.server_id,
-                &right.tool_name,
-                &right.schema_hash,
-                &right.host_identity_hash,
-            ))
-    });
-    scope.mcp_tool_allowlist.dedup();
-    scope.contribution_revisions.sort_by(|left, right| {
-        (&left.plugin_id, &left.contribution_id, &left.account_id).cmp(&(
-            &right.plugin_id,
-            &right.contribution_id,
-            &right.account_id,
-        ))
-    });
-    scope.contribution_revisions.dedup_by(|left, right| {
-        left.plugin_id == right.plugin_id
-            && left.contribution_id == right.contribution_id
-            && left.account_id == right.account_id
-    });
-    scope.permission_config.external_targets.sort();
-    scope.permission_config.external_targets.dedup();
-    Ok(scope)
-}
-
-fn validate_schedule_host_grant(schedule: &ScheduleDefinition) -> Result<(), CommandError> {
-    if schedule.host_grant.computer_unattended {
+    skill_revisions.sort();
+    skill_revisions.dedup();
+    if skill_revisions != schedule.skill_revisions {
         return Err(CommandError::new(
-            "computer_unattended_unsupported",
-            "Computer Host cannot run unattended",
+            "schedule_skill_revision_changed",
+            "a pinned Skill changed after the Schedule definition was saved",
         ));
     }
-    let Some(browser) = schedule.host_grant.browser.as_ref() else {
-        return Ok(());
-    };
-    if !browser.enabled {
+    Ok(())
+}
+
+fn validate_unattended_browser_policy(schedule: &ScheduleDefinition) -> Result<(), CommandError> {
+    if schedule.permission_policy.level == hachimi_protocol::PermissionProfile::FullAccess {
         return Ok(());
     }
-    if browser.document_origins.is_empty() || browser.capabilities.is_empty() {
+    let browser = &schedule.permission_policy.rules.browser;
+    if !(browser.observe
+        || browser.act
+        || browser.upload
+        || browser.download
+        || browser.cookie_storage
+        || browser.cdp)
+    {
+        return Ok(());
+    }
+    if browser.origins.is_empty() {
         return Err(CommandError::new(
             "schedule_browser_grant_invalid",
             "an unattended Browser grant requires a document origin and capability",
         ));
     }
-    if browser
-        .capabilities
-        .contains(&hachimi_protocol::BrowserCapability::Upload)
-    {
+    if browser.upload {
         return Err(CommandError::new(
             "schedule_browser_upload_unattended_unsupported",
             "unattended Browser upload requires a separately pinned file grant, which is not supported in this release",
         ));
     }
-    for origin in browser
-        .document_origins
-        .iter()
-        .chain(browser.resource_origins.iter())
-    {
+    for origin in &browser.origins {
         let normalized = hachimi_browser::normalized_origin(origin)
             .map_err(|error| CommandError::operation("schedule_browser_origin_invalid", error))?;
         if normalized != *origin {
@@ -1306,16 +1247,15 @@ struct ScheduleRunCreateInputs {
     idempotency_key: String,
     origin: Option<RunOrigin>,
     interactive: bool,
-    cancellation: CancellationToken,
 }
 
 struct CreatedRunExecution {
     client: hachimi_protocol::ClientContext,
     schedule: ScheduleDefinition,
     created: hachimi_storage::CreatedAgentRun,
+    authority: hachimi_protocol::RunAuthoritySnapshot,
+    capability_grants: hachimi_protocol::CapabilityGrantSet,
     project_snapshot: Option<WorkbenchTaskSnapshot>,
-    schedule_authorization: Option<ScheduleAuthorizationScope>,
-    schedule_grant_hash: Option<String>,
     cancellation: CancellationToken,
 }
 
@@ -1324,126 +1264,34 @@ async fn create_agent_run_for_schedule(
     schedule: &ScheduleDefinition,
     task: &TaskRunRecord,
     inputs: ScheduleRunCreateInputs,
-) -> Result<
-    (
-        hachimi_storage::CreatedAgentRun,
-        Option<WorkbenchTaskSnapshot>,
-    ),
-    CommandError,
-> {
+) -> Result<(LaunchedAgentRun, Option<WorkbenchTaskSnapshot>), CommandError> {
     let model_snapshot = state.settings.read().llm.clone();
     let now = now_ms();
-    let (context, execution_target, project_and_checkout, existing_session) =
-        match &schedule.context_template {
-            ScheduleContextTemplate::General => (SessionContextBinding::General, None, None, None),
-            ScheduleContextTemplate::Project {
-                project_id,
-                execution_target,
-            } => {
-                let project = state
-                    .agent_store
-                    .get_project(project_id)
-                    .await
-                    .map_err(scheduler_error)?
-                    .ok_or_else(|| {
-                        CommandError::new("project_not_found", "Schedule Project does not exist")
-                    })?;
-                let checkout = state
-                    .workbench
-                    .prepare_checkout(execution_target, &inputs.cancellation)
-                    .await
-                    .map_err(|error| CommandError::operation("schedule_checkout_failed", error))?;
-                (
-                    SessionContextBinding::Project {
-                        project_id: project.id.clone(),
-                        checkout_id: checkout.id.clone(),
-                    },
-                    Some(execution_target.clone()),
-                    Some((project, checkout)),
-                    None,
-                )
-            }
-            ScheduleContextTemplate::SessionContinuation { session_id } => {
-                let session = state
-                    .agent_store
-                    .get_session(session_id)
-                    .await
-                    .map_err(scheduler_error)?
-                    .ok_or_else(|| {
-                        CommandError::new(
-                            "schedule_session_unavailable",
-                            "Schedule continuation Session no longer exists",
-                        )
-                    })?;
-                if session.entry_profile != EntryProfile::Workbench {
-                    return Err(CommandError::new(
-                        "schedule_session_profile_invalid",
-                        "Only Workbench Sessions support scheduled continuation",
-                    ));
-                }
-                let context = session.context.clone();
-                let (execution_target, project_and_checkout) = match &context {
-                    SessionContextBinding::Project {
-                        project_id,
-                        checkout_id,
-                    } => {
-                        let project = state
-                            .agent_store
-                            .get_project(project_id)
-                            .await
-                            .map_err(scheduler_error)?
-                            .ok_or_else(|| {
-                                CommandError::new(
-                                    "project_not_found",
-                                    "Schedule continuation Project does not exist",
-                                )
-                            })?;
-                        let checkout = state
-                            .agent_store
-                            .get_checkout(checkout_id)
-                            .await
-                            .map_err(scheduler_error)?
-                            .ok_or_else(|| {
-                                CommandError::new(
-                                    "checkout_not_found",
-                                    "Schedule continuation Checkout does not exist",
-                                )
-                            })?;
-                        let target = match checkout.kind {
-                            CheckoutKind::Local => ExecutionTarget::Local {
-                                project_id: project_id.clone(),
-                            },
-                            CheckoutKind::ManagedWorktree => ExecutionTarget::ManagedWorktree {
-                                project_id: project_id.clone(),
-                                base_revision: checkout.base_revision.clone().ok_or_else(|| {
-                                    CommandError::new(
-                                        "checkout_revision_missing",
-                                        "Managed continuation Checkout has no base revision",
-                                    )
-                                })?,
-                            },
-                        };
-                        (Some(target), Some((project, checkout)))
-                    }
-                    SessionContextBinding::General | SessionContextBinding::Avatar { .. } => {
-                        (None, None)
-                    }
-                };
-                (
-                    context,
-                    execution_target,
-                    project_and_checkout,
-                    Some(session),
-                )
-            }
+    let ScheduleContextTemplate::Workspace {
+        workspace,
+        conversation_mode,
+    } = &schedule.context_template;
+    let workspace = ensure_schedule_workspace(state, schedule, workspace, now).await?;
+    let existing_session =
+        if *conversation_mode == hachimi_protocol::ScheduleConversationMode::SharedSession {
+            state
+                .agent_store
+                .session_for_workspace(&workspace.id)
+                .await
+                .map_err(scheduler_error)?
+        } else {
+            None
         };
+    let context = SessionContextBinding::Workspace {
+        workspace_id: workspace.id,
+    };
     let create_request = AgentRunCreateRequest {
         principal: inputs.principal,
         idempotency_key: inputs.idempotency_key,
         context,
         origin: inputs.origin.unwrap_or_else(|| {
             if inputs.interactive {
-                RunOrigin::Interactive
+                RunOrigin::Manual
             } else {
                 RunOrigin::Scheduled {
                     schedule_id: schedule.id.clone(),
@@ -1466,13 +1314,13 @@ async fn create_agent_run_for_schedule(
         entry_profile: schedule.entry_profile,
         workload_override: schedule.workload_override,
         behavior_mode: BehaviorMode::Default,
-        execution_target,
+        execution_target: None,
         approval_policy: if inputs.interactive {
             ApprovalPolicy::OnlyWhenNeeded
         } else {
             ApprovalPolicy::NeverPrompt
         },
-        permission_profile: schedule.permission_config.permission_profile,
+        permission_profile: schedule.permission_policy.level,
         budget: RunBudget {
             model_timeout_ms: schedule.timeout_ms.min(120_000),
             tool_timeout_ms: schedule.timeout_ms.min(120_000),
@@ -1481,20 +1329,98 @@ async fn create_agent_run_for_schedule(
         requested_capabilities: requested_capabilities(&model_snapshot),
         created_at_ms: now,
     };
-    let factory = AgentRunFactory::new(state.agent_store.clone());
-    let created = if let Some(session) = existing_session {
-        factory.create_in_session(create_request, session).await
+    let policy = state
+        .agent_store
+        .permission_policy(&format!("schedule:{}", schedule.id))
+        .await
+        .map_err(scheduler_error)?
+        .unwrap_or_else(|| {
+            let mut policy = schedule.permission_policy.clone();
+            policy.revision = schedule.permission_revision;
+            policy
+        });
+    let launcher = AgentRunLauncher::new(state.agent_store.clone());
+    let launch_request = AgentRunLaunchRequest {
+        create: create_request,
+        policy,
+        authority_mode: if inputs.interactive {
+            AuthorityMode::Interactive
+        } else {
+            AuthorityMode::Unattended
+        },
+    };
+    let owner_key = format!("schedule:{}", schedule.id);
+    let launched = if let Some(session) = existing_session {
+        launcher
+            .launch_in_session_with_policy_owner(launch_request, session, owner_key)
+            .await
     } else {
-        factory.create(create_request).await
+        launcher
+            .launch_new_with_policy_owner(launch_request, owner_key)
+            .await
     }
     .map_err(|error| CommandError::operation("schedule_run_create_failed", error))?;
-    let snapshot = project_and_checkout.map(|(project, checkout)| WorkbenchTaskSnapshot {
-        project: Some(project),
-        checkout: Some(checkout),
-        session: created.session.clone(),
-        run: created.run.clone(),
-    });
-    Ok((created, snapshot))
+    Ok((launched, None))
+}
+
+async fn ensure_schedule_workspace(
+    state: &DesktopState,
+    schedule: &ScheduleDefinition,
+    spec: &hachimi_protocol::ScheduleWorkspaceSpec,
+    timestamp_ms: i64,
+) -> Result<hachimi_protocol::AgentWorkspace, CommandError> {
+    let owner = hachimi_storage::WorkspaceOwnerRef::Schedule(&schedule.id);
+    let workspace_id = state
+        .agent_store
+        .workspace_for_owner(owner)
+        .await
+        .map_err(scheduler_error)?
+        .map_or_else(hachimi_protocol::WorkspaceId::random, |workspace| {
+            workspace.id
+        });
+    match spec {
+        hachimi_protocol::ScheduleWorkspaceSpec::Managed => state
+            .agent_store
+            .ensure_managed_workspace(workspace_id, owner, timestamp_ms)
+            .await
+            .map_err(scheduler_error),
+        hachimi_protocol::ScheduleWorkspaceSpec::SelectedDirectory { root_path } => {
+            reject_selected_workspace_inside_data_root(state, std::path::Path::new(root_path))?;
+            state
+                .agent_store
+                .ensure_selected_workspace(
+                    workspace_id,
+                    owner,
+                    std::path::Path::new(root_path),
+                    timestamp_ms,
+                )
+                .await
+                .map_err(|error| {
+                    CommandError::new(
+                        "schedule_workspace_unavailable",
+                        format!("Selected Schedule directory is unavailable: {error}"),
+                    )
+                })
+        }
+    }
+}
+
+fn reject_selected_workspace_inside_data_root(
+    state: &DesktopState,
+    root: &std::path::Path,
+) -> Result<(), CommandError> {
+    let data_root = std::fs::canonicalize(&state.storage_layout.root).map_err(|error| {
+        CommandError::operation("schedule_workspace_data_root_unavailable", error)
+    })?;
+    let selected = std::fs::canonicalize(root)
+        .map_err(|error| CommandError::operation("schedule_workspace_unavailable", error))?;
+    if selected.starts_with(&data_root) {
+        return Err(CommandError::new(
+            "schedule_workspace_inside_data_root",
+            "Scheduled explicit directories cannot be inside Hachimi managed data",
+        ));
+    }
+    Ok(())
 }
 
 fn spawn_created_run(app: AppHandle, execution: CreatedRunExecution) {
@@ -1512,9 +1438,9 @@ async fn execute_created_run(
         client,
         schedule,
         created,
+        authority,
+        capability_grants,
         project_snapshot,
-        schedule_authorization,
-        schedule_grant_hash,
         cancellation: external_cancellation,
     } = execution;
     let executor = state.agent_executor.clone();
@@ -1530,118 +1456,57 @@ async fn execute_created_run(
             "the scheduled Agent Run was cancelled before dispatch",
         ));
     }
-    let workspace_root = project_snapshot.as_ref().map_or_else(
-        || "general://extensions".to_owned(),
-        |snapshot| {
-            snapshot.checkout.as_ref().map_or_else(
-                || "general://extensions".to_owned(),
-                |checkout| checkout.path.clone(),
-            )
-        },
+    let skill_allowlist = schedule.skill_allowlist.clone();
+    let mcp_tool_allowlist = schedule.mcp_tool_allowlist.clone();
+    let connector_revisions = schedule.host_revision_snapshot.connectors.as_slice();
+    let host_revision_snapshot = crate::host_revision_snapshots::snapshot_from_permission_policy(
+        &schedule.permission_policy,
+        connector_revisions,
     );
-    let mut capability_grants = expand_permission_profile(
-        created.run.configuration.permission_profile,
-        created.run.configuration.behavior_mode,
-        created.session.id.clone(),
-        created.run.id.clone(),
-        workspace_root,
-    );
-    if project_snapshot.is_none() {
-        capability_grants
-            .file_system
-            .retain(|grant| grant.access == hachimi_protocol::FileSystemAccess::Read);
-        capability_grants.process = hachimi_protocol::ProcessGrant::default();
-    }
-    if let Some(hash) = &schedule_grant_hash {
-        capability_grants.source = format!("schedule_grant:{hash}");
-        capability_grants.review_each_command = false;
-    }
-    let run_tool_allowlist = schedule_authorization.as_ref().map(|scope| {
-        let mut tools = scope.tool_allowlist.clone();
-        if !scope.skill_allowlist.is_empty() {
-            tools.extend([
-                hachimi_agent::SKILLS_LIST_TOOL.into(),
-                hachimi_agent::SKILLS_READ_TOOL.into(),
-            ]);
-        }
-        tools.extend(scope.mcp_tool_allowlist.iter().map(|selection| {
-            hachimi_capabilities::mcp_exposed_tool_name(
-                selection.server_id.as_str(),
-                &selection.tool_name,
-            )
-        }));
-        tools.sort();
-        tools.dedup();
-        tools
-    });
-    let skill_allowlist = schedule_authorization.as_ref().map_or_else(
-        || schedule.skill_allowlist.clone(),
-        |scope| scope.skill_allowlist.clone(),
-    );
-    let mcp_tool_allowlist = schedule_authorization.as_ref().map_or_else(
-        || schedule.mcp_tool_allowlist.clone(),
-        |scope| scope.mcp_tool_allowlist.clone(),
-    );
-    let schedule_host_grant = schedule_authorization
-        .as_ref()
-        .map(|scope| scope.host_grant.clone());
-    if let Some(host_grant) = &schedule_host_grant {
-        capability_grants.computer = hachimi_protocol::ComputerGrant::default();
-        capability_grants.browser = hachimi_protocol::BrowserGrant::default();
-        if let Some(browser) = &host_grant.browser
-            && browser.enabled
-        {
-            capability_grants.browser.observe = browser
-                .capabilities
-                .contains(&hachimi_protocol::BrowserCapability::Observe);
-            capability_grants.browser.act = browser
-                .capabilities
-                .contains(&hachimi_protocol::BrowserCapability::Act);
-            capability_grants.browser.upload = browser
-                .capabilities
-                .contains(&hachimi_protocol::BrowserCapability::Upload);
-            capability_grants.browser.download = browser
-                .capabilities
-                .contains(&hachimi_protocol::BrowserCapability::Download);
-            capability_grants.browser.cookie_storage = browser
-                .capabilities
-                .contains(&hachimi_protocol::BrowserCapability::CookieStorage);
-            capability_grants.browser.cdp = browser
-                .capabilities
-                .contains(&hachimi_protocol::BrowserCapability::Cdp);
-            capability_grants
-                .browser
-                .origins
-                .extend(browser.document_origins.iter().cloned());
-            capability_grants
-                .browser
-                .origins
-                .extend(browser.resource_origins.iter().cloned());
-            capability_grants.browser.origins.sort();
-            capability_grants.browser.origins.dedup();
-        }
-    }
+    let priority = match authority.mode {
+        hachimi_protocol::AuthorityMode::Interactive => AgentRunPriority::Interactive,
+        hachimi_protocol::AuthorityMode::Unattended => AgentRunPriority::Background,
+    };
     let operation = executor.execute(hachimi_agent::AgentRunRequest {
         principal: client.client_id.0,
         session: created.session,
         run: created.run,
-        priority: AgentRunPriority::Background,
+        authority,
+        priority,
+        user_input_availability: match priority {
+            AgentRunPriority::Interactive => hachimi_agent::UserInputAvailability::Available,
+            AgentRunPriority::Background => hachimi_agent::UserInputAvailability::Unavailable,
+        },
         capability_grants,
         sandbox_snapshot: state.sandbox_snapshot().report,
         attachment_ids: Vec::new(),
         skill_allowlist,
         mcp_tool_allowlist,
-        run_tool_allowlist,
-        schedule_host_grant,
+        run_tool_allowlist: None,
+        host_revision_snapshot,
         workload_override: schedule.workload_override,
         recovery_checkpoint: None,
         parent_agent_task_id: None,
         parent_run_id: None,
         agent_depth: 0,
     });
-    let mut result = operation
-        .await
-        .map_err(|error| CommandError::operation("scheduled_agent_execution_failed", error));
+    tokio::pin!(operation);
+    let mut result = tokio::select! {
+        execution = &mut operation => execution
+            .map_err(|error| CommandError::operation("scheduled_agent_execution_failed", error)),
+        () = external_cancellation.cancelled() => {
+            if let Some(active) = executor.registry().get(&created_run_id) {
+                let _ = executor.registry().cancel(&created_run_id, active.run_generation);
+            }
+            let _ = state.approval_broker.cancel_run(created_run_id.clone()).await;
+            let _ = state.user_input_broker.cancel_run(created_run_id.clone()).await;
+            let _ = operation.await;
+            Err(CommandError::new(
+                "scheduled_agent_cancelled",
+                "the scheduled Agent Run was cancelled because its authority changed",
+            ))
+        }
+    };
     if result.is_err() {
         ensure_run_failed(&state.agent_store, &created_run_id).await;
     }
@@ -1700,21 +1565,6 @@ async fn latest_assistant_summary(
         })
 }
 
-fn schedule_scope(schedule: &ScheduleDefinition) -> ScheduleAuthorizationScope {
-    ScheduleAuthorizationScope {
-        entry_profile: schedule.entry_profile,
-        workload_override: schedule.workload_override,
-        context_template: schedule.context_template.clone(),
-        tool_allowlist: schedule.tool_allowlist.clone(),
-        skill_allowlist: schedule.skill_allowlist.clone(),
-        skill_revisions: Vec::new(),
-        mcp_tool_allowlist: schedule.mcp_tool_allowlist.clone(),
-        permission_config: schedule.permission_config.clone(),
-        contribution_revisions: schedule.contribution_revisions.clone(),
-        host_grant: schedule.host_grant.clone(),
-    }
-}
-
 fn requested_capabilities(settings: &LlmSettings) -> ProviderCapabilities {
     let structured =
         settings.structured_output_mode != hachimi_protocol::StructuredOutputMode::Disabled;
@@ -1767,7 +1617,7 @@ pub(super) fn scheduled_completion_status(
     }
 }
 
-pub(super) fn has_schedule_host_grant_attention(
+pub(super) fn has_host_revision_attention(
     events: &[hachimi_protocol::RunEventEnvelope],
     run_id: &hachimi_protocol::RunId,
 ) -> bool {
@@ -1776,7 +1626,7 @@ pub(super) fn has_schedule_host_grant_attention(
             && matches!(
                 &event.payload,
                 hachimi_protocol::RunEventPayload::Generic { event, .. }
-                    if event == crate::schedule_host_grants::SCHEDULE_HOST_GRANT_ATTENTION_EVENT
+                    if event == crate::host_revision_snapshots::HOST_REVISION_ATTENTION_EVENT
             )
     })
 }
@@ -1812,6 +1662,17 @@ fn command_to_launch_error(error: CommandError) -> ScheduleLaunchError {
     }
 }
 
+fn schedule_creation_error_outcome(
+    error: CommandError,
+) -> Result<ScheduleRunCompletion, ScheduleLaunchError> {
+    let error = command_to_launch_error(error);
+    if error.code == "schedule_workspace_unavailable" {
+        Ok(needs_attention_completion(error))
+    } else {
+        Err(error)
+    }
+}
+
 fn store_to_launch_error(error: impl std::fmt::Display) -> ScheduleLaunchError {
     attention("schedule_store_failed", error.to_string())
 }
@@ -1824,7 +1685,7 @@ fn now_ms() -> i64 {
 mod tests {
     use super::{
         mcp_dependency_available, mutation_fingerprint, needs_attention_completion,
-        scheduled_completion_status, task_notification_status,
+        schedule_creation_error_outcome, scheduled_completion_status, task_notification_status,
     };
     use hachimi_protocol::{
         McpServerHealthRecord, McpServerHealthState, McpServerId, McpServerRecord,
@@ -1922,5 +1783,26 @@ mod tests {
             completion.error_code.as_deref(),
             Some("schedule_skill_dependency_missing")
         );
+    }
+
+    #[test]
+    fn unavailable_selected_workspace_is_reported_as_needs_attention() {
+        let completion = schedule_creation_error_outcome(super::CommandError::new(
+            "schedule_workspace_unavailable",
+            "selected directory no longer exists",
+        ))
+        .expect("workspace attention completion");
+        assert_eq!(completion.status, TaskRunStatus::NeedsAttention);
+        assert_eq!(
+            completion.error_code.as_deref(),
+            Some("schedule_workspace_unavailable")
+        );
+
+        let error = schedule_creation_error_outcome(super::CommandError::new(
+            "schedule_run_create_failed",
+            "database unavailable",
+        ))
+        .expect_err("unrelated launch errors remain failures");
+        assert_eq!(error.code, "schedule_run_create_failed");
     }
 }

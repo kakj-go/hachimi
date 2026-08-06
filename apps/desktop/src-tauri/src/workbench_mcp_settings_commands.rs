@@ -15,8 +15,7 @@ pub(crate) async fn list_mcp_servers(
     window: WebviewWindow,
     state: State<'_, DesktopState>,
 ) -> Result<Vec<McpServerView>, CommandError> {
-    state.authorize(&window, ControlMethod::ConnectorsManage)?;
-    require_window(&window, "workbench")?;
+    authorize_mcp_catalog(&window, &state)?;
     state
         .mcp_control
         .list()
@@ -164,13 +163,30 @@ pub(crate) async fn list_mcp_tools(
     state: State<'_, DesktopState>,
     server_id: hachimi_protocol::McpServerId,
 ) -> Result<Vec<hachimi_protocol::McpToolView>, CommandError> {
-    state.authorize(&window, ControlMethod::ConnectorsManage)?;
-    require_window(&window, "workbench")?;
+    authorize_mcp_catalog(&window, &state)?;
     state
         .mcp_control
         .list_tools(&server_id)
         .await
         .map_err(|error| CommandError::operation("mcp_tools_failed", error))
+}
+
+fn authorize_mcp_catalog(window: &WebviewWindow, state: &DesktopState) -> Result<(), CommandError> {
+    match window.label() {
+        "pet" => {
+            state.authorize(window, ControlMethod::LlmChat)?;
+        }
+        "workbench" => {
+            state.authorize(window, ControlMethod::ConnectorsManage)?;
+        }
+        _ => {
+            return Err(CommandError::new(
+                "unknown_window",
+                "untrusted MCP catalog client",
+            ));
+        }
+    }
+    Ok(())
 }
 
 #[tauri::command]

@@ -1,9 +1,13 @@
-use std::{collections::BTreeSet, path::Path};
+use std::{
+    collections::BTreeSet,
+    path::{Path, PathBuf},
+};
 
 use hachimi_protocol::{
-    CheckoutKind, ComputerControlStatus, EnvironmentActivity, EnvironmentChangeSummary,
-    EnvironmentGitSummary, EnvironmentHandoffState, ForgeKind, GitRefRecord, GitRemoteRecord,
-    PlanStepStatus, SessionContextBinding, SessionId, WorkbenchEnvironmentSnapshot,
+    AgentWorkspaceStatus, CheckoutKind, ComputerControlStatus, EnvironmentActivity,
+    EnvironmentChangeSummary, EnvironmentGitSummary, EnvironmentHandoffState, ForgeKind,
+    GitRefRecord, GitRemoteRecord, PlanStepStatus, SessionContextBinding, SessionId,
+    WorkbenchEnvironmentSnapshot,
 };
 use sha2::{Digest, Sha256};
 
@@ -22,71 +26,100 @@ impl WorkbenchService {
             .get_session(session_id)
             .await?
             .ok_or_else(|| WorkbenchError::SessionNotFound(session_id.clone()))?;
-        let (project_id, checkout_id) = match &session.context {
+        let (
+            checkout,
+            workspace,
+            root,
+            baseline_revision,
+            binding_revision,
+            environment_revision,
+            handoff,
+        ) = match &session.context {
             SessionContextBinding::Project {
                 project_id,
                 checkout_id,
-            } => (project_id, checkout_id),
-            _ => return Err(WorkbenchError::ProjectContextRequired),
+            } => {
+                let checkout = self
+                    .store
+                    .get_checkout(checkout_id)
+                    .await?
+                    .ok_or_else(|| WorkbenchError::CheckoutNotFound(checkout_id.clone()))?;
+                let state = self
+                    .store
+                    .ensure_session_environment_state(
+                        session_id,
+                        checkout_id,
+                        checkout.kind,
+                        checkout.head_revision.as_deref(),
+                    )
+                    .await?;
+                let local_checkout_id = self
+                    .store
+                    .list_checkouts(project_id)
+                    .await?
+                    .into_iter()
+                    .find(|candidate| candidate.kind == CheckoutKind::Local)
+                    .map(|candidate| candidate.id);
+                let active = self.store.checkout_has_active_runs(checkout_id).await?;
+                let leased = self.store.checkout_has_write_lease(checkout_id).await?;
+                let blocked_reason = if active {
+                    Some("active_run".to_owned())
+                } else if leased {
+                    Some("write_lease".to_owned())
+                } else {
+                    None
+                };
+                let handoff = EnvironmentHandoffState {
+                    local_checkout_id,
+                    managed_checkout_id: state.managed_checkout_id.clone(),
+                    can_handoff: blocked_reason.is_none(),
+                    blocked_reason,
+                };
+                (
+                    Some(checkout.clone()),
+                    None,
+                    PathBuf::from(&checkout.path),
+                    state.baseline_revision,
+                    state.binding_revision,
+                    state.revision,
+                    handoff,
+                )
+            }
+            SessionContextBinding::Workspace { workspace_id } => {
+                let workspace = self.store.workspace(workspace_id).await?.ok_or_else(|| {
+                    WorkbenchError::WorkspaceUnavailable(format!("not found: {workspace_id}"))
+                })?;
+                if workspace.status != AgentWorkspaceStatus::Ready {
+                    return Err(WorkbenchError::WorkspaceUnavailable(
+                        workspace
+                            .status_reason
+                            .clone()
+                            .unwrap_or_else(|| workspace.root_path.clone()),
+                    ));
+                }
+                let root = PathBuf::from(&workspace.root_path);
+                if !root.is_dir() {
+                    return Err(WorkbenchError::WorkspaceUnavailable(
+                        workspace.root_path.clone(),
+                    ));
+                }
+                (
+                    None,
+                    Some(workspace.clone()),
+                    root,
+                    None,
+                    0,
+                    u64::try_from(workspace.updated_at_ms.max(0)).unwrap_or(u64::MAX),
+                    EnvironmentHandoffState {
+                        local_checkout_id: None,
+                        managed_checkout_id: None,
+                        can_handoff: false,
+                        blocked_reason: Some("workspace_context".to_owned()),
+                    },
+                )
+            }
         };
-        let checkout = self
-            .store
-            .get_checkout(checkout_id)
-            .await?
-            .ok_or_else(|| WorkbenchError::CheckoutNotFound(checkout_id.clone()))?;
-        let state = self
-            .store
-            .ensure_session_environment_state(
-                session_id,
-                checkout_id,
-                checkout.kind,
-                checkout.head_revision.as_deref(),
-            )
-            .await?;
-        let root = Path::new(&checkout.path);
-        let head = git_optional(root, &["rev-parse", "HEAD"]).await?;
-        let branch = git_optional(root, &["symbolic-ref", "--quiet", "--short", "HEAD"])
-            .await?
-            .map(|value| value.trim().to_owned())
-            .filter(|value| !value.is_empty());
-        let status = git_required(
-            root,
-            &[
-                "status",
-                "--porcelain=v1",
-                "-z",
-                "--untracked-files=all",
-                "--ignored=no",
-            ],
-            None,
-        )
-        .await?;
-        let status_fingerprint = digest(status.as_bytes());
-        let changes = change_summary(root, state.baseline_revision.as_deref()).await?;
-        let refs = git_refs(root, branch.as_deref()).await?;
-        let remotes = git_remotes(root).await?;
-        let upstream = git_optional(root, &["rev-parse", "--abbrev-ref", "@{upstream}"])
-            .await?
-            .map(|value| value.trim().to_owned())
-            .filter(|value| !value.is_empty());
-        let (ahead, behind) = ahead_behind(root, upstream.as_deref()).await?;
-        let default_comparison_ref = default_comparison_ref(root, branch.as_deref(), &refs).await?;
-        let local_checkout_id = self
-            .store
-            .list_checkouts(project_id)
-            .await?
-            .into_iter()
-            .find(|candidate| candidate.kind == CheckoutKind::Local)
-            .map(|candidate| candidate.id);
-        let active = self.store.checkout_has_active_runs(checkout_id).await?;
-        let leased = self.store.checkout_has_write_lease(checkout_id).await?;
-        let blocked_reason = if active {
-            Some("active_run".to_owned())
-        } else if leased {
-            Some("write_lease".to_owned())
-        } else {
-            None
-        };
+        let (changes, git) = git_environment(&root, baseline_revision.as_deref()).await?;
         let browser_lease = self
             .store
             .active_browser_automation_lease_for_session(session_id)
@@ -186,38 +219,90 @@ impl WorkbenchService {
                 })
         });
         let sources = self.store.list_session_sources(session_id).await?;
-        let detached = branch.is_none();
         Ok(WorkbenchEnvironmentSnapshot {
             session_id: session.id,
             checkout,
-            binding_revision: state.binding_revision,
-            baseline_revision: state.baseline_revision,
+            workspace,
+            binding_revision,
+            baseline_revision,
             changes,
-            git: EnvironmentGitSummary {
-                branch,
-                head_sha: head,
-                detached,
-                status_fingerprint,
-                uncommitted_files: u32::try_from(status_records(&status)).unwrap_or(u32::MAX),
-                upstream,
-                ahead,
-                behind,
-                default_comparison_ref,
-                refs,
-                remotes,
-            },
-            handoff: EnvironmentHandoffState {
-                local_checkout_id,
-                managed_checkout_id: state.managed_checkout_id,
-                can_handoff: blocked_reason.is_none(),
-                blocked_reason,
-            },
+            git,
+            handoff,
             activity,
             sources,
-            revision: state.revision,
+            revision: environment_revision,
             generated_at_ms: now_ms(),
         })
     }
+}
+
+async fn git_environment(
+    root: &Path,
+    baseline: Option<&str>,
+) -> Result<(EnvironmentChangeSummary, EnvironmentGitSummary), WorkbenchError> {
+    let inside_work_tree = git_optional(root, &["rev-parse", "--is-inside-work-tree"])
+        .await?
+        .is_some_and(|value| value == "true");
+    if !inside_work_tree {
+        return Ok((
+            EnvironmentChangeSummary::default(),
+            EnvironmentGitSummary {
+                branch: None,
+                head_sha: None,
+                detached: false,
+                status_fingerprint: String::new(),
+                uncommitted_files: 0,
+                upstream: None,
+                ahead: 0,
+                behind: 0,
+                default_comparison_ref: None,
+                refs: Vec::new(),
+                remotes: Vec::new(),
+            },
+        ));
+    }
+    let head = git_optional(root, &["rev-parse", "HEAD"]).await?;
+    let branch = git_optional(root, &["symbolic-ref", "--quiet", "--short", "HEAD"])
+        .await?
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty());
+    let status = git_required(
+        root,
+        &[
+            "status",
+            "--porcelain=v1",
+            "-z",
+            "--untracked-files=all",
+            "--ignored=no",
+        ],
+        None,
+    )
+    .await?;
+    let refs = git_refs(root, branch.as_deref()).await?;
+    let remotes = git_remotes(root).await?;
+    let upstream = git_optional(root, &["rev-parse", "--abbrev-ref", "@{upstream}"])
+        .await?
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty());
+    let (ahead, behind) = ahead_behind(root, upstream.as_deref()).await?;
+    let default_comparison_ref = default_comparison_ref(root, branch.as_deref(), &refs).await?;
+    let detached = branch.is_none();
+    Ok((
+        change_summary(root, baseline).await?,
+        EnvironmentGitSummary {
+            branch,
+            head_sha: head,
+            detached,
+            status_fingerprint: digest(status.as_bytes()),
+            uncommitted_files: u32::try_from(status_records(&status)).unwrap_or(u32::MAX),
+            upstream,
+            ahead,
+            behind,
+            default_comparison_ref,
+            refs,
+            remotes,
+        },
+    ))
 }
 
 async fn change_summary(
@@ -466,10 +551,10 @@ mod tests {
     use std::process::Command;
 
     use hachimi_protocol::{
-        ApprovalPolicy, BehaviorMode, BrowserAutomationLeaseStatus, BrowserAutomationSurfaceKind,
-        BrowserCapability, EntryProfile, ExecutionTarget, LlmSettings, PlanAcceptanceRequest,
-        PlanId, PlanStep, PlanStepId, ProposedPlan, ProposedPlanStatus, RunStatus,
-        WorkbenchTaskStartRequest,
+        BehaviorMode, BrowserAutomationLeaseStatus, BrowserAutomationSurfaceKind,
+        BrowserCapability, EntryProfile, ExecutionTarget, LlmSettings, PermissionProfile,
+        PlanAcceptanceRequest, PlanId, PlanStep, PlanStepId, ProposedPlan, ProposedPlanStatus,
+        RunStatus, WorkbenchTaskStartRequest,
     };
     use hachimi_storage::AgentStore;
     use tokio_util::sync::CancellationToken;
@@ -535,7 +620,7 @@ mod tests {
                         project_id: project.id,
                     }),
                     behavior_mode: BehaviorMode::Plan,
-                    approval_policy: ApprovalPolicy::OnlyWhenNeeded,
+                    permission_profile: PermissionProfile::ReadOnly,
                     attachment_ids: Vec::new(),
                     skill_ids: Vec::new(),
                 },

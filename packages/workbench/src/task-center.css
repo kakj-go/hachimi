@@ -310,6 +310,17 @@
   margin-top: 0;
 }
 
+.task-directory-picker {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: end;
+}
+
+.task-directory-picker > button {
+  min-height: 36px;
+}
+
 .task-prompt-field {
   display: grid;
   gap: 7px;
@@ -426,6 +437,13 @@
 .task-connector-card > small {
   color: var(--color-text-faint);
   font-size: var(--font-size-xs);
+}
+
+.task-connector-action {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  padding-right: 8px;
 }
 
 .task-browser-grant {
@@ -670,6 +688,7 @@
   }
 
   .task-form-grid,
+  .task-directory-picker,
   .task-permission-section,
   .task-card-meta {
     grid-template-columns: minmax(0, 1fr);

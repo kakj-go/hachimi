@@ -19,7 +19,7 @@ import {
 } from "./production-workbench-fixtures";
 import { installEnvironmentSummaryVisualTests } from "./environment-summary-visual";
 import { assertPlatformIntegrationsVisualMatrix } from "./platform-integrations-visual";
-import { assertApprovalPolicyTones, installSessionScrollVisualTest } from "./session-scroll-visual";
+import { assertPermissionTones, installSessionScrollVisualTest } from "./session-scroll-visual";
 export async function installTauriMocks(
   page: Page,
   withComposerData = false,
@@ -1135,10 +1135,10 @@ test("production composer popovers dismiss outside and create visual Skill refer
     });
   }
 
-  await page.getByTestId("workbench-approval-policy").click();
-  const approvalPopover = page.getByTestId("workbench-approval-popover");
-  await expect(approvalPopover).toBeVisible();
-  await assertApprovalPolicyTones(page, approvalPopover);
+  await page.getByTestId("workbench-permission-profile").click();
+  const permissionPopover = page.getByTestId("workbench-permission-popover");
+  await expect(permissionPopover).toBeVisible();
+  await assertPermissionTones(page, permissionPopover);
   if (process.env.HACHIMI_CAPTURE_COMPOSER_QA) {
     await page.screenshot({
       path: resolve(import.meta.dirname, "../../../../target/composer-approval-popover-qa.png"),
@@ -1151,14 +1151,14 @@ test("production composer popovers dismiss outside and create visual Skill refer
     root.style.setProperty("--font-size-sm", "17px");
     root.style.setProperty("--font-size-md", "18px");
   });
-  await expect(approvalPopover).toHaveCSS("width", "380px");
-  await expect(approvalPopover.locator(".composer-popover-row-copy strong").first()).toHaveCSS(
+  await expect(permissionPopover).toHaveCSS("width", "380px");
+  await expect(permissionPopover.locator(".composer-popover-row-copy strong").first()).toHaveCSS(
     "font-size",
     "17px",
   );
-  const enlargedApprovalBox = await approvalPopover.boundingBox();
-  expect(enlargedApprovalBox).not.toBeNull();
-  expect(enlargedApprovalBox!.height).toBeLessThan(230);
+  const enlargedPermissionBox = await permissionPopover.boundingBox();
+  expect(enlargedPermissionBox).not.toBeNull();
+  expect(enlargedPermissionBox!.height).toBeLessThan(240);
   if (process.env.HACHIMI_CAPTURE_COMPOSER_QA) {
     await page.screenshot({
       path: resolve(
@@ -1424,12 +1424,12 @@ for (const route of ["general", "llm", "voice", "avatar", "skills", "mcp"] as co
       .disableRules(["nested-interactive"])
       .analyze();
     expect(result.violations).toEqual([]);
+    if (route === "avatar") await expect(page.getByText("预览不可用")).toBeVisible();
     await expect(page).toHaveScreenshot(`production-settings-${route}-1280x800.png`, {
       animations: "disabled",
     });
   });
 }
-
 for (const viewport of [
   { name: "1855x1343", width: 1855, height: 1343 },
   { name: "1024x768", width: 1024, height: 768 },

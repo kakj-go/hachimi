@@ -162,13 +162,7 @@ async fn launch_recovered_workbench_run(
                 })?;
             (project, checkout)
         }
-        hachimi_protocol::SessionContextBinding::General => (None, None),
-        hachimi_protocol::SessionContextBinding::Avatar { .. } => {
-            return Err(CommandError::new(
-                "run_recovery_context_unsupported",
-                "Avatar Runs cannot be resumed through Workbench",
-            ));
-        }
+        hachimi_protocol::SessionContextBinding::Workspace { .. } => (None, None),
     };
     spawn_workbench_run_with_recovery(
         app,
@@ -677,53 +671,50 @@ pub(super) fn spawn_workbench_run_with_recovery(
             .into_iter()
             .map(|attachment| attachment.attachment.id)
             .collect();
+        let authority = store
+            .authority_snapshot(&snapshot.run.id)
+            .await
+            .ok()
+            .flatten();
+        let Some(authority) = authority else {
+            tracing::warn!(run_id = %run_id, "workbench Run has no immutable authority snapshot");
+            if let Ok(Some(current)) = store.get_run(&run_id).await
+                && current.status == hachimi_protocol::RunStatus::Queued
+            {
+                let _ = store
+                    .transition_run(&run_id, hachimi_protocol::RunStatus::Preparing, None)
+                    .await;
+                let _ = store
+                    .transition_run(
+                        &run_id,
+                        hachimi_protocol::RunStatus::Failed,
+                        Some("run_authority_snapshot_missing"),
+                    )
+                    .await;
+            }
+            if let Ok(Some(run)) = store.get_run(&run_id).await {
+                emit_workbench_run_completion(&app, run);
+            }
+            return;
+        };
+        let policy = authority.policy.clone();
+        let workspace_root = authority.workspace_root.clone();
+        let mut capability_grants = hachimi_policy::expand_permission_policy(
+            &policy,
+            hachimi_protocol::AuthorityMode::Interactive,
+            snapshot.run.configuration.behavior_mode,
+            snapshot.session.id.clone(),
+            snapshot.run.id.clone(),
+            workspace_root,
+        );
+        if snapshot.run.configuration.behavior_mode != hachimi_protocol::BehaviorMode::Plan {
+            capability_grants
+                .network
+                .protocols
+                .extend(["managed-connector".into(), "model-runtime".into()]);
+        }
         let capability_grants = interactive_grants::for_workbench_run(
-            snapshot.checkout.as_ref().map_or_else(
-                || {
-                    let external = snapshot.run.configuration.permission_profile
-                        != hachimi_protocol::PermissionProfile::ReadOnly
-                        && snapshot.run.configuration.behavior_mode
-                            != hachimi_protocol::BehaviorMode::Plan;
-                    hachimi_protocol::CapabilityGrantSet {
-                        profile: snapshot.run.configuration.permission_profile,
-                        session_id: snapshot.session.id.clone(),
-                        run_id: Some(snapshot.run.id.clone()),
-                        source: "general_session".into(),
-                        file_system: vec![hachimi_protocol::FileSystemGrant {
-                            access: hachimi_protocol::FileSystemAccess::Read,
-                            roots: Vec::new(),
-                            globs: Vec::new(),
-                            special_roots: Vec::new(),
-                        }],
-                        network: hachimi_protocol::NetworkGrant {
-                            enabled: external,
-                            hosts: Vec::new(),
-                            protocols: vec!["managed-connector".into(), "model-runtime".into()],
-                        },
-                        review_each_command: true,
-                        ..hachimi_protocol::CapabilityGrantSet::default()
-                    }
-                },
-                |checkout| {
-                    let mut grants = expand_permission_profile(
-                        snapshot.run.configuration.permission_profile,
-                        snapshot.run.configuration.behavior_mode,
-                        snapshot.session.id.clone(),
-                        snapshot.run.id.clone(),
-                        checkout.path.clone(),
-                    );
-                    if snapshot.run.configuration.behavior_mode
-                        != hachimi_protocol::BehaviorMode::Plan
-                    {
-                        grants.network.enabled = true;
-                        grants
-                            .network
-                            .protocols
-                            .extend(["managed-connector".into(), "model-runtime".into()]);
-                    }
-                    grants
-                },
-            ),
+            capability_grants,
             snapshot.run.configuration.behavior_mode,
         );
         let execution = executor
@@ -731,14 +722,16 @@ pub(super) fn spawn_workbench_run_with_recovery(
                 principal: client.client_id.0,
                 session: snapshot.session.clone(),
                 run: snapshot.run.clone(),
+                authority,
                 priority: hachimi_agent::AgentRunPriority::Interactive,
+                user_input_availability: hachimi_agent::UserInputAvailability::Available,
                 capability_grants,
                 sandbox_snapshot: sandbox_report,
                 attachment_ids: attachments,
                 skill_allowlist: explicit_skill_ids,
                 mcp_tool_allowlist: Vec::new(),
                 run_tool_allowlist: None,
-                schedule_host_grant: None,
+                host_revision_snapshot: None,
                 workload_override: snapshot.run.configuration.workload_override,
                 recovery_checkpoint,
                 parent_agent_task_id: None,
@@ -871,25 +864,19 @@ impl hachimi_agent::ModelRuntime for DesktopE2eModel {
                     }]
                 }),
             })
-        } else if pet_cross_window && !completed_tools.contains(&"connector_invoke") {
+        } else if pet_cross_window && !completed_tools.contains(&"workspace_write_file") {
             tool_call_events(ModelToolCall {
-                id: ToolCallId::from("desktop-e2e-pet-approval"),
-                name: "connector_invoke".into(),
+                id: ToolCallId::from("desktop-e2e-pet-workspace-write"),
+                name: "workspace_write_file".into(),
                 arguments: serde_json::json!({
-                    "accountId": "desktop-e2e-missing-account",
-                    "action": "create",
-                    "arguments": { "name": "cross-window approval" },
-                    "idempotencyKey": "desktop-e2e-pet-cross-window",
-                    "expectedRevision": {
-                        "hostIdentityHash": "desktop-e2e",
-                        "schemaHash": "desktop-e2e",
-                        "actionHash": "desktop-e2e"
-                    }
+                    "path": "pet-cross-window-evidence.txt",
+                    "content": "Pet unified Agent workspace evidence\n",
+                    "expectedSha256": null
                 }),
             })
         } else if pet_cross_window {
             desktop_e2e_text_response(
-                "Pet cross-window UserInput and Approval completed on one Agent Run.",
+                "Pet cross-window UserInput and writable Workspace action completed on one Agent Run.",
             )
         } else if implicit_office_workflow && !completed_tools.contains(&"skills.list") {
             tool_call_events(ModelToolCall {

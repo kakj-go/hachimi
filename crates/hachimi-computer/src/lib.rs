@@ -910,7 +910,7 @@ mod tests {
 
     fn grants(session_id: &SessionId, run_id: &RunId) -> CapabilityGrantSet {
         CapabilityGrantSet {
-            profile: PermissionProfile::ExternalSandbox,
+            profile: PermissionProfile::FullAccess,
             scope: PermissionGrantScope::Run,
             session_id: session_id.clone(),
             run_id: Some(run_id.clone()),

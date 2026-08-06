@@ -1,4 +1,6 @@
-use hachimi_protocol::{ComputerAction, ComputerWindowIdentity};
+use hachimi_protocol::{
+    CapabilityGrantSet, ComputerAction, ComputerWindowIdentity, PermissionProfile,
+};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
@@ -48,6 +50,29 @@ pub(super) fn computer_target_summary(target: &ComputerWindowIdentity, action: &
         stable_hash(target.app_id.as_bytes()),
         stable_hash(target.fingerprint.as_bytes())
     )
+}
+
+pub(super) fn unattended_computer_target_allowed(
+    grants: &CapabilityGrantSet,
+    target: &ComputerWindowIdentity,
+) -> bool {
+    grants.profile == PermissionProfile::FullAccess
+        || grants.computer.target_windows.iter().any(|allowed| {
+            let allowed = allowed.trim();
+            !allowed.is_empty()
+                && [
+                    target.app_id.as_str(),
+                    target.app.app_id.as_str(),
+                    target.app.display_name.as_str(),
+                    target.app.executable_name.as_str(),
+                    target.app.identity_hash.as_str(),
+                    target.title.as_str(),
+                    target.fingerprint.as_str(),
+                ]
+                .into_iter()
+                .chain(target.app.executable_path.as_deref())
+                .any(|candidate| candidate.eq_ignore_ascii_case(allowed))
+        })
 }
 
 pub(super) const fn computer_action_category(action: &ComputerAction) -> &'static str {
@@ -126,4 +151,53 @@ pub(super) fn object_schema(properties: Value, required: &[&str]) -> Value {
 
 pub(super) fn now_ms() -> i64 {
     i64::try_from(crate::epoch_millis()).unwrap_or(i64::MAX)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn target() -> ComputerWindowIdentity {
+        ComputerWindowIdentity {
+            app_id: "notepad".into(),
+            app: hachimi_protocol::ComputerAppDescriptor {
+                app_id: "notepad".into(),
+                display_name: "Notepad".into(),
+                executable_name: "notepad.exe".into(),
+                executable_path: Some("C:\\Windows\\System32\\notepad.exe".into()),
+                publisher: Some("Microsoft".into()),
+                publisher_verified: true,
+                package_family_name: None,
+                app_user_model_id: None,
+                file_identity: None,
+                identity_hash: "identity-1".into(),
+            },
+            process_id: 42,
+            window_handle: "window-1".into(),
+            fingerprint: "fingerprint-1".into(),
+            title: "notes.txt - Notepad".into(),
+            elevated: false,
+            protected_desktop: false,
+            hachimi_owned: false,
+        }
+    }
+
+    #[test]
+    fn unattended_computer_scope_matches_stable_application_identifiers() {
+        let mut grants = CapabilityGrantSet::default();
+        grants.computer.target_windows = vec!["NOTEPAD.EXE".into()];
+
+        assert!(unattended_computer_target_allowed(&grants, &target()));
+        grants.computer.target_windows = vec!["calculator.exe".into()];
+        assert!(!unattended_computer_target_allowed(&grants, &target()));
+    }
+
+    #[test]
+    fn full_access_allows_any_computer_target() {
+        let grants = CapabilityGrantSet {
+            profile: PermissionProfile::FullAccess,
+            ..CapabilityGrantSet::default()
+        };
+        assert!(unattended_computer_target_allowed(&grants, &target()));
+    }
 }

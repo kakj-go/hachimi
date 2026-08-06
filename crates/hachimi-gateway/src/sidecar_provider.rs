@@ -131,7 +131,7 @@ impl SandboxedStdioChannelProvider {
         let bundle_root = self.bundle_root.to_string_lossy().into_owned();
         let executable = self.executable.to_string_lossy().into_owned();
         let grants = CapabilityGrantSet {
-            profile: PermissionProfile::WorkspaceWrite,
+            profile: PermissionProfile::Writable,
             scope: PermissionGrantScope::Run,
             session_id: session_id.clone(),
             run_id: Some(run_id.clone()),

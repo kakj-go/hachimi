@@ -619,6 +619,55 @@
   }
 }
 
+.composer-permission-extra {
+  display: grid;
+  gap: 8px;
+  margin: 8px 10px 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border-subtle);
+}
+
+.composer-permission-extra-heading {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: var(--font-size-xs);
+}
+
+.composer-permission-extra-clear {
+  min-height: 28px;
+  gap: 5px;
+  padding: 0 8px;
+  color: var(--text-secondary);
+  font-size: var(--font-size-xs);
+}
+
+.composer-permission-extra ul {
+  display: grid;
+  max-height: 140px;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  overflow: auto;
+  list-style: none;
+}
+
+.composer-permission-extra li {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+  font-size: var(--font-size-xs);
+}
+
+.composer-permission-extra li code {
+  overflow: hidden;
+  color: var(--text-tertiary);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 html[data-color-scheme="light"] [data-component="floating-popover-content"].composer-popover {
   border-color: color-mix(in srgb, var(--color-text-base) 14%, transparent);
   box-shadow: var(--shadow-overlay);

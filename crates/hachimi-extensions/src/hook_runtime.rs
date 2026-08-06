@@ -248,7 +248,7 @@ async fn execute_hook_sidecar(
                 checkout_id: CheckoutId::random(),
                 checkout_root: temporary.path().to_path_buf(),
                 grants: CapabilityGrantSet {
-                    profile: PermissionProfile::WorkspaceWrite,
+                    profile: PermissionProfile::Writable,
                     scope: PermissionGrantScope::Run,
                     session_id: grant_session_id,
                     run_id: Some(grant_run_id),

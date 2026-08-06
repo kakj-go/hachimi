@@ -211,6 +211,7 @@ async function waitForRun(status, timeout = 60_000) {
 }
 
 async function timelineText() {
+  await switchToWorkbench();
   return browser.execute(() => document.querySelector(".timeline-items")?.textContent ?? "");
 }
 
@@ -255,22 +256,21 @@ describe("Hachimi Agent product tool reachability", () => {
     }
   });
 
-  it("runs spawn, wait, and collect through the real Coding ToolPlan", async () => {
+  it("runs spawn, wait, and collect through the real unified ToolPlan", async () => {
     await startProjectTask("[desktop-e2e:multi-agent-tools] run one bounded child task");
     await waitForRun("succeeded");
     await browser.refresh();
-    await waitForTimeline("Desktop E2E Coding Multi-Agent completed");
+    await waitForTimeline("Desktop E2E Coding unified ToolPlan completed");
     const timeline = await $('[data-testid="workbench-session-timeline"]');
     expect(Number(await timeline.getAttribute("data-agent-task-count"))).toBe(1);
     expect(await timeline.getAttribute("data-agent-task-statuses")).toContain("succeeded");
-    expect(await timelineText()).toContain("Desktop E2E Coding Multi-Agent completed");
+    expect(await timelineText()).toContain("Desktop E2E Coding unified ToolPlan completed");
   });
 
   it("pushes a local Remote successfully, then fences Remote drift", async () => {
     await startProjectTask(
       `[desktop-e2e:agent-git-forge] oid=${fixtureOid} push the local fixture and verify drift`,
     );
-    await approveNextSideEffect();
     await approveNextSideEffect();
     await waitForTimeline("forge_remote_drift", 90_000);
     await waitForRun("succeeded", 90_000);
@@ -288,7 +288,7 @@ describe("Hachimi Agent product tool reachability", () => {
     await startProjectTask(
       `[desktop-e2e:agent-forge-lifecycle] oid=${fixtureOid} exercise the loopback Forge lifecycle`,
     );
-    for (let index = 0; index < 4; index += 1) await approveNextSideEffect(90_000);
+    await approveNextSideEffect(90_000);
     await waitForTimeline("Forge query/create/update/close/merge completed", 120_000);
     await waitForRun("succeeded", 120_000);
     expect(await timelineText()).toContain("forge.change.mutate");
@@ -359,28 +359,28 @@ describe("Hachimi Agent product tool reachability", () => {
     await waitForRun("cancelled", 60_000);
   });
 
-  it("exposes enterprise attachments and Multi-Agent only in the General matrix", async () => {
+  it("exposes profile-independent enterprise attachment and Multi-Agent capabilities", async () => {
     await switchToWorkbench();
     await clickWhenReady('[data-testid="workbench-new-task"]');
     await $('[data-testid="workbench-composer-input"]').setValue(
       "[desktop-e2e:enterprise-attachment-tool] verify the General ToolPlan matrix",
     );
     await clickWhenReady('[data-testid="workbench-start-task"]');
-    await waitForTimeline("General ToolPlan exposed Multi-Agent", 60_000);
+    await waitForTimeline("General unified ToolPlan exposed", 60_000);
     await waitForRun("succeeded");
     expect(await timelineText()).toContain(
-      "General ToolPlan exposed Multi-Agent and enterprise attachment tools without Coding Git/Forge tools.",
+      "General unified ToolPlan exposed profile-independent Multi-Agent and enterprise attachment capabilities.",
     );
   });
 
-  it("runs Multi-Agent through General and Office ToolPlans", async () => {
+  it("runs Multi-Agent through General and Office unified ToolPlans", async () => {
     await switchToWorkbench();
     await clickWhenReady('[data-testid="workbench-new-task"]');
     await $('[data-testid="workbench-composer-input"]').setValue(
       "[desktop-e2e:multi-agent-general] run one bounded General child",
     );
     await clickWhenReady('[data-testid="workbench-start-task"]');
-    await waitForTimeline("General Multi-Agent completed", 90_000);
+    await waitForTimeline("General unified ToolPlan completed", 90_000);
     await waitForRun("succeeded", 90_000);
 
     await switchToWorkbench();
@@ -389,7 +389,7 @@ describe("Hachimi Agent product tool reachability", () => {
       "$office-documents [desktop-e2e:multi-agent-office] run one bounded Office child",
     );
     await clickWhenReady('[data-testid="workbench-start-task"]');
-    await waitForTimeline("Office Multi-Agent completed", 90_000);
+    await waitForTimeline("Office unified ToolPlan completed", 90_000);
     await waitForRun("succeeded", 90_000);
   });
 });

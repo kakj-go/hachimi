@@ -15,10 +15,10 @@ use std::{
 };
 
 use hachimi_protocol::{
-    ArtifactId, DeliveryPolicy, DeliveryStatus, EntryProfile, MisfirePolicy, PermissionProfile,
-    ScheduleAuthorizationScope, ScheduleDefinition, ScheduleGrantRecord, ScheduleHealth,
+    AgentPermissionPolicy, ArtifactId, DeliveryPolicy, DeliveryStatus, EntryProfile,
+    FileSystemAccess, MisfirePolicy, PermissionProfile, ScheduleDefinition, ScheduleHealth,
     ScheduleId, SchedulePreview, ScheduleSnapshot, ScheduleSpec, TaskRunId, TaskRunRecord,
-    TaskRunStatus, TaskRunTrigger, WorkloadKind,
+    TaskRunStatus, TaskRunTrigger,
 };
 use hachimi_storage::{AgentStore, AgentStoreError, ScheduleInvocationClaim};
 use parking_lot::Mutex;
@@ -27,7 +27,7 @@ use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 
 use crate::service_helpers::{
-    apply_stop_conditions, authorization_scope, build_grant, next_occurrence,
+    apply_stop_conditions, authority_configuration_changed, next_occurrence,
     required_next_occurrence, task_record,
 };
 use crate::{TimeZoneResolver, preview_schedule};
@@ -174,20 +174,6 @@ impl SchedulerService {
         principal: &str,
         idempotency_key: &str,
         mut definition: ScheduleDefinition,
-        authorize: bool,
-    ) -> Result<ScheduleSnapshot, SchedulerError> {
-        normalize_definition(&mut definition);
-        let grant_scope = authorize.then(|| authorization_scope(&definition));
-        self.create_with_grant_scope(principal, idempotency_key, definition, grant_scope)
-            .await
-    }
-
-    pub async fn create_with_grant_scope(
-        &self,
-        principal: &str,
-        idempotency_key: &str,
-        mut definition: ScheduleDefinition,
-        grant_scope: Option<ScheduleAuthorizationScope>,
     ) -> Result<ScheduleSnapshot, SchedulerError> {
         self.ensure_accepting()?;
         normalize_definition(&mut definition);
@@ -208,19 +194,11 @@ impl SchedulerService {
             } else {
                 None
             };
-        let grant = grant_scope
-            .map(|scope| build_grant(&definition, principal, now, scope))
-            .transpose()?;
-        if grant.is_some() {
-            definition.health = ScheduleHealth::Healthy;
-            definition.health_reason = None;
-        } else {
-            definition.health = ScheduleHealth::NeedsAuthorization;
-            definition.health_reason = Some("schedule_authorization_required".into());
-        }
+        definition.health = ScheduleHealth::Healthy;
+        definition.health_reason = None;
         let snapshot = self
             .store
-            .create_schedule_idempotent(principal, idempotency_key, &definition, grant.as_ref())
+            .create_schedule_idempotent(principal, idempotency_key, &definition)
             .await?;
         self.wake.notify_one();
         Ok(snapshot)
@@ -253,15 +231,15 @@ impl SchedulerService {
         }
         normalize_definition(&mut definition);
         validate_definition(&definition)?;
-        let scope_changed = authorization_scope(&current) != authorization_scope(&definition);
+        let scope_changed = authority_configuration_changed(&current, &definition);
         definition.created_by = current.created_by;
         definition.created_at_ms = current.created_at_ms;
         definition.config_revision = current.config_revision.saturating_add(1);
         definition.updated_at_ms = self.clock.now_ms();
         if scope_changed {
             definition.permission_revision = current.permission_revision.saturating_add(1);
-            definition.health = ScheduleHealth::NeedsAuthorization;
-            definition.health_reason = Some("schedule_permission_scope_changed".into());
+            definition.health = ScheduleHealth::Healthy;
+            definition.health_reason = None;
         } else {
             definition.permission_revision = current.permission_revision;
             definition.health = current.health;
@@ -281,8 +259,37 @@ impl SchedulerService {
             .store
             .update_schedule(&definition, expected_config_revision)
             .await?;
+        if scope_changed {
+            self.cancel_active_launches_for_schedule(&updated.id)
+                .await?;
+        }
         self.wake.notify_one();
         Ok(updated)
+    }
+
+    async fn cancel_active_launches_for_schedule(
+        &self,
+        schedule_id: &ScheduleId,
+    ) -> Result<usize, SchedulerError> {
+        let active = self
+            .active_launches
+            .lock()
+            .iter()
+            .map(|(task_id, cancellation)| (task_id.clone(), cancellation.clone()))
+            .collect::<Vec<_>>();
+        let mut cancelled = 0;
+        for (task_id, cancellation) in active {
+            if self
+                .store
+                .get_task_run(&task_id)
+                .await?
+                .is_some_and(|task| task.schedule_id.as_ref() == Some(schedule_id))
+            {
+                cancellation.cancel();
+                cancelled += 1;
+            }
+        }
+        Ok(cancelled)
     }
 
     pub async fn set_enabled(
@@ -320,52 +327,6 @@ impl SchedulerService {
         let removed = self.store.remove_schedule(schedule_id).await?;
         self.wake.notify_one();
         Ok(removed)
-    }
-
-    pub async fn reauthorize(
-        &self,
-        schedule_id: &ScheduleId,
-        principal: &str,
-    ) -> Result<ScheduleGrantRecord, SchedulerError> {
-        let schedule = self
-            .store
-            .get_schedule(schedule_id)
-            .await?
-            .ok_or_else(|| AgentStoreError::ScheduleNotFound(schedule_id.clone()))?;
-        let scope = authorization_scope(&schedule);
-        self.reauthorize_with_grant_scope(schedule_id, principal, scope)
-            .await
-    }
-
-    pub async fn reauthorize_with_grant_scope(
-        &self,
-        schedule_id: &ScheduleId,
-        principal: &str,
-        scope: ScheduleAuthorizationScope,
-    ) -> Result<ScheduleGrantRecord, SchedulerError> {
-        self.ensure_accepting()?;
-        let schedule = self
-            .store
-            .get_schedule(schedule_id)
-            .await?
-            .ok_or_else(|| AgentStoreError::ScheduleNotFound(schedule_id.clone()))?;
-        let grant = build_grant(&schedule, principal, self.clock.now_ms(), scope)?;
-        let grant = self.store.reauthorize_schedule(&grant).await?;
-        self.wake.notify_one();
-        Ok(grant)
-    }
-
-    pub async fn revoke_grant(
-        &self,
-        schedule_id: &ScheduleId,
-    ) -> Result<Option<ScheduleGrantRecord>, SchedulerError> {
-        self.ensure_accepting()?;
-        let grant = self
-            .store
-            .revoke_schedule_grant(schedule_id, self.clock.now_ms())
-            .await?;
-        self.wake.notify_one();
-        Ok(grant)
     }
 
     pub async fn run_now(&self, schedule_id: &ScheduleId) -> Result<TaskRunRecord, SchedulerError> {
@@ -782,10 +743,10 @@ pub(crate) fn scheduler_delay_ms(wake_at_ms: Option<i64>, now_ms: i64) -> u64 {
 fn normalize_definition(definition: &mut ScheduleDefinition) {
     definition.name = definition.name.trim().chars().take(200).collect();
     definition.prompt = definition.prompt.trim().to_owned();
-    definition.tool_allowlist.sort();
-    definition.tool_allowlist.dedup();
     definition.skill_allowlist.sort();
     definition.skill_allowlist.dedup();
+    definition.skill_revisions.sort();
+    definition.skill_revisions.dedup();
     definition.mcp_tool_allowlist.sort_by(|left, right| {
         (
             &left.server_id,
@@ -814,10 +775,10 @@ fn normalize_definition(definition: &mut ScheduleDefinition) {
             && left.account_id == right.account_id
     });
     definition
-        .host_grant
+        .host_revision_snapshot
         .connectors
         .sort_by(|left, right| left.account_id.cmp(&right.account_id));
-    for selection in &mut definition.host_grant.connectors {
+    for selection in &mut definition.host_revision_snapshot.connectors {
         selection.allowed_actions = selection
             .allowed_actions
             .iter()
@@ -826,15 +787,6 @@ fn normalize_definition(definition: &mut ScheduleDefinition) {
             .collect();
         selection.allowed_actions.sort();
         selection.allowed_actions.dedup();
-        definition
-            .tool_allowlist
-            .extend(["connector_list_accounts".into(), "connector_invoke".into()]);
-        definition.permission_config.external_targets.extend(
-            selection
-                .allowed_actions
-                .iter()
-                .map(|action| format!("connector:{}:{action}", selection.account_id)),
-        );
         if let Some(current) = definition
             .contribution_revisions
             .iter_mut()
@@ -851,67 +803,6 @@ fn normalize_definition(definition: &mut ScheduleDefinition) {
                 .push(selection.contribution_revision.clone());
         }
     }
-    if let Some(browser) = &mut definition.host_grant.browser {
-        browser.document_origins = browser
-            .document_origins
-            .iter()
-            .map(|origin| origin.trim().to_owned())
-            .filter(|origin| !origin.is_empty())
-            .collect();
-        browser.document_origins.sort();
-        browser.document_origins.dedup();
-        browser.resource_origins = browser
-            .resource_origins
-            .iter()
-            .map(|origin| origin.trim().to_owned())
-            .filter(|origin| !origin.is_empty())
-            .collect();
-        browser.resource_origins.sort();
-        browser.resource_origins.dedup();
-        browser.capabilities.sort();
-        browser.capabilities.dedup();
-        if browser.enabled {
-            definition
-                .tool_allowlist
-                .extend(["browser_start".into(), "browser_stop".into()]);
-            if browser
-                .capabilities
-                .contains(&hachimi_protocol::BrowserCapability::Observe)
-            {
-                definition.tool_allowlist.push("browser_observe".into());
-            }
-            if browser
-                .capabilities
-                .iter()
-                .any(|capability| *capability != hachimi_protocol::BrowserCapability::Observe)
-            {
-                definition.tool_allowlist.push("browser_act".into());
-            }
-            definition.permission_config.external_targets.extend(
-                browser
-                    .document_origins
-                    .iter()
-                    .map(|origin| format!("browser:document:{origin}")),
-            );
-            definition.permission_config.external_targets.extend(
-                browser
-                    .resource_origins
-                    .iter()
-                    .map(|origin| format!("browser:resource:{origin}")),
-            );
-        }
-    }
-    if !definition.host_grant.connectors.is_empty()
-        || definition
-            .host_grant
-            .browser
-            .as_ref()
-            .is_some_and(|browser| browser.enabled)
-    {
-        definition.permission_config.permission_profile = PermissionProfile::ExternalSandbox;
-    }
-    definition.tool_allowlist.sort();
-    definition.tool_allowlist.dedup();
     definition.contribution_revisions.sort_by(|left, right| {
         (&left.plugin_id, &left.contribution_id, &left.account_id).cmp(&(
             &right.plugin_id,
@@ -924,8 +815,91 @@ fn normalize_definition(definition: &mut ScheduleDefinition) {
             && left.contribution_id == right.contribution_id
             && left.account_id == right.account_id
     });
-    definition.permission_config.external_targets.sort();
-    definition.permission_config.external_targets.dedup();
+    normalize_permission_policy(&mut definition.permission_policy);
+    if definition.permission_policy.level == PermissionProfile::FullAccess {
+        definition.permission_policy.rules = Default::default();
+        definition.mcp_tool_allowlist.clear();
+        definition.contribution_revisions.clear();
+        definition.host_revision_snapshot.connectors.clear();
+    }
+}
+
+fn normalize_permission_policy(policy: &mut AgentPermissionPolicy) {
+    for grant in &mut policy.rules.file_system {
+        normalize_strings(&mut grant.roots);
+        normalize_strings(&mut grant.globs);
+        normalize_strings(&mut grant.special_roots);
+    }
+    policy.rules.file_system.sort_by(|left, right| {
+        file_system_access_rank(left.access)
+            .cmp(&file_system_access_rank(right.access))
+            .then_with(|| left.roots.cmp(&right.roots))
+            .then_with(|| left.globs.cmp(&right.globs))
+            .then_with(|| left.special_roots.cmp(&right.special_roots))
+    });
+    policy.rules.file_system.dedup();
+    normalize_strings(&mut policy.rules.network.hosts);
+    normalize_strings(&mut policy.rules.network.protocols);
+    normalize_strings(&mut policy.rules.process.allowed_commands);
+    normalize_strings(&mut policy.rules.browser.origins);
+    normalize_strings(&mut policy.rules.computer.target_windows);
+    for rule in &mut policy.rules.mcp {
+        rule.tool_name = rule.tool_name.trim().to_owned();
+        rule.schema_hash = rule.schema_hash.trim().to_owned();
+    }
+    policy.rules.mcp.sort_by(|left, right| {
+        (
+            &left.server_id,
+            &left.tool_name,
+            &left.schema_hash,
+            left.read_only,
+        )
+            .cmp(&(
+                &right.server_id,
+                &right.tool_name,
+                &right.schema_hash,
+                right.read_only,
+            ))
+    });
+    policy.rules.mcp.dedup();
+    for rule in &mut policy.rules.connectors {
+        normalize_strings(&mut rule.actions);
+        normalize_strings(&mut rule.read_only_actions);
+        rule.contribution_revision = rule.contribution_revision.trim().to_owned();
+    }
+    policy.rules.connectors.sort_by(|left, right| {
+        (
+            &left.account_id,
+            &left.contribution_revision,
+            &left.actions,
+            &left.read_only_actions,
+        )
+            .cmp(&(
+                &right.account_id,
+                &right.contribution_revision,
+                &right.actions,
+                &right.read_only_actions,
+            ))
+    });
+    policy.rules.connectors.dedup();
+}
+
+fn normalize_strings(values: &mut Vec<String>) {
+    *values = values
+        .iter()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+        .collect();
+    values.sort();
+    values.dedup();
+}
+
+const fn file_system_access_rank(access: FileSystemAccess) -> u8 {
+    match access {
+        FileSystemAccess::Read => 0,
+        FileSystemAccess::Write => 1,
+        FileSystemAccess::Deny => 2,
+    }
 }
 
 /// Canonicalizes all persisted authority-bearing Schedule fields before an
@@ -993,12 +967,7 @@ fn validate_definition(definition: &ScheduleDefinition) -> Result<(), SchedulerE
             }
         }
     }
-    if definition.host_grant.computer_unattended {
-        return Err(SchedulerError::InvalidSchedule(
-            "computer_unattended_unsupported".into(),
-        ));
-    }
-    for selection in &definition.host_grant.connectors {
+    for selection in &definition.host_revision_snapshot.connectors {
         if selection.allowed_actions.is_empty()
             || selection.contribution_revision.account_id.as_ref() != Some(&selection.account_id)
         {
@@ -1006,33 +975,6 @@ fn validate_definition(definition: &ScheduleDefinition) -> Result<(), SchedulerE
                 "schedule_connector_selection_invalid".into(),
             ));
         }
-    }
-    if let Some(browser) = &definition.host_grant.browser
-        && browser.enabled
-        && (browser.document_origins.is_empty() || browser.capabilities.is_empty())
-    {
-        return Err(SchedulerError::InvalidSchedule(
-            "schedule_browser_grant_invalid".into(),
-        ));
-    }
-    match (&definition.workload_override, &definition.context_template) {
-        (
-            Some(WorkloadKind::Coding),
-            hachimi_protocol::ScheduleContextTemplate::Project {
-                project_id,
-                execution_target,
-            },
-        ) if execution_target.project_id() == project_id => {}
-        (
-            Some(WorkloadKind::Coding),
-            hachimi_protocol::ScheduleContextTemplate::SessionContinuation { .. },
-        ) => {}
-        (Some(WorkloadKind::Coding), _) => {
-            return Err(SchedulerError::InvalidSchedule(
-                "coding schedules require a matching Project target".into(),
-            ));
-        }
-        (Some(WorkloadKind::Office | WorkloadKind::General) | None, _) => {}
     }
     if definition.stop_conditions.max_occurrences == Some(0)
         || definition
@@ -1042,17 +984,6 @@ fn validate_definition(definition: &ScheduleDefinition) -> Result<(), SchedulerE
     {
         return Err(SchedulerError::InvalidSchedule(
             "stop conditions must allow at least one future occurrence".into(),
-        ));
-    }
-    if matches!(
-        definition.context_template,
-        hachimi_protocol::ScheduleContextTemplate::General
-    ) && (definition.permission_config.allow_file_read
-        || definition.permission_config.allow_file_write
-        || definition.permission_config.allow_exec)
-    {
-        return Err(SchedulerError::InvalidSchedule(
-            "General schedules cannot request Workspace file or process access".into(),
         ));
     }
     Ok(())
@@ -1073,8 +1004,8 @@ mod tests {
     use std::sync::atomic::{AtomicI64, AtomicUsize, Ordering};
 
     use hachimi_protocol::{
-        ApprovalPolicy, DeliveryPolicy, MisfirePolicy, PermissionProfile, ScheduleContextTemplate,
-        SchedulePermissionConfig, ScheduleSkillSelection, SessionId, SkillId,
+        AgentPermissionPolicy, ApprovalPolicy, DeliveryPolicy, MisfirePolicy, PermissionProfile,
+        ScheduleContextTemplate, ScheduleSkillSelection, SkillId, WorkloadKind,
     };
 
     use super::*;
@@ -1205,15 +1136,18 @@ mod tests {
             },
             entry_profile: EntryProfile::Workbench,
             workload_override: Some(WorkloadKind::Office),
-            context_template: ScheduleContextTemplate::General,
-            tool_allowlist: vec!["request_user_input".into()],
+            context_template: ScheduleContextTemplate::Workspace {
+                workspace: hachimi_protocol::ScheduleWorkspaceSpec::Managed,
+                conversation_mode: hachimi_protocol::ScheduleConversationMode::PerRunSession,
+            },
             skill_allowlist: Vec::new(),
+            skill_revisions: Vec::new(),
             mcp_tool_allowlist: Vec::new(),
             contribution_revisions: Vec::new(),
-            host_grant: hachimi_protocol::ScheduleHostGrant::default(),
-            permission_config: SchedulePermissionConfig {
-                permission_profile: PermissionProfile::ReadOnly,
-                ..SchedulePermissionConfig::default()
+            host_revision_snapshot: hachimi_protocol::HostRevisionSnapshot::default(),
+            permission_policy: AgentPermissionPolicy {
+                level: PermissionProfile::ReadOnly,
+                ..AgentPermissionPolicy::default()
             },
             permission_revision: 99,
             timeout_ms: 120_000,
@@ -1247,7 +1181,7 @@ mod tests {
         let now = 1_800_000_000_000;
         let (service, _) = service(now).await;
         let created = service
-            .create("user", "create-1", definition(now), true)
+            .create("user", "create-1", definition(now))
             .await
             .expect("create");
         assert_eq!(created.definition.permission_revision, 1);
@@ -1264,115 +1198,6 @@ mod tests {
             .expect("update");
         assert_eq!(edited.permission_revision, 1);
         assert_eq!(edited.health, ScheduleHealth::Healthy);
-        assert!(
-            service
-                .get(&edited.id)
-                .await
-                .expect("get")
-                .expect("snapshot")
-                .active_grant
-                .is_some()
-        );
-    }
-
-    #[tokio::test]
-    async fn host_grants_are_canonical_authority_and_change_permission_revision() {
-        let now = 1_800_000_000_000;
-        let (service, _) = service(now).await;
-        let mut input = definition(now);
-        let account_id = hachimi_protocol::ConnectorAccountId::from("crm-local");
-        input
-            .host_grant
-            .connectors
-            .push(hachimi_protocol::ScheduleConnectorSelection {
-                account_id: account_id.clone(),
-                contribution_revision: hachimi_protocol::ContributionRevision {
-                    plugin_id: hachimi_protocol::PluginId::from("sample-crm"),
-                    contribution_id: "sample-crm".into(),
-                    account_id: Some(account_id.clone()),
-                    content_hash: "content-v1".into(),
-                    host_identity_hash: Some("host-v1".into()),
-                    schema_hash: Some("schema-v1".into()),
-                    action_hash: Some("actions-v1".into()),
-                },
-                allowed_actions: vec!["search".into()],
-            });
-        let created = service
-            .create("user", "host-grant-create", input, true)
-            .await
-            .expect("create");
-        assert_eq!(
-            created.definition.permission_config.permission_profile,
-            PermissionProfile::ExternalSandbox
-        );
-        assert!(
-            created
-                .definition
-                .tool_allowlist
-                .contains(&"connector_invoke".into())
-        );
-        assert!(
-            created
-                .definition
-                .permission_config
-                .external_targets
-                .contains(&format!("connector:{account_id}:search"))
-        );
-        assert_eq!(
-            created.active_grant.as_ref().unwrap().scope.host_grant,
-            created.definition.host_grant
-        );
-
-        let mut updated = created.definition.clone();
-        updated.host_grant.connectors[0]
-            .allowed_actions
-            .push("update".into());
-        let updated = service
-            .update(updated, created.definition.config_revision)
-            .await
-            .expect("update");
-        assert_eq!(updated.permission_revision, 2);
-        assert_eq!(updated.health, ScheduleHealth::NeedsAuthorization);
-    }
-
-    #[tokio::test]
-    async fn unattended_computer_is_stably_rejected() {
-        let now = 1_800_000_000_000;
-        let (service, _) = service(now).await;
-        let mut input = definition(now);
-        input.host_grant.computer_unattended = true;
-        let error = service
-            .create("user", "computer-unattended", input, false)
-            .await
-            .expect_err("computer must be rejected");
-        assert!(
-            error
-                .to_string()
-                .contains("computer_unattended_unsupported")
-        );
-    }
-
-    #[tokio::test]
-    async fn authority_scope_edits_require_a_new_user_grant() {
-        let now = 1_800_000_000_000;
-        let (service, _) = service(now).await;
-        let created = service
-            .create("user", "create-2", definition(now), true)
-            .await
-            .expect("create");
-        let mut edited = created.definition.clone();
-        edited.tool_allowlist.push("mcp:send_mail".into());
-        let edited = service
-            .update(edited, created.definition.config_revision)
-            .await
-            .expect("update");
-        assert_eq!(edited.permission_revision, 2);
-        assert_eq!(edited.health, ScheduleHealth::NeedsAuthorization);
-        let grant = service
-            .reauthorize(&edited.id, "user")
-            .await
-            .expect("reauthorize");
-        assert_eq!(grant.permission_revision, 2);
         assert_eq!(
             service
                 .get(&edited.id)
@@ -1386,68 +1211,224 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn skill_content_drift_changes_the_grant_without_reusing_old_authority() {
+    async fn host_revision_snapshots_are_canonical_and_change_permission_revision() {
+        let now = 1_800_000_000_000;
+        let (service, _) = service(now).await;
+        let mut input = definition(now);
+        let account_id = hachimi_protocol::ConnectorAccountId::from("crm-local");
+        input.host_revision_snapshot.connectors.push(
+            hachimi_protocol::ConnectorRevisionSelection {
+                account_id: account_id.clone(),
+                contribution_revision: hachimi_protocol::ContributionRevision {
+                    plugin_id: hachimi_protocol::PluginId::from("sample-crm"),
+                    contribution_id: "sample-crm".into(),
+                    account_id: Some(account_id.clone()),
+                    content_hash: "content-v1".into(),
+                    host_identity_hash: Some("host-v1".into()),
+                    schema_hash: Some("schema-v1".into()),
+                    action_hash: Some("actions-v1".into()),
+                },
+                allowed_actions: vec!["search".into()],
+            },
+        );
+        let created = service
+            .create("user", "host-revision-create", input)
+            .await
+            .expect("create");
+        assert_eq!(
+            created.definition.permission_policy.level,
+            PermissionProfile::ReadOnly
+        );
+        assert!(
+            created
+                .definition
+                .permission_policy
+                .rules
+                .connectors
+                .is_empty()
+        );
+        assert_eq!(
+            created.definition.host_revision_snapshot.connectors.len(),
+            1
+        );
+
+        let mut updated = created.definition.clone();
+        updated.host_revision_snapshot.connectors[0]
+            .allowed_actions
+            .push("update".into());
+        let updated = service
+            .update(updated, created.definition.config_revision)
+            .await
+            .expect("update");
+        assert_eq!(updated.permission_revision, 2);
+        assert_eq!(updated.health, ScheduleHealth::Healthy);
+    }
+
+    #[tokio::test]
+    async fn full_access_canonicalizes_extension_scope_fields() {
+        let now = 1_800_000_000_000;
+        let (service, _) = service(now).await;
+        let mut input = definition(now);
+        input.permission_policy.level = PermissionProfile::FullAccess;
+        input
+            .mcp_tool_allowlist
+            .push(hachimi_protocol::McpToolSelection {
+                server_id: "legacy-server".into(),
+                tool_name: "legacy_tool".into(),
+                schema_hash: "schema".into(),
+                host_identity_hash: "host".into(),
+            });
+        input.host_revision_snapshot.connectors.push(
+            hachimi_protocol::ConnectorRevisionSelection {
+                account_id: hachimi_protocol::ConnectorAccountId::from("legacy-account"),
+                contribution_revision: hachimi_protocol::ContributionRevision {
+                    plugin_id: hachimi_protocol::PluginId::from("legacy-plugin"),
+                    contribution_id: "legacy-contribution".into(),
+                    account_id: None,
+                    content_hash: "content".into(),
+                    host_identity_hash: None,
+                    schema_hash: None,
+                    action_hash: None,
+                },
+                allowed_actions: vec!["send".into()],
+            },
+        );
+        let created = service
+            .create("user", "full-access-scope", input)
+            .await
+            .expect("full access schedule");
+        assert!(created.definition.mcp_tool_allowlist.is_empty());
+        assert!(created.definition.contribution_revisions.is_empty());
+        assert!(
+            created
+                .definition
+                .host_revision_snapshot
+                .connectors
+                .is_empty()
+        );
+        assert!(created.definition.permission_policy.rules.mcp.is_empty());
+        assert!(
+            created
+                .definition
+                .permission_policy
+                .rules
+                .connectors
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn unattended_computer_requires_structured_pre_authorization() {
+        let now = 1_800_000_000_000;
+        let (service, _) = service(now).await;
+        let mut input = definition(now);
+        input.permission_policy.level = PermissionProfile::Writable;
+        input.permission_policy.rules.computer = hachimi_protocol::ComputerGrant {
+            observe: true,
+            act: true,
+            target_windows: vec!["notepad.exe".into()],
+            max_actions: Some(20),
+        };
+        let authorized = service
+            .create("user", "computer-unattended-authorized", input)
+            .await
+            .expect("authorized unattended definition");
+        assert_eq!(authorized.definition.health, ScheduleHealth::Healthy);
+        assert!(authorized.definition.permission_policy.rules.computer.act);
+        assert_eq!(
+            authorized
+                .definition
+                .permission_policy
+                .rules
+                .computer
+                .target_windows,
+            ["notepad.exe"]
+        );
+    }
+
+    #[tokio::test]
+    async fn authority_scope_edits_replace_the_persisted_policy_revision() {
+        let now = 1_800_000_000_000;
+        let (service, _) = service(now).await;
+        let created = service
+            .create("user", "create-2", definition(now))
+            .await
+            .expect("create");
+        let mut edited = created.definition.clone();
+        edited.skill_allowlist.push(SkillId::from("mail-skill"));
+        let edited = service
+            .update(edited, created.definition.config_revision)
+            .await
+            .expect("update");
+        assert_eq!(edited.permission_revision, 2);
+        assert_eq!(edited.health, ScheduleHealth::Healthy);
+        assert_eq!(
+            service
+                .get(&edited.id)
+                .await
+                .expect("get")
+                .expect("snapshot")
+                .definition
+                .health,
+            ScheduleHealth::Healthy
+        );
+    }
+
+    #[tokio::test]
+    async fn skill_content_drift_changes_the_definition_revision() {
         let now = 1_800_000_000_000;
         let (service, _) = service(now).await;
         let mut requested = definition(now);
         requested.skill_allowlist = vec![SkillId::from("daily-office")];
-        let mut first_scope = authorization_scope(&requested);
-        first_scope.skill_revisions = vec![ScheduleSkillSelection {
+        requested.skill_revisions = vec![ScheduleSkillSelection {
             skill_id: SkillId::from("daily-office"),
             content_hash: "content-v1".into(),
             tree_revision: "tree-v1".into(),
         }];
         let created = service
-            .create_with_grant_scope("user", "skill-drift", requested, Some(first_scope))
+            .create("user", "skill-drift", requested)
             .await
             .expect("create with Skill revision");
-        let first_grant = created.active_grant.expect("grant");
-
-        let mut second_scope = authorization_scope(&created.definition);
-        second_scope.skill_revisions = vec![ScheduleSkillSelection {
+        let mut updated = created.definition.clone();
+        updated.skill_revisions = vec![ScheduleSkillSelection {
             skill_id: SkillId::from("daily-office"),
             content_hash: "content-v2".into(),
             tree_revision: "tree-v2".into(),
         }];
-        let second_grant = service
-            .reauthorize_with_grant_scope(&created.definition.id, "user", second_scope)
+        let updated = service
+            .update(updated, created.definition.config_revision)
             .await
-            .expect("reauthorize changed Skill");
+            .expect("update changed Skill");
 
-        assert_eq!(
-            first_grant.permission_revision,
-            second_grant.permission_revision
-        );
-        assert_ne!(first_grant.scope_hash, second_grant.scope_hash);
-        assert_eq!(
-            second_grant.scope.skill_revisions[0].content_hash,
-            "content-v2"
-        );
+        assert_eq!(updated.permission_revision, 2);
+        assert_eq!(updated.skill_revisions[0].content_hash, "content-v2");
     }
 
     #[tokio::test]
-    async fn unauthorized_background_invocations_need_attention_without_waiting() {
+    async fn background_invocations_use_the_definition_policy_without_a_second_grant() {
         let now = 1_800_000_000_000;
         let (service, _) = service(now).await;
         let created = service
-            .create("user", "create-3", definition(now), false)
+            .create("user", "create-3", definition(now))
             .await
             .expect("create");
         let task = service
             .run_now(&created.definition.id)
             .await
             .expect("run now");
-        let stored = service
-            .store
-            .get_task_run(&task.id)
-            .await
-            .expect("task")
-            .expect("task row");
-        assert_eq!(stored.status, TaskRunStatus::NeedsAttention);
-        assert_eq!(
-            stored.error_code.as_deref(),
-            Some("schedule_authorization_required")
-        );
+        let stored = loop {
+            let stored = service
+                .store
+                .get_task_run(&task.id)
+                .await
+                .expect("task")
+                .expect("task row");
+            if stored.status == TaskRunStatus::Succeeded {
+                break stored;
+            }
+            tokio::task::yield_now().await;
+        };
+        assert_eq!(stored.status, TaskRunStatus::Succeeded);
     }
 
     #[tokio::test]
@@ -1467,7 +1448,6 @@ mod tests {
                 "service:scheduler-test",
                 "windowless-create",
                 definition(now),
-                true,
             )
             .await
             .expect("create")
@@ -1506,7 +1486,7 @@ mod tests {
         stop_after_success.id = ScheduleId::from("stop-after-success");
         stop_after_success.stop_conditions.stop_after_success = true;
         let success_schedule = service
-            .create("user", "stop-after-success", stop_after_success, true)
+            .create("user", "stop-after-success", stop_after_success)
             .await
             .expect("create")
             .definition;
@@ -1552,7 +1532,7 @@ mod tests {
         limited.id = ScheduleId::from("max-occurrences");
         limited.stop_conditions.max_occurrences = Some(2);
         let limited = service
-            .create("user", "max-occurrences", limited, true)
+            .create("user", "max-occurrences", limited)
             .await
             .expect("create")
             .definition;
@@ -1595,13 +1575,9 @@ mod tests {
     }
 
     #[test]
-    fn session_continuation_task_ledger_binds_the_requesting_session() {
+    fn schedule_task_ledger_starts_without_a_requesting_session() {
         let now = 1_800_000_000_000;
-        let mut schedule = definition(now);
-        let session_id = SessionId::from("continuation-session");
-        schedule.context_template = ScheduleContextTemplate::SessionContinuation {
-            session_id: session_id.clone(),
-        };
+        let schedule = definition(now);
         let task = task_record(
             &schedule,
             TaskRunId::from("continuation-task"),
@@ -1612,7 +1588,7 @@ mod tests {
             None,
             now,
         );
-        assert_eq!(task.requester_session_id, Some(session_id));
+        assert_eq!(task.requester_session_id, None);
         assert_eq!(task.execution_session_id, None);
         assert_eq!(task.run_id, None);
     }
@@ -1626,7 +1602,7 @@ mod tests {
             timestamp_ms: now - 1,
         };
         let error = service
-            .create("user", "past-at", past, true)
+            .create("user", "past-at", past)
             .await
             .expect_err("past At schedule must fail closed");
         assert!(matches!(error, SchedulerError::NoFutureOccurrence));
@@ -1637,7 +1613,7 @@ mod tests {
         let now = 1_800_000_000_000;
         let (service, _) = service(now).await;
         let schedule = service
-            .create("user", "duplicate-claim", definition(now), true)
+            .create("user", "duplicate-claim", definition(now))
             .await
             .expect("create")
             .definition;
@@ -1681,7 +1657,7 @@ mod tests {
             Arc::new(NoopNotificationAdapter),
         );
         let schedule = service
-            .create("user", "cancel-race", definition(now), true)
+            .create("user", "cancel-race", definition(now))
             .await
             .expect("create")
             .definition;
@@ -1732,7 +1708,7 @@ mod tests {
             Arc::new(NoopNotificationAdapter),
         );
         let schedule = service
-            .create("user", "retry-fresh", definition(now), true)
+            .create("user", "retry-fresh", definition(now))
             .await
             .expect("create")
             .definition;
@@ -1796,7 +1772,7 @@ mod tests {
         let mut requested = definition(now);
         requested.delivery_policy = DeliveryPolicy::TaskTabAndSystemNotification;
         let schedule = service
-            .create("user", "notification-failure", requested, true)
+            .create("user", "notification-failure", requested)
             .await
             .expect("create")
             .definition;
@@ -1833,7 +1809,7 @@ mod tests {
             Arc::new(NoopNotificationAdapter),
         );
         let schedule = setup
-            .create("user", "reconcile", definition(now), true)
+            .create("user", "reconcile", definition(now))
             .await
             .expect("create")
             .definition;
@@ -1900,7 +1876,7 @@ mod tests {
     fn schedule_permissions_do_not_reuse_interactive_approval_policy() {
         assert_eq!(ApprovalPolicy::OnlyWhenNeeded, ApprovalPolicy::default());
         assert_ne!(
-            serde_json::to_string(&SchedulePermissionConfig::default()).expect("JSON"),
+            serde_json::to_string(&AgentPermissionPolicy::default()).expect("JSON"),
             serde_json::to_string(&ApprovalPolicy::OnlyWhenNeeded).expect("JSON")
         );
     }

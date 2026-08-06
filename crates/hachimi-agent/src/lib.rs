@@ -15,6 +15,7 @@ mod profiles;
 mod review;
 mod review_tools;
 mod run_diff;
+mod run_launcher;
 mod run_projection;
 mod run_runtime;
 #[cfg(test)]
@@ -47,20 +48,21 @@ pub use multi_agent::{
     MultiAgentCoordinator,
 };
 pub use plan_tool::{UPDATE_PLAN_TOOL, update_plan_tool};
-pub use profiles::{
-    WorkloadProfileSpec, profile_allows_tool, profile_runtime_context, workload_profile_spec,
-};
+pub use profiles::{WorkloadProfileSpec, profile_runtime_context, workload_profile_spec};
 pub use review::{
     ParsedReviewOutput, build_review_prompt, materialize_review_findings, parse_review_output,
     priority_to_severity,
 };
 pub use review_tools::{REVIEW_DIFF_TOOL, review_diff_tool};
 pub use run_diff::RunDiffTracker;
-pub use run_projection::{PersistedRunError, PersistedToolLoop, RunStepContext};
+pub use run_launcher::{AgentRunLaunchRequest, AgentRunLauncher, LaunchedAgentRun};
+pub use run_projection::{
+    AUTHORITY_NEEDS_ATTENTION_EVENT, PersistedRunError, PersistedToolLoop, RunStepContext,
+};
 pub use run_runtime::{
     ActiveAgentRun, AgentExecutionError, AgentExecutorRegistry, AgentExecutorRegistryError,
-    AgentPreparationFuture, AgentRunCreateRequest, AgentRunExecutor, AgentRunFactory,
-    AgentRunFactoryError, AgentRunPreparer, AgentRunPriority, AgentRunRequest, PreparedAgentRun,
+    AgentPreparationFuture, AgentRunCreateRequest, AgentRunExecutor, AgentRunFactoryError,
+    AgentRunPreparer, AgentRunPriority, AgentRunRequest, PreparedAgentRun, UserInputAvailability,
 };
 pub use security_tools::{AuthorizedToolContext, PersistentAuditSink, authorized_tool};
 pub use session_lane::{LaneError, LaneMarker, SessionLanePermit, SessionLanes};

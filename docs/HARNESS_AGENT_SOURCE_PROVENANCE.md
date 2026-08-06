@@ -1,23 +1,24 @@
 # Harness Agent 第三方来源登记
 
-更新时间：2026-07-31
+更新时间：2026-08-06
 
 本文只登记实际复制、翻译或实质改写的文件。候选研究路径不等于已移植代码；新增派生文件必须先更新本文件，再进入实现。
 
 ## 固定来源
 
-| ID                              | 仓库与 commit                                                     | 许可证与边界                                                                                       |
-| ------------------------------- | ----------------------------------------------------------------- | -------------------------------------------------------------------------------------------------- |
-| `codex-4c434651`                | OpenAI Codex `4c43465133428898aa84f0bfc02c306ed65fb66a`           | Apache-2.0；选择性移植，保留 SPDX、commit、源路径和修改说明                                        |
-| `openclaw-f6d45623`             | OpenClaw `f6d456235cf011004f7cffc71a95acf6fbf1fa0a`               | MIT；选择性移植，保留版权、commit、源路径和修改说明                                                |
-| `claude-clean-room-34b3dc99`    | Claude Code Best `34b3dc99bf40c57c0b78f3b5b1d70471ebc2d06d`       | 只研究公开可观察 Compaction 行为；不复制源码、提示词、注释、测试或内部标识符                       |
-| `deerflow-11bb8ddc`             | DeerFlow `11bb8ddcd95f41e673783b7e20c4ab4cd5ee7e24`               | MIT；只参考一次性连接码与 Connection/Conversation 分表行为，不复制实现                             |
-| `cc-connect-f2e4ed83`           | cc-connect `f2e4ed83c6953297a92d66d49114196fc4402206`             | NOASSERTION；只参考外部 Conversation 与 Agent Session 分离行为，不复制实现                         |
-| `langbot-7820949d`              | LangBot `7820949d3a3d8ca0b6f07d060deab40cb86807ff`                | Apache-2.0；只参考消息对象分层、企微 AI Bot 与 iLink 可观察行为，不复制实现                        |
-| `astrbot-03a6edb2`              | AstrBot `03a6edb29e7e742fb97d5926949c03c3214a31e5`                | AGPL-3.0；只参考 typed message parts 行为，Rust 实现保持 clean-room，不复制 AGPL 源码              |
-| `cowagent-848a1a4e`             | CowAgent `848a1a4eb171f3d891304370f7d5ed42046f3280`               | MIT；只参考企微 AI Bot 与 iLink 公开 wire 行为，不采用 LinkAI 代建或非官方微信 Hook                |
-| `dingtalk-stream-sdk-go-v0.9.1` | DingTalk Stream SDK Go `d1cc841e6013c3f6513a5bb01dfe3219b9c37d17` | MIT；只保存握手、WebSocket、心跳、ACK 和重连的有界 wire 快照，不作为运行时依赖或源码移植           |
-| `feishu-sdk-go-v3.9.9`          | Feishu Go SDK `ff207b774541a195f0a98c5bfda1507905e45431`          | MIT；只保存长连接 WebSocket/protobuf、心跳、ACK 和重连的有界 wire 快照，不作为运行时依赖或源码移植 |
+| ID                              | 仓库与 commit                                                                                            | 许可证与边界                                                                                       |
+| ------------------------------- | -------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------- |
+| `codex-4c434651`                | OpenAI Codex `4c43465133428898aa84f0bfc02c306ed65fb66a`                                                  | Apache-2.0；选择性移植，保留 SPDX、commit、源路径和修改说明                                        |
+| `codex-manual-20260805`         | Codex manual 2026-08-05 快照，SHA-256 `3528f93bacfae29be08f757d0f24be468b52f058fff698d78d73495cc660b147` | 产品行为与权限分层参考；不作为源码派生来源                                                         |
+| `openclaw-f6d45623`             | OpenClaw `f6d456235cf011004f7cffc71a95acf6fbf1fa0a`                                                      | MIT；选择性移植，保留版权、commit、源路径和修改说明                                                |
+| `claude-clean-room-34b3dc99`    | Claude Code Best `34b3dc99bf40c57c0b78f3b5b1d70471ebc2d06d`                                              | 只研究公开可观察 Compaction 行为；不复制源码、提示词、注释、测试或内部标识符                       |
+| `deerflow-11bb8ddc`             | DeerFlow `11bb8ddcd95f41e673783b7e20c4ab4cd5ee7e24`                                                      | MIT；只参考一次性连接码与 Connection/Conversation 分表行为，不复制实现                             |
+| `cc-connect-f2e4ed83`           | cc-connect `f2e4ed83c6953297a92d66d49114196fc4402206`                                                    | NOASSERTION；只参考外部 Conversation 与 Agent Session 分离行为，不复制实现                         |
+| `langbot-7820949d`              | LangBot `7820949d3a3d8ca0b6f07d060deab40cb86807ff`                                                       | Apache-2.0；只参考消息对象分层、企微 AI Bot 与 iLink 可观察行为，不复制实现                        |
+| `astrbot-03a6edb2`              | AstrBot `03a6edb29e7e742fb97d5926949c03c3214a31e5`                                                       | AGPL-3.0；只参考 typed message parts 行为，Rust 实现保持 clean-room，不复制 AGPL 源码              |
+| `cowagent-848a1a4e`             | CowAgent `848a1a4eb171f3d891304370f7d5ed42046f3280`                                                      | MIT；只参考企微 AI Bot 与 iLink 公开 wire 行为，不采用 LinkAI 代建或非官方微信 Hook                |
+| `dingtalk-stream-sdk-go-v0.9.1` | DingTalk Stream SDK Go `d1cc841e6013c3f6513a5bb01dfe3219b9c37d17`                                        | MIT；只保存握手、WebSocket、心跳、ACK 和重连的有界 wire 快照，不作为运行时依赖或源码移植           |
+| `feishu-sdk-go-v3.9.9`          | Feishu Go SDK `ff207b774541a195f0a98c5bfda1507905e45431`                                                 | MIT；只保存长连接 WebSocket/protobuf、心跳、ACK 和重连的有界 wire 快照，不作为运行时依赖或源码移植 |
 
 ## 产品行为与候选研究范围（不是已派生代码）
 
@@ -37,6 +38,10 @@
 | Cron/Heartbeat/Task ledger | OpenClaw `src/cron/service/{timer-scheduler,timer-catchup,task-runs}.ts`、`src/cron/{heartbeat-policy,heartbeat-task}.ts`、`src/cron/delivery*.ts`、`src/tasks/{task-registry.store.sqlite,task-registry.maintenance,task-registry.reconcile}.ts`、`docs/automation/{cron-jobs,tasks}.md`                                 | 参考本地 timer、事件触发、Task ledger、投递和后台任务重启 reconciliation；不把 `src/cron/**` 或 `src/tasks/**` 整体作为 Agent Runtime 参考，也不允许 standing orders 或 Prompt 直接授予永久权限 |
 
 OpenClaw 的 Agent Core、通用 Plugin/Provider Runtime、Memory、多 Agent、产品 Prompt，以及有副作用 Turn 的自动恢复均不在默认参考范围。Browser 候选只补足 Codex 未公开的底层 Host 工程细节；一旦 Codex 提供等价公开实现，应优先重新评估 Codex 基线。
+
+Hachimi 的 Manual、Project、Channel、Scheduled 与可对话 Pet 共用同一 Agent/Tool Orchestrator；Pet 和 Scheduled 不绑定 Project，非 Project 使用 managed 或显式普通目录。这是明确的产品差异。`RunOrigin` 只保留来源审计、队列和投递信息；policy owner 由统一 Launcher 显式传入并与 Run bundle 原子提交，Multi-Agent child 使用 transient policy，不覆盖 Channel/Schedule/Pet 的持久配置。Codex manual 用于统一 Agent、权限分层与 Host 行为基线；OpenClaw 仍只用于 Channel 路由、队列、Task ledger、投递和重启 reconciliation，不用于来源专用 Agent Runtime。
+
+实现状态：统一五来源 Agent/Workspace/三档权限及七类资源执行校验的核心代码与本地单测已完成；Desktop E2E 仍有 4 个显式 skip，故整体状态暂记为“部分完成”。真实 OpenAI/Forge/企业组织及 standard-user/elevated Windows Gate 仍为“真实环境待验证”。
 
 P1–P8 新增代码均沿用上方固定派生边界或作为 Hachimi 原创模块实现。OpenAI 三类协议、四类 Forge adapter、企业微信 callback，以及 DingTalk Stream/Feishu 长连接 wire contract 已登记离线快照；普通 CI 校验路径、commit、许可证和 SHA-256。DingTalk/Feishu SDK 只作为协议来源，Rust transport 未引入 vendor SDK 运行时依赖。真实外部企业组织仍待验证，fixture、loopback WebSocket 和 protobuf/ACK 测试不能冒充真实平台连接；外部组织身份不构成 Hachimi 租户。
 
@@ -94,7 +99,7 @@ Memory 已调整为远期，当前不选择 Codex Memory 或其他实现方案�
 - `crates/hachimi-storage/src/agent_store/review.rs`
 - `crates/hachimi-storage/src/agent_store/workspace_diff.rs`
 
-修改：替换为 Hachimi typed Item、UserInput Broker、Keyring reference、media hash reference、ScheduleGrant、restricted MCP Host 和 Review lineage。Elicitation 不等于 Approval，服务器 annotation 不授予权限。
+修改：替换为 Hachimi typed Item、UserInput Broker、Keyring reference、media hash reference、RunAuthoritySnapshot、restricted MCP Host 和 Review lineage。Elicitation 不等于 Approval，服务器 annotation 不授予权限。
 
 测试：Resources/Templates/Prompts、OAuth、progress、媒体边界、Elicitation accept/decline/cancel、Review target/Finding、Diff baseline/restart。
 
@@ -137,7 +142,7 @@ Memory 已调整为远期，当前不选择 Codex Memory 或其他实现方案�
 - `crates/hachimi-skills/src/metadata.rs`
 - `crates/hachimi-skills/src/watcher.rs`
 
-修改：使用 Hachimi Run-scoped Catalog、SkillActivation、revision fencing、Workload classification、Built-in/User/Repo/System/Admin roots 和 ScheduleGrant；Skill metadata 只能声明兼容性/诊断，永远不授予权限。
+修改：使用 Hachimi Run-scoped Catalog、SkillActivation、revision fencing、Workload classification、Built-in/User/Repo/System/Admin roots 和 ScheduleDefinition revision fencing；Skill metadata 只能声明兼容性/诊断，永远不授予权限。
 
 测试：显式 ID、`$name`、隐式 activation、分页、资源越界、namespace、revision 漂移、Worktree 继承、Watcher 和 Office overlay。
 
@@ -151,7 +156,7 @@ Memory 已调整为远期，当前不选择 Codex Memory 或其他实现方案�
 - `crates/hachimi-scheduler/src/service.rs`
 - `crates/hachimi-storage/src/agent_store/schedule.rs`
 
-修改：改为 Tokio lane/单 timer、SQLite invocation claim、ScheduleDefinition/Grant/TaskRun、fresh Hachimi Session/Run、后台并发、通知、typed Event ledger 和重启 reconciliation。不复制 OpenClaw Agent Core、Prompt 或 Connector 产品逻辑。
+修改：改为 Tokio lane/单 timer、SQLite invocation claim、ScheduleDefinition/TaskRun、fresh Hachimi Session/Run、RunAuthoritySnapshot、后台并发、通知、typed Event ledger 和重启 reconciliation。不复制 OpenClaw Agent Core、Prompt 或 Connector 产品逻辑。
 
 测试：lane reset/generation、At/Every/Cron/DST、Skip/CatchUpOnce、重复 invocation、取消、重启、授权/Skill/MCP 漂移和脏 Worktree 上限。
 

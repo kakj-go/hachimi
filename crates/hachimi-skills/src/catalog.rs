@@ -82,6 +82,12 @@ impl SkillHost {
                 ));
             }
         }
+        let mut discovered = BTreeSet::from([self.root.clone()]);
+        for root in &roots {
+            if let Some(canonical) = canonical_root_if_directory(&root.path)? {
+                discovered.insert(canonical);
+            }
+        }
         *self
             .catalog_roots
             .write()
@@ -89,8 +95,7 @@ impl SkillHost {
         *self
             .discovered_roots
             .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) =
-            BTreeSet::from([self.root.clone()]);
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = discovered;
         Ok(())
     }
 
@@ -792,6 +797,48 @@ mod tests {
                 .await,
             Err(SkillHostError::NotFound(_))
         ));
+    }
+
+    #[tokio::test]
+    async fn static_skill_resources_remain_readable_before_the_first_post_restart_scan() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let store = AgentStore::connect_in_memory().await.expect("store");
+        let user_root = temp.path().join("user");
+        let builtin = temp.path().join("builtin");
+        write_skill(&builtin, "preview", "preview");
+        fs::write(
+            builtin.join("preview/reference.py"),
+            "print('restart-safe preview')\n",
+        )
+        .expect("preview resource");
+        let first = SkillHost::new(&user_root, store.clone()).expect("first host");
+        first
+            .set_catalog_roots(vec![SkillCatalogRoot::new(&builtin, SkillScope::BuiltIn)])
+            .expect("roots");
+        let skill = first
+            .list()
+            .await
+            .expect("initial scan")
+            .into_iter()
+            .next()
+            .expect("skill");
+
+        let restarted = SkillHost::new(&user_root, store).expect("restarted host");
+        restarted
+            .set_catalog_roots(vec![SkillCatalogRoot::new(&builtin, SkillScope::BuiltIn)])
+            .expect("roots");
+        let preview = restarted
+            .read_preview_resource(&hachimi_protocol::SkillPreviewResourceRequest {
+                skill_id: skill.id,
+                source_path: ENTRY_FILE.into(),
+                destination: "reference.py".into(),
+            })
+            .await
+            .expect("preview before list");
+        assert_eq!(
+            preview.text.as_deref(),
+            Some("print('restart-safe preview')\n")
+        );
     }
 
     #[cfg(windows)]

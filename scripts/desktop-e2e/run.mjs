@@ -65,10 +65,11 @@ if (!existsSync(driver) || !existsSync(nativeDriver)) {
   );
 }
 mkdirSync(project, { recursive: true });
+mkdirSync(data, { recursive: true });
+writeFileSync(join(data, ".hachimi-data-root"), "com.hachimi.desktop", "utf8");
 const loopbackToken = "hachimi-desktop-e2e-loopback-token-00000001";
 mkdirSync(join(data, "gateway"), { recursive: true });
 writeFileSync(join(data, "gateway", "loopback.token"), loopbackToken, "utf8");
-mkdirSync(data, { recursive: true });
 mkdirSync(webviewData, { recursive: true });
 if (!artifacts.startsWith(`${targetRoot}${sep}`)) {
   throw new Error("Desktop E2E artifact path escaped the repository target directory.");

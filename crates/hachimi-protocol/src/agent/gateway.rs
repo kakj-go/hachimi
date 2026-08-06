@@ -312,9 +312,10 @@ pub enum ChannelAuthorizationTarget {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct ChannelGrant {
+    pub permission_policy: super::AgentPermissionPolicy,
     pub skill_ids: Vec<String>,
     pub mcp_server_ids: Vec<String>,
-    pub connector_selections: Vec<super::ScheduleConnectorSelection>,
+    pub connector_selections: Vec<super::ConnectorRevisionSelection>,
     pub read_only_workspace_roots: Vec<String>,
     pub network_hosts: Vec<String>,
 }

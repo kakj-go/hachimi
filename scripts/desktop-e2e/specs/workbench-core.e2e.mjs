@@ -10,7 +10,7 @@ import {
 } from "../support/interactions.mjs";
 import { restartApplication, switchToPet, switchToWorkbench } from "../support/windows.mjs";
 
-/* global HTMLButtonElement, HTMLElement, HTMLTextAreaElement, InputEvent, document */
+/* global HTMLButtonElement, HTMLTextAreaElement, InputEvent, document */
 
 const EPHEMERAL_SECRET = "desktop-e2e-secret-value";
 
@@ -221,7 +221,6 @@ describe("Hachimi Workbench core lifecycle", () => {
 
     await clickWhenReady('[data-testid="workbench-execute-plan"]');
     await submitEphemeralUserInput();
-    await clickWhenReady('[data-testid="workbench-approve-once"]');
     await waitForRun("succeeded", 45_000);
     await clickWhenReady('[data-testid="workbench-pin-summary"]');
     await clickWhenReady('[data-testid="workbench-summary-files"]');
@@ -297,9 +296,14 @@ describe("Hachimi Workbench core lifecycle", () => {
     await $('[data-testid="workbench-composer-input"]').waitForDisplayed({ timeout: 5_000 });
     await ensureDefaultMode();
     const draft = await $(".composer textarea");
-    await draft.setValue("Start the deterministic write and stop at approval.");
+    const project = process.env.HACHIMI_DESKTOP_E2E_PROJECT_PATH;
+    if (!project) throw new Error("HACHIMI_DESKTOP_E2E_PROJECT_PATH is missing");
+    const browserUrl = process.env.HACHIMI_DESKTOP_E2E_BROWSER_URL;
+    if (!browserUrl) throw new Error("HACHIMI_DESKTOP_E2E_BROWSER_URL is missing");
+    await draft.setValue(
+      `[desktop-e2e:approval-recovery] url=${browserUrl} start the deterministic external action and stop at approval.`,
+    );
     await clickWhenReady('[data-testid="workbench-start-task"]');
-    await submitEphemeralUserInput();
     await $('[data-testid="workbench-approve-once"]').waitForDisplayed({ timeout: 30_000 });
 
     await openInspectorToolLauncher();
@@ -308,8 +312,6 @@ describe("Hachimi Workbench core lifecycle", () => {
     );
     await waitForDisplayed(".workbench-bottom-panel .terminal-session.active .xterm");
 
-    const project = process.env.HACHIMI_DESKTOP_E2E_PROJECT_PATH;
-    if (!project) throw new Error("HACHIMI_DESKTOP_E2E_PROJECT_PATH is missing");
     await writeTerminal('Get-Location; Write-Output "terminal-e2e"');
     await browser.waitUntil(
       async () => {
@@ -375,7 +377,7 @@ describe("Hachimi Workbench core lifecycle", () => {
     await expect($('[data-testid^="run-recovery-"]')).not.toBeDisplayed();
   });
 
-  it("continues one Pet Run across Workbench UserInput and Pet Approval", async () => {
+  it("continues one Pet Run across Workbench UserInput and writable Workspace", async () => {
     const petSecret = "desktop-e2e-pet-cross-window-secret";
     await switchToPet();
     await hoverWhenReady(".pet-avatar-hit-area");
@@ -386,7 +388,16 @@ describe("Hachimi Workbench core lifecycle", () => {
           .querySelector('[data-testid="pet-permission-toggle"]')
           ?.getAttribute("aria-pressed") === "true",
     );
-    if (!permissionEnabled) await clickWhenReady('[data-testid="pet-permission-toggle"]');
+    if (!permissionEnabled) {
+      await clickWhenReady('[data-testid="pet-permission-toggle"]');
+      await waitForDisplayed('[data-testid="pet-permission-panel"]', 10_000);
+      await clickWhenReady('[data-testid="pet-permission-writable"]');
+      await clickWhenReady('[data-testid="pet-permission-save"]');
+      await browser.waitUntil(
+        async () => !(await $('[data-testid="pet-permission-panel"]').isDisplayed()),
+        { timeout: 10_000, timeoutMsg: "Pet permission editor did not close after save" },
+      );
+    }
     await hoverWhenReady(".pet-avatar-hit-area");
     await clickWhenReady('[data-testid="pet-open-composer"]');
     await $('[data-testid="pet-composer-input"]').setValue(
@@ -424,39 +435,15 @@ describe("Hachimi Workbench core lifecycle", () => {
     await clickWhenReady(".window-close");
 
     await switchToPet();
-    await waitForDisplayed('[data-testid="pet-approve-once"]', 30_000);
-    expect(await $('[data-testid="pet-stage"]').getAttribute("data-agent-run-id")).toBe(agentRunId);
-    await browser.execute(() => {
-      const button = document.querySelector('[data-testid="pet-approve-once"]');
-      if (!(button instanceof HTMLButtonElement)) throw new Error("Pet Approval action is missing");
-      button.click();
-    });
     await browser.waitUntil(
       async () => {
-        const state = await browser.execute(() => {
-          const approvalButton = document.querySelector('[data-testid="pet-approve-once"]');
-          const error = document.querySelector('[data-testid="pet-attention-error"]');
-          return {
-            approvalVisible:
-              approvalButton instanceof HTMLElement && approvalButton.offsetParent !== null,
-            errorVisible: error instanceof HTMLElement && error.offsetParent !== null,
-            errorText: error?.textContent ?? "",
-          };
-        });
-        if (!state.approvalVisible) return true;
-        if (state.errorVisible) throw new Error(`Pet Approval failed: ${state.errorText}`);
-        return false;
+        return (
+          await browser.execute(() => document.querySelector(".pet-speech")?.textContent ?? "")
+        ).includes("writable Workspace");
       },
-      { timeout: 20_000, timeoutMsg: "Pet Approval did not resolve" },
+      { timeout: 45_000, timeoutMsg: "Pet writable Workspace completion reply was not projected" },
     );
-    await browser.waitUntil(
-      async () =>
-        browser.execute(
-          () =>
-            document.querySelector(".pet-speech")?.textContent?.includes("one Agent Run") ?? false,
-        ),
-      { timeout: 45_000, timeoutMsg: "Pet completion reply was not projected" },
-    );
+    await expect($('[data-testid="pet-approve-once"]')).not.toBeDisplayed();
     assertSecretAbsent(process.env.HACHIMI_DATA_DIR, petSecret);
   });
 });

@@ -14,8 +14,10 @@ import { Button, Dialog, NativeSelect, StatusBanner, TextField } from "@hachimi/
 import { Show, createSignal, untrack } from "solid-js";
 
 import { ChannelGrantEditor } from "./platform-integration-grant-editor";
+import { createPermissionPolicy } from "./permission-policy-editor";
 
 const EMPTY_GRANT: ChannelGrant = {
+  permissionPolicy: createPermissionPolicy(),
   skillIds: [],
   mcpServerIds: [],
   connectorSelections: [],

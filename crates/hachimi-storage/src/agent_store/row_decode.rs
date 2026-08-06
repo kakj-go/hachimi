@@ -450,9 +450,8 @@ pub(super) fn session_context_kind(
     context: &hachimi_protocol::SessionContextBinding,
 ) -> &'static str {
     match context {
-        hachimi_protocol::SessionContextBinding::General => "general",
+        hachimi_protocol::SessionContextBinding::Workspace { .. } => "workspace",
         hachimi_protocol::SessionContextBinding::Project { .. } => "project",
-        hachimi_protocol::SessionContextBinding::Avatar { .. } => "avatar",
     }
 }
 

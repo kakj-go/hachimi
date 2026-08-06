@@ -76,6 +76,7 @@ function environment(
       kind: "local",
       path: "C:/repo",
     },
+    workspace: null,
     bindingRevision: 1,
     baselineRevision: "a".repeat(40),
     changes: { changedFiles: 1, additions: 2, deletions: 1, truncated: false },

@@ -3,14 +3,17 @@ import {
   commandFailure,
   commands,
   type AppSettings,
+  type ConnectorAccount,
+  type ConnectorDriverDescriptor,
   type ApprovalRequestRecord,
   type BootstrapState,
   type ClipMotionRequest,
   type InteractiveRegionsUpdate,
   type InteractionMotionPreviewRequest,
   type MotionCatalogSnapshot,
+  type McpToolView,
   type PetTurnEvent,
-  type PermissionProfile,
+  type AgentPermissionPolicy,
   type RuntimeControllerRequest,
   type SpeechPlaybackEvent,
   type SpeechTurnEvent,
@@ -19,16 +22,20 @@ import {
 } from "@hachimi/contracts";
 import { I18nProvider, useI18n, type AppLocale } from "@hachimi/i18n";
 import {
+  Button,
+  Checkbox,
   FloatingIconButton,
   MessageCircle,
   Mic2,
   Send,
   ShieldCheck,
   Square,
+  PermissionPolicyEditor,
   AppearanceProvider,
   Tooltip,
   Volume2,
   VolumeX,
+  X,
   useTheme,
   type ThemeMode,
 } from "@hachimi/ui";
@@ -44,6 +51,18 @@ interface PetWindowMotionEvent {
   y: number;
   velocityX: number;
   velocityY: number;
+}
+
+interface PetMcpTool {
+  serverId: string;
+  serverName: string;
+  tool: McpToolView;
+  readOnly: boolean;
+}
+
+interface PetConnector {
+  account: ConnectorAccount;
+  descriptor: ConnectorDriverDescriptor;
 }
 
 function FallbackPet() {
@@ -80,6 +99,30 @@ function FallbackPet() {
   );
 }
 
+function defaultPetPermissionPolicy(): AgentPermissionPolicy {
+  return {
+    level: "read_only",
+    revision: 0,
+    rules: {
+      fileSystem: [],
+      network: { enabled: false, hosts: [], protocols: [] },
+      process: { spawn: false, interactive: false, allowedCommands: [] },
+      browser: {
+        observe: false,
+        act: false,
+        upload: false,
+        download: false,
+        cookieStorage: false,
+        cdp: false,
+        origins: [],
+      },
+      computer: { observe: false, act: false, targetWindows: [], maxActions: null },
+      mcp: [],
+      connectors: [],
+    },
+  };
+}
+
 function DesktopPet() {
   const i18n = useI18n();
   const theme = useTheme();
@@ -94,7 +137,17 @@ function DesktopPet() {
   const [pendingApproval, setPendingApproval] = createSignal<ApprovalRequestRecord>();
   const [pendingUserInput, setPendingUserInput] = createSignal<UserInputRequestRecord>();
   const [inputAnswers, setInputAnswers] = createSignal<Record<string, string>>({});
-  const [permissionProfile, setPermissionProfile] = createSignal<PermissionProfile>("read_only");
+  const [permissionPolicy, setPermissionPolicy] = createSignal<AgentPermissionPolicy>(
+    defaultPetPermissionPolicy(),
+  );
+  const [permissionDraft, setPermissionDraft] = createSignal<AgentPermissionPolicy>(
+    defaultPetPermissionPolicy(),
+  );
+  const [permissionOpen, setPermissionOpen] = createSignal(false);
+  const [permissionSaving, setPermissionSaving] = createSignal(false);
+  const [permissionMcpTools, setPermissionMcpTools] = createSignal<PetMcpTool[]>([]);
+  const [permissionConnectors, setPermissionConnectors] = createSignal<PetConnector[]>([]);
+  const permissionProfile = () => permissionPolicy().level;
   const [permissionSessionId, setPermissionSessionId] = createSignal<string>();
   const [muted, setMutedValue] = createSignal(false);
   const [avatarReady, setAvatarReady] = createSignal(false);
@@ -107,6 +160,7 @@ function DesktopPet() {
   let composer: HTMLFormElement | undefined;
   let composerInput: HTMLTextAreaElement | undefined;
   let attentionPanel: HTMLDivElement | undefined;
+  let permissionPanel: HTMLDivElement | undefined;
   let avatarRenderer: AvatarRuntime | undefined;
   let pointerStart:
     | {
@@ -147,9 +201,9 @@ function DesktopPet() {
           silhouette: avatarHitArea,
           actionBar,
           composer: composerOpen() ? composer : undefined,
-          menuContent: attentionPanel,
+          menuContent: permissionOpen() ? permissionPanel : attentionPanel,
           actionsVisible: actionsVisible(),
-          menuOpen: Boolean(needsAttention()),
+          menuOpen: permissionOpen() || Boolean(needsAttention()),
         },
         window.innerWidth,
         window.innerHeight,
@@ -266,7 +320,7 @@ function DesktopPet() {
       setPendingApproval(undefined);
       setPendingUserInput(undefined);
       avatarRenderer?.setListening(false);
-    } else if (event.type === "failed") {
+    } else if (event.type === "needs_attention" || event.type === "failed") {
       setReply(event.message);
       setTurnPhase("idle");
       setActiveRunId(undefined);
@@ -280,19 +334,32 @@ function DesktopPet() {
 
   async function refreshPendingInteraction() {
     const sessionId = permissionSessionId();
-    const runId = agentRunId();
-    if (!sessionId || !runId || !activeRunId()) {
+    const currentAgentRunId = agentRunId();
+    const presentationRunId = activeRunId();
+    if (!sessionId || !currentAgentRunId || !presentationRunId) {
       setPendingApproval(undefined);
       setPendingUserInput(undefined);
       return;
     }
     try {
-      const [approvals, inputs] = await Promise.all([
+      const [approvals, inputs, recovered] = await Promise.all([
         commands.listPendingApprovals(sessionId),
         commands.listPendingUserInput(sessionId),
+        commands.recoverPetTurn(presentationRunId, sessionId, currentAgentRunId),
       ]);
-      const approval = approvals.find((record) => record.runId === runId);
-      const input = inputs.find((record) => record.runId === runId);
+      if (
+        activeRunId() !== presentationRunId ||
+        permissionSessionId() !== sessionId ||
+        agentRunId() !== currentAgentRunId
+      ) {
+        return;
+      }
+      if (recovered) {
+        handleTurnEvent(recovered);
+        return;
+      }
+      const approval = approvals.find((record) => record.runId === currentAgentRunId);
+      const input = inputs.find((record) => record.runId === currentAgentRunId);
       setPendingApproval(approval);
       setPendingUserInput(input);
       if (input) {
@@ -357,21 +424,158 @@ function DesktopPet() {
     }
   }
 
-  async function togglePermissionProfile() {
+  async function openPermissionEditor() {
     if (activeRunId()) return;
-    const next = permissionProfile() === "read_only" ? "external_sandbox" : "read_only";
     try {
-      const config = await commands.updateSessionPermissionConfig({
-        sessionId: permissionSessionId() ?? null,
-        entryProfile: "pet_conversation",
-        config: {
-          permissionProfile: next,
-          approvalPolicy: "only_when_needed",
-        },
-      });
-      setPermissionProfile(config.permissionProfile);
+      const [config] = await Promise.all([
+        commands.getSessionPermissionConfig({
+          sessionId: null,
+          entryProfile: "pet_conversation",
+        }),
+        loadPermissionCatalog(),
+      ]);
+      setPermissionPolicy(config.policy);
+      setPermissionDraft(config.policy);
+      setPermissionOpen(true);
+      scheduleRegionReport();
     } catch (error) {
       setReply(commandFailure(error).message);
+    }
+  }
+
+  async function loadPermissionCatalog() {
+    const [servers, accounts] = await Promise.all([
+      commands.listMcpServers(),
+      commands.listConnectorAccounts(),
+    ]);
+    const readyServers = servers.filter((server) => server.health.state === "ready");
+    const tools = await Promise.all(
+      readyServers.map(async (server) => {
+        const discovered = await commands.listMcpTools(server.configuration.id);
+        return discovered
+          .filter((tool) => tool.enabled && !tool.stale && !tool.validationError)
+          .map((tool) => ({
+            serverId: server.configuration.id,
+            serverName: server.configuration.displayName,
+            readOnly: server.configuration.readOnlyTools.includes(tool.name),
+            tool,
+          }));
+      }),
+    );
+    setPermissionMcpTools(tools.flat());
+    const connectors = await Promise.all(
+      accounts
+        .filter((account) => account.health === "healthy")
+        .map(async (account) => ({
+          account,
+          descriptor: await commands.getConnectorDriverDescriptor(
+            account.pluginId,
+            account.connectorId,
+          ),
+        })),
+    );
+    setPermissionConnectors(connectors);
+  }
+
+  function toggleMcpTool(entry: PetMcpTool, checked: boolean) {
+    setPermissionDraft((policy) => {
+      const retained = policy.rules.mcp.filter(
+        (rule) => !(rule.serverId === entry.serverId && rule.toolName === entry.tool.name),
+      );
+      return {
+        ...policy,
+        rules: {
+          ...policy.rules,
+          mcp: checked
+            ? [
+                ...retained,
+                {
+                  serverId: entry.serverId,
+                  toolName: entry.tool.name,
+                  schemaHash: entry.tool.schemaHash,
+                  readOnly: entry.readOnly,
+                },
+              ]
+            : retained,
+        },
+      };
+    });
+  }
+
+  function toggleConnectorAction(entry: PetConnector, action: string, checked: boolean) {
+    setPermissionDraft((policy) => {
+      const existing = policy.rules.connectors.find((rule) => rule.accountId === entry.account.id);
+      const actions = checked
+        ? [...new Set([...(existing?.actions ?? []), action])]
+        : (existing?.actions ?? []).filter((value) => value !== action);
+      const readOnlyActions = (
+        policy.level === "read_only"
+          ? actions
+          : (existing?.readOnlyActions ?? []).filter((value) => actions.includes(value))
+      ).sort();
+      const retained = policy.rules.connectors.filter(
+        (rule) => rule.accountId !== entry.account.id,
+      );
+      return {
+        ...policy,
+        rules: {
+          ...policy.rules,
+          connectors:
+            actions.length > 0
+              ? [
+                  ...retained,
+                  {
+                    accountId: entry.account.id,
+                    actions: actions.sort(),
+                    readOnlyActions,
+                    contributionRevision: entry.descriptor.revision.actionHash,
+                  },
+                ]
+              : retained,
+        },
+      };
+    });
+  }
+
+  function setConnectorActionReadOnly(accountId: string, action: string, checked: boolean) {
+    setPermissionDraft((policy) => ({
+      ...policy,
+      rules: {
+        ...policy.rules,
+        connectors: policy.rules.connectors.map((rule) =>
+          rule.accountId === accountId
+            ? {
+                ...rule,
+                readOnlyActions: checked
+                  ? [...new Set([...rule.readOnlyActions, action])].sort()
+                  : rule.readOnlyActions.filter((value) => value !== action),
+              }
+            : rule,
+        ),
+      },
+    }));
+  }
+
+  async function savePermissionPolicy() {
+    if (activeRunId() || permissionSaving()) return;
+    setPermissionSaving(true);
+    try {
+      const config = await commands.updateSessionPermissionConfig({
+        sessionId: null,
+        entryProfile: "pet_conversation",
+        config: {
+          extraAuthorizations: [],
+          policy: permissionDraft(),
+        },
+      });
+      setPermissionPolicy(config.policy);
+      setPermissionDraft(config.policy);
+      setPermissionOpen(false);
+    } catch (error) {
+      setReply(commandFailure(error).message);
+    } finally {
+      setPermissionSaving(false);
+      scheduleRegionReport();
     }
   }
 
@@ -618,7 +822,10 @@ function DesktopPet() {
       .catch((error) => setReply(commandFailure(error).message));
     void commands
       .getSessionPermissionConfig({ sessionId: null, entryProfile: "pet_conversation" })
-      .then((config) => setPermissionProfile(config.permissionProfile))
+      .then((config) => {
+        setPermissionPolicy(config.policy);
+        setPermissionDraft(config.policy);
+      })
       .catch(() => undefined);
     // Load the motion catalog before the avatar so its cool base idle can be
     // prepared while the SVG fallback remains visible. This prevents a rest/T-pose flash.
@@ -652,6 +859,146 @@ function DesktopPet() {
       data-composer-open={composerOpen()}
       aria-label={i18n.t("pet.testLabel")}
     >
+      <Show when={permissionOpen()}>
+        <div
+          ref={permissionPanel}
+          class="pet-permission-panel"
+          data-testid="pet-permission-panel"
+          role="dialog"
+          aria-modal="true"
+          aria-label={i18n.locale() === "zh-CN" ? "Agent 权限" : "Agent permissions"}
+        >
+          <header>
+            <strong>{i18n.locale() === "zh-CN" ? "Agent 权限" : "Agent permissions"}</strong>
+            <FloatingIconButton
+              size="small"
+              label={i18n.locale() === "zh-CN" ? "关闭" : "Close"}
+              onClick={() => {
+                setPermissionOpen(false);
+                scheduleRegionReport();
+              }}
+            >
+              <X size={16} />
+            </FloatingIconButton>
+          </header>
+          <div class="pet-permission-scroll">
+            <PermissionPolicyEditor
+              value={permissionDraft()}
+              testId="pet-permission"
+              zh={i18n.locale() === "zh-CN"}
+              disabled={permissionSaving()}
+              onChange={(value) => {
+                const next = value as AgentPermissionPolicy;
+                if (next.level === "read_only") {
+                  next.rules.connectors = next.rules.connectors.map((rule) => ({
+                    ...rule,
+                    readOnlyActions: [...rule.actions],
+                  }));
+                }
+                setPermissionDraft(next);
+              }}
+            />
+            <Show when={permissionDraft().level !== "full_access"}>
+              <div class="pet-permission-extensions">
+                <Show when={permissionMcpTools().length > 0}>
+                  <section>
+                    <h4>MCP</h4>
+                    <For each={permissionMcpTools()}>
+                      {(entry) => (
+                        <Checkbox
+                          label={`${entry.serverName} / ${entry.tool.name}`}
+                          disabled={
+                            permissionSaving() ||
+                            (!entry.readOnly && permissionDraft().level === "read_only")
+                          }
+                          checked={permissionDraft().rules.mcp.some(
+                            (rule) =>
+                              rule.serverId === entry.serverId &&
+                              rule.toolName === entry.tool.name &&
+                              rule.schemaHash === entry.tool.schemaHash,
+                          )}
+                          onChange={(event) => toggleMcpTool(entry, event.currentTarget.checked)}
+                        />
+                      )}
+                    </For>
+                  </section>
+                </Show>
+                <Show when={permissionConnectors().length > 0}>
+                  <section>
+                    <h4>Connectors</h4>
+                    <For each={permissionConnectors()}>
+                      {(entry) => (
+                        <div class="pet-permission-connector">
+                          <strong>{entry.account.displayName}</strong>
+                          <For each={entry.descriptor.actions}>
+                            {(action) => {
+                              const rule = () =>
+                                permissionDraft().rules.connectors.find(
+                                  (value) => value.accountId === entry.account.id,
+                                );
+                              const selected = () => rule()?.actions.includes(action) ?? false;
+                              return (
+                                <div class="pet-permission-action">
+                                  <Checkbox
+                                    label={action}
+                                    disabled={permissionSaving()}
+                                    checked={selected()}
+                                    onChange={(event) =>
+                                      toggleConnectorAction(
+                                        entry,
+                                        action,
+                                        event.currentTarget.checked,
+                                      )
+                                    }
+                                  />
+                                  <Show when={selected() && permissionDraft().level === "writable"}>
+                                    <Checkbox
+                                      label={i18n.locale() === "zh-CN" ? "只读" : "Read only"}
+                                      disabled={permissionSaving()}
+                                      checked={rule()?.readOnlyActions.includes(action) ?? false}
+                                      onChange={(event) =>
+                                        setConnectorActionReadOnly(
+                                          entry.account.id,
+                                          action,
+                                          event.currentTarget.checked,
+                                        )
+                                      }
+                                    />
+                                  </Show>
+                                </div>
+                              );
+                            }}
+                          </For>
+                        </div>
+                      )}
+                    </For>
+                  </section>
+                </Show>
+              </div>
+            </Show>
+          </div>
+          <footer>
+            <Button
+              variant="ghost"
+              disabled={permissionSaving()}
+              onClick={() => {
+                setPermissionOpen(false);
+                scheduleRegionReport();
+              }}
+            >
+              {i18n.locale() === "zh-CN" ? "取消" : "Cancel"}
+            </Button>
+            <Button
+              variant="primary"
+              data-testid="pet-permission-save"
+              loading={permissionSaving()}
+              onClick={() => void savePermissionPolicy()}
+            >
+              {i18n.locale() === "zh-CN" ? "保存" : "Save"}
+            </Button>
+          </footer>
+        </div>
+      </Show>
       <Show when={needsAttention()}>
         <div
           ref={attentionPanel}
@@ -884,9 +1231,13 @@ function DesktopPet() {
               ? i18n.locale() === "zh-CN"
                 ? "只读权限"
                 : "Read-only permissions"
-              : i18n.locale() === "zh-CN"
-                ? "外部工具权限（仍需审批）"
-                : "External tools (approvals still apply)"
+              : permissionProfile() === "writable"
+                ? i18n.locale() === "zh-CN"
+                  ? "可写权限"
+                  : "Writable permissions"
+                : i18n.locale() === "zh-CN"
+                  ? "完全授权"
+                  : "Full access"
           }
         >
           <FloatingIconButton
@@ -894,9 +1245,9 @@ function DesktopPet() {
             size="small"
             data-testid="pet-permission-toggle"
             label="Agent permissions"
-            aria-pressed={permissionProfile() === "external_sandbox"}
+            aria-pressed={permissionProfile() !== "read_only"}
             disabled={Boolean(activeRunId())}
-            onClick={() => void togglePermissionProfile()}
+            onClick={() => void openPermissionEditor()}
           >
             <ShieldCheck size={17} />
           </FloatingIconButton>

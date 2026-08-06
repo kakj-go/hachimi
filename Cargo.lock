@@ -2410,6 +2410,7 @@ dependencies = [
  "tracing-subscriber",
  "url",
  "uuid",
+ "windows 0.62.2",
  "zeroize",
 ]
 

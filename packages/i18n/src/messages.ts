@@ -226,6 +226,14 @@ export const zhCn = {
   "workbench.approvalOnlyWhenNeededDescription": "仅对检测到的风险操作请求批准",
   "workbench.approvalAlwaysAskDescription": "文件写入、命令和外部副作用始终询问",
   "workbench.approvalNeverPromptDescription": "在当前权限边界内不再询问，高风险操作可能直接执行",
+  "workbench.permissionLevel": "权限",
+  "workbench.permissionPopoverTitle": "此会话可以访问哪些内容？",
+  "workbench.permissionReadOnly": "只读",
+  "workbench.permissionReadOnlyDescription": "读取工作目录和已授权的观察型工具",
+  "workbench.permissionWritable": "可写",
+  "workbench.permissionWritableDescription": "可在工作目录内自由修改，越界时申请授权",
+  "workbench.permissionFullAccess": "完全授权",
+  "workbench.permissionFullAccessDescription": "可访问整机及全部已配置服务，不再逐次询问",
   "workbench.startTask": "创建任务",
   "workbench.workspaceToolsDisabled": "此构建未启用工作区工具。",
   "workbench.taskReady": "任务将使用全局模型设置的快照；执行位置、计划模式和审批策略分别保存。",
@@ -626,6 +634,16 @@ export const enUs: Record<MessageKey, string> = {
     "Always ask before writes, commands, and external side effects",
   "workbench.approvalNeverPromptDescription":
     "Do not ask within current permission boundaries; high-risk actions may run directly",
+  "workbench.permissionLevel": "Permissions",
+  "workbench.permissionPopoverTitle": "What can this session access?",
+  "workbench.permissionReadOnly": "Read only",
+  "workbench.permissionReadOnlyDescription": "Read the workspace and authorized observation tools",
+  "workbench.permissionWritable": "Writable",
+  "workbench.permissionWritableDescription":
+    "Modify the workspace freely and request access beyond it",
+  "workbench.permissionFullAccess": "Full access",
+  "workbench.permissionFullAccessDescription":
+    "Access the machine and every configured service without per-action prompts",
   "workbench.startTask": "Create task",
   "workbench.workspaceToolsDisabled": "Workspace tools are disabled in this build.",
   "workbench.taskReady":

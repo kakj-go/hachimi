@@ -1,9 +1,4 @@
-import type {
-  ProjectRecord,
-  ScheduleDefinition,
-  ScheduleEventReceipt,
-  TaskRunRecord,
-} from "@hachimi/contracts";
+import type { ScheduleDefinition, ScheduleEventReceipt, TaskRunRecord } from "@hachimi/contracts";
 
 export function formatTaskTime(value: number | null, zh?: boolean): string {
   return value
@@ -61,17 +56,11 @@ export function scheduleFrequencyLabel(schedule: ScheduleDefinition, zh: boolean
   return `${spec.expression} · ${spec.timezone}`;
 }
 
-export function taskContextLabel(
-  schedule: ScheduleDefinition,
-  projects: ProjectRecord[],
-  zh: boolean,
-): string {
-  if (schedule.contextTemplate.kind === "general") return zh ? "通用" : "General";
-  if (schedule.contextTemplate.kind === "session_continuation") {
-    return zh ? "续接现有会话" : "Continue a session";
+export function taskContextLabel(schedule: ScheduleDefinition, zh: boolean): string {
+  if (schedule.contextTemplate.workspace.kind === "managed") {
+    return zh ? "任务目录" : "Task workspace";
   }
-  const projectId = schedule.contextTemplate.project_id;
-  return projects.find((project) => project.id === projectId)?.displayName ?? projectId;
+  return schedule.contextTemplate.workspace.root_path;
 }
 
 export function scheduleHealthTone(
@@ -85,7 +74,6 @@ export function scheduleHealthTone(
 export function scheduleHealthLabel(health: ScheduleDefinition["health"], zh: boolean): string {
   const labels = {
     healthy: zh ? "正常" : "Healthy",
-    needs_authorization: zh ? "需要授权" : "Authorization required",
     needs_attention: zh ? "需要处理" : "Needs attention",
     invalid: zh ? "配置无效" : "Invalid",
   } satisfies Record<ScheduleDefinition["health"], string>;

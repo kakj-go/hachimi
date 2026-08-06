@@ -66,6 +66,12 @@ vi.mock("@hachimi/ui", () => ({
       onChange={(event) => props.onChange?.(event)}
     />
   ),
+  FormField: (props: { label: string; children?: JSX.Element }) => (
+    <label>
+      <span>{props.label}</span>
+      {props.children}
+    </label>
+  ),
   Dialog: (props: {
     open: boolean;
     title: string;
@@ -89,6 +95,28 @@ vi.mock("@hachimi/ui", () => ({
       {props.actions}
     </header>
   ),
+  PermissionPolicyEditor: (props: {
+    value: { level: string } & Record<string, unknown>;
+    testId?: string;
+    disabled?: boolean;
+    zh: boolean;
+    onChange?: (value: { level: string } & Record<string, unknown>) => void;
+  }) => (
+    <label>
+      <span>{props.zh ? "权限档位" : "Permission level"}</span>
+      <select
+        aria-label={props.zh ? "权限档位" : "Permission level"}
+        data-testid={props.testId}
+        disabled={props.disabled}
+        value={props.value.level}
+        onChange={(event) => props.onChange?.({ ...props.value, level: event.currentTarget.value })}
+      >
+        <option value="read_only">Read only</option>
+        <option value="writable">Writable</option>
+        <option value="full_access">Full access</option>
+      </select>
+    </label>
+  ),
   SettingsCard: (props: { children?: JSX.Element }) => <div>{props.children}</div>,
   SettingsRow: (props: { label: string; description?: JSX.Element; children?: JSX.Element }) => (
     <section>
@@ -99,6 +127,25 @@ vi.mock("@hachimi/ui", () => ({
   ),
   SettingsSection: (props: { title: string; children?: JSX.Element }) => (
     <section aria-label={props.title}>{props.children}</section>
+  ),
+  SegmentedControl: (props: {
+    label: string;
+    value: string;
+    options: { value: string; label: string }[];
+    onChange?: (value: string) => void;
+  }) => (
+    <label>
+      <span>{props.label}</span>
+      <select
+        aria-label={props.label}
+        value={props.value}
+        onChange={(event) => props.onChange?.(event.currentTarget.value)}
+      >
+        <For each={props.options}>
+          {(option) => <option value={option.value}>{option.label}</option>}
+        </For>
+      </select>
+    </label>
   ),
   StatusBanner: (props: { children?: JSX.Element }) => <div role="status">{props.children}</div>,
   Switch: (props: {
@@ -366,6 +413,27 @@ beforeEach(() => {
     dmPolicy: "pairing",
     allowlistActorIds: [],
     grantCeiling: {
+      permissionPolicy: {
+        level: "read_only",
+        rules: {
+          fileSystem: [],
+          network: { enabled: false, hosts: [], protocols: [] },
+          process: { spawn: false, interactive: false, allowedCommands: [] },
+          browser: {
+            observe: false,
+            act: false,
+            upload: false,
+            download: false,
+            cookieStorage: false,
+            cdp: false,
+            origins: [],
+          },
+          computer: { observe: false, act: false, targetWindows: [], maxActions: null },
+          mcp: [],
+          connectors: [],
+        },
+        revision: 0,
+      },
       skillIds: [],
       mcpServerIds: [],
       connectorSelections: [],
@@ -494,9 +562,11 @@ describe("PlatformIntegrationsSettings", () => {
     await vi.waitFor(() =>
       expect(commandMocks.getChannelAccessPolicy).toHaveBeenCalledWith(account.id),
     );
-    const dmPolicy = mounted.host.querySelector<HTMLSelectElement>(
-      'select[aria-label="私聊策略"]',
-    )!;
+    const dmPolicy = await vi.waitFor(() => {
+      const field = mounted.host.querySelector<HTMLSelectElement>('select[aria-label="私聊策略"]');
+      expect(field).toBeTruthy();
+      return field!;
+    });
     dmPolicy.value = "open";
     dmPolicy.dispatchEvent(new Event("change", { bubbles: true }));
     await vi.waitFor(() =>
@@ -511,6 +581,36 @@ describe("PlatformIntegrationsSettings", () => {
         dmPolicy: "open",
         expectedRevision: 1,
         grantCeiling: expect.objectContaining({ skillIds: ["skill-a", "skill-b"] }),
+      }),
+    );
+    mounted.dispose();
+  });
+
+  it("hides and clears scoped Channel fields for full access", async () => {
+    commandMocks.listEnterpriseIntegrations.mockResolvedValue([account]);
+    const mounted = mount();
+    await vi.waitFor(() => expect(mounted.host.textContent).toContain("客服账户"));
+    mounted.host
+      .querySelector<HTMLButtonElement>('[role="tab"][aria-label="企微自建应用"]')
+      ?.click();
+    button(mounted.host, "策略与权限")?.click();
+    await vi.waitFor(() =>
+      expect(commandMocks.getChannelAccessPolicy).toHaveBeenCalledWith(account.id),
+    );
+    select(mounted.host, "权限档位", "full_access");
+    expect(mounted.host.textContent).not.toContain("MCP Servers");
+    expect(mounted.host.textContent).not.toContain("网络范围");
+    button(mounted.host, "保存")?.click();
+    await vi.waitFor(() => expect(commandMocks.updateChannelAccessPolicy).toHaveBeenCalledOnce());
+    expect(commandMocks.updateChannelAccessPolicy).toHaveBeenCalledWith(
+      expect.objectContaining({
+        grantCeiling: expect.objectContaining({
+          permissionPolicy: expect.objectContaining({ level: "full_access" }),
+          mcpServerIds: [],
+          connectorSelections: [],
+          readOnlyWorkspaceRoots: [],
+          networkHosts: [],
+        }),
       }),
     );
     mounted.dispose();

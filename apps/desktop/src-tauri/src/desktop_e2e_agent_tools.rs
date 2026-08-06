@@ -36,6 +36,9 @@ pub(super) fn response(request: &ModelRequest) -> Option<Response> {
     if has_marker(&request.messages, "[desktop-e2e:agent-git-forge]") {
         return Some(git_forge_response(request));
     }
+    if has_marker(&request.messages, "[desktop-e2e:approval-recovery]") {
+        return Some(approval_recovery_response(request));
+    }
     if has_marker(&request.messages, "[desktop-e2e:agent-forge-lifecycle]") {
         return Some(forge_lifecycle_response(request));
     }
@@ -87,14 +90,6 @@ fn disabled_feature_response(request: &ModelRequest, expected_workload: &str) ->
     if expected_workload == "Coding" && !has_tool(request, "git.remotes") {
         return failure("Git mutation feature flag removed the read-only git.remotes tool".into());
     }
-    if expected_workload == "General"
-        && request
-            .tools
-            .iter()
-            .any(|tool| tool.name.starts_with("git.") || tool.name.starts_with("forge."))
-    {
-        return failure("General ToolPlan exposed Coding Git/Forge tools".into());
-    }
     text_response(&format!(
         "Desktop E2E {expected_workload} feature flags removed Multi-Agent, enterprise attachment, and Git/Forge mutations from the real ToolPlan."
     ))
@@ -117,19 +112,12 @@ fn multi_agent_response(request: &ModelRequest, expected_workload: &str) -> Resp
         "agent.wait",
         "agent.cancel",
         "agent.collect",
+        "enterprise.download_attachment",
     ];
     if let Some(missing) = required.iter().find(|name| !has_tool(request, name)) {
-        return failure(format!("Multi-Agent ToolPlan is missing {missing}"));
-    }
-    if matches!(expected_workload, "General" | "Office")
-        && !has_tool(request, "enterprise.download_attachment")
-    {
         return failure(format!(
-            "{expected_workload} ToolPlan is missing enterprise.download_attachment"
+            "Unified {expected_workload} ToolPlan is missing {missing}"
         ));
-    }
-    if expected_workload == "Coding" && has_tool(request, "enterprise.download_attachment") {
-        return failure("Coding ToolPlan exposed enterprise.download_attachment".into());
     }
     if !completed(request, "agent.spawn") {
         return tool_call(
@@ -164,7 +152,7 @@ fn multi_agent_response(request: &ModelRequest, expected_workload: &str) -> Resp
         return failure("Multi-Agent collect did not return the child Task".into());
     }
     text_response(&format!(
-        "Desktop E2E {expected_workload} Multi-Agent completed; spawn, wait, and collect used the real ToolPlan."
+        "Desktop E2E {expected_workload} unified ToolPlan completed; Multi-Agent and enterprise attachment capabilities were profile-independent."
     ))
 }
 
@@ -178,9 +166,6 @@ fn git_forge_response(request: &ModelRequest) -> Response {
         if !has_tool(request, name) {
             return failure(format!("Coding ToolPlan is missing {name}"));
         }
-    }
-    if has_tool(request, "enterprise.download_attachment") {
-        return failure("Coding ToolPlan exposed enterprise.download_attachment".into());
     }
     if !completed(request, "git.remotes") {
         return tool_call(
@@ -245,6 +230,26 @@ fn git_forge_response(request: &ModelRequest) -> Response {
     text_response(
         "Desktop E2E successful push and drift fencing completed with exact approval and receipt checks.",
     )
+}
+
+fn approval_recovery_response(request: &ModelRequest) -> Response {
+    if !has_tool(request, "browser_start") {
+        return failure("Approval recovery ToolPlan is missing browser_start".into());
+    }
+    if !completed(request, "browser_start") {
+        let Some(initial_url) = marker_value(&request.messages, "url=") else {
+            return failure("Approval recovery Browser URL is missing".into());
+        };
+        return tool_call(
+            "desktop-e2e-approval-browser",
+            "browser_start",
+            serde_json::json!({
+                "initialUrl": initial_url,
+                "surface": "embedded"
+            }),
+        );
+    }
+    text_response("Desktop E2E approval recovery Browser action completed.")
 }
 
 fn forge_lifecycle_response(request: &ModelRequest) -> Response {
@@ -452,10 +457,7 @@ fn forge_credential_response(request: &ModelRequest) -> Response {
 
 fn enterprise_attachment_response(request: &ModelRequest) -> Response {
     if !has_tool(request, "enterprise.download_attachment") {
-        return failure("General ToolPlan is missing enterprise.download_attachment".into());
-    }
-    if has_tool(request, "git.remotes") || has_tool(request, "forge.change.query") {
-        return failure("General ToolPlan exposed Coding Git/Forge tools".into());
+        return failure("Unified ToolPlan is missing enterprise.download_attachment".into());
     }
     for name in ["agent.spawn", "agent.wait", "agent.collect"] {
         if !has_tool(request, name) {
@@ -463,7 +465,7 @@ fn enterprise_attachment_response(request: &ModelRequest) -> Response {
         }
     }
     text_response(
-        "Desktop E2E General ToolPlan exposed Multi-Agent and enterprise attachment tools without Coding Git/Forge tools.",
+        "Desktop E2E General unified ToolPlan exposed profile-independent Multi-Agent and enterprise attachment capabilities.",
     )
 }
 
@@ -477,11 +479,6 @@ fn require_forge_tools_and_remotes(request: &ModelRequest) -> Option<Response> {
         if !has_tool(request, name) {
             return Some(failure(format!("Coding ToolPlan is missing {name}")));
         }
-    }
-    if has_tool(request, "enterprise.download_attachment") {
-        return Some(failure(
-            "Coding ToolPlan exposed enterprise.download_attachment".into(),
-        ));
     }
     (!completed(request, "git.remotes")).then(|| {
         tool_call(

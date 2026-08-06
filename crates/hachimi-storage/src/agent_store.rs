@@ -22,6 +22,10 @@ use std::{
 };
 use tokio::sync::broadcast;
 static MIGRATOR: Migrator = sqlx::migrate!("./migrations");
+
+// WAL readers cannot upgrade a stale snapshot after another process commits a write.
+const SQLITE_BEGIN_IMMEDIATE: &str = "BEGIN IMMEDIATE";
+
 mod active_events;
 mod agent_tasks;
 mod audit;
@@ -61,6 +65,7 @@ pub(crate) mod side_effects;
 mod transaction_helpers;
 mod usage;
 mod user_input;
+mod workspace_authority;
 pub(crate) mod workspace_diff;
 pub use agent_tasks::AgentTaskExecutionClaim;
 pub use audit::AuditMetadataRecord;
@@ -77,10 +82,16 @@ pub use plugin_hooks::{
 };
 pub use recovery::RecoveryToolFence;
 use row_decode::*;
-pub use run_bundle::{ChannelAgentRunCreateInput, ChannelRunBindingInput, CreatedAgentRun};
+pub use run_bundle::{
+    AtomicRunLaunchInput, ChannelAgentRunCreateInput, ChannelRunBindingInput, CreatedAgentRun,
+};
 pub use schedule::{IdempotentMutationClaim, ScheduleInvocationClaim};
 pub use schedule_event::{ScheduleEventIngestClaim, ScheduleEventLaunchClaim};
 use transaction_helpers::*;
+pub use workspace_authority::{
+    PreparedAgentWorkspace, SessionHostAuthorizationSummary, WorkspaceOwnerRef,
+    WorkspaceReconciliationReport,
+};
 pub use workspace_diff::{ManagedRunDiffFile, RunFileBaselineRecord};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -345,6 +356,30 @@ impl AgentStore {
         plan_id: &PlanId,
         run: &RunRecord,
     ) -> Result<(ProposedPlan, RunRecord), AgentStoreError> {
+        self.accept_proposed_plan_inner(principal, idempotency_key, plan_id, run, None)
+            .await
+    }
+
+    pub async fn accept_proposed_plan_authorized_idempotent(
+        &self,
+        principal: &str,
+        idempotency_key: &str,
+        plan_id: &PlanId,
+        run: &RunRecord,
+        launch: AtomicRunLaunchInput<'_>,
+    ) -> Result<(ProposedPlan, RunRecord), AgentStoreError> {
+        self.accept_proposed_plan_inner(principal, idempotency_key, plan_id, run, Some(launch))
+            .await
+    }
+
+    async fn accept_proposed_plan_inner(
+        &self,
+        principal: &str,
+        idempotency_key: &str,
+        plan_id: &PlanId,
+        run: &RunRecord,
+        launch: Option<AtomicRunLaunchInput<'_>>,
+    ) -> Result<(ProposedPlan, RunRecord), AgentStoreError> {
         let mut transaction = self.pool.begin().await?;
         if let Some(existing_id) = sqlx::query_scalar::<_, String>(
             "SELECT resource_id FROM idempotency_records WHERE principal = ? AND method = 'plan.accept' AND idempotency_key = ?",
@@ -365,6 +400,10 @@ impl AgentStore {
             let plan = get_proposed_plan_tx(&mut transaction, accepted_plan_id)
                 .await?
                 .ok_or_else(|| AgentStoreError::ProposedPlanNotFound(accepted_plan_id.clone()))?;
+            if launch.is_some() {
+                run_bundle::require_authority_snapshot_tx(&mut transaction, &existing_run.id)
+                    .await?;
+            }
             transaction.commit().await?;
             return Ok((plan, existing_run));
         }
@@ -409,6 +448,15 @@ impl AgentStore {
         .bind(plan.run_id.as_str())
         .execute(&mut *transaction)
         .await?;
+        if let Some(launch) = launch {
+            let session_row = sqlx::query("SELECT * FROM sessions WHERE id = ?")
+                .bind(plan.session_id.as_str())
+                .fetch_one(&mut *transaction)
+                .await?;
+            let session = session_from_row(&session_row)?;
+            run_bundle::insert_atomic_launch_state_tx(&mut transaction, &session, run, launch)
+                .await?;
+        }
         let accepted_at_ms = run.created_at_ms;
         sqlx::query(
             "UPDATE proposed_plans SET status = 'accepted', accepted_run_id = ?, accepted_at_ms = ? WHERE id = ? AND status = 'proposed'",
@@ -1461,7 +1509,7 @@ impl AgentStore {
         ) {
             return Err(AgentStoreError::InvalidApprovalDecision);
         }
-        let mut transaction = self.pool.begin().await?;
+        let mut transaction = self.pool.begin_with(SQLITE_BEGIN_IMMEDIATE).await?;
         let row = sqlx::query("SELECT * FROM approval_requests WHERE id = ?")
             .bind(resolution.approval_id.as_str())
             .fetch_optional(&mut *transaction)

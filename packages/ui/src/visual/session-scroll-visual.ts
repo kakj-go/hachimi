@@ -20,13 +20,16 @@ export function installSessionScrollVisualTest(installTauriMocks: InstallTauriMo
     await expect(menuItem).toHaveAttribute("aria-pressed", "false");
     await menuItem.click();
 
-    const approval = page.getByTestId("workbench-approval-policy");
+    const permission = page.getByTestId("workbench-permission-profile");
     const chip = page.getByTestId("workbench-plan-mode-chip");
     await expect(page.getByTestId("workbench-options-popover")).toHaveCount(0);
     await expect(chip).toBeVisible();
     await expect(page.locator(".plan-mode-banner")).toHaveCount(0);
-    const [approvalBox, chipBox] = await Promise.all([approval.boundingBox(), chip.boundingBox()]);
-    expect(chipBox!.x).toBeGreaterThan(approvalBox!.x + approvalBox!.width);
+    const [permissionBox, chipBox] = await Promise.all([
+      permission.boundingBox(),
+      chip.boundingBox(),
+    ]);
+    expect(chipBox!.x).toBeGreaterThan(permissionBox!.x + permissionBox!.width);
 
     const defaultIcon = chip.locator(".composer-plan-mode-default-icon");
     const removeIcon = chip.locator(".composer-plan-mode-remove-icon");
@@ -170,19 +173,19 @@ export function installSessionScrollVisualTest(installTauriMocks: InstallTauriMo
   });
 }
 
-export async function assertApprovalPolicyTones(
+export async function assertPermissionTones(
   page: Page,
-  approvalPopover: ReturnType<Page["getByTestId"]>,
+  permissionPopover: ReturnType<Page["getByTestId"]>,
 ) {
-  await expect(approvalPopover).toHaveCSS("width", "380px");
-  const ask = page.getByTestId("workbench-approval-policy-always_ask_side_effects");
-  const recommended = page.getByTestId("workbench-approval-policy-only_when_needed");
-  const fullAccess = page.getByTestId("workbench-approval-policy-never_prompt");
-  await expect(ask).toHaveAttribute("data-tone", "neutral");
-  await expect(recommended).toHaveAttribute("data-tone", "recommended");
-  await expect(recommended).toHaveAttribute("aria-pressed", "true");
+  await expect(permissionPopover).toHaveCSS("width", "380px");
+  const readOnly = page.getByTestId("workbench-permission-read_only");
+  const writable = page.getByTestId("workbench-permission-writable");
+  const fullAccess = page.getByTestId("workbench-permission-full_access");
+  await expect(readOnly).toHaveAttribute("data-tone", "neutral");
+  await expect(writable).toHaveAttribute("data-tone", "recommended");
+  await expect(writable).toHaveAttribute("aria-pressed", "true");
   await expect(fullAccess).toHaveAttribute("data-tone", "danger");
-  const colors = await approvalPopover.locator(".composer-popover-row").evaluateAll((rows) =>
+  const colors = await permissionPopover.locator(".composer-popover-row").evaluateAll((rows) =>
     rows.map((row) => ({
       color: getComputedStyle(row).color,
       background: getComputedStyle(row).backgroundColor,

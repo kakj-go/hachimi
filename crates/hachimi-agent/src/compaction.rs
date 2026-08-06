@@ -1329,7 +1329,7 @@ mod tests {
             session_id: session.id.clone(),
             status: RunStatus::Queued,
             purpose: RunPurpose::Task,
-            origin: RunOrigin::Interactive,
+            origin: RunOrigin::Manual,
             generation: 1,
             configuration: RunConfiguration {
                 model_snapshot: LlmSettings::default(),

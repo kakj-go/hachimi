@@ -146,7 +146,7 @@ async fn mock_provider_drives_real_worker_and_persists_evidence_across_restart()
             project_id: project.id.clone(),
         }),
         behavior_mode: BehaviorMode::Default,
-        approval_policy: ApprovalPolicy::OnlyWhenNeeded,
+        permission_profile: PermissionProfile::Writable,
         attachment_ids: Vec::new(),
         skill_ids: Vec::new(),
     };
@@ -193,16 +193,22 @@ async fn mock_provider_drives_real_worker_and_persists_evidence_across_restart()
         Scope::WorkspaceWrite,
         Scope::WorkspaceExec,
     ]);
+    let authority = store
+        .authority_snapshot(&snapshot.run.id)
+        .await
+        .expect("authority snapshot lookup")
+        .expect("authority snapshot");
     let authorization = AuthorizedToolContext {
         client,
         principal: "test:user".into(),
         session_id: snapshot.session.id.clone(),
         run_id: snapshot.run.id.clone(),
         run_generation: snapshot.run.generation,
+        authority,
         approval_policy: ApprovalPolicy::OnlyWhenNeeded,
-        permission_profile: PermissionProfile::WorkspaceWrite,
+        permission_profile: PermissionProfile::Writable,
         capability_grants: expand_permission_profile(
-            PermissionProfile::WorkspaceWrite,
+            PermissionProfile::Writable,
             BehaviorMode::Default,
             snapshot.session.id.clone(),
             snapshot.run.id.clone(),
@@ -210,7 +216,6 @@ async fn mock_provider_drives_real_worker_and_persists_evidence_across_restart()
         ),
         capability_host: "workspace-worker".into(),
         run_tool_allowlist: None,
-        schedule_grant_hash: None,
         sandbox_status: SandboxStatus::Enforced,
         run_store: Some(store.clone()),
         policy: Arc::new(DefaultPolicy),

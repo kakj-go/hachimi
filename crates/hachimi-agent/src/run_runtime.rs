@@ -2,16 +2,17 @@ use std::{collections::BTreeMap, future::Future, pin::Pin, sync::Arc};
 
 use futures_util::StreamExt;
 use hachimi_protocol::{
-    ApprovalPolicy, AttachmentId, BehaviorMode, CapabilityGrantSet, CompactionCheckpoint,
-    EntryProfile, ItemId, ItemPayload, ItemRelations, ItemStatus, LlmSettings, McpToolSelection,
-    ModelEvent, ModelMessage, ModelRequest, ModelRole, PermissionProfile, ProviderCapabilities,
-    RunBudget, RunConfiguration, RunDriverKind, RunId, RunOrigin, RunPurpose, RunRecord, RunStatus,
-    SandboxCapabilityReport, SessionContextBinding, SessionId, SessionRecord, SkillId,
-    TranscriptItem, TranscriptItemKind, WorkloadKind,
+    AgentPermissionPolicy, AgentWorkspaceOwner, AgentWorkspaceStatus, ApprovalPolicy, AttachmentId,
+    AuthorityMode, BehaviorMode, CapabilityGrantSet, CompactionCheckpoint, EntryProfile, ItemId,
+    ItemPayload, ItemRelations, ItemStatus, LlmSettings, McpToolSelection, ModelEvent,
+    ModelMessage, ModelRequest, ModelRole, PermissionProfile, ProviderCapabilities,
+    RunAuthoritySnapshot, RunBudget, RunConfiguration, RunDriverKind, RunId, RunOrigin, RunPurpose,
+    RunRecord, RunStatus, SandboxCapabilityReport, ScheduleId, SessionContextBinding, SessionId,
+    SessionRecord, SkillId, TranscriptItem, TranscriptItemKind, WorkloadKind,
 };
 use hachimi_storage::{
-    AgentStore, AgentStoreError, ChannelAgentRunCreateInput, ChannelRunBindingInput,
-    CreatedAgentRun,
+    AgentStore, AgentStoreError, AtomicRunLaunchInput, ChannelAgentRunCreateInput,
+    ChannelRunBindingInput, CreatedAgentRun, PreparedAgentWorkspace,
 };
 use parking_lot::Mutex;
 use thiserror::Error;
@@ -56,9 +57,7 @@ pub enum AgentRunFactoryError {
     InvalidPrompt,
     #[error("title must contain 1-200 characters")]
     InvalidTitle,
-    #[error("coding Runs require a Project context and matching execution target")]
-    CodingProjectRequired,
-    #[error("General and Avatar contexts cannot carry a workspace execution target")]
+    #[error("Workspace contexts cannot carry a Project execution target")]
     UnexpectedExecutionTarget,
     #[error("Plan mode must use a read-only permission profile")]
     PlanMustBeReadOnly,
@@ -69,22 +68,100 @@ pub enum AgentRunFactoryError {
 }
 
 #[derive(Debug, Clone)]
-pub struct AgentRunFactory {
+pub(crate) struct AgentRunFactory {
     store: AgentStore,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct AgentRunAuthorization {
+    pub effective_policy: AgentPermissionPolicy,
+    pub stored_policy: Option<AgentPermissionPolicy>,
+    pub stored_policy_owner: Option<StoredPolicyOwner>,
+    pub authority_mode: AuthorityMode,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) enum StoredPolicyOwner {
+    Session,
+    Key(String),
+}
+
+impl StoredPolicyOwner {
+    pub(crate) fn key(&self, session_id: &SessionId) -> String {
+        match self {
+            Self::Session => format!("session:{session_id}"),
+            Self::Key(key) => key.clone(),
+        }
+    }
+
+    fn schedule_workspace_owner(&self) -> Option<AgentWorkspaceOwner> {
+        let Self::Key(key) = self else {
+            return None;
+        };
+        key.strip_prefix("schedule:")
+            .filter(|schedule_id| !schedule_id.is_empty())
+            .map(|schedule_id| AgentWorkspaceOwner::Schedule {
+                schedule_id: ScheduleId::new(schedule_id),
+            })
+    }
 }
 
 impl AgentRunFactory {
     #[must_use]
-    pub const fn new(store: AgentStore) -> Self {
+    pub(crate) const fn new(store: AgentStore) -> Self {
         Self { store }
     }
 
-    pub async fn create(
+    pub(crate) async fn create_authorized(
         &self,
         request: AgentRunCreateRequest,
+        authorization: AgentRunAuthorization,
+    ) -> Result<(CreatedAgentRun, RunAuthoritySnapshot), AgentRunFactoryError> {
+        let created = self.create_inner(request, Some(authorization)).await?;
+        let authority = self.required_authority(&created.run.id).await?;
+        Ok((created, authority))
+    }
+
+    async fn create_inner(
+        &self,
+        mut request: AgentRunCreateRequest,
+        authorization: Option<AgentRunAuthorization>,
     ) -> Result<CreatedAgentRun, AgentRunFactoryError> {
-        validate_create_request(&request)?;
         let session_id = SessionId::random();
+        let (context, provisioned_workspace, prepared_workspace) = if authorization.is_some() {
+            let workspace_owner = self
+                .workspace_owner_for_launch(
+                    &request.context,
+                    &session_id,
+                    request.parent_session_id.as_ref(),
+                    request.source_run_id.as_ref(),
+                    authorization
+                        .as_ref()
+                        .and_then(|authorization| authorization.stored_policy_owner.as_ref()),
+                    None,
+                )
+                .await?;
+            let (context, prepared) = self
+                .prepare_context(request.context, &workspace_owner, request.created_at_ms)
+                .await?;
+            (context, false, prepared)
+        } else {
+            let (context, provisioned) = self
+                .materialize_context(request.context, &session_id, request.created_at_ms)
+                .await?;
+            (context, provisioned, None)
+        };
+        request.context = context;
+        request.origin = normalized_origin(&request.context, request.entry_profile, request.origin);
+        if let Err(error) = validate_create_request(&request) {
+            self.cleanup_launch_workspace(
+                &session_id,
+                provisioned_workspace,
+                prepared_workspace.as_ref(),
+            )
+            .await;
+            return Err(error);
+        }
         let run_id = RunId::random();
         let session = SessionRecord {
             id: session_id.clone(),
@@ -141,26 +218,148 @@ impl AgentRunFactory {
             relations: ItemRelations::default(),
             created_at_ms: request.created_at_ms,
         };
-        Ok(self
-            .store
-            .create_agent_run_bundle_idempotent(
-                &request.principal,
-                &request.idempotency_key,
-                &session,
-                &run,
-                &user_item,
-                &request.attachment_ids,
-            )
-            .await?)
+        let result = if let Some(authorization) = authorization.as_ref() {
+            let workspace_owner = self
+                .workspace_owner_for_session(&session, authorization.stored_policy_owner.as_ref())
+                .await?;
+            let workspace_root = match self
+                .workspace_root(
+                    &session.context,
+                    &workspace_owner,
+                    prepared_workspace.as_ref(),
+                )
+                .await
+            {
+                Ok(root) => root,
+                Err(error) => {
+                    self.cleanup_launch_workspace(
+                        &session_id,
+                        provisioned_workspace,
+                        prepared_workspace.as_ref(),
+                    )
+                    .await;
+                    return Err(error);
+                }
+            };
+            let stored_policy_owner_key = authorization
+                .stored_policy_owner
+                .as_ref()
+                .map(|owner| owner.key(&session.id));
+            self.store
+                .create_agent_run_bundle_authorized_idempotent(
+                    &request.principal,
+                    &request.idempotency_key,
+                    &session,
+                    &run,
+                    &user_item,
+                    &request.attachment_ids,
+                    AtomicRunLaunchInput {
+                        proposed_workspace: prepared_workspace
+                            .as_ref()
+                            .map(|prepared| &prepared.workspace),
+                        workspace_owner: matches!(
+                            &session.context,
+                            SessionContextBinding::Workspace { .. }
+                        )
+                        .then_some(&workspace_owner),
+                        stored_policy_owner_key: stored_policy_owner_key.as_deref(),
+                        stored_policy: authorization.stored_policy.as_ref(),
+                        effective_policy: &authorization.effective_policy,
+                        authority_mode: authorization.authority_mode,
+                        workspace_root: &workspace_root,
+                    },
+                )
+                .await
+        } else {
+            self.store
+                .create_agent_run_bundle_idempotent(
+                    &request.principal,
+                    &request.idempotency_key,
+                    &session,
+                    &run,
+                    &user_item,
+                    &request.attachment_ids,
+                )
+                .await
+        };
+        match result {
+            Ok(created) => {
+                if created.session.id != session_id {
+                    self.cleanup_launch_workspace(
+                        &session_id,
+                        provisioned_workspace,
+                        prepared_workspace.as_ref(),
+                    )
+                    .await;
+                }
+                Ok(created)
+            }
+            Err(error) => {
+                self.cleanup_launch_workspace(
+                    &session_id,
+                    provisioned_workspace,
+                    prepared_workspace.as_ref(),
+                )
+                .await;
+                Err(error.into())
+            }
+        }
     }
 
-    pub async fn create_channel(
+    pub(crate) async fn create_channel_authorized(
         &self,
         request: AgentRunCreateRequest,
         binding: ChannelRunBindingInput,
+        authorization: AgentRunAuthorization,
+    ) -> Result<(CreatedAgentRun, RunAuthoritySnapshot), AgentRunFactoryError> {
+        let created = self
+            .create_channel_inner(request, binding, Some(authorization))
+            .await?;
+        let authority = self.required_authority(&created.run.id).await?;
+        Ok((created, authority))
+    }
+
+    async fn create_channel_inner(
+        &self,
+        mut request: AgentRunCreateRequest,
+        binding: ChannelRunBindingInput,
+        authorization: Option<AgentRunAuthorization>,
     ) -> Result<CreatedAgentRun, AgentRunFactoryError> {
-        validate_create_request(&request)?;
         let session_id = SessionId::random();
+        let (context, provisioned_workspace, prepared_workspace) = if authorization.is_some() {
+            let workspace_owner = self
+                .workspace_owner_for_launch(
+                    &request.context,
+                    &session_id,
+                    request.parent_session_id.as_ref(),
+                    request.source_run_id.as_ref(),
+                    authorization
+                        .as_ref()
+                        .and_then(|authorization| authorization.stored_policy_owner.as_ref()),
+                    Some(&binding.binding_key_hash),
+                )
+                .await?;
+            let (context, prepared) = self
+                .prepare_context(request.context, &workspace_owner, request.created_at_ms)
+                .await?;
+            (context, false, prepared)
+        } else {
+            let (context, provisioned) = self
+                .materialize_context(request.context, &session_id, request.created_at_ms)
+                .await?;
+            (context, provisioned, None)
+        };
+        request.context = context;
+        request.origin = normalized_origin(&request.context, request.entry_profile, request.origin);
+        if let Err(error) = validate_create_request(&request) {
+            self.cleanup_launch_workspace(
+                &session_id,
+                provisioned_workspace,
+                prepared_workspace.as_ref(),
+            )
+            .await;
+            return Err(error);
+        }
         let run_id = RunId::random();
         let session = SessionRecord {
             id: session_id.clone(),
@@ -216,27 +415,116 @@ impl AgentRunFactory {
             relations: ItemRelations::default(),
             created_at_ms: request.created_at_ms,
         };
-        Ok(self
-            .store
-            .create_channel_agent_run_idempotent(ChannelAgentRunCreateInput {
-                principal: &request.principal,
-                idempotency_key: &request.idempotency_key,
-                proposed_session: &session,
-                proposed_run: &run,
-                proposed_user_item: &user_item,
-                attachment_ids: &request.attachment_ids,
-                binding: &binding,
-            })
-            .await?)
+        let input = ChannelAgentRunCreateInput {
+            principal: &request.principal,
+            idempotency_key: &request.idempotency_key,
+            proposed_session: &session,
+            proposed_run: &run,
+            proposed_user_item: &user_item,
+            attachment_ids: &request.attachment_ids,
+            binding: &binding,
+        };
+        let result = if let Some(authorization) = authorization.as_ref() {
+            let workspace_owner = self
+                .workspace_owner_for_launch(
+                    &session.context,
+                    &session.id,
+                    session.parent_session_id.as_ref(),
+                    session.source_run_id.as_ref(),
+                    authorization.stored_policy_owner.as_ref(),
+                    Some(&binding.binding_key_hash),
+                )
+                .await?;
+            let workspace_root = match self
+                .workspace_root(
+                    &session.context,
+                    &workspace_owner,
+                    prepared_workspace.as_ref(),
+                )
+                .await
+            {
+                Ok(root) => root,
+                Err(error) => {
+                    self.cleanup_launch_workspace(
+                        &session_id,
+                        provisioned_workspace,
+                        prepared_workspace.as_ref(),
+                    )
+                    .await;
+                    return Err(error);
+                }
+            };
+            let stored_policy_owner_key = authorization
+                .stored_policy_owner
+                .as_ref()
+                .map(|owner| owner.key(&session.id));
+            self.store
+                .create_channel_agent_run_authorized_idempotent(
+                    input,
+                    AtomicRunLaunchInput {
+                        proposed_workspace: prepared_workspace
+                            .as_ref()
+                            .map(|prepared| &prepared.workspace),
+                        workspace_owner: matches!(
+                            &session.context,
+                            SessionContextBinding::Workspace { .. }
+                        )
+                        .then_some(&workspace_owner),
+                        stored_policy_owner_key: stored_policy_owner_key.as_deref(),
+                        stored_policy: authorization.stored_policy.as_ref(),
+                        effective_policy: &authorization.effective_policy,
+                        authority_mode: authorization.authority_mode,
+                        workspace_root: &workspace_root,
+                    },
+                )
+                .await
+        } else {
+            self.store.create_channel_agent_run_idempotent(input).await
+        };
+        match result {
+            Ok(created) => {
+                if created.session.id != session_id {
+                    self.cleanup_launch_workspace(
+                        &session_id,
+                        provisioned_workspace,
+                        prepared_workspace.as_ref(),
+                    )
+                    .await;
+                }
+                Ok(created)
+            }
+            Err(error) => {
+                self.cleanup_launch_workspace(
+                    &session_id,
+                    provisioned_workspace,
+                    prepared_workspace.as_ref(),
+                )
+                .await;
+                Err(error.into())
+            }
+        }
     }
 
-    /// Creates a fresh Run in an existing Session without restoring any prior
-    /// approval, user-input secret, capability grant, lease, or Host snapshot.
-    pub async fn create_in_session(
+    pub(crate) async fn create_in_session_authorized(
         &self,
         request: AgentRunCreateRequest,
         session: SessionRecord,
+        authorization: AgentRunAuthorization,
+    ) -> Result<(CreatedAgentRun, RunAuthoritySnapshot), AgentRunFactoryError> {
+        let created = self
+            .create_in_session_inner(request, session, Some(authorization))
+            .await?;
+        let authority = self.required_authority(&created.run.id).await?;
+        Ok((created, authority))
+    }
+
+    async fn create_in_session_inner(
+        &self,
+        mut request: AgentRunCreateRequest,
+        session: SessionRecord,
+        authorization: Option<AgentRunAuthorization>,
     ) -> Result<CreatedAgentRun, AgentRunFactoryError> {
+        request.origin = normalized_origin(&request.context, request.entry_profile, request.origin);
         validate_create_request(&request)?;
         if request.context != session.context
             || request.entry_profile != session.entry_profile
@@ -287,17 +575,329 @@ impl AgentRunFactory {
             relations: ItemRelations::default(),
             created_at_ms: request.created_at_ms,
         };
-        Ok(self
+        let created = if let Some(authorization) = authorization.as_ref() {
+            let workspace_owner = self
+                .workspace_owner_for_session(&session, authorization.stored_policy_owner.as_ref())
+                .await?;
+            let workspace_root = self
+                .workspace_root(&session.context, &workspace_owner, None)
+                .await?;
+            let stored_policy_owner_key = authorization
+                .stored_policy_owner
+                .as_ref()
+                .map(|owner| owner.key(&session.id));
+            self.store
+                .create_agent_run_in_session_authorized_idempotent(
+                    &request.principal,
+                    &request.idempotency_key,
+                    &session,
+                    &run,
+                    &user_item,
+                    &request.attachment_ids,
+                    AtomicRunLaunchInput {
+                        proposed_workspace: None,
+                        workspace_owner: matches!(
+                            &session.context,
+                            SessionContextBinding::Workspace { .. }
+                        )
+                        .then_some(&workspace_owner),
+                        stored_policy_owner_key: stored_policy_owner_key.as_deref(),
+                        stored_policy: authorization.stored_policy.as_ref(),
+                        effective_policy: &authorization.effective_policy,
+                        authority_mode: authorization.authority_mode,
+                        workspace_root: &workspace_root,
+                    },
+                )
+                .await?
+        } else {
+            self.store
+                .create_agent_run_in_session_idempotent(
+                    &request.principal,
+                    &request.idempotency_key,
+                    &session,
+                    &run,
+                    &user_item,
+                    &request.attachment_ids,
+                )
+                .await?
+        };
+        Ok(created)
+    }
+
+    async fn prepare_context(
+        &self,
+        context: SessionContextBinding,
+        workspace_owner: &AgentWorkspaceOwner,
+        timestamp_ms: i64,
+    ) -> Result<(SessionContextBinding, Option<PreparedAgentWorkspace>), AgentRunFactoryError> {
+        match context {
+            SessionContextBinding::Workspace { workspace_id } => {
+                match self.store.workspace(&workspace_id).await? {
+                    Some(workspace) => {
+                        if &workspace.owner != workspace_owner {
+                            return Err(AgentRunFactoryError::UnexpectedExecutionTarget);
+                        }
+                        Ok((SessionContextBinding::Workspace { workspace_id }, None))
+                    }
+                    None => {
+                        let prepared = match workspace_owner {
+                            AgentWorkspaceOwner::Session { session_id } => {
+                                self.store.prepare_managed_workspace(
+                                    workspace_id,
+                                    hachimi_storage::WorkspaceOwnerRef::Session(session_id),
+                                    timestamp_ms,
+                                )?
+                            }
+                            AgentWorkspaceOwner::Schedule { schedule_id } => {
+                                self.store.prepare_managed_workspace(
+                                    workspace_id,
+                                    hachimi_storage::WorkspaceOwnerRef::Schedule(schedule_id),
+                                    timestamp_ms,
+                                )?
+                            }
+                        };
+                        Ok((
+                            SessionContextBinding::Workspace {
+                                workspace_id: prepared.workspace.id.clone(),
+                            },
+                            Some(prepared),
+                        ))
+                    }
+                }
+            }
+            context => Ok((context, None)),
+        }
+    }
+
+    async fn workspace_root(
+        &self,
+        context: &SessionContextBinding,
+        workspace_owner: &AgentWorkspaceOwner,
+        prepared: Option<&PreparedAgentWorkspace>,
+    ) -> Result<String, AgentRunFactoryError> {
+        match context {
+            SessionContextBinding::Workspace { workspace_id } => {
+                if let Some(prepared) = prepared {
+                    if &prepared.workspace.id != workspace_id
+                        || &prepared.workspace.owner != workspace_owner
+                    {
+                        return Err(AgentRunFactoryError::UnexpectedExecutionTarget);
+                    }
+                    return Ok(prepared.workspace.root_path.clone());
+                }
+                let workspace = self
+                    .store
+                    .workspace(workspace_id)
+                    .await?
+                    .filter(|workspace| workspace.status == AgentWorkspaceStatus::Ready)
+                    .ok_or(AgentRunFactoryError::UnexpectedExecutionTarget)?;
+                if &workspace.owner != workspace_owner {
+                    return Err(AgentRunFactoryError::UnexpectedExecutionTarget);
+                }
+                Ok(workspace.root_path)
+            }
+            SessionContextBinding::Project { checkout_id, .. } => Ok(self
+                .store
+                .get_checkout(checkout_id)
+                .await?
+                .ok_or_else(|| {
+                    AgentRunFactoryError::Store(AgentStoreError::CheckoutNotFound(
+                        checkout_id.clone(),
+                    ))
+                })?
+                .path),
+        }
+    }
+
+    async fn workspace_owner_for_session(
+        &self,
+        session: &SessionRecord,
+        stored_policy_owner: Option<&StoredPolicyOwner>,
+    ) -> Result<AgentWorkspaceOwner, AgentRunFactoryError> {
+        self.workspace_owner_for_launch(
+            &session.context,
+            &session.id,
+            session.parent_session_id.as_ref(),
+            session.source_run_id.as_ref(),
+            stored_policy_owner,
+            None,
+        )
+        .await
+    }
+
+    async fn workspace_owner_for_launch(
+        &self,
+        context: &SessionContextBinding,
+        session_id: &SessionId,
+        parent_session_id: Option<&SessionId>,
+        source_run_id: Option<&RunId>,
+        stored_policy_owner: Option<&StoredPolicyOwner>,
+        channel_binding_key_hash: Option<&str>,
+    ) -> Result<AgentWorkspaceOwner, AgentRunFactoryError> {
+        if matches!(context, SessionContextBinding::Project { .. }) {
+            return Ok(AgentWorkspaceOwner::Session {
+                session_id: session_id.clone(),
+            });
+        }
+        if let Some(owner) =
+            stored_policy_owner.and_then(StoredPolicyOwner::schedule_workspace_owner)
+        {
+            return Ok(owner);
+        }
+        if let Some(binding_key_hash) = channel_binding_key_hash
+            && let Some(bound_session) = self
+                .store
+                .session_for_channel_binding(binding_key_hash)
+                .await?
+        {
+            if &bound_session.context != context {
+                return Err(AgentRunFactoryError::UnexpectedExecutionTarget);
+            }
+            if bound_session.parent_session_id.is_some() || bound_session.source_run_id.is_some() {
+                return self
+                    .inherited_workspace_owner(
+                        &bound_session.context,
+                        bound_session.parent_session_id.as_ref(),
+                        bound_session.source_run_id.as_ref(),
+                    )
+                    .await;
+            }
+            return Ok(AgentWorkspaceOwner::Session {
+                session_id: bound_session.id,
+            });
+        }
+        if parent_session_id.is_some() || source_run_id.is_some() {
+            return self
+                .inherited_workspace_owner(context, parent_session_id, source_run_id)
+                .await;
+        }
+        Ok(AgentWorkspaceOwner::Session {
+            session_id: session_id.clone(),
+        })
+    }
+
+    async fn inherited_workspace_owner(
+        &self,
+        context: &SessionContextBinding,
+        parent_session_id: Option<&SessionId>,
+        source_run_id: Option<&RunId>,
+    ) -> Result<AgentWorkspaceOwner, AgentRunFactoryError> {
+        let (Some(parent_session_id), Some(source_run_id)) = (parent_session_id, source_run_id)
+        else {
+            return Err(AgentRunFactoryError::UnexpectedExecutionTarget);
+        };
+        let parent_session = self
             .store
-            .create_agent_run_in_session_idempotent(
-                &request.principal,
-                &request.idempotency_key,
-                &session,
-                &run,
-                &user_item,
-                &request.attachment_ids,
-            )
-            .await?)
+            .get_session(parent_session_id)
+            .await?
+            .ok_or(AgentRunFactoryError::UnexpectedExecutionTarget)?;
+        let source_run = self
+            .store
+            .get_run(source_run_id)
+            .await?
+            .filter(|run| &run.session_id == parent_session_id)
+            .ok_or(AgentRunFactoryError::UnexpectedExecutionTarget)?;
+        let authority = self
+            .store
+            .authority_snapshot(&source_run.id)
+            .await?
+            .filter(|authority| {
+                authority.session_id == *parent_session_id && authority.run_id == *source_run_id
+            })
+            .ok_or(AgentRunFactoryError::UnexpectedExecutionTarget)?;
+        if &parent_session.context != context {
+            return Err(AgentRunFactoryError::UnexpectedExecutionTarget);
+        }
+        let SessionContextBinding::Workspace { workspace_id } = context else {
+            return Ok(AgentWorkspaceOwner::Session {
+                session_id: parent_session_id.clone(),
+            });
+        };
+        let workspace = self
+            .store
+            .workspace(workspace_id)
+            .await?
+            .filter(|workspace| workspace.status == AgentWorkspaceStatus::Ready)
+            .filter(|workspace| workspace.root_path == authority.workspace_root)
+            .ok_or(AgentRunFactoryError::UnexpectedExecutionTarget)?;
+        Ok(workspace.owner)
+    }
+
+    async fn required_authority(
+        &self,
+        run_id: &RunId,
+    ) -> Result<RunAuthoritySnapshot, AgentRunFactoryError> {
+        self.store
+            .authority_snapshot(run_id)
+            .await?
+            .ok_or_else(|| AgentRunFactoryError::Store(AgentStoreError::RunPreconditionFailed))
+    }
+
+    async fn materialize_context(
+        &self,
+        context: SessionContextBinding,
+        session_id: &SessionId,
+        timestamp_ms: i64,
+    ) -> Result<(SessionContextBinding, bool), AgentRunFactoryError> {
+        match context {
+            SessionContextBinding::Workspace { workspace_id }
+                if self.store.workspace(&workspace_id).await?.is_none() =>
+            {
+                let workspace = self
+                    .store
+                    .ensure_managed_workspace(
+                        workspace_id,
+                        hachimi_storage::WorkspaceOwnerRef::Session(session_id),
+                        timestamp_ms,
+                    )
+                    .await?;
+                Ok((
+                    SessionContextBinding::Workspace {
+                        workspace_id: workspace.id,
+                    },
+                    true,
+                ))
+            }
+            context => Ok((context, false)),
+        }
+    }
+
+    async fn cleanup_provisioned_workspace(&self, session_id: &SessionId, provisioned: bool) {
+        if provisioned {
+            let _ = self
+                .store
+                .remove_workspace_for_owner(hachimi_storage::WorkspaceOwnerRef::Session(session_id))
+                .await;
+        }
+    }
+
+    async fn cleanup_launch_workspace(
+        &self,
+        session_id: &SessionId,
+        provisioned: bool,
+        prepared: Option<&PreparedAgentWorkspace>,
+    ) {
+        self.cleanup_provisioned_workspace(session_id, provisioned)
+            .await;
+        if let Some(prepared) = prepared {
+            let _ = self.store.discard_prepared_workspace(prepared);
+        }
+    }
+}
+
+fn normalized_origin(
+    context: &SessionContextBinding,
+    entry_profile: EntryProfile,
+    origin: RunOrigin,
+) -> RunOrigin {
+    if matches!(origin, RunOrigin::Manual) && entry_profile == EntryProfile::PetConversation {
+        RunOrigin::Pet
+    } else if matches!(origin, RunOrigin::Manual)
+        && matches!(context, SessionContextBinding::Project { .. })
+    {
+        RunOrigin::Project
+    } else {
+        origin
     }
 }
 
@@ -327,20 +927,11 @@ fn validate_create_request(request: &AgentRunCreateRequest) -> Result<(), AgentR
             SessionContextBinding::Project { project_id, .. },
             Some(target),
         ) if target.project_id() == project_id => {}
-        (EntryProfile::Workbench, Some(WorkloadKind::Coding), _, _) => {
-            return Err(AgentRunFactoryError::CodingProjectRequired);
-        }
-        (
-            EntryProfile::PetConversation,
-            Some(WorkloadKind::Coding | WorkloadKind::Office),
-            _,
-            _,
-        )
-        | (EntryProfile::PetConversation, _, SessionContextBinding::Project { .. }, _)
+        (EntryProfile::PetConversation, _, SessionContextBinding::Project { .. }, _)
         | (EntryProfile::PetConversation, _, _, Some(_)) => {
             return Err(AgentRunFactoryError::EntryContextMismatch);
         }
-        (_, _, SessionContextBinding::General | SessionContextBinding::Avatar { .. }, Some(_)) => {
+        (_, _, SessionContextBinding::Workspace { .. }, Some(_)) => {
             return Err(AgentRunFactoryError::UnexpectedExecutionTarget);
         }
         _ => {}
@@ -352,6 +943,12 @@ fn validate_create_request(request: &AgentRunCreateRequest) -> Result<(), AgentR
 pub enum AgentRunPriority {
     Interactive,
     Background,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UserInputAvailability {
+    Available,
+    Unavailable,
 }
 
 #[derive(Debug, Clone)]
@@ -537,14 +1134,16 @@ pub struct AgentRunRequest {
     pub principal: String,
     pub session: SessionRecord,
     pub run: RunRecord,
+    pub authority: RunAuthoritySnapshot,
     pub priority: AgentRunPriority,
+    pub user_input_availability: UserInputAvailability,
     pub capability_grants: CapabilityGrantSet,
     pub sandbox_snapshot: SandboxCapabilityReport,
     pub attachment_ids: Vec<AttachmentId>,
     pub skill_allowlist: Vec<SkillId>,
     pub mcp_tool_allowlist: Vec<McpToolSelection>,
     pub run_tool_allowlist: Option<Vec<String>>,
-    pub schedule_host_grant: Option<hachimi_protocol::ScheduleHostGrant>,
+    pub host_revision_snapshot: Option<hachimi_protocol::HostRevisionSnapshot>,
     pub workload_override: Option<WorkloadKind>,
     pub recovery_checkpoint: Option<hachimi_protocol::RunStepCheckpoint>,
     pub parent_agent_task_id: Option<hachimi_protocol::AgentTaskId>,
@@ -669,6 +1268,12 @@ impl AgentRunExecutor {
 
     pub async fn execute(&self, request: AgentRunRequest) -> Result<(), AgentExecutionError> {
         validate_agent_run_request(&request)?;
+        let persisted_authority = self.store.authority_snapshot(&request.run.id).await?;
+        if persisted_authority.as_ref() != Some(&request.authority) {
+            return Err(AgentExecutionError::Preparation(
+                "Run authority snapshot is missing or differs from the persisted snapshot".into(),
+            ));
+        }
         let run = request.run.clone();
         self.registry
             .register(&run, request.priority, request.parent_run_id.clone())?;
@@ -875,17 +1480,16 @@ impl AgentRunExecutor {
 }
 
 fn validate_agent_run_request(request: &AgentRunRequest) -> Result<(), AgentExecutionError> {
-    let host_grant_origin_valid = match request.run.origin {
-        hachimi_protocol::RunOrigin::Scheduled { .. } => request.schedule_host_grant.is_some(),
-        hachimi_protocol::RunOrigin::Channel { .. } => true,
-        _ => request.schedule_host_grant.is_none(),
-    };
     if request.run.session_id != request.session.id
         || request.run.configuration.entry_profile != request.session.entry_profile
         || request.run.configuration.workload_override != request.workload_override
+        || request.authority.session_id != request.session.id
+        || request.authority.run_id != request.run.id
+        || request.authority.policy.level != request.run.configuration.permission_profile
+        || request.authority.workspace_root.trim().is_empty()
+        || request.capability_grants.profile != request.run.configuration.permission_profile
         || request.capability_grants.session_id != request.session.id
         || request.capability_grants.run_id.as_ref() != Some(&request.run.id)
-        || !host_grant_origin_valid
         || request
             .recovery_checkpoint
             .as_ref()

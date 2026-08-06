@@ -394,6 +394,9 @@ pub struct WorkspaceHostClient {
     sandbox_backend: Option<Arc<dyn SandboxBackend>>,
     sandbox_context: Option<WorkspaceSandboxContext>,
     launch_guard: Option<Arc<dyn WorkspaceLaunchGuard>>,
+    external_roots: Arc<Vec<PathBuf>>,
+    full_filesystem: bool,
+    interactive_external_access: bool,
 }
 
 impl std::fmt::Debug for WorkspaceHostClient {
@@ -422,6 +425,8 @@ pub struct WorkspaceLaunchCheck {
     pub run_id: hachimi_protocol::RunId,
     pub run_generation: u64,
     pub checkout_id: hachimi_protocol::CheckoutId,
+    pub workspace_root: PathBuf,
+    pub interactive_extension: bool,
     pub effect: hachimi_protocol::ToolEffect,
 }
 
@@ -451,7 +456,31 @@ impl WorkspaceHostClient {
             sandbox_backend: None,
             sandbox_context: None,
             launch_guard: None,
+            external_roots: Arc::new(Vec::new()),
+            full_filesystem: false,
+            interactive_external_access: false,
         }
+    }
+
+    #[must_use]
+    pub fn with_external_roots(mut self, mut roots: Vec<PathBuf>) -> Self {
+        roots.push(self.checkout_root.clone());
+        roots.sort();
+        roots.dedup();
+        self.external_roots = Arc::new(roots);
+        self
+    }
+
+    #[must_use]
+    pub const fn with_full_filesystem(mut self, enabled: bool) -> Self {
+        self.full_filesystem = enabled;
+        self
+    }
+
+    #[must_use]
+    pub const fn with_interactive_external_access(mut self, enabled: bool) -> Self {
+        self.interactive_external_access = enabled;
+        self
     }
 
     #[must_use]
@@ -774,6 +803,53 @@ impl WorkspaceHostClient {
         timeout: Duration,
         cancellation: CancellationToken,
     ) -> Result<WorkspaceOutput, WorkspaceError> {
+        if let Some(path) = operation_path(&operation)
+            && Path::new(path).is_absolute()
+        {
+            let target = PathBuf::from(path);
+            let explicit_root = self
+                .external_roots
+                .iter()
+                .filter(|root| path_within(root, &target))
+                .max_by_key(|root| root.components().count())
+                .cloned();
+            let interactive_extension = explicit_root.is_none()
+                && !self.full_filesystem
+                && self.interactive_external_access;
+            let root = explicit_root
+                .or_else(|| {
+                    (self.full_filesystem || interactive_extension)
+                        .then(|| full_access_root(&target))
+                })
+                .ok_or_else(|| {
+                    WorkspaceError::new(
+                        WorkspaceErrorCode::Unauthorized,
+                        "absolute path is not inside an authorized Workspace root",
+                    )
+                })?;
+            let relative = target
+                .strip_prefix(&root)
+                .map_err(|_| {
+                    WorkspaceError::new(
+                        WorkspaceErrorCode::Unauthorized,
+                        "absolute path could not be reduced to its authorized root",
+                    )
+                })?
+                .to_string_lossy()
+                .into_owned();
+            let operation = operation_with_path(operation, relative);
+            let scoped = self.scoped_root(root, interactive_extension);
+            return scoped.execute_inner(operation, timeout, cancellation).await;
+        }
+        self.execute_inner(operation, timeout, cancellation).await
+    }
+
+    async fn execute_inner(
+        &self,
+        operation: WorkspaceOperation,
+        timeout: Duration,
+        cancellation: CancellationToken,
+    ) -> Result<WorkspaceOutput, WorkspaceError> {
         if cancellation.is_cancelled() {
             return Err(WorkspaceError::new(
                 WorkspaceErrorCode::Cancelled,
@@ -884,6 +960,16 @@ impl WorkspaceHostClient {
         }
     }
 
+    fn scoped_root(&self, root: PathBuf, interactive_extension: bool) -> Self {
+        let mut scoped = self.clone();
+        scoped.checkout_id = format!("external-root:{}", root.to_string_lossy());
+        scoped.checkout_root = root;
+        scoped.external_roots = Arc::new(Vec::new());
+        scoped.full_filesystem = false;
+        scoped.interactive_external_access = interactive_extension;
+        scoped
+    }
+
     async fn execute_sandboxed(
         &self,
         operation: WorkspaceOperation,
@@ -915,6 +1001,8 @@ impl WorkspaceHostClient {
                 run_id: context.run_id.clone(),
                 run_generation: self.run_generation,
                 checkout_id: hachimi_protocol::CheckoutId::new(self.checkout_id.clone()),
+                workspace_root: self.checkout_root.clone(),
+                interactive_extension: self.interactive_external_access,
                 effect,
             })
             .await?;
@@ -957,13 +1045,26 @@ impl WorkspaceHostClient {
                 identity.file_index.to_string().into(),
             ]);
         }
+        let mut grants = context.grants.clone();
+        if self.interactive_external_access {
+            grants.file_system.push(hachimi_protocol::FileSystemGrant {
+                access: if effect == hachimi_protocol::ToolEffect::ReadOnly {
+                    hachimi_protocol::FileSystemAccess::Read
+                } else {
+                    hachimi_protocol::FileSystemAccess::Write
+                },
+                roots: vec![self.checkout_root.to_string_lossy().into_owned()],
+                globs: Vec::new(),
+                special_roots: Vec::new(),
+            });
+        }
         let spec = SandboxLaunchSpec {
             session_id: context.session_id.clone(),
             run_id: context.run_id.clone(),
             run_generation: self.run_generation,
             checkout_id: hachimi_protocol::CheckoutId::new(self.checkout_id.clone()),
             checkout_root: self.checkout_root.clone(),
-            grants: context.grants.clone(),
+            grants,
             required_effect: effect,
             executable: self.worker_program.clone(),
             args: worker_args,
@@ -1736,6 +1837,71 @@ impl WorkerContext {
         resolve_checkout_path(&self.root, relative, PathAccess::Write, true)
             .map_err(path_security_error)
     }
+}
+
+fn operation_path(operation: &WorkspaceOperation) -> Option<&str> {
+    match operation {
+        WorkspaceOperation::ReadFile { path }
+        | WorkspaceOperation::ListDirectory { path }
+        | WorkspaceOperation::ListDirectoryPage { path, .. }
+        | WorkspaceOperation::ReadFileChunk { path, .. }
+        | WorkspaceOperation::SearchText { path, .. }
+        | WorkspaceOperation::WriteFile { path, .. }
+        | WorkspaceOperation::ReplaceText { path, .. }
+        | WorkspaceOperation::GitDiffFileChunk { path, .. }
+        | WorkspaceOperation::ReadGitBlob { path } => Some(path),
+        WorkspaceOperation::Exec { cwd, .. } => Some(cwd),
+        _ => None,
+    }
+}
+
+fn operation_with_path(mut operation: WorkspaceOperation, relative: String) -> WorkspaceOperation {
+    match &mut operation {
+        WorkspaceOperation::ReadFile { path }
+        | WorkspaceOperation::ListDirectory { path }
+        | WorkspaceOperation::ListDirectoryPage { path, .. }
+        | WorkspaceOperation::ReadFileChunk { path, .. }
+        | WorkspaceOperation::SearchText { path, .. }
+        | WorkspaceOperation::WriteFile { path, .. }
+        | WorkspaceOperation::ReplaceText { path, .. }
+        | WorkspaceOperation::GitDiffFileChunk { path, .. }
+        | WorkspaceOperation::ReadGitBlob { path } => *path = relative,
+        WorkspaceOperation::Exec { cwd, .. } => *cwd = relative,
+        _ => {}
+    }
+    operation
+}
+
+fn path_within(root: &Path, target: &Path) -> bool {
+    let root = root.components().collect::<Vec<_>>();
+    let target = target.components().collect::<Vec<_>>();
+    target.len() >= root.len()
+        && root.iter().zip(target.iter()).all(|(left, right)| {
+            #[cfg(windows)]
+            {
+                left.as_os_str()
+                    .to_string_lossy()
+                    .eq_ignore_ascii_case(&right.as_os_str().to_string_lossy())
+            }
+            #[cfg(not(windows))]
+            {
+                left == right
+            }
+        })
+}
+
+fn full_access_root(target: &Path) -> PathBuf {
+    if target.is_dir() {
+        return target.to_path_buf();
+    }
+    let mut candidate = target.parent().unwrap_or(target);
+    while !candidate.is_dir() {
+        let Some(parent) = candidate.parent() else {
+            break;
+        };
+        candidate = parent;
+    }
+    candidate.to_path_buf()
 }
 
 #[cfg(test)]

@@ -220,8 +220,8 @@ pub struct ToolPlanConstraints<'a> {
 impl ToolPlan {
     #[must_use]
     pub fn build(
-        entry_profile: EntryProfile,
-        workload: hachimi_protocol::WorkloadKind,
+        _entry_profile: EntryProfile,
+        _workload: hachimi_protocol::WorkloadKind,
         mode: BehaviorMode,
         provider: ProviderCapabilities,
         mut descriptors: Vec<ToolDescriptor>,
@@ -231,11 +231,21 @@ impl ToolPlan {
             !constraints.host_ready && constraints.disabled_tool_names.is_empty();
         descriptors.retain(|descriptor| {
             !fail_closed_for_unknown_host
-                && crate::profile_allows_tool(entry_profile, workload, &descriptor.name)
                 && (mode != BehaviorMode::Plan
-                    || descriptor.effect == hachimi_protocol::ToolEffect::ReadOnly)
+                    || matches!(
+                        descriptor.effect,
+                        hachimi_protocol::ToolEffect::ReadOnly
+                            | hachimi_protocol::ToolEffect::BrowserObserve
+                            | hachimi_protocol::ToolEffect::ComputerObserve
+                    ))
                 && constraints.capability_grants.is_none_or(|grants| {
                     hachimi_policy::capability_grant_allows(grants, descriptor.effect)
+                        || (descriptor.name == "connector_invoke"
+                            && grants
+                                .network
+                                .protocols
+                                .iter()
+                                .any(|protocol| protocol == "managed-connector"))
                 })
                 && constraints
                     .run_allowlist
@@ -250,8 +260,6 @@ impl ToolPlan {
             descriptors.clear();
         }
         let hash = canonical_hash(&(
-            entry_profile,
-            workload,
             mode,
             provider.tool_calls,
             provider.strict_json_schema,
@@ -410,8 +418,8 @@ fn canonical_hash(value: &impl Serialize) -> String {
 mod tests {
     use super::*;
     use hachimi_protocol::{
-        PermissionProfile, ScheduleId, TaskRunId, ToolEffect, WorkloadKind,
-        WorkloadResolutionSource,
+        AgentPermissionPolicy, ConnectorPermissionRule, PermissionProfile, ScheduleId,
+        ScopedPermissionRules, TaskRunId, ToolEffect, WorkloadKind, WorkloadResolutionSource,
     };
 
     fn resolution() -> WorkloadResolution {
@@ -481,7 +489,64 @@ mod tests {
     }
 
     #[test]
-    fn multi_agent_tool_plan_is_workbench_only_and_honors_schedule_allowlists() {
+    fn read_only_connector_rule_exposes_only_the_typed_dispatcher() {
+        let mut rules = ScopedPermissionRules::default();
+        rules.connectors.push(ConnectorPermissionRule {
+            account_id: hachimi_protocol::ConnectorAccountId::from("account"),
+            actions: vec!["search".into()],
+            read_only_actions: vec!["search".into()],
+            contribution_revision: "action-revision".into(),
+        });
+        let grants = hachimi_policy::expand_permission_policy(
+            &AgentPermissionPolicy {
+                level: PermissionProfile::ReadOnly,
+                rules,
+                revision: 1,
+            },
+            hachimi_protocol::AuthorityMode::Unattended,
+            BehaviorMode::Default,
+            SessionId::from("session"),
+            RunId::from("run"),
+            "C:\\workspace".into(),
+        );
+        let descriptors = vec![
+            ToolDescriptor {
+                name: "connector_invoke".into(),
+                description: "connector".into(),
+                input_schema: serde_json::json!({"type": "object"}),
+                effect: ToolEffect::ExternalSideEffect,
+                parallel_safe: false,
+                required_scopes: vec!["connectors.invoke".into()],
+            },
+            ToolDescriptor {
+                name: "unscoped_external_tool".into(),
+                description: "external".into(),
+                input_schema: serde_json::json!({"type": "object"}),
+                effect: ToolEffect::ExternalSideEffect,
+                parallel_safe: false,
+                required_scopes: vec!["connectors.invoke".into()],
+            },
+        ];
+        let plan = ToolPlan::build(
+            EntryProfile::Workbench,
+            WorkloadKind::General,
+            BehaviorMode::Default,
+            ProviderCapabilities {
+                tool_calls: true,
+                ..ProviderCapabilities::default()
+            },
+            descriptors,
+            ToolPlanConstraints {
+                capability_grants: Some(&grants),
+                ..unconstrained_tool_plan()
+            },
+        );
+        assert!(plan.allows("connector_invoke"));
+        assert!(!plan.allows("unscoped_external_tool"));
+    }
+
+    #[test]
+    fn multi_agent_tool_plan_honors_mode_and_run_allowlists_for_every_entry() {
         let descriptors = vec![
             ToolDescriptor {
                 name: "agent.spawn".into(),
@@ -529,7 +594,7 @@ mod tests {
         assert!(plan.allows("agent.wait"));
         assert!(!plan.allows("agent.spawn"));
 
-        let denied = ToolPlan::build(
+        let pet = ToolPlan::build(
             EntryProfile::PetConversation,
             WorkloadKind::General,
             BehaviorMode::Default,
@@ -537,7 +602,8 @@ mod tests {
             descriptors.clone(),
             unconstrained_tool_plan(),
         );
-        assert!(denied.descriptors().is_empty());
+        assert!(pet.allows("agent.spawn"));
+        assert!(pet.allows("agent.wait"));
     }
 
     #[test]
@@ -564,7 +630,7 @@ mod tests {
             ..ProviderCapabilities::default()
         };
         let full_grants = hachimi_policy::expand_permission_profile(
-            PermissionProfile::ExternalSandbox,
+            PermissionProfile::FullAccess,
             BehaviorMode::Default,
             SessionId::from("matrix-session"),
             RunId::from("matrix-run"),
@@ -615,21 +681,19 @@ mod tests {
                 vec!["agent.collect", "agent.wait"]
             );
 
-            assert!(
-                ToolPlan::build(
-                    EntryProfile::PetConversation,
-                    workload,
-                    BehaviorMode::Default,
-                    provider,
-                    descriptors.clone(),
-                    ToolPlanConstraints {
-                        capability_grants: Some(&full_grants),
-                        ..unconstrained_tool_plan()
-                    },
-                )
-                .descriptors()
-                .is_empty()
+            let pet = ToolPlan::build(
+                EntryProfile::PetConversation,
+                workload,
+                BehaviorMode::Default,
+                provider,
+                descriptors.clone(),
+                ToolPlanConstraints {
+                    capability_grants: Some(&full_grants),
+                    ..unconstrained_tool_plan()
+                },
             );
+            assert_eq!(pet.descriptors(), default.descriptors());
+            assert_eq!(pet.hash(), default.hash());
         }
 
         let narrowed = ToolPlan::build(
@@ -688,7 +752,9 @@ mod tests {
             workload: resolution(),
             behavior_mode: BehaviorMode::Default,
             origin,
-            context: SessionContextBinding::General,
+            context: SessionContextBinding::Workspace {
+                workspace_id: hachimi_protocol::WorkspaceId::random(),
+            },
             world: StepWorldState {
                 context_revision: 1,
                 profile_revision: 1,
@@ -736,29 +802,40 @@ mod tests {
     }
 
     #[test]
-    fn interactive_and_scheduled_origins_share_the_same_semantic_step_and_tool_plan() {
-        let interactive =
-            StepContextFactory::default().capture(equivalent_input(RunOrigin::Interactive));
-        let scheduled =
-            StepContextFactory::default().capture(equivalent_input(RunOrigin::Scheduled {
+    fn all_run_origins_share_the_same_semantic_step_and_tool_plan() {
+        let origins = vec![
+            RunOrigin::Project,
+            RunOrigin::Manual,
+            RunOrigin::Channel {
+                channel: "test".into(),
+                account: "account".into(),
+                peer: "peer".into(),
+                thread: "thread".into(),
+                message_id: hachimi_protocol::ChannelMessageId::from("message"),
+            },
+            RunOrigin::Scheduled {
                 schedule_id: ScheduleId::from("schedule"),
                 task_run_id: TaskRunId::from("task"),
                 scheduled_for_ms: 1_800_000_000_000,
                 event_context: None,
-            }));
-
-        assert_eq!(interactive.context_hash(), scheduled.context_hash());
-        assert_eq!(interactive.tool_plan.hash(), scheduled.tool_plan.hash());
-        assert_eq!(
-            interactive.tool_plan.descriptors(),
-            scheduled.tool_plan.descriptors()
-        );
-        assert_ne!(interactive.origin, scheduled.origin);
+            },
+            RunOrigin::Pet,
+        ];
+        let baseline = StepContextFactory::default().capture(equivalent_input(origins[0].clone()));
+        for origin in origins.into_iter().skip(1) {
+            let candidate = StepContextFactory::default().capture(equivalent_input(origin));
+            assert_eq!(baseline.context_hash(), candidate.context_hash());
+            assert_eq!(baseline.tool_plan.hash(), candidate.tool_plan.hash());
+            assert_eq!(
+                baseline.tool_plan.descriptors(),
+                candidate.tool_plan.descriptors()
+            );
+        }
     }
 
     #[test]
     fn sandbox_repair_cannot_widen_an_existing_run_snapshot() {
-        let input = equivalent_input(RunOrigin::Interactive);
+        let input = equivalent_input(RunOrigin::Manual);
         let state = StepRuntimeState::new(input.world, input.workload);
         state.narrow_sandbox(SandboxCapabilityReport {
             backend: "windows-appcontainer".into(),
@@ -784,7 +861,7 @@ mod tests {
 
     #[test]
     fn mcp_schema_or_host_revision_change_advances_context_revision() {
-        let input = equivalent_input(RunOrigin::Interactive);
+        let input = equivalent_input(RunOrigin::Manual);
         let state = StepRuntimeState::new(input.world.clone(), input.workload);
         let mut refreshed = input.world;
         refreshed.mcp_revision = "schema-and-host-v2".into();

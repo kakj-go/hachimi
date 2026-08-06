@@ -189,7 +189,7 @@ async fn stale_generation_guard_fails_before_restricted_worker_dispatch() {
     let run_id = hachimi_protocol::RunId::from("run-final-guard");
     let root = directory.path().to_string_lossy().into_owned();
     let grants = CapabilityGrantSet {
-        profile: PermissionProfile::WorkspaceWrite,
+        profile: PermissionProfile::Writable,
         scope: PermissionGrantScope::Run,
         session_id: session_id.clone(),
         run_id: Some(run_id.clone()),

@@ -1,4 +1,4 @@
-import type { ProjectRecord, ScheduleDefinition, TaskRunRecord } from "@hachimi/contracts";
+import type { ScheduleDefinition, TaskRunRecord } from "@hachimi/contracts";
 import {
   Badge,
   Button,
@@ -9,7 +9,6 @@ import {
   IconButton,
   Pencil,
   Play,
-  RefreshCw,
   Switch,
   Tooltip,
   Trash2,
@@ -31,7 +30,6 @@ import {
 export function TaskCard(props: {
   schedule: ScheduleDefinition;
   recentRun: TaskRunRecord | undefined;
-  projects: ProjectRecord[];
   zh: boolean;
   busy: boolean;
   onRun: () => void;
@@ -39,7 +37,6 @@ export function TaskCard(props: {
   onToggle: (enabled: boolean) => void;
   onEdit: () => void;
   onDelete: () => void;
-  onReauthorize: () => void;
 }) {
   return (
     <article
@@ -98,7 +95,7 @@ export function TaskCard(props: {
       <div class="task-card-meta">
         <span>
           <GitBranch size={14} />
-          <span>{taskContextLabel(props.schedule, props.projects, props.zh)}</span>
+          <span>{taskContextLabel(props.schedule, props.zh)}</span>
         </span>
         <span>
           <Clock3 size={14} />
@@ -141,11 +138,11 @@ export function TaskCard(props: {
         <div class="task-card-attention">
           <span>
             {props.schedule.healthReason ??
-              (props.zh ? "任务需要重新授权" : "Task needs attention")}
+              (props.zh ? "任务设置需要检查" : "Task settings need attention")}
           </span>
-          <Button size="small" variant="ghost" disabled={props.busy} onClick={props.onReauthorize}>
-            <RefreshCw size={14} />
-            {props.zh ? "重新授权" : "Reauthorize"}
+          <Button size="small" variant="ghost" disabled={props.busy} onClick={props.onEdit}>
+            <Pencil size={14} />
+            {props.zh ? "检查设置" : "Review settings"}
           </Button>
         </div>
       </Show>

@@ -19,9 +19,10 @@ use hachimi_core::WindowKind;
 use hachimi_policy::DefaultPolicy;
 #[cfg(windows)]
 use hachimi_protocol::{
-    ApprovalPolicy, BehaviorMode, CapabilityGrantSet, CheckoutId, ClientContext, EntryProfile,
-    FileSystemAccess, FileSystemGrant, NetworkGrant, PermissionGrantScope, PermissionProfile,
-    ProcessGrant, RunId, Scope, ToolCallId, WorkloadKind,
+    AgentPermissionPolicy, ApprovalPolicy, AuthorityMode, AuthoritySnapshotId, BehaviorMode,
+    CapabilityGrantSet, CheckoutId, ClientContext, EntryProfile, FileSystemAccess, FileSystemGrant,
+    NetworkGrant, PermissionGrantScope, PermissionProfile, ProcessGrant, RunAuthoritySnapshot,
+    RunId, Scope, ToolCallId, WorkloadKind,
 };
 #[cfg(windows)]
 use hachimi_sandbox::{
@@ -79,6 +80,94 @@ async fn client_reads_through_the_worker_process() {
     ));
 }
 
+#[tokio::test]
+async fn absolute_paths_use_explicit_roots_and_full_access_but_reject_escape() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let external = tempfile::tempdir().expect("external root");
+    let outside = tempfile::tempdir().expect("outside root");
+    std::fs::write(external.path().join("allowed.txt"), "allowed").expect("allowed file");
+    std::fs::write(outside.path().join("blocked.txt"), "blocked").expect("blocked file");
+
+    let client = WorkspaceHostClient::new(
+        env!("CARGO_BIN_EXE_hachimi-workspace-worker"),
+        workspace.path(),
+        "checkout-external",
+        1,
+    )
+    .with_external_roots(vec![external.path().to_path_buf()]);
+    let allowed = client
+        .execute(
+            WorkspaceOperation::ReadFile {
+                path: external.path().join("allowed.txt").display().to_string(),
+            },
+            Duration::from_secs(10),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("authorized external read");
+    assert!(matches!(
+        allowed,
+        WorkspaceOutput::File { content, .. } if content == "allowed"
+    ));
+
+    let denied = client
+        .execute(
+            WorkspaceOperation::ReadFile {
+                path: outside.path().join("blocked.txt").display().to_string(),
+            },
+            Duration::from_secs(10),
+            CancellationToken::new(),
+        )
+        .await
+        .expect_err("unlisted external root");
+    assert_eq!(
+        denied.code,
+        hachimi_workspace::WorkspaceErrorCode::Unauthorized
+    );
+
+    let traversal = client
+        .execute(
+            WorkspaceOperation::ReadFile {
+                path: workspace
+                    .path()
+                    .join("..")
+                    .join("blocked.txt")
+                    .display()
+                    .to_string(),
+            },
+            Duration::from_secs(10),
+            CancellationToken::new(),
+        )
+        .await
+        .expect_err("parent traversal");
+    assert_eq!(
+        traversal.code,
+        hachimi_workspace::WorkspaceErrorCode::PathOutsideCheckout
+    );
+
+    let full_access = WorkspaceHostClient::new(
+        env!("CARGO_BIN_EXE_hachimi-workspace-worker"),
+        workspace.path(),
+        "checkout-full-access",
+        1,
+    )
+    .with_full_filesystem(true);
+    let full = full_access
+        .execute(
+            WorkspaceOperation::ReadFile {
+                path: outside.path().join("blocked.txt").display().to_string(),
+            },
+            Duration::from_secs(10),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("full access external read");
+    assert!(matches!(
+        full,
+        WorkspaceOutput::File { content, .. } if content == "blocked"
+    ));
+}
+
 #[cfg(windows)]
 #[tokio::test]
 #[ignore = "requires the standard-user Windows sandbox release environment"]
@@ -122,14 +211,14 @@ async fn restricted_workspace_worker_executes_a_checkout_bound_write() {
     let root = directory.path().to_string_lossy().into_owned();
     let temp = client.run_temp_dir().to_string_lossy().into_owned();
     let grants = CapabilityGrantSet {
-        profile: PermissionProfile::WorkspaceWrite,
+        profile: PermissionProfile::Writable,
         scope: PermissionGrantScope::Run,
         session_id: session_id.clone(),
         run_id: Some(run_id.clone()),
         source: "windows_release_smoke".into(),
         file_system: vec![FileSystemGrant {
             access: FileSystemAccess::Write,
-            roots: vec![root, temp],
+            roots: vec![root.clone(), temp],
             globs: Vec::new(),
             special_roots: Vec::new(),
         }],
@@ -239,7 +328,7 @@ async fn restricted_workspace_worker_creates_an_empty_initial_commit_without_tou
     let root = directory.path().to_string_lossy().into_owned();
     let temp = client.run_temp_dir().to_string_lossy().into_owned();
     let grants = CapabilityGrantSet {
-        profile: PermissionProfile::WorkspaceWrite,
+        profile: PermissionProfile::Writable,
         scope: PermissionGrantScope::Run,
         session_id: session_id.clone(),
         run_id: Some(run_id.clone()),
@@ -335,14 +424,14 @@ async fn restricted_agent_exec_tool_runs_through_policy_and_workspace_sandbox() 
     let root = directory.path().to_string_lossy().into_owned();
     let temp = client.run_temp_dir().to_string_lossy().into_owned();
     let grants = CapabilityGrantSet {
-        profile: PermissionProfile::WorkspaceWrite,
+        profile: PermissionProfile::Writable,
         scope: PermissionGrantScope::Run,
         session_id: session_id.clone(),
         run_id: Some(run_id.clone()),
         source: "windows_release_agent_exec_smoke".into(),
         file_system: vec![FileSystemGrant {
             access: FileSystemAccess::Write,
-            roots: vec![root, temp],
+            roots: vec![root.clone(), temp],
             globs: Vec::new(),
             special_roots: Vec::new(),
         }],
@@ -380,15 +469,27 @@ async fn restricted_agent_exec_tool_runs_through_policy_and_workspace_sandbox() 
         AuthorizedToolContext {
             client: control_client,
             principal: "test:windows-release".into(),
-            session_id,
-            run_id,
+            session_id: session_id.clone(),
+            run_id: run_id.clone(),
             run_generation: 1,
+            authority: RunAuthoritySnapshot {
+                id: AuthoritySnapshotId::random(),
+                session_id,
+                run_id,
+                policy: AgentPermissionPolicy {
+                    level: PermissionProfile::Writable,
+                    ..AgentPermissionPolicy::default()
+                },
+                mode: AuthorityMode::Unattended,
+                source: "test".into(),
+                workspace_root: root.clone(),
+                created_at_ms: 0,
+            },
             approval_policy: ApprovalPolicy::NeverPrompt,
-            permission_profile: PermissionProfile::WorkspaceWrite,
+            permission_profile: PermissionProfile::Writable,
             capability_grants: grants,
             capability_host: "workspace-worker".into(),
             run_tool_allowlist: Some(vec!["workspace_exec".into()]),
-            schedule_grant_hash: Some("windows-release-smoke".into()),
             sandbox_status: SandboxStatus::Enforced,
             run_store: None,
             policy: Arc::new(DefaultPolicy),

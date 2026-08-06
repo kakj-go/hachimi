@@ -11,6 +11,7 @@ CREATE TABLE schedule_definitions (
     context_template_json TEXT NOT NULL,
     tool_allowlist_json TEXT NOT NULL DEFAULT '[]',
     skill_allowlist_json TEXT NOT NULL DEFAULT '[]',
+    skill_revisions_json TEXT NOT NULL DEFAULT '[]',
     mcp_tool_allowlist_json TEXT NOT NULL DEFAULT '[]',
     permission_config_json TEXT NOT NULL,
     permission_revision INTEGER NOT NULL CHECK (permission_revision > 0),
@@ -20,7 +21,7 @@ CREATE TABLE schedule_definitions (
     config_revision INTEGER NOT NULL CHECK (config_revision > 0),
     created_by TEXT NOT NULL,
     next_run_at_ms INTEGER,
-    health TEXT NOT NULL CHECK (health IN ('healthy', 'needs_authorization', 'needs_attention', 'invalid')),
+    health TEXT NOT NULL CHECK (health IN ('healthy', 'needs_attention', 'invalid')),
     health_reason TEXT,
     created_at_ms INTEGER NOT NULL,
     updated_at_ms INTEGER NOT NULL
@@ -38,22 +39,6 @@ CREATE TABLE schedule_runtime_state (
     updated_at_ms INTEGER NOT NULL
 );
 
-CREATE TABLE schedule_grants (
-    id TEXT PRIMARY KEY NOT NULL,
-    schedule_id TEXT NOT NULL REFERENCES schedule_definitions(id) ON DELETE CASCADE,
-    permission_revision INTEGER NOT NULL CHECK (permission_revision > 0),
-    scope_hash TEXT NOT NULL,
-    scope_json TEXT NOT NULL,
-    status TEXT NOT NULL CHECK (status IN ('active', 'revoked', 'superseded')),
-    granted_by TEXT NOT NULL,
-    created_at_ms INTEGER NOT NULL,
-    revoked_at_ms INTEGER,
-    UNIQUE(schedule_id, permission_revision)
-);
-
-CREATE UNIQUE INDEX schedule_grants_one_active_idx
-ON schedule_grants(schedule_id) WHERE status = 'active';
-
 CREATE TABLE task_runs (
     id TEXT PRIMARY KEY NOT NULL,
     schedule_id TEXT REFERENCES schedule_definitions(id) ON DELETE SET NULL,
@@ -64,7 +49,6 @@ CREATE TABLE task_runs (
     requester_session_id TEXT REFERENCES sessions(id) ON DELETE SET NULL,
     execution_session_id TEXT REFERENCES sessions(id) ON DELETE SET NULL,
     run_id TEXT REFERENCES runs(id) ON DELETE SET NULL,
-    permission_snapshot_hash TEXT,
     status TEXT NOT NULL CHECK (status IN (
         'queued', 'preparing', 'running', 'needs_attention', 'succeeded',
         'failed', 'timed_out', 'cancelled', 'lost', 'skipped'

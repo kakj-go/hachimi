@@ -137,6 +137,29 @@ impl ToolResult {
     }
 
     #[must_use]
+    pub fn needs_attention(
+        call: &ToolCall,
+        code: impl Into<String>,
+        message: impl Into<String>,
+    ) -> Self {
+        let code = code.into();
+        let message = message.into();
+        Self {
+            call_id: call.id.clone(),
+            tool_name: call.name.clone(),
+            status: ToolResultStatus::Rejected,
+            structured_content: serde_json::json!({
+                "rejected": true,
+                "needsAttention": true,
+                "code": code,
+                "message": message,
+            }),
+            model_content: message,
+            model_images: Vec::new(),
+        }
+    }
+
+    #[must_use]
     pub fn timed_out(call: &ToolCall, message: impl Into<String>) -> Self {
         let message = message.into();
         Self {
@@ -266,16 +289,21 @@ impl ToolRegistry {
     #[must_use]
     pub fn descriptors(
         &self,
-        entry_profile: EntryProfile,
-        workload: WorkloadKind,
+        _entry_profile: EntryProfile,
+        _workload: WorkloadKind,
         mode: BehaviorMode,
     ) -> Vec<ToolDescriptor> {
         self.tools
             .values()
             .map(|tool| tool.descriptor())
             .filter(|descriptor| {
-                crate::profile_allows_tool(entry_profile, workload, &descriptor.name)
-                    && (mode != BehaviorMode::Plan || descriptor.effect == ToolEffect::ReadOnly)
+                mode != BehaviorMode::Plan
+                    || matches!(
+                        descriptor.effect,
+                        ToolEffect::ReadOnly
+                            | ToolEffect::BrowserObserve
+                            | ToolEffect::ComputerObserve
+                    )
             })
             .collect()
     }
@@ -284,14 +312,16 @@ impl ToolRegistry {
     pub fn is_allowed(
         &self,
         name: &str,
-        entry_profile: EntryProfile,
-        workload: WorkloadKind,
+        _entry_profile: EntryProfile,
+        _workload: WorkloadKind,
         mode: BehaviorMode,
     ) -> bool {
         self.executor(name).is_some_and(|executor| {
-            crate::profile_allows_tool(entry_profile, workload, name)
-                && (mode != BehaviorMode::Plan
-                    || executor.descriptor().effect == ToolEffect::ReadOnly)
+            mode != BehaviorMode::Plan
+                || matches!(
+                    executor.descriptor().effect,
+                    ToolEffect::ReadOnly | ToolEffect::BrowserObserve | ToolEffect::ComputerObserve
+                )
         })
     }
 }
@@ -361,7 +391,7 @@ mod tests {
     }
 
     #[test]
-    fn plan_mode_only_advertises_read_tools() {
+    fn plan_mode_advertises_only_non_mutating_tools() {
         let mut registry = ToolRegistry::new();
         registry
             .register(Arc::new(StaticTool(descriptor(
@@ -381,6 +411,18 @@ mod tests {
                 ToolEffect::Process,
             ))))
             .expect("exec");
+        registry
+            .register(Arc::new(StaticTool(descriptor(
+                "browser_observe",
+                ToolEffect::BrowserObserve,
+            ))))
+            .expect("browser observe");
+        registry
+            .register(Arc::new(StaticTool(descriptor(
+                "computer_observe",
+                ToolEffect::ComputerObserve,
+            ))))
+            .expect("computer observe");
         let names = registry
             .descriptors(
                 EntryProfile::Workbench,
@@ -390,14 +432,25 @@ mod tests {
             .into_iter()
             .map(|descriptor| descriptor.name)
             .collect::<Vec<_>>();
-        assert_eq!(names, vec!["workspace_read_file"]);
+        assert_eq!(
+            names,
+            vec!["browser_observe", "computer_observe", "workspace_read_file"]
+        );
+        for name in ["browser_observe", "computer_observe", "workspace_read_file"] {
+            assert!(registry.is_allowed(
+                name,
+                EntryProfile::Workbench,
+                WorkloadKind::Coding,
+                BehaviorMode::Plan
+            ));
+        }
         assert!(!registry.is_allowed(
             "workspace_write_file",
             EntryProfile::Workbench,
             WorkloadKind::Coding,
             BehaviorMode::Plan
         ));
-        assert!(!registry.is_allowed(
+        assert!(registry.is_allowed(
             "workspace_exec",
             EntryProfile::Workbench,
             WorkloadKind::Office,

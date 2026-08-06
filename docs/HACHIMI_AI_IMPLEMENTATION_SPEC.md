@@ -18,7 +18,7 @@ Hachimi 支持 General、Coding、Office、Scheduled Task 和父子 Agent Task�
 - `office-pdf`：PDF 生成、读取、渲染和校验；
 - `office-file-organizer`：授权目录内盘点、预览计划、归类/重命名和回滚 manifest。
 
-Skill 只提供知识、模板和验证要求，不创建 Scope、Capability Grant、Approval 或 ScheduleGrant。
+Skill 只提供知识、模板和验证要求，不创建 Scope、Capability Grant、Approval 或 Schedule policy。
 
 ## 2. 唯一 Runtime
 
@@ -78,7 +78,7 @@ Compaction 支持 Auto、Manual、ProviderOverflow、本地 checkpoint 和 Respo
 
 ## 8. Scheduler
 
-ScheduleDefinition 保存 Prompt、At/Every/Cron/Event、时区或 typed Event matcher、General/Project/Session context、workload override、Tool/Skill/MCP allowlist、权限 revision、misfire、delivery、停止条件和 config revision。Codex Scheduled Tasks 定义后台任务、Skills/Plugins、Worktree、对话续接和权限产品语义 [ref:OAI-PRODUCT-SCHEDULED-20260730]；当前本地 timer、事件入口、Task ledger、并发和重启 reconciliation 实现参考固定版本 OpenClaw。每次 invocation 创建 fresh TaskRun 和 Run；Event 使用 `(source,event_id)`、fingerprint 和包含 schedule revision 的 invocation key 去重。ScheduleGrant 固化 Skill content/tree revision、MCP schema/Host identity 和权限上限；Prompt/时间/名称变化不撤销，权限/context/Skill/MCP 集合变化必须重新授权。
+ScheduleDefinition 保存 Prompt、At/Every/Cron/Event、Workspace context、workload override、Tool/Skill/MCP allowlist、Skill content/tree revision、Connector/Host revision、统一权限 policy、permission revision、misfire、delivery、停止条件和 config revision。Codex Scheduled Tasks 定义后台任务、Skills/Plugins、Workspace、对话续接和权限产品语义 [ref:OAI-PRODUCT-SCHEDULED-20260730]；当前本地 timer、事件入口、Task ledger、并发和重启 reconciliation 实现参考固定版本 OpenClaw。每次 invocation 创建 fresh TaskRun 和 Run，Run 创建服务再生成不可变 `RunAuthoritySnapshot`；Event 使用 `(source,event_id)`、fingerprint 和包含 schedule revision 的 invocation key 去重。Prompt/时间/名称变化不改变权限 revision，权限/context/Skill/MCP/Host 集合变化由用户保存新的 definition revision；运行时漂移进入 `NeedsAttention`。
 
 Event 入口只接受 source/type/subject/最多 16 个 exact labels 和可选 typed resource reference，不接受 Prompt、Grant、Approval 或任意正文。AppServer 使用已认证 principal 绑定 source identity；Workspace、Plugin、Connector、Channel 和 Gateway 适配器只能经由同一入口投递。Event metadata 不提升权限，Agent 需要正文时必须通过已授权 Tool 读取 resource reference。
 
@@ -110,7 +110,7 @@ Event 入口只接受 source/type/subject/最多 16 个 exact labels 和可选 t
 - 平台集成设置：企业微信、钉钉、飞书由生产 manifest 生成品牌 Tab；同一企业账户独立选择 API 与消息能力，凭据使用平台字段并只写入 Windows Credential Manager。Gateway 随消息账户需求自动托管；fixture Provider 不进入正式 UI。
 - Plugins 产品状态：P6 lifecycle 代码与本地测试完成，Runtime 继续供官方 Bundle 使用；所有版本的用户管理入口当前置灰，第三方 Bundle 产品化属于后续计划，Marketplace 继续不实现。
 - Computer Use：只枚举当前可控制的可见窗口与已有策略；Windows 描述符包含产品名、规范路径、发布者验证状态、文件身份和 Shell 图标。策略写入只接受后端候选的 `identityHash`，不扫描全部已安装应用。
-- Scheduler：Codex 定义 Scheduled Tasks 产品语义，OpenClaw 只提供 Cron/Heartbeat/事件触发、Task ledger、投递和后台任务重启 reconciliation。OpenClaw standing orders 不能从 Prompt 或 `AGENTS.md` 直接生成永久授权，仍必须创建显式 ScheduleGrant。
+- Scheduler：Codex 定义 Scheduled Tasks 产品语义，OpenClaw 只提供 Cron/Heartbeat/事件触发、Task ledger、投递和后台任务重启 reconciliation。OpenClaw standing orders 不能从 Prompt 或 `AGENTS.md` 直接生成永久权限；权限只能来自 ScheduleDefinition 的统一 policy。
 - Restart：Codex 式 Session/Thread resume 与 rollout reconstruction 用于恢复历史；活动 Run 依据 durable checkpoint、可信 Host recovery policy、revision 和 side-effect receipt 安全续跑。不得照搬 OpenClaw 对有副作用 turn 的自动重放；dispatch 后结果未知的动作必须由用户确认或放弃。
 
 ## 11. 验收
@@ -122,9 +122,9 @@ Event 入口只接受 source/type/subject/最多 16 个 exact labels 和可选 t
 ## 12. P1–P8 当前边界
 
 - 崩溃续跑只允许只读或能以同一幂等键证明回执的步骤；dispatch 后未知结果固定为 `indeterminate`。
-- Multi-Agent 使用父子 Task/Run 和统一 Projector；`agent.spawn/send/wait/cancel/collect` 只进入 Workbench General/Coding/Office，Scheduled 必须命中持久化精确 allowlist，Pet 不开放；子 Agent 的 Tool/Skill/MCP/Host/预算只能继承后收窄，取消和审计向下传播。
-- Git push 使用标准 Remote 与 GCM/SSH Agent。Agent 原生 `git.remotes/git.push/forge.change.query/forge.change.mutate` 只注册到交互式 Project Coding，并与 Workbench UI 复用同一 Host；Plan mode 只保留 remotes/query。当前 Project Remote 只为 Git/Forge 授权上下文产生精确 host/protocol Grant，不扩大其他 Host。Forge adapter 支持 GitHub、GitLab、Gitee、Gitea/Forgejo [ref:GITHUB-API-20260730] [ref:GITLAB-API-20260730] [ref:GITEE-API-20260730] [ref:GITEA-FORGEJO-API-20260730]；未知平台只完成 push 并生成草稿。mutation 响应未知时返回 executor error，使统一 side-effect ledger 保持 `Indeterminate`；只允许查询远端，source/target、可见字段、状态与 commit OID 全部匹配才把原操作确认为成功，否则不重放。官方 API 不支持原地替换源分支，因此更新操作把 source ref 作为不可变前置条件。
-- 企业附件工具只进入 Workbench General/Office；Scheduled 必须固定 Connector account、`download_attachment` action 与 contribution revision，授权缺失或 revision 漂移进入 `NeedsAttention`。通用 `connector_invoke` 明确拒绝保留动作，不能绕过 `enterprise.download_attachment` 的下载、校验和 Artifact fencing。
+- Multi-Agent 使用父子 Task/Run 和统一 Projector；`agent.spawn/send/wait/cancel/collect` 与其他能力一样只按权限、Host readiness、Plan mode 和父 Run 的单调收窄规则进入 ToolPlan，不按来源、EntryProfile 或 workload 建白名单。子 Agent 的 Tool/Skill/MCP/Host/预算只能继承后收窄，取消和审计向下传播。
+- Git push 使用标准 Remote 与 GCM/SSH Agent。Agent 原生 `git.remotes/git.push/forge.change.query/forge.change.mutate` 依赖通用 WorkspaceHandle 和实际 Git 仓库，并与 Workbench UI 复用同一 Host；Plan mode 只保留 remotes/query。Remote 只为 Git/Forge 授权上下文产生精确 host/protocol Grant，不扩大其他 Host。Forge adapter 支持 GitHub、GitLab、Gitee、Gitea/Forgejo [ref:GITHUB-API-20260730] [ref:GITLAB-API-20260730] [ref:GITEE-API-20260730] [ref:GITEA-FORGEJO-API-20260730]；未知平台只完成 push 并生成草稿。mutation 响应未知时返回 executor error，使统一 side-effect ledger 保持 `Indeterminate`；只允许查询远端，source/target、可见字段、状态与 commit OID 全部匹配才把原操作确认为成功，否则不重放。官方 API 不支持原地替换源分支，因此更新操作把 source ref 作为不可变前置条件。
+- 企业附件与通用 Connector 能力按统一权限和 Host readiness 进入所有来源/Profile/workload 的 ToolPlan；Scheduled、Channel 和 Pet 的后台授权必须固定 Connector account、action 与 contribution revision，缺失或漂移进入 `NeedsAttention`。通用 `connector_invoke` 明确拒绝保留动作，不能绕过 `enterprise.download_attachment` 的下载、校验和 Artifact fencing。
 - Browser 与 Computer 继续绑定 Run generation、lease、observation/frame、App/Window fingerprint、站点/能力授权和 Sandbox readiness；终态 Run 不能复用旧 generation。
 - 八类 `RuntimeFeatureSet` 能力默认开启；关闭时 UI 隐藏入口、对应工具不注册，命令返回 `feature_disabled` 和 feature key。Provider Extensions 关闭后只保留 legacy Chat Completions，Git Remote Mutations 关闭后仍允许本地 stage/commit；migration 不受开关影响。
 - Office 产品边界是本地 DOCX/XLSX/PPTX/PDF 与文件整理，不增加在线 Office 服务依赖或 Office 专用 Kernel 分支。

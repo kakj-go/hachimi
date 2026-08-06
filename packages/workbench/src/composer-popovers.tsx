@@ -1,8 +1,9 @@
 import type {
-  ApprovalPolicy,
   GitRefRecord,
+  PermissionProfile,
   ProjectGitSnapshot,
   ProjectRecord,
+  SessionExtraAuthorizationSummary,
   SkillRecord,
 } from "@hachimi/contracts";
 import { useI18n } from "@hachimi/i18n";
@@ -16,15 +17,15 @@ import {
   FolderOpen,
   GitBranch,
   GitFork,
-  Hand,
   Laptop,
   Lightbulb,
   Paperclip,
+  Pencil,
   Plus,
   RefreshCw,
-  ShieldCheck,
   ShieldOff,
   Sparkles,
+  Trash2,
   Tooltip,
   X,
 } from "@hachimi/ui";
@@ -391,53 +392,55 @@ export function ComposerOptionsPopover(
   );
 }
 
-export function ApprovalPolicyPopover(
+export function PermissionProfilePopover(
   props: PopoverStateProps & {
-    value: ApprovalPolicy;
-    onChange: (policy: ApprovalPolicy) => void;
+    value: PermissionProfile;
+    onChange: (profile: PermissionProfile) => void;
+    extraAuthorizations?: SessionExtraAuthorizationSummary[];
+    onClearExtraAuthorizations?: () => void;
   },
 ) {
   const i18n = useI18n();
-  const policies: Array<{
-    value: ApprovalPolicy;
+  const profiles: Array<{
+    value: PermissionProfile;
     icon: JSX.Element;
     label: string;
     description: string;
     tone: MenuRowTone;
   }> = [
     {
-      value: "always_ask_side_effects",
-      icon: <Hand size={18} />,
-      label: i18n.t("workbench.approvalAlwaysAsk"),
-      description: i18n.t("workbench.approvalAlwaysAskDescription"),
+      value: "read_only",
+      icon: <FileText size={18} />,
+      label: i18n.t("workbench.permissionReadOnly"),
+      description: i18n.t("workbench.permissionReadOnlyDescription"),
       tone: "neutral",
     },
     {
-      value: "only_when_needed",
-      icon: <ShieldCheck size={18} />,
-      label: i18n.t("workbench.approvalOnlyWhenNeeded"),
-      description: i18n.t("workbench.approvalOnlyWhenNeededDescription"),
+      value: "writable",
+      icon: <Pencil size={18} />,
+      label: i18n.t("workbench.permissionWritable"),
+      description: i18n.t("workbench.permissionWritableDescription"),
       tone: "recommended",
     },
     {
-      value: "never_prompt",
+      value: "full_access",
       icon: <ShieldOff size={18} />,
-      label: i18n.t("workbench.approvalNeverPrompt"),
-      description: i18n.t("workbench.approvalNeverPromptDescription"),
+      label: i18n.t("workbench.permissionFullAccess"),
+      description: i18n.t("workbench.permissionFullAccessDescription"),
       tone: "danger",
     },
   ];
-  const selected = () => policies.find((policy) => policy.value === props.value) ?? policies[1]!;
+  const selected = () => profiles.find((profile) => profile.value === props.value) ?? profiles[1]!;
 
   return (
     <FloatingPopover
       open={props.activePopover === "approval"}
       onOpenChange={(open) => props.onOpenChange("approval", open)}
-      label={i18n.t("workbench.approvalPolicy")}
+      label={i18n.t("workbench.permissionLevel")}
       triggerClass={`composer-approval-trigger composer-policy policy-${selected().tone}`}
-      triggerTestId="workbench-approval-policy"
+      triggerTestId="workbench-permission-profile"
       contentClass="composer-popover composer-approval-popover"
-      contentTestId="workbench-approval-popover"
+      contentTestId="workbench-permission-popover"
       trigger={
         <>
           {selected().icon}
@@ -446,25 +449,50 @@ export function ApprovalPolicyPopover(
         </>
       }
     >
-      <div class="composer-popover-heading">{i18n.t("workbench.approvalPopoverTitle")}</div>
+      <div class="composer-popover-heading">{i18n.t("workbench.permissionPopoverTitle")}</div>
       <div class="composer-popover-list">
-        <For each={policies}>
-          {(policy) => (
+        <For each={profiles}>
+          {(profile) => (
             <MenuRow
-              icon={policy.icon}
-              label={policy.label}
-              description={policy.description}
-              selected={props.value === policy.value}
-              tone={policy.tone}
-              testId={`workbench-approval-policy-${policy.value}`}
+              icon={profile.icon}
+              label={profile.label}
+              description={profile.description}
+              selected={props.value === profile.value}
+              tone={profile.tone}
+              testId={`workbench-permission-${profile.value}`}
               onSelect={() => {
-                props.onChange(policy.value);
+                props.onChange(profile.value);
                 props.onOpenChange("approval", false);
               }}
             />
           )}
         </For>
       </div>
+      <Show when={(props.extraAuthorizations?.length ?? 0) > 0}>
+        <div class="composer-permission-extra">
+          <div class="composer-permission-extra-heading">
+            <strong>{i18n.locale() === "zh-CN" ? "会话额外授权" : "Session authorizations"}</strong>
+            <Button
+              type="button"
+              class="composer-permission-extra-clear"
+              onClick={() => props.onClearExtraAuthorizations?.()}
+            >
+              <Trash2 size={14} aria-hidden="true" />
+              {i18n.locale() === "zh-CN" ? "全部清除" : "Clear all"}
+            </Button>
+          </div>
+          <ul>
+            <For each={props.extraAuthorizations}>
+              {(authorization) => (
+                <li>
+                  <span>{authorization.action}</span>
+                  <code>{authorization.resource}</code>
+                </li>
+              )}
+            </For>
+          </ul>
+        </div>
+      </Show>
     </FloatingPopover>
   );
 }

@@ -27,7 +27,7 @@ async fn computer_projection_and_host_action_ledger_are_durable_and_non_replayab
     };
     store.create_session(&session).await.expect("session");
     let mut host_run = run(&session, "host-control-run");
-    host_run.configuration.permission_profile = PermissionProfile::ExternalSandbox;
+    host_run.configuration.permission_profile = PermissionProfile::FullAccess;
     store
         .create_run_idempotent("host-test", "host-control-run", &host_run)
         .await

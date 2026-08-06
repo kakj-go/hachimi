@@ -32,8 +32,7 @@ pub(super) async fn get_workbench_project_tool_context(
             .map_err(|error| CommandError::operation("project_tool_run_get_failed", error))?
         && !run.status.is_terminal()
     {
-        ensure_project_tool_security(&state, &context.session_id, &run, &context.checkout_id)
-            .await?;
+        ensure_project_tool_security(&state, &context.session_id, &run).await?;
         return state
             .workbench
             .session_snapshot(&context.session_id)
@@ -53,7 +52,7 @@ pub(super) async fn get_workbench_project_tool_context(
             project_id: project_id.clone(),
         }),
         behavior_mode: hachimi_protocol::BehaviorMode::Default,
-        approval_policy: hachimi_protocol::ApprovalPolicy::OnlyWhenNeeded,
+        permission_profile: hachimi_protocol::PermissionProfile::Writable,
         attachment_ids: Vec::new(),
         skill_ids: Vec::new(),
     };
@@ -95,7 +94,7 @@ pub(super) async fn get_workbench_project_tool_context(
         snapshot.run.clone()
     };
 
-    ensure_project_tool_security(&state, &snapshot.session.id, &run, &checkout.id).await?;
+    ensure_project_tool_security(&state, &snapshot.session.id, &run).await?;
     state
         .agent_store
         .bind_project_tool_context(
@@ -118,7 +117,6 @@ async fn ensure_project_tool_security(
     state: &DesktopState,
     session_id: &SessionId,
     run: &hachimi_protocol::RunRecord,
-    checkout_id: &hachimi_protocol::CheckoutId,
 ) -> Result<(), CommandError> {
     if state
         .agent_store
@@ -132,28 +130,45 @@ async fn ensure_project_tool_security(
             .await
             .map_err(|error| CommandError::operation("project_tool_sandbox_get_failed", error))?
             .is_some()
+        && state
+            .agent_store
+            .authority_snapshot(&run.id)
+            .await
+            .map_err(|error| CommandError::operation("project_tool_authority_get_failed", error))?
+            .is_some()
     {
         return Ok(());
     }
-    let checkout = state
+    let session = state
         .agent_store
-        .get_checkout(checkout_id)
+        .get_session(session_id)
         .await
-        .map_err(|error| CommandError::operation("project_tool_checkout_get_failed", error))?
+        .map_err(|error| CommandError::operation("project_tool_session_get_failed", error))?
         .ok_or_else(|| {
             CommandError::new(
-                "project_tool_checkout_missing",
-                "project tool Checkout does not exist",
+                "project_tool_session_missing",
+                "project tool Session does not exist",
             )
         })?;
-    let mut grants = expand_permission_profile(
-        hachimi_protocol::PermissionProfile::ExternalSandbox,
-        hachimi_protocol::BehaviorMode::Default,
-        session_id.clone(),
-        run.id.clone(),
-        checkout.path,
-    );
-    grants.source = "project_tools_direct_user".into();
+    let policy = state
+        .agent_store
+        .permission_policy(&format!("session:{session_id}"))
+        .await
+        .map_err(|error| CommandError::operation("project_tool_policy_get_failed", error))?
+        .unwrap_or_else(|| hachimi_protocol::AgentPermissionPolicy {
+            level: run.configuration.permission_profile,
+            ..hachimi_protocol::AgentPermissionPolicy::default()
+        });
+    let (authority, mut grants) = hachimi_agent::AgentRunLauncher::new(state.agent_store.clone())
+        .authorize_existing(
+            &session,
+            run,
+            policy,
+            hachimi_protocol::AuthorityMode::Interactive,
+        )
+        .await
+        .map_err(|error| CommandError::operation("project_tool_authority_restore_failed", error))?;
+    grants.source = format!("authority_snapshot:{}", authority.id);
     state
         .agent_store
         .persist_run_security_snapshot(&grants, &state.sandbox_snapshot().report, now_ms())

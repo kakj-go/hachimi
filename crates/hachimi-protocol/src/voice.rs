@@ -318,6 +318,14 @@ pub enum PetTurnEvent {
         session_id: SessionId,
         agent_run_id: RunId,
     },
+    NeedsAttention {
+        #[serde(rename = "runId")]
+        run_id: String,
+        session_id: SessionId,
+        agent_run_id: RunId,
+        code: String,
+        message: String,
+    },
     Failed {
         #[serde(rename = "runId")]
         run_id: String,

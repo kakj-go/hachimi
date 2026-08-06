@@ -328,6 +328,26 @@
   gap: var(--space-3);
 }
 
+.integration-grant-editor
+  [data-component="settings-card"]
+  > [data-component="settings-row"]:first-child {
+  align-items: stretch;
+  flex-direction: column;
+}
+
+.integration-grant-editor
+  [data-component="settings-card"]
+  > [data-component="settings-row"]:first-child
+  > .settings-control {
+  width: 100%;
+  flex-basis: auto;
+  justify-content: flex-start;
+}
+
+.integration-grant-editor .permission-policy-editor {
+  width: 100%;
+}
+
 .integration-grant-connector {
   padding-bottom: var(--space-2);
   border-bottom: 1px solid var(--color-border-muted);

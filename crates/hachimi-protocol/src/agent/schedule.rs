@@ -6,21 +6,19 @@ use serde::{Deserialize, Serialize};
 use specta::Type;
 
 use super::{
-    ArtifactId, AvatarId, EntryProfile, ExecutionTarget, McpServerId, MutationContext,
-    PermissionProfile, ProjectId, RunId, ScheduleGrantId, ScheduleId, SessionId, SkillId,
-    TaskRunId, WorkloadKind,
+    ArtifactId, EntryProfile, McpServerId, MutationContext, ProjectId, RunId, ScheduleId,
+    SessionId, SkillId, TaskRunId, WorkloadKind, WorkspaceId,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum SessionContextBinding {
-    General,
+    Workspace {
+        workspace_id: WorkspaceId,
+    },
     Project {
         project_id: ProjectId,
         checkout_id: super::CheckoutId,
-    },
-    Avatar {
-        avatar_id: Option<AvatarId>,
     },
 }
 
@@ -29,7 +27,7 @@ impl SessionContextBinding {
     pub const fn project_id(&self) -> Option<&ProjectId> {
         match self {
             Self::Project { project_id, .. } => Some(project_id),
-            Self::General | Self::Avatar { .. } => None,
+            Self::Workspace { .. } => None,
         }
     }
 
@@ -37,7 +35,7 @@ impl SessionContextBinding {
     pub const fn checkout_id(&self) -> Option<&super::CheckoutId> {
         match self {
             Self::Project { checkout_id, .. } => Some(checkout_id),
-            Self::General | Self::Avatar { .. } => None,
+            Self::Workspace { .. } => None,
         }
     }
 }
@@ -46,10 +44,14 @@ impl SessionContextBinding {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum RunOrigin {
     #[default]
-    Interactive,
-    Handoff {
-        source_session_id: SessionId,
-        source_run_id: RunId,
+    Manual,
+    Project,
+    Channel {
+        channel: String,
+        account: String,
+        peer: String,
+        thread: String,
+        message_id: super::ChannelMessageId,
     },
     Scheduled {
         schedule_id: ScheduleId,
@@ -59,13 +61,14 @@ pub enum RunOrigin {
         #[serde(default)]
         event_context: Option<ScheduleEventContext>,
     },
-    Channel {
-        channel: String,
-        account: String,
-        peer: String,
-        thread: String,
-        message_id: super::ChannelMessageId,
-    },
+    Pet,
+}
+
+impl RunOrigin {
+    #[must_use]
+    pub const fn is_interactive(&self) -> bool {
+        matches!(self, Self::Project | Self::Manual | Self::Pet)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
@@ -190,13 +193,9 @@ pub struct ScheduleEventReceipt {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ScheduleContextTemplate {
-    General,
-    Project {
-        project_id: ProjectId,
-        execution_target: ExecutionTarget,
-    },
-    SessionContinuation {
-        session_id: SessionId,
+    Workspace {
+        workspace: super::ScheduleWorkspaceSpec,
+        conversation_mode: super::ScheduleConversationMode,
     },
 }
 
@@ -211,7 +210,7 @@ pub struct ScheduleStopConditions {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
-pub struct ScheduleConnectorSelection {
+pub struct ConnectorRevisionSelection {
     pub account_id: super::ConnectorAccountId,
     pub contribution_revision: super::ContributionRevision,
     pub allowed_actions: Vec<String>,
@@ -219,20 +218,8 @@ pub struct ScheduleConnectorSelection {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type, Default)]
 #[serde(rename_all = "camelCase")]
-pub struct ScheduleBrowserGrant {
-    pub enabled: bool,
-    pub document_origins: Vec<String>,
-    pub resource_origins: Vec<String>,
-    pub capabilities: Vec<super::BrowserCapability>,
-    pub allow_private_network: bool,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type, Default)]
-#[serde(rename_all = "camelCase")]
-pub struct ScheduleHostGrant {
-    pub connectors: Vec<ScheduleConnectorSelection>,
-    pub browser: Option<ScheduleBrowserGrant>,
-    pub computer_unattended: bool,
+pub struct HostRevisionSnapshot {
+    pub connectors: Vec<ConnectorRevisionSelection>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type, Default)]
@@ -256,7 +243,6 @@ pub enum DeliveryPolicy {
 pub enum ScheduleHealth {
     #[default]
     Healthy,
-    NeedsAuthorization,
     NeedsAttention,
     Invalid,
 }
@@ -266,7 +252,6 @@ impl ScheduleHealth {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Healthy => "healthy",
-            Self::NeedsAuthorization => "needs_authorization",
             Self::NeedsAttention => "needs_attention",
             Self::Invalid => "invalid",
         }
@@ -276,7 +261,6 @@ impl ScheduleHealth {
     pub fn parse(value: &str) -> Option<Self> {
         Some(match value {
             "healthy" => Self::Healthy,
-            "needs_authorization" => Self::NeedsAuthorization,
             "needs_attention" => Self::NeedsAttention,
             "invalid" => Self::Invalid,
             _ => return None,
@@ -303,28 +287,6 @@ pub struct ScheduleSkillSelection {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
-pub struct SchedulePermissionConfig {
-    pub permission_profile: PermissionProfile,
-    pub allow_file_read: bool,
-    pub allow_file_write: bool,
-    pub allow_exec: bool,
-    pub external_targets: Vec<String>,
-}
-
-impl Default for SchedulePermissionConfig {
-    fn default() -> Self {
-        Self {
-            permission_profile: PermissionProfile::ReadOnly,
-            allow_file_read: false,
-            allow_file_write: false,
-            allow_exec: false,
-            external_targets: Vec::new(),
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
-#[serde(rename_all = "camelCase")]
 pub struct ScheduleDefinition {
     pub id: ScheduleId,
     pub name: String,
@@ -334,14 +296,15 @@ pub struct ScheduleDefinition {
     pub entry_profile: EntryProfile,
     pub workload_override: Option<WorkloadKind>,
     pub context_template: ScheduleContextTemplate,
-    pub tool_allowlist: Vec<String>,
     pub skill_allowlist: Vec<SkillId>,
+    #[serde(default)]
+    pub skill_revisions: Vec<ScheduleSkillSelection>,
     pub mcp_tool_allowlist: Vec<McpToolSelection>,
     #[serde(default)]
     pub contribution_revisions: Vec<super::ContributionRevision>,
     #[serde(default)]
-    pub host_grant: ScheduleHostGrant,
-    pub permission_config: SchedulePermissionConfig,
+    pub host_revision_snapshot: HostRevisionSnapshot,
+    pub permission_policy: super::AgentPermissionPolicy,
     #[specta(type = specta_typescript::Number)]
     pub permission_revision: u64,
     #[specta(type = specta_typescript::Number)]
@@ -361,71 +324,6 @@ pub struct ScheduleDefinition {
     pub created_at_ms: i64,
     #[specta(type = specta_typescript::Number)]
     pub updated_at_ms: i64,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type, Default)]
-#[serde(rename_all = "snake_case")]
-pub enum ScheduleGrantStatus {
-    #[default]
-    Active,
-    Revoked,
-    Superseded,
-}
-
-impl ScheduleGrantStatus {
-    #[must_use]
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Active => "active",
-            Self::Revoked => "revoked",
-            Self::Superseded => "superseded",
-        }
-    }
-
-    #[must_use]
-    pub fn parse(value: &str) -> Option<Self> {
-        Some(match value {
-            "active" => Self::Active,
-            "revoked" => Self::Revoked,
-            "superseded" => Self::Superseded,
-            _ => return None,
-        })
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
-#[serde(rename_all = "camelCase")]
-pub struct ScheduleAuthorizationScope {
-    pub entry_profile: EntryProfile,
-    pub workload_override: Option<WorkloadKind>,
-    pub context_template: ScheduleContextTemplate,
-    pub tool_allowlist: Vec<String>,
-    pub skill_allowlist: Vec<SkillId>,
-    #[serde(default)]
-    pub skill_revisions: Vec<ScheduleSkillSelection>,
-    pub mcp_tool_allowlist: Vec<McpToolSelection>,
-    pub permission_config: SchedulePermissionConfig,
-    #[serde(default)]
-    pub contribution_revisions: Vec<super::ContributionRevision>,
-    #[serde(default)]
-    pub host_grant: ScheduleHostGrant,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
-#[serde(rename_all = "camelCase")]
-pub struct ScheduleGrantRecord {
-    pub id: ScheduleGrantId,
-    pub schedule_id: ScheduleId,
-    #[specta(type = specta_typescript::Number)]
-    pub permission_revision: u64,
-    pub scope_hash: String,
-    pub scope: ScheduleAuthorizationScope,
-    pub status: ScheduleGrantStatus,
-    pub granted_by: String,
-    #[specta(type = specta_typescript::Number)]
-    pub created_at_ms: i64,
-    #[specta(type = Option<specta_typescript::Number>)]
-    pub revoked_at_ms: Option<i64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type, Default)]
@@ -551,7 +449,6 @@ pub struct TaskRunRecord {
     pub requester_session_id: Option<SessionId>,
     pub execution_session_id: Option<SessionId>,
     pub run_id: Option<RunId>,
-    pub permission_snapshot_hash: Option<String>,
     pub status: TaskRunStatus,
     pub progress_percent: Option<u8>,
     pub result_summary: Option<String>,
@@ -575,7 +472,6 @@ pub struct TaskRunRecord {
 pub struct ScheduleCreateRequest {
     pub context: MutationContext,
     pub definition: ScheduleDefinition,
-    pub authorize: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
@@ -600,7 +496,6 @@ pub struct SchedulePreview {
 #[serde(rename_all = "camelCase")]
 pub struct ScheduleSnapshot {
     pub definition: ScheduleDefinition,
-    pub active_grant: Option<ScheduleGrantRecord>,
     pub recent_runs: Vec<TaskRunRecord>,
 }
 

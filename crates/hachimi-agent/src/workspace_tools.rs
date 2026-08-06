@@ -56,18 +56,20 @@ impl WorkspaceToolKind {
 
     fn description(self) -> &'static str {
         match self {
-            Self::ReadFile => "Read a UTF-8 text file inside the active checkout.",
-            Self::ListDirectory => "List one directory inside the active checkout.",
-            Self::SearchText => "Search UTF-8 workspace files without following symlinks.",
+            Self::ReadFile => "Read a UTF-8 text file inside an authorized Workspace root.",
+            Self::ListDirectory => "List one directory inside an authorized Workspace root.",
+            Self::SearchText => "Search authorized Workspace files without following symlinks.",
             Self::WriteFile => {
                 "Create or replace a UTF-8 file. Existing files require the SHA-256 returned by read_file."
             }
             Self::ReplaceText => {
                 "Replace exact text in a UTF-8 file, guarded by its previously read SHA-256."
             }
-            Self::GitStatus => "Return Git short status for the active checkout.",
-            Self::GitDiff => "Return the unstaged Git diff for the active checkout.",
-            Self::Exec => "Run one program without a shell or PTY inside the active checkout.",
+            Self::GitStatus => "Return Git short status for the active Workspace.",
+            Self::GitDiff => "Return the unstaged Git diff for the active Workspace.",
+            Self::Exec => {
+                "Run one program without a shell or PTY inside an authorized Workspace root."
+            }
         }
     }
 

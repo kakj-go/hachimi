@@ -117,11 +117,11 @@ mod tests {
     };
 
     use hachimi_protocol::{
-        DeliveryPolicy, EntryProfile, MisfirePolicy, PermissionProfile, ScheduleContextTemplate,
-        ScheduleDefinition, ScheduleEventEnvelope, ScheduleEventMatcher, ScheduleEventSource,
-        ScheduleEventSourceKind, ScheduleHealth, ScheduleHostGrant, ScheduleId,
-        SchedulePermissionConfig, ScheduleSpec, ScheduleStopConditions, TaskRunRecord,
-        TaskRunStatus, TaskRunTrigger, WorkloadKind,
+        AgentPermissionPolicy, DeliveryPolicy, EntryProfile, HostRevisionSnapshot, MisfirePolicy,
+        PermissionProfile, ScheduleContextTemplate, ScheduleDefinition, ScheduleEventEnvelope,
+        ScheduleEventMatcher, ScheduleEventSource, ScheduleEventSourceKind, ScheduleHealth,
+        ScheduleId, ScheduleSpec, ScheduleStopConditions, TaskRunRecord, TaskRunStatus,
+        TaskRunTrigger, WorkloadKind,
     };
     use hachimi_storage::{AgentStore, AgentStoreError};
     use tokio_util::sync::CancellationToken;
@@ -190,15 +190,18 @@ mod tests {
             },
             entry_profile: EntryProfile::Workbench,
             workload_override: Some(WorkloadKind::Office),
-            context_template: ScheduleContextTemplate::General,
-            tool_allowlist: Vec::new(),
+            context_template: ScheduleContextTemplate::Workspace {
+                workspace: hachimi_protocol::ScheduleWorkspaceSpec::Managed,
+                conversation_mode: hachimi_protocol::ScheduleConversationMode::PerRunSession,
+            },
             skill_allowlist: Vec::new(),
+            skill_revisions: Vec::new(),
             mcp_tool_allowlist: Vec::new(),
             contribution_revisions: Vec::new(),
-            host_grant: ScheduleHostGrant::default(),
-            permission_config: SchedulePermissionConfig {
-                permission_profile: PermissionProfile::ReadOnly,
-                ..SchedulePermissionConfig::default()
+            host_revision_snapshot: HostRevisionSnapshot::default(),
+            permission_policy: AgentPermissionPolicy {
+                level: PermissionProfile::ReadOnly,
+                ..AgentPermissionPolicy::default()
             },
             permission_revision: 0,
             timeout_ms: 120_000,
@@ -261,7 +264,6 @@ mod tests {
                     "owner",
                     &format!("create-{index}"),
                     event_definition(&format!("schedule-{index}"), kind, &source_id, &event_type),
-                    true,
                 )
                 .await
                 .expect("create event schedule");
@@ -316,7 +318,6 @@ mod tests {
                         "calendar",
                         "meeting.changed",
                     ),
-                    true,
                 )
                 .await
                 .expect("create fanout schedule");

@@ -660,7 +660,7 @@ async fn expired_run_created_claim_recovers_the_existing_run() {
         .expect("message");
     let session_id = SessionId::new("session-1");
     let run_id = RunId::new("run-1");
-    sqlx::query("INSERT INTO sessions(id, context_kind, context_json, entry_profile, title, archived, pinned, parent_session_id, source_run_id, next_sequence, created_at_ms, updated_at_ms) VALUES(?, 'general', '{\"kind\":\"general\"}', 'workbench', 'Channel', 0, 0, NULL, NULL, 1, 10, 10)")
+    sqlx::query("INSERT INTO sessions(id, context_kind, context_json, entry_profile, title, archived, pinned, parent_session_id, source_run_id, next_sequence, created_at_ms, updated_at_ms) VALUES(?, 'workspace', '{\"kind\":\"workspace\",\"workspace_id\":\"workspace-1\"}', 'workbench', 'Channel', 0, 0, NULL, NULL, 1, 10, 10)")
         .bind(session_id.as_str()).execute(store.pool()).await.expect("session");
     sqlx::query("INSERT INTO runs(id, session_id, status, purpose, origin_json, generation, configuration_json, requested_capabilities_json, negotiated_capabilities_json, provider_capability_probe_json, capability_degradations_json, failure_code, created_at_ms, updated_at_ms) VALUES(?, ?, 'queued', 'task', '{\"kind\":\"default\"}', 1, '{}', '{}', '{}', 'null', '[]', NULL, 10, 10)")
         .bind(run_id.as_str()).bind(session_id.as_str()).execute(store.pool()).await.expect("run");

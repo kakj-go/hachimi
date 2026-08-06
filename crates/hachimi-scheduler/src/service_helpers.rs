@@ -1,64 +1,24 @@
 use hachimi_protocol::{
-    DeliveryPolicy, DeliveryStatus, ScheduleAuthorizationScope, ScheduleDefinition,
-    ScheduleGrantId, ScheduleGrantRecord, ScheduleGrantStatus, ScheduleSpec, TaskRunId,
-    TaskRunRecord, TaskRunStatus, TaskRunTrigger,
+    DeliveryPolicy, DeliveryStatus, ScheduleDefinition, ScheduleSpec, TaskRunId, TaskRunRecord,
+    TaskRunStatus, TaskRunTrigger,
 };
 use hachimi_storage::AgentStore;
-use sha2::{Digest, Sha256};
 
 use crate::{SchedulerError, TimeZoneResolver, error_code, occurrences_after};
 
-pub(super) fn authorization_scope(definition: &ScheduleDefinition) -> ScheduleAuthorizationScope {
-    ScheduleAuthorizationScope {
-        entry_profile: definition.entry_profile,
-        workload_override: definition.workload_override,
-        context_template: definition.context_template.clone(),
-        tool_allowlist: definition.tool_allowlist.clone(),
-        skill_allowlist: definition.skill_allowlist.clone(),
-        skill_revisions: Vec::new(),
-        mcp_tool_allowlist: definition.mcp_tool_allowlist.clone(),
-        permission_config: definition.permission_config.clone(),
-        contribution_revisions: definition.contribution_revisions.clone(),
-        host_grant: definition.host_grant.clone(),
-    }
-}
-
-pub(super) fn build_grant(
-    definition: &ScheduleDefinition,
-    principal: &str,
-    now_ms: i64,
-    scope: ScheduleAuthorizationScope,
-) -> Result<ScheduleGrantRecord, SchedulerError> {
-    if scope.entry_profile != definition.entry_profile
-        || scope.workload_override != definition.workload_override
-        || scope.context_template != definition.context_template
-        || scope.tool_allowlist != definition.tool_allowlist
-        || scope.skill_allowlist != definition.skill_allowlist
-        || scope.mcp_tool_allowlist != definition.mcp_tool_allowlist
-        || scope.contribution_revisions != definition.contribution_revisions
-        || scope.host_grant != definition.host_grant
-        || scope.permission_config != definition.permission_config
-    {
-        return Err(SchedulerError::InvalidSchedule(
-            "authorization scope does not match the Schedule definition".into(),
-        ));
-    }
-    let bytes = serde_json::to_vec(&scope)?;
-    let scope_hash = Sha256::digest(bytes)
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect::<String>();
-    Ok(ScheduleGrantRecord {
-        id: ScheduleGrantId::random(),
-        schedule_id: definition.id.clone(),
-        permission_revision: definition.permission_revision,
-        scope_hash,
-        scope,
-        status: ScheduleGrantStatus::Active,
-        granted_by: principal.into(),
-        created_at_ms: now_ms,
-        revoked_at_ms: None,
-    })
+pub(super) fn authority_configuration_changed(
+    current: &ScheduleDefinition,
+    candidate: &ScheduleDefinition,
+) -> bool {
+    current.entry_profile != candidate.entry_profile
+        || current.workload_override != candidate.workload_override
+        || current.context_template != candidate.context_template
+        || current.skill_allowlist != candidate.skill_allowlist
+        || current.skill_revisions != candidate.skill_revisions
+        || current.mcp_tool_allowlist != candidate.mcp_tool_allowlist
+        || current.permission_policy != candidate.permission_policy
+        || current.contribution_revisions != candidate.contribution_revisions
+        || current.host_revision_snapshot != candidate.host_revision_snapshot
 }
 
 pub(super) fn next_occurrence(
@@ -101,15 +61,9 @@ pub(super) fn task_record(
         scheduled_for_ms: Some(scheduled_for_ms),
         event_context: None,
         invocation_key,
-        requester_session_id: match &schedule.context_template {
-            hachimi_protocol::ScheduleContextTemplate::SessionContinuation { session_id } => {
-                Some(session_id.clone())
-            }
-            _ => None,
-        },
+        requester_session_id: None,
         execution_session_id: None,
         run_id: None,
-        permission_snapshot_hash: None,
         status,
         progress_percent: None,
         result_summary: None,

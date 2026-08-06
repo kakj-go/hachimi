@@ -5,9 +5,9 @@ import { render } from "solid-js/web";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
-  ApprovalPolicyPopover,
   ComposerContextControls,
   ComposerOptionsPopover,
+  PermissionProfilePopover,
   PlanModeChip,
   SkillReferenceList,
 } from "./composer-popovers";
@@ -48,12 +48,14 @@ vi.mock("@hachimi/ui", () => {
     Laptop: Icon,
     Lightbulb: Icon,
     Paperclip: Icon,
+    Pencil: Icon,
     Plus: Icon,
     RefreshCw: Icon,
     ShieldAlert: Icon,
     ShieldCheck: Icon,
     ShieldOff: Icon,
     Sparkles: Icon,
+    Trash2: Icon,
     Tooltip,
     X: Icon,
   };
@@ -87,25 +89,25 @@ describe("composer plan mode chip", () => {
   });
 });
 
-describe("composer approval policies", () => {
-  it("distinguishes policy risk and updates the trigger treatment", async () => {
+describe("composer permission profiles", () => {
+  it("distinguishes permission risk and updates the trigger treatment", async () => {
     const host = document.createElement("div");
     document.body.append(host);
     const change = vi.fn();
 
     function Harness() {
-      const [policy, setPolicy] = createSignal<
-        "always_ask_side_effects" | "only_when_needed" | "never_prompt"
-      >("only_when_needed");
+      const [profile, setProfile] = createSignal<"read_only" | "writable" | "full_access">(
+        "writable",
+      );
       return (
         <I18nProvider initialLocale="zh-CN">
-          <ApprovalPolicyPopover
+          <PermissionProfilePopover
             activePopover="approval"
             onOpenChange={() => undefined}
-            value={policy()}
+            value={profile()}
             onChange={(value) => {
               change(value);
-              setPolicy(value);
+              setProfile(value);
             }}
           />
         </I18nProvider>
@@ -116,16 +118,16 @@ describe("composer approval policies", () => {
     await Promise.resolve();
 
     const trigger = host.querySelector<HTMLButtonElement>(
-      '[data-testid="workbench-approval-policy"]',
+      '[data-testid="workbench-permission-profile"]',
     )!;
     const ask = host.querySelector<HTMLButtonElement>(
-      '[data-testid="workbench-approval-policy-always_ask_side_effects"]',
+      '[data-testid="workbench-permission-read_only"]',
     )!;
     const recommended = host.querySelector<HTMLButtonElement>(
-      '[data-testid="workbench-approval-policy-only_when_needed"]',
+      '[data-testid="workbench-permission-writable"]',
     )!;
     const fullAccess = host.querySelector<HTMLButtonElement>(
-      '[data-testid="workbench-approval-policy-never_prompt"]',
+      '[data-testid="workbench-permission-full_access"]',
     )!;
 
     expect(ask.dataset.tone).toBe("neutral");
@@ -136,16 +138,16 @@ describe("composer approval policies", () => {
 
     ask.click();
     await Promise.resolve();
-    expect(change).toHaveBeenLastCalledWith("always_ask_side_effects");
+    expect(change).toHaveBeenLastCalledWith("read_only");
     expect(ask.getAttribute("aria-pressed")).toBe("true");
     expect(trigger.classList.contains("policy-neutral")).toBe(true);
 
     fullAccess.click();
     await Promise.resolve();
-    expect(change).toHaveBeenLastCalledWith("never_prompt");
+    expect(change).toHaveBeenLastCalledWith("full_access");
     expect(fullAccess.getAttribute("aria-pressed")).toBe("true");
     expect(trigger.classList.contains("policy-danger")).toBe(true);
-    expect(host.textContent).toContain("高风险操作可能直接执行");
+    expect(host.textContent).toContain("可访问整机及全部已配置服务");
 
     dispose();
   });
