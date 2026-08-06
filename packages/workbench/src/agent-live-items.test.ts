@@ -12,24 +12,32 @@ const event = (payload: RunEventEnvelope["payload"], sequence: number): RunEvent
   payload,
 });
 
+const item = (id: string, kind: string, status = "in_progress", payload: unknown = {}) =>
+  ({ id, kind, status, payload }) as never;
+
+const textDelta = (text: string) => ({ type: "text", data: { text } }) as const;
+
 describe("active item replay", () => {
   it("renders assistant, reasoning, and tool deltas independently", () => {
     const result = reduceLiveItemDeltas({}, [
+      event({ type: "item_started", data: { item: item("assistant-1", "assistant") } }, 1),
       event(
-        { type: "item_started", data: { item_id: "assistant-1" as never, kind: "assistant" } },
-        1,
+        {
+          type: "item_delta",
+          data: { item_id: "assistant-1" as never, delta: textDelta("hello") },
+        },
+        2,
       ),
-      event({ type: "item_delta", data: { item_id: "assistant-1" as never, delta: "hello" } }, 2),
+      event({ type: "item_started", data: { item: item("reasoning-1", "reasoning") } }, 3),
       event(
-        { type: "item_started", data: { item_id: "reasoning-1" as never, kind: "reasoning" } },
-        3,
+        { type: "item_delta", data: { item_id: "reasoning-1" as never, delta: textDelta("why") } },
+        4,
       ),
-      event({ type: "item_delta", data: { item_id: "reasoning-1" as never, delta: "why" } }, 4),
+      event({ type: "item_started", data: { item: item("tool-1", "tool_execution") } }, 5),
       event(
-        { type: "item_started", data: { item_id: "tool-1" as never, kind: "tool_execution" } },
-        5,
+        { type: "item_delta", data: { item_id: "tool-1" as never, delta: textDelta("running") } },
+        6,
       ),
-      event({ type: "item_delta", data: { item_id: "tool-1" as never, delta: "running" } }, 6),
     ]);
 
     expect(result).toEqual({
@@ -41,28 +49,33 @@ describe("active item replay", () => {
 
   it("drops stale deltas after completed payload and bounds display memory", () => {
     const result = reduceLiveItemDeltas({}, [
-      event({ type: "item_started", data: { item_id: "item-1" as never, kind: "assistant" } }, 1),
-      event({ type: "item_delta", data: { item_id: "item-1" as never, delta: "old" } }, 2),
+      event({ type: "item_started", data: { item: item("item-1", "assistant") } }, 1),
+      event(
+        { type: "item_delta", data: { item_id: "item-1" as never, delta: textDelta("old") } },
+        2,
+      ),
       event(
         {
           type: "item_completed",
-          data: {
-            item_id: "item-1" as never,
-            status: "completed",
-            payload: { type: "assistant", text: "final" } as never,
-          },
+          data: { item: item("item-1", "assistant", "completed", { text: "final" }) },
         },
         3,
       ),
-      event({ type: "item_delta", data: { item_id: "item-1" as never, delta: "late" } }, 4),
+      event(
+        { type: "item_delta", data: { item_id: "item-1" as never, delta: textDelta("late") } },
+        4,
+      ),
     ]);
     // A late delta cannot revive the completed transcript projection.
     expect(result["item-1"]).toBeUndefined();
 
     const bounded = reduceLiveItemDeltas({}, [
-      event({ type: "item_started", data: { item_id: "item-2" as never, kind: "assistant" } }, 5),
+      event({ type: "item_started", data: { item: item("item-2", "assistant") } }, 5),
       event(
-        { type: "item_delta", data: { item_id: "item-2" as never, delta: "x".repeat(300_000) } },
+        {
+          type: "item_delta",
+          data: { item_id: "item-2" as never, delta: textDelta("x".repeat(300_000)) },
+        },
         6,
       ),
     ]);

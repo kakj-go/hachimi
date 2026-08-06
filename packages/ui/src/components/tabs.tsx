@@ -5,7 +5,8 @@ import { componentState, type ComponentStateProps } from "./types";
 
 export interface TabDefinition {
   value: string;
-  label: string;
+  label: JSX.Element;
+  ariaLabel?: string;
   content: JSX.Element;
 }
 
@@ -43,6 +44,7 @@ export function Tabs(props: TabsProps) {
           {(tab) => (
             <KTabs.Trigger
               value={tab.value}
+              aria-label={tab.ariaLabel}
               data-component="tabs-trigger"
               data-variant="default"
               data-size="normal"

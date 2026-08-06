@@ -30,7 +30,6 @@ impl McpEchoServer {
     pub fn start() -> std::io::Result<Self> {
         let listener = TcpListener::bind("127.0.0.1:0")?;
         let address = listener.local_addr()?;
-        listener.set_nonblocking(true)?;
         let stopping = Arc::new(AtomicBool::new(false));
         let stop = Arc::clone(&stopping);
         let thread = thread::Builder::new()
@@ -70,9 +69,6 @@ fn serve(listener: TcpListener, stopping: &AtomicBool) {
                 let _ = handle_connection(stream);
             }
             Ok(_) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                thread::sleep(Duration::from_millis(10));
-            }
             // Windows can surface a client that disconnects between the TCP
             // handshake and accept as ConnectionAborted. That connection is
             // gone, but the listener remains healthy and must keep serving.

@@ -10,7 +10,8 @@ use std::{
 };
 
 use hachimi_protocol::{
-    CONTROL_PROTOCOL_VERSION, ItemId, RunEventEnvelope, RunEventPayload, RunId, SessionId,
+    CONTROL_PROTOCOL_VERSION, ItemDeltaPayload, ItemId, RunEventEnvelope, RunEventPayload, RunId,
+    SessionId,
 };
 use tokio::sync::broadcast;
 
@@ -103,7 +104,7 @@ impl AgentStore {
             run_id: Some(run_id.clone()),
             payload: RunEventPayload::ItemDelta {
                 item_id: item_id.clone(),
-                delta,
+                delta: ItemDeltaPayload::Text { text: delta },
             },
             created_at_ms,
         };

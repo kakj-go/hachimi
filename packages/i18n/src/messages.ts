@@ -59,6 +59,14 @@ export const zhCn = {
   "settings.data.resetConfirm":
     "将永久删除设置、模型库、语音库、动作开发库、日志、WebView 缓存和 API 密钥。应用会立即退出，下次启动按首次使用状态初始化。",
   "settings.data.resetting": "正在退出并清理…",
+  "settings.about.title": "关于与许可",
+  "settings.about.version": "版本",
+  "settings.about.sourceLicense": "源代码许可",
+  "settings.about.sourceLicenseDescription": "Hachimi 源代码采用 Apache License 2.0。",
+  "settings.about.binaryBoundary": "官方安装包为非商业发行",
+  "settings.about.binaryBoundaryDescription":
+    "内置默认 VRM 允许修改与再分发，但禁止个人和企业商业使用；替换或移除该资源不会改变源代码的 Apache-2.0 许可。",
+  "settings.about.notice": "完整第三方来源和许可随安装包的 NOTICE.md 与 resources 许可文件提供。",
   "settings.appearance.description": "选择 Hachimi 的界面主题，系统模式会实时跟随 Windows。",
   "settings.appearance.diffPreview": "代码差异预览",
   "settings.appearance.lightTheme": "浅色主题",
@@ -202,7 +210,8 @@ export const zhCn = {
   "workbench.removeAttachment": "移除附件",
   "workbench.planMode": "计划模式",
   "workbench.planModeDescription": "先分析并制定方案，不直接执行修改",
-  "workbench.planBanner": "当前为计划模式：后端强制只读，不允许写文件、执行命令或触发外部副作用。",
+  "workbench.planModeChip": "计划",
+  "workbench.disablePlanMode": "关闭计划模式",
   "workbench.skills": "技能",
   "workbench.skillsLoading": "正在加载技能…",
   "workbench.skillsEmpty": "设置中还没有可用的技能。",
@@ -210,13 +219,21 @@ export const zhCn = {
   "workbench.skillReferences": "已引用的技能",
   "workbench.removeSkillReference": "取消引用技能 {name}",
   "workbench.approvalPolicy": "审批模式",
-  "workbench.approvalOnlyWhenNeeded": "仅在需要时审批",
-  "workbench.approvalAlwaysAsk": "副作用总是询问",
-  "workbench.approvalNeverPrompt": "从不询问",
+  "workbench.approvalOnlyWhenNeeded": "替我审批",
+  "workbench.approvalAlwaysAsk": "请求批准",
+  "workbench.approvalNeverPrompt": "完全访问权限",
   "workbench.approvalPopoverTitle": "如何批准 Hachimi 操作？",
   "workbench.approvalOnlyWhenNeededDescription": "仅对检测到的风险操作请求批准",
   "workbench.approvalAlwaysAskDescription": "文件写入、命令和外部副作用始终询问",
-  "workbench.approvalNeverPromptDescription": "在现有权限边界内不再弹出审批请求",
+  "workbench.approvalNeverPromptDescription": "在当前权限边界内不再询问，高风险操作可能直接执行",
+  "workbench.permissionLevel": "权限",
+  "workbench.permissionPopoverTitle": "此会话可以访问哪些内容？",
+  "workbench.permissionReadOnly": "只读",
+  "workbench.permissionReadOnlyDescription": "读取工作目录和已授权的观察型工具",
+  "workbench.permissionWritable": "可写",
+  "workbench.permissionWritableDescription": "可在工作目录内自由修改，越界时申请授权",
+  "workbench.permissionFullAccess": "完全授权",
+  "workbench.permissionFullAccessDescription": "可访问整机及全部已配置服务，不再逐次询问",
   "workbench.startTask": "创建任务",
   "workbench.workspaceToolsDisabled": "此构建未启用工作区工具。",
   "workbench.taskReady": "任务将使用全局模型设置的快照；执行位置、计划模式和审批策略分别保存。",
@@ -227,6 +244,15 @@ export const zhCn = {
   "workbench.approvalRequired": "需要审批",
   "workbench.deny": "拒绝",
   "workbench.approveOnce": "仅批准本次",
+  "workbench.recoveryRequired": "需要恢复决策",
+  "workbench.recoveryDescription":
+    "上次进程在此 Run 活动期间退出。Hachimi 只会恢复安全步骤，不会自动重放结果未知的外部操作。",
+  "workbench.recoveryIndeterminate":
+    "外部操作结果未知。请先在目标系统核实，再确认成功或按原幂等键重试。",
+  "workbench.recoveryResumeSafe": "继续安全部分",
+  "workbench.recoveryConfirmSucceeded": "已确认操作成功",
+  "workbench.recoveryRetry": "按原幂等键重试",
+  "workbench.recoveryAbandon": "放弃 Run",
   "workbench.proposedPlanRevision": "建议计划 · 修订 {revision}",
   "workbench.planAcceptCreatesRun": "执行会创建新的默认模式任务，不继承计划模式权限。",
   "workbench.executePlan": "执行计划",
@@ -264,8 +290,23 @@ export const zhCn = {
   "settings.petOnly": "仅影响透明 Pet 窗口",
   "settings.securityBoundary": "安全边界",
   "settings.securityDescription":
-    "工作台目前只能读写设置、测试 LLM 连接、管理 3D 资源和配置内置语音；没有目录、终端、Git、浏览器或桌面控制权限。",
+    "工作台能力由运行时沙箱、精确 Host 授权和独立副作用审批共同约束。",
   "settings.connection": "连接配置",
+  "settings.providerProtocol": "Provider 协议",
+  "settings.providerProtocol.description":
+    "首期仅支持 OpenAI 标准 Chat Completions 与 Responses；Embeddings 通过独立接口调用。",
+  "settings.compatibilityProfile": "兼容档案",
+  "settings.compatibilityProfile.description":
+    "默认严格校验 openai-strict；其他方言必须预先登记并通过探测。",
+  "settings.embeddingModel": "Embedding 模型",
+  "settings.embeddingModel.description":
+    "可选，仅启用 Provider-neutral Embeddings；不会创建 Memory。",
+  "settings.reasoningSummary": "Provider reasoning summary",
+  "settings.reasoningSummary.description":
+    "只展示 Provider 明确标记为公开 summary 的内容，不读取隐藏 reasoning。",
+  "settings.remoteCompaction": "远程压缩",
+  "settings.remoteCompaction.description":
+    "仅 Responses 可启用；失败或能力漂移时回退本地 checkpoint。",
   "settings.responsePreview": "响应预览（最多 512 字符）",
   "settings.resource.invalidName": "请输入 1–64 个字符的唯一名称。",
   "settings.resource.imported": "资源已安全复制到 Hachimi 模型库。",
@@ -416,6 +457,16 @@ export const enUs: Record<MessageKey, string> = {
   "settings.data.resetConfirm":
     "This permanently deletes settings, model and voice libraries, developer motions, logs, WebView cache, and the API key. The app exits immediately and starts fresh next time.",
   "settings.data.resetting": "Exiting and cleaning…",
+  "settings.about.title": "About and licenses",
+  "settings.about.version": "Version",
+  "settings.about.sourceLicense": "Source license",
+  "settings.about.sourceLicenseDescription":
+    "The Hachimi source code is licensed under Apache License 2.0.",
+  "settings.about.binaryBoundary": "Official packages are non-commercial distributions",
+  "settings.about.binaryBoundaryDescription":
+    "The bundled default VRM permits modification and redistribution but disallows personal and corporate commercial use. Replacing or removing that asset does not change the Apache-2.0 source license.",
+  "settings.about.notice":
+    "Complete third-party sources and terms are provided in the packaged NOTICE.md and resource license files.",
   "settings.appearance.description":
     "Choose Hachimi's interface theme. System mode follows Windows in real time.",
   "settings.appearance.diffPreview": "Code diff preview",
@@ -565,8 +616,8 @@ export const enUs: Record<MessageKey, string> = {
   "workbench.removeAttachment": "Remove attachment",
   "workbench.planMode": "Plan mode",
   "workbench.planModeDescription": "Analyze and prepare a plan before making changes",
-  "workbench.planBanner":
-    "Plan mode is active: the backend enforces read-only access and blocks writes, commands, and external side effects.",
+  "workbench.planModeChip": "Plan",
+  "workbench.disablePlanMode": "Turn off plan mode",
   "workbench.skills": "Skills",
   "workbench.skillsLoading": "Loading Skills…",
   "workbench.skillsEmpty": "No Skills are available in Settings yet.",
@@ -574,15 +625,25 @@ export const enUs: Record<MessageKey, string> = {
   "workbench.skillReferences": "Referenced Skills",
   "workbench.removeSkillReference": "Remove the {name} Skill reference",
   "workbench.approvalPolicy": "Approval policy",
-  "workbench.approvalOnlyWhenNeeded": "Ask only when needed",
-  "workbench.approvalAlwaysAsk": "Always ask for side effects",
-  "workbench.approvalNeverPrompt": "Never prompt",
+  "workbench.approvalOnlyWhenNeeded": "Approve for me",
+  "workbench.approvalAlwaysAsk": "Request approval",
+  "workbench.approvalNeverPrompt": "Full access",
   "workbench.approvalPopoverTitle": "How should Hachimi approve actions?",
   "workbench.approvalOnlyWhenNeededDescription": "Ask only for operations detected as risky",
   "workbench.approvalAlwaysAskDescription":
     "Always ask before writes, commands, and external side effects",
   "workbench.approvalNeverPromptDescription":
-    "Do not show approval prompts within existing permission boundaries",
+    "Do not ask within current permission boundaries; high-risk actions may run directly",
+  "workbench.permissionLevel": "Permissions",
+  "workbench.permissionPopoverTitle": "What can this session access?",
+  "workbench.permissionReadOnly": "Read only",
+  "workbench.permissionReadOnlyDescription": "Read the workspace and authorized observation tools",
+  "workbench.permissionWritable": "Writable",
+  "workbench.permissionWritableDescription":
+    "Modify the workspace freely and request access beyond it",
+  "workbench.permissionFullAccess": "Full access",
+  "workbench.permissionFullAccessDescription":
+    "Access the machine and every configured service without per-action prompts",
   "workbench.startTask": "Create task",
   "workbench.workspaceToolsDisabled": "Workspace tools are disabled in this build.",
   "workbench.taskReady":
@@ -594,6 +655,15 @@ export const enUs: Record<MessageKey, string> = {
   "workbench.approvalRequired": "Approval required",
   "workbench.deny": "Deny",
   "workbench.approveOnce": "Approve once",
+  "workbench.recoveryRequired": "Recovery decision required",
+  "workbench.recoveryDescription":
+    "The previous process exited while this Run was active. Hachimi resumes only safe work and never silently replays an external operation with an unknown result.",
+  "workbench.recoveryIndeterminate":
+    "The external result is unknown. Verify the target system before confirming success or retrying with the original idempotency key.",
+  "workbench.recoveryResumeSafe": "Resume safe work",
+  "workbench.recoveryConfirmSucceeded": "Confirm effect succeeded",
+  "workbench.recoveryRetry": "Retry idempotently",
+  "workbench.recoveryAbandon": "Abandon Run",
   "workbench.proposedPlanRevision": "Proposed plan · revision {revision}",
   "workbench.planAcceptCreatesRun":
     "Execution creates a new default-mode run without inheriting Plan-mode authority.",
@@ -633,8 +703,23 @@ export const enUs: Record<MessageKey, string> = {
   "settings.petOnly": "Only affects the transparent Pet window",
   "settings.securityBoundary": "Security boundary",
   "settings.securityDescription":
-    "The Workbench can only manage settings, test the LLM connection, manage 3D assets, and configure built-in speech. It has no workspace, terminal, Git, browser, or desktop-control access.",
+    "Workbench capabilities are jointly constrained by the runtime sandbox, exact Host grants, and separate side-effect approvals.",
   "settings.connection": "Connection",
+  "settings.providerProtocol": "Provider protocol",
+  "settings.providerProtocol.description":
+    "The first release supports standard OpenAI Chat Completions and Responses; Embeddings use a separate interface.",
+  "settings.compatibilityProfile": "Compatibility profile",
+  "settings.compatibilityProfile.description":
+    "openai-strict validates the official wire shape; other dialects must be registered and probed.",
+  "settings.embeddingModel": "Embedding model",
+  "settings.embeddingModel.description":
+    "Optional provider-neutral Embeddings capability; it does not create Memory.",
+  "settings.reasoningSummary": "Provider reasoning summary",
+  "settings.reasoningSummary.description":
+    "Displays only content explicitly marked by the Provider as a public summary, never hidden reasoning.",
+  "settings.remoteCompaction": "Remote compaction",
+  "settings.remoteCompaction.description":
+    "Responses only; failures or capability drift fall back to the local checkpoint.",
   "settings.responsePreview": "Response preview (up to 512 characters)",
   "settings.resource.invalidName": "Enter a unique name between 1 and 64 characters.",
   "settings.resource.imported": "The resource was safely copied into the Hachimi catalog.",

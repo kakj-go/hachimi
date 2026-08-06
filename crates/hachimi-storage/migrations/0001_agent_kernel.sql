@@ -2,9 +2,9 @@ PRAGMA foreign_keys = ON;
 
 CREATE TABLE sessions (
     id TEXT PRIMARY KEY NOT NULL,
-    context_kind TEXT NOT NULL CHECK (context_kind IN ('general', 'project', 'avatar')),
+    context_kind TEXT NOT NULL CHECK (context_kind IN ('workspace', 'project')),
     context_json TEXT NOT NULL,
-    entry_profile TEXT NOT NULL CHECK (entry_profile IN ('workbench', 'pet_conversation', 'desktop_control')),
+    entry_profile TEXT NOT NULL CHECK (entry_profile IN ('workbench', 'pet_conversation')),
     title TEXT NOT NULL,
     archived INTEGER NOT NULL DEFAULT 0 CHECK (archived IN (0, 1)),
     pinned INTEGER NOT NULL DEFAULT 0 CHECK (pinned IN (0, 1)),
@@ -58,7 +58,7 @@ CREATE TABLE transcript_items (
     kind TEXT NOT NULL CHECK (kind IN (
         'user', 'assistant', 'reasoning', 'tool_execution', 'plan', 'approval',
         'user_input_request', 'command_execution', 'file_change', 'mcp_call',
-        'dynamic_tool_call', 'context_compaction', 'review', 'system_context'
+        'dynamic_tool_call', 'collab_tool_call', 'context_compaction', 'review', 'system_context'
     )),
     status TEXT NOT NULL CHECK (status IN ('pending', 'in_progress', 'completed', 'failed', 'interrupted')),
     payload_json TEXT NOT NULL,

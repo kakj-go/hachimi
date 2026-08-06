@@ -249,6 +249,26 @@ pub(super) async fn watch_workspace_files(
                 break;
             }
             let _ = emitter.emit(WORKSPACE_CHANGE_EVENT, &event);
+            let managed = app.state::<DesktopState>();
+            if managed
+                .agent_store
+                .bump_session_environment_revision(&expected_session_id)
+                .await
+                .is_ok()
+                && let Ok(environment) = managed
+                    .workbench
+                    .environment_snapshot(&expected_session_id)
+                    .await
+            {
+                crate::environment_commands::emit_workbench_environment(
+                    &app,
+                    &environment,
+                    vec![
+                        hachimi_protocol::WorkbenchEnvironmentChangeReason::Files,
+                        hachimi_protocol::WorkbenchEnvironmentChangeReason::Git,
+                    ],
+                );
+            }
             if event.kind == hachimi_protocol::FsChangeKind::Invalidated {
                 break;
             }

@@ -179,6 +179,124 @@ fn verify_native_runtime(runtime: &Path) {
     }
 }
 
+fn verify_managed_git(root: &Path) {
+    const VERSION: &str = "2.50.1.windows.1";
+    const ARCHIVE_SHA256: &str = "6f672aebe9e488a246efd6875f9197dbc0d9a40100e218acc3877cba2b206c45";
+    let manifest_path = root.join("manifest.json");
+    println!("cargo:rerun-if-changed={}", manifest_path.display());
+    if !manifest_path.is_file() {
+        if std::env::var("PROFILE").as_deref() == Ok("release") {
+            panic!(
+                "pinned Managed Git is missing. Run `corepack pnpm runtime:prepare` before a release build"
+            );
+        }
+        println!(
+            "cargo:warning=pinned Managed Git is absent; Workspace Git is unavailable until `corepack pnpm runtime:prepare` runs"
+        );
+        return;
+    }
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&manifest_path).expect("read Managed Git manifest"))
+            .expect("Managed Git manifest is invalid");
+    assert_eq!(manifest["version"].as_str(), Some(VERSION));
+    assert_eq!(
+        manifest["sourceArchiveSha256"].as_str(),
+        Some(ARCHIVE_SHA256)
+    );
+    let files = manifest["files"]
+        .as_object()
+        .expect("Managed Git manifest has no file hashes");
+    assert!(files.contains_key("cmd/git.exe"));
+    for (relative, expected) in files {
+        let relative_path = Path::new(relative);
+        assert!(
+            !relative_path.as_os_str().is_empty()
+                && !relative_path.components().any(|component| matches!(
+                    component,
+                    Component::ParentDir | Component::RootDir | Component::Prefix(_)
+                )),
+            "invalid Managed Git path: {relative}"
+        );
+        let path = root.join(relative_path);
+        println!("cargo:rerun-if-changed={}", path.display());
+        let metadata = std::fs::symlink_metadata(&path).unwrap_or_else(|error| {
+            panic!("Managed Git file is missing: {}: {error}", path.display())
+        });
+        assert!(metadata.is_file() && !metadata.file_type().is_symlink());
+        assert_eq!(
+            sha256_file(&path),
+            expected.as_str().expect("Managed Git SHA-256 must be text"),
+            "Managed Git SHA-256 mismatch: {}",
+            path.display()
+        );
+    }
+}
+
+fn verify_cef_runtime(root: &Path) {
+    const CEF_CRATE_VERSION: &str = "151.2.0+151.3.14";
+    const CHROMIUM_VERSION: &str = "151.0.7922.72";
+    const ARCHIVE_SHA256: &str = "c63a18909fea077b5c3b5f9a3194f05781cd909efa8a6d7a543cad99c4183a55";
+    let manifest_path = root.join("runtime-manifest.json");
+    println!("cargo:rerun-if-changed={}", manifest_path.display());
+    if !manifest_path.is_file() {
+        if std::env::var("PROFILE").as_deref() == Ok("release") {
+            panic!("CEF Runtime is missing; run scripts/build-cef-host.ps1 -Release");
+        }
+        println!(
+            "cargo:warning=CEF Runtime is absent; the embedded browser is unavailable until scripts/build-cef-host.ps1 runs"
+        );
+        return;
+    }
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&manifest_path).expect("read CEF Runtime manifest"))
+            .expect("CEF Runtime manifest is invalid");
+    assert_eq!(manifest["schemaVersion"].as_u64(), Some(1));
+    assert_eq!(
+        manifest["cefCrateVersion"].as_str(),
+        Some(CEF_CRATE_VERSION)
+    );
+    assert_eq!(manifest["chromiumVersion"].as_str(), Some(CHROMIUM_VERSION));
+    assert_eq!(manifest["platform"].as_str(), Some("windows-x64"));
+    assert_eq!(manifest["archiveSha256"].as_str(), Some(ARCHIVE_SHA256));
+    let files = manifest["files"]
+        .as_array()
+        .expect("CEF Runtime manifest must contain files");
+    assert!(!files.is_empty(), "CEF Runtime manifest is empty");
+    let mut has_host = false;
+    let mut has_libcef = false;
+    for entry in files {
+        let relative = entry["path"].as_str().expect("CEF Runtime path");
+        let relative_path = Path::new(relative);
+        assert!(
+            !relative_path.as_os_str().is_empty()
+                && !relative_path.components().any(|component| matches!(
+                    component,
+                    Component::ParentDir | Component::RootDir | Component::Prefix(_)
+                )),
+            "invalid CEF Runtime path: {relative}"
+        );
+        has_host |= relative.eq_ignore_ascii_case("hachimi-cef-host.exe");
+        has_libcef |= relative.eq_ignore_ascii_case("libcef.dll");
+        let path = root.join(relative_path);
+        println!("cargo:rerun-if-changed={}", path.display());
+        let metadata = std::fs::symlink_metadata(&path).unwrap_or_else(|error| {
+            panic!("CEF Runtime file is missing: {}: {error}", path.display())
+        });
+        assert!(metadata.is_file() && !metadata.file_type().is_symlink());
+        assert_eq!(
+            metadata.len(),
+            entry["size"].as_u64().expect("CEF Runtime size")
+        );
+        assert_eq!(
+            sha256_file(&path),
+            entry["sha256"].as_str().expect("CEF Runtime SHA-256"),
+            "CEF Runtime SHA-256 mismatch: {}",
+            path.display()
+        );
+    }
+    assert!(has_host && has_libcef, "CEF Runtime is incomplete");
+}
+
 fn verify_motion_catalog(root: &Path) {
     let manifest_path = root.join("catalog.json");
     println!("cargo:rerun-if-changed={}", manifest_path.display());
@@ -250,6 +368,36 @@ fn verify_motion_catalog(root: &Path) {
     }
 }
 
+fn register_sandbox_sidecar_hashes() {
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
+        return;
+    }
+    let target = std::env::var("TARGET").expect("Cargo TARGET");
+    for (name, environment) in [
+        ("hachimi-sandbox-setup", "HACHIMI_SANDBOX_SETUP_SHA256"),
+        (
+            "hachimi-sandbox-launcher",
+            "HACHIMI_SANDBOX_LAUNCHER_SHA256",
+        ),
+        ("hachimi-sandbox-canary", "HACHIMI_SANDBOX_CANARY_SHA256"),
+        ("hachimi-sandbox-attest", "HACHIMI_SANDBOX_ATTEST_SHA256"),
+        (
+            "hachimi-workspace-worker",
+            "HACHIMI_WORKSPACE_WORKER_SHA256",
+        ),
+    ] {
+        let path = Path::new("binaries").join(format!("{name}-{target}.exe"));
+        println!("cargo:rerun-if-changed={}", path.display());
+        if !path.is_file() {
+            panic!(
+                "bundled Sandbox sidecar is missing: {}. Run the sidecar preparation script first",
+                path.display()
+            );
+        }
+        println!("cargo:rustc-env={environment}={}", sha256_file(&path));
+    }
+}
+
 fn read_glb_json(path: &Path) -> serde_json::Value {
     let bytes = std::fs::read(path)
         .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
@@ -288,6 +436,9 @@ fn main() {
         let runtime =
             std::path::Path::new("resources/native/sherpa-onnx-1.13.4-directml/windows-x64");
         verify_native_runtime(runtime);
+        verify_managed_git(Path::new("managed-git"));
+        verify_cef_runtime(Path::new("../../../target/cef-bundle"));
     }
+    register_sandbox_sidecar_hashes();
     tauri_build::build();
 }

@@ -1,0 +1,14 @@
+{
+  "hostIdentity": "hachimi.enterprise.feishu.v1",
+  "transport": "local",
+  "actions": [
+    "account_identity",
+    "department_list",
+    "member_list",
+    "message_send",
+    "event_subscribe"
+  ],
+  "webhook": false,
+  "poll": false,
+  "externalNetwork": false
+}

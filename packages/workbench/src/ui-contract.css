@@ -5,7 +5,9 @@
  */
 
 .home-layout {
-  grid-template-columns: var(--sidebar-width) minmax(0, 1fr);
+  grid-template-columns:
+    clamp(220px, var(--workbench-project-sidebar-width, var(--sidebar-width)), 480px) 5px
+    minmax(0, 1fr);
   background: var(--sidebar);
 }
 
@@ -245,7 +247,9 @@
 
 @media (max-width: 1100px) {
   .home-layout {
-    grid-template-columns: 250px minmax(0, 1fr);
+    grid-template-columns:
+      clamp(220px, var(--workbench-project-sidebar-width, 250px), 250px)
+      5px minmax(0, 1fr);
   }
 }
 
@@ -283,14 +287,48 @@
 }
 
 @media (max-width: 760px) {
-  .home-layout,
+  .workbench-window .home-main {
+    display: grid;
+    align-items: stretch;
+    justify-content: stretch;
+    padding: 0;
+  }
+
+  .home-layout {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .home-layout > .home-main {
+    grid-column: 1;
+  }
+
+  .workbench-project-resize-handle {
+    display: none;
+  }
+
   .settings-layout {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .workbench-window.sidebar-collapsed .home-layout,
+  .workbench-window.sidebar-collapsed .settings-layout {
     grid-template-columns: minmax(0, 1fr);
   }
 
   .project-sidebar,
   .settings-sidebar {
     display: none;
+  }
+
+  .workbench-window:not(.sidebar-collapsed) .project-sidebar {
+    position: fixed;
+    z-index: 40;
+    top: 46px;
+    bottom: 0;
+    left: 0;
+    width: min(300px, calc(100vw - 48px));
+    display: flex;
+    box-shadow: var(--shadow-lg);
   }
 
   .settings-page,

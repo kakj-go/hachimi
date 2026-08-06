@@ -1,32 +1,55 @@
 # Harness Agent 第三方来源登记
 
-更新时间：2026-07-28
+更新时间：2026-08-06
 
 本文只登记实际复制、翻译或实质改写的文件。候选研究路径不等于已移植代码；新增派生文件必须先更新本文件，再进入实现。
 
 ## 固定来源
 
-| ID                           | 仓库与 commit                                               | 许可证与边界                                                                 |
-| ---------------------------- | ----------------------------------------------------------- | ---------------------------------------------------------------------------- |
-| `codex-4c434651`             | OpenAI Codex `4c43465133428898aa84f0bfc02c306ed65fb66a`     | Apache-2.0；选择性移植，保留 SPDX、commit、源路径和修改说明                  |
-| `openclaw-f6d45623`          | OpenClaw `f6d456235cf011004f7cffc71a95acf6fbf1fa0a`         | MIT；选择性移植，保留版权、commit、源路径和修改说明                          |
-| `claude-clean-room-34b3dc99` | Claude Code Best `34b3dc99bf40c57c0b78f3b5b1d70471ebc2d06d` | 只研究公开可观察 Compaction 行为；不复制源码、提示词、注释、测试或内部标识符 |
+| ID                              | 仓库与 commit                                                                                            | 许可证与边界                                                                                       |
+| ------------------------------- | -------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------- |
+| `codex-4c434651`                | OpenAI Codex `4c43465133428898aa84f0bfc02c306ed65fb66a`                                                  | Apache-2.0；选择性移植，保留 SPDX、commit、源路径和修改说明                                        |
+| `codex-manual-20260805`         | Codex manual 2026-08-05 快照，SHA-256 `3528f93bacfae29be08f757d0f24be468b52f058fff698d78d73495cc660b147` | 产品行为与权限分层参考；不作为源码派生来源                                                         |
+| `openclaw-f6d45623`             | OpenClaw `f6d456235cf011004f7cffc71a95acf6fbf1fa0a`                                                      | MIT；选择性移植，保留版权、commit、源路径和修改说明                                                |
+| `claude-clean-room-34b3dc99`    | Claude Code Best `34b3dc99bf40c57c0b78f3b5b1d70471ebc2d06d`                                              | 只研究公开可观察 Compaction 行为；不复制源码、提示词、注释、测试或内部标识符                       |
+| `deerflow-11bb8ddc`             | DeerFlow `11bb8ddcd95f41e673783b7e20c4ab4cd5ee7e24`                                                      | MIT；只参考一次性连接码与 Connection/Conversation 分表行为，不复制实现                             |
+| `cc-connect-f2e4ed83`           | cc-connect `f2e4ed83c6953297a92d66d49114196fc4402206`                                                    | NOASSERTION；只参考外部 Conversation 与 Agent Session 分离行为，不复制实现                         |
+| `langbot-7820949d`              | LangBot `7820949d3a3d8ca0b6f07d060deab40cb86807ff`                                                       | Apache-2.0；只参考消息对象分层、企微 AI Bot 与 iLink 可观察行为，不复制实现                        |
+| `astrbot-03a6edb2`              | AstrBot `03a6edb29e7e742fb97d5926949c03c3214a31e5`                                                       | AGPL-3.0；只参考 typed message parts 行为，Rust 实现保持 clean-room，不复制 AGPL 源码              |
+| `cowagent-848a1a4e`             | CowAgent `848a1a4eb171f3d891304370f7d5ed42046f3280`                                                      | MIT；只参考企微 AI Bot 与 iLink 公开 wire 行为，不采用 LinkAI 代建或非官方微信 Hook                |
+| `dingtalk-stream-sdk-go-v0.9.1` | DingTalk Stream SDK Go `d1cc841e6013c3f6513a5bb01dfe3219b9c37d17`                                        | MIT；只保存握手、WebSocket、心跳、ACK 和重连的有界 wire 快照，不作为运行时依赖或源码移植           |
+| `feishu-sdk-go-v3.9.9`          | Feishu Go SDK `ff207b774541a195f0a98c5bfda1507905e45431`                                                 | MIT；只保存长连接 WebSocket/protobuf、心跳、ACK 和重连的有界 wire 快照，不作为运行时依赖或源码移植 |
 
 ## 产品行为与候选研究范围（不是已派生代码）
 
 产品文档只用于定义目标行为、安全边界和验收，不是实现代码来源。候选源码目录只表示研究范围；只有下文列出的精确 Hachimi 目标文件才是已发生的派生。未来适配任何候选文件前，必须先登记精确源路径、目标路径、许可证和修改说明。
 
-| 能力                       | 主参考                                                                                                                                                                                                                                                                                                                    | 边界                                                                                                                                                                                                                                      |
-| -------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Browser/Chrome             | Codex [Browser](https://learn.chatgpt.com/docs/browser) 与 [Chrome extension](https://learn.chatgpt.com/docs/chrome-extension) 产品文档                                                                                                                                                                                   | 产品行为和权限以 Codex 为准；Codex 未公开的 Host 细节只候选研究 OpenClaw `extensions/browser/src/browser/{navigation-guard,request-policy,profiles,cdp-page-session,chrome-mcp-tabs}.ts` 及对应测试，不得整体移植 `extensions/browser/**` |
-| Computer Use               | Codex [Computer Use](https://learn.chatgpt.com/docs/computer-use) 产品文档                                                                                                                                                                                                                                                | App-scoped Observe/Act、用户接管和系统权限以 Codex 为准；Hachimi Windows Host 独立实现                                                                                                                                                    |
-| Plugins/Connectors         | Codex [Plugins](https://learn.chatgpt.com/docs/plugins)；固定 commit 的 `codex-rs/core-plugins/**`、`codex-rs/core/src/connectors.rs`、`codex-rs/codex-mcp/**`                                                                                                                                                            | Codex 是 manifest/marketplace/bundle、Skills/Hooks、Connectors/MCP、Browser extension、Scheduled task template、custom UI 和权限分层主基线                                                                                                |
-| Session/Thread 恢复        | Codex `codex-rs/core/src/session/rollout_reconstruction.rs`、`codex-rs/app-server/tests/suite/v2/thread_resume.rs`                                                                                                                                                                                                        | 恢复持久历史，不等于自动重放崩溃前有副作用的活跃 Turn                                                                                                                                                                                     |
-| Scheduled Tasks            | Codex [Scheduled tasks](https://developers.openai.com/codex/app/automations) 产品文档                                                                                                                                                                                                                                     | Codex 定义独立/对话内任务、Skills/Plugins、Worktree 和权限产品语义；开源固定 commit 没有完整调度引擎                                                                                                                                      |
-| Channels/Gateway           | OpenClaw `src/channels/plugins/binding-routing.ts`、`src/channels/message/{durable-receive,ingress-queue,ingress-retry-policy,receipt,send}.ts`、`src/channels/turn/durable-delivery.ts`、`src/routing/session-key.ts`、`src/gateway/{auth,auth-rate-limit,connection-auth,channel-health-monitor,server-session-key}.ts` | 只参考 Channel plugin contract、确定性消息/Session 路由、pairing/allowlist、bot-loop protection、durable ingress/delivery 和常驻 Gateway；不把整个 `src/gateway/**` 纳入候选范围                                                          |
-| Cron/Heartbeat/Task ledger | OpenClaw `src/cron/service/{timer-scheduler,timer-catchup,task-runs}.ts`、`src/cron/{heartbeat-policy,heartbeat-task}.ts`、`src/cron/delivery*.ts`、`src/tasks/{task-registry.store.sqlite,task-registry.maintenance,task-registry.reconcile}.ts`、`docs/automation/{cron-jobs,tasks}.md`                                 | 参考本地 timer、事件触发、Task ledger、投递和后台任务重启 reconciliation；不把 `src/cron/**` 或 `src/tasks/**` 整体作为 Agent Runtime 参考，也不允许 standing orders 或 Prompt 直接授予永久权限                                           |
+| 能力                       | 主参考                                                                                                                                                                                                                                                                                                                    | 边界                                                                                                                                                                                            |
+| -------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Browser/Chrome             | Codex Browser [ref:OAI-PRODUCT-BROWSER-20260730] 与 Chrome extension [ref:OAI-PRODUCT-CHROME-20260730] 产品文档                                                                                                                                                                                                           | 产品行为和权限以 Codex 为准；当前 `hachimi-browser` 与扩展 transport 为 Hachimi 原创实现。Codex 未公开的 Host 细节只候选研究 OpenClaw 对应文件，不得整体移植 `extensions/browser/**`            |
+| Computer Use               | Codex Computer Use [ref:OAI-PRODUCT-COMPUTER-20260730] 产品文档                                                                                                                                                                                                                                                           | App-scoped Observe/Act、用户接管和系统权限以 Codex 为准；Hachimi Windows Host 独立实现                                                                                                          |
+| OpenAI Provider            | Chat Completions、Responses 与 Embeddings 官方固定快照 [ref:OAI-PRODUCT-CHATCOMPLETIONS-20260730] [ref:OAI-PRODUCT-RESPONSES-20260730] [ref:OAI-PRODUCT-EMBEDDINGS-20260730]                                                                                                                                              | 只实现公开 wire shape、Remote Compaction 与公开 summary；不复制私有 Codex protocol、Prompt 或隐藏 reasoning                                                                                     |
+| Git/Forge                  | GitHub、GitLab、Gitee、Gitea/Forgejo 官方 API 快照 [ref:GITHUB-API-20260730] [ref:GITLAB-API-20260730] [ref:GITEE-API-20260730] [ref:GITEA-FORGEJO-API-20260730]                                                                                                                                                          | 快照只固定 create/query/update/close/merge wire contract；adapter 为 Hachimi 原创，不复制厂商 SDK                                                                                               |
+| 企业平台                   | 企业微信官方 API、DingTalk Stream SDK Go v0.9.1 与 Feishu Go SDK v3.9.9 固定快照 [ref:WECOM-API-20260730] [ref:DINGTALK-STREAM-SDK-GO-20260731] [ref:FEISHU-SDK-GO-20260731]                                                                                                                                              | Rust 原创实现 REST、loopback AES callback、Stream/长连接 transport、mention 与附件 Artifact fencing；SDK 快照只提供 wire contract，不链接或复制 vendor SDK 运行时代码                           |
+| Plugins/Connectors         | Codex Plugins [ref:OAI-PRODUCT-PLUGINS-20260730]；固定 commit 的 `codex-rs/core-plugins/**`、`codex-rs/core/src/connectors.rs`、`codex-rs/codex-mcp/**`                                                                                                                                                                   | Codex 是本地 bundle、Skills/Hooks、Connectors/MCP、Browser extension、Scheduled task template、custom UI 和权限分层主基线；Hachimi 只建设本地 Bundle 分发                                       |
+| Session/Thread 恢复        | Codex `codex-rs/core/src/session/rollout_reconstruction.rs`、`codex-rs/app-server/tests/suite/v2/thread_resume.rs`                                                                                                                                                                                                        | 恢复持久历史，不等于自动重放崩溃前有副作用的活跃 Turn                                                                                                                                           |
+| Scheduled Tasks            | Codex Scheduled Tasks [ref:OAI-PRODUCT-SCHEDULED-20260730] 产品文档                                                                                                                                                                                                                                                       | Codex 定义独立/对话内任务、Skills/Plugins、Worktree 和权限产品语义；开源固定 commit 没有完整调度引擎                                                                                            |
+| Channels/Gateway           | OpenClaw `src/channels/plugins/binding-routing.ts`、`src/channels/message/{durable-receive,ingress-queue,ingress-retry-policy,receipt,send}.ts`、`src/channels/turn/durable-delivery.ts`、`src/routing/session-key.ts`、`src/gateway/{auth,auth-rate-limit,connection-auth,channel-health-monitor,server-session-key}.ts` | 只参考 Channel plugin contract、确定性消息/Session 路由、pairing/allowlist、bot-loop protection、durable ingress/delivery 和常驻 Gateway；不把整个 `src/gateway/**` 纳入候选范围                |
+| Cron/Heartbeat/Task ledger | OpenClaw `src/cron/service/{timer-scheduler,timer-catchup,task-runs}.ts`、`src/cron/{heartbeat-policy,heartbeat-task}.ts`、`src/cron/delivery*.ts`、`src/tasks/{task-registry.store.sqlite,task-registry.maintenance,task-registry.reconcile}.ts`、`docs/automation/{cron-jobs,tasks}.md`                                 | 参考本地 timer、事件触发、Task ledger、投递和后台任务重启 reconciliation；不把 `src/cron/**` 或 `src/tasks/**` 整体作为 Agent Runtime 参考，也不允许 standing orders 或 Prompt 直接授予永久权限 |
 
 OpenClaw 的 Agent Core、通用 Plugin/Provider Runtime、Memory、多 Agent、产品 Prompt，以及有副作用 Turn 的自动恢复均不在默认参考范围。Browser 候选只补足 Codex 未公开的底层 Host 工程细节；一旦 Codex 提供等价公开实现，应优先重新评估 Codex 基线。
+
+Hachimi 的 Manual、Project、Channel、Scheduled 与可对话 Pet 共用同一 Agent/Tool Orchestrator；Pet 和 Scheduled 不绑定 Project，非 Project 使用 managed 或显式普通目录。这是明确的产品差异。`RunOrigin` 只保留来源审计、队列和投递信息；policy owner 由统一 Launcher 显式传入并与 Run bundle 原子提交，Multi-Agent child 使用 transient policy，不覆盖 Channel/Schedule/Pet 的持久配置。Codex manual 用于统一 Agent、权限分层与 Host 行为基线；OpenClaw 仍只用于 Channel 路由、队列、Task ledger、投递和重启 reconciliation，不用于来源专用 Agent Runtime。
+
+实现状态：统一五来源 Agent/Workspace/三档权限及七类资源执行校验的核心代码与本地单测已完成；Desktop E2E 仍有 4 个显式 skip，故整体状态暂记为“部分完成”。真实 OpenAI/Forge/企业组织及 standard-user/elevated Windows Gate 仍为“真实环境待验证”。
+
+P1–P8 新增代码均沿用上方固定派生边界或作为 Hachimi 原创模块实现。OpenAI 三类协议、四类 Forge adapter、企业微信 callback，以及 DingTalk Stream/Feishu 长连接 wire contract 已登记离线快照；普通 CI 校验路径、commit、许可证和 SHA-256。DingTalk/Feishu SDK 只作为协议来源，Rust transport 未引入 vendor SDK 运行时依赖。真实外部企业组织仍待验证，fixture、loopback WebSocket 和 protobuf/ACK 测试不能冒充真实平台连接；外部组织身份不构成 Hachimi 租户。
+
+Memory 已调整为远期，当前不选择 Codex Memory 或其他实现方案，不登记候选派生路径；后续重新立项时再单独补充来源与 clean-room 边界。
+
+## 动态产品文档快照 registry
+
+动态官方文档分别登记在 `docs/references/openai/registry.json`、`docs/references/forge/registry.json` 和 `docs/references/enterprise/registry.json`。Channel 行为参考单独登记在 `docs/references/channels/registry.json`，包含精确 commit、许可证、文件、使用边界和真实实现状态。普通 CI 只读本地文件并校验 hash，不访问网络。更新官方文档必须创建新的 reference ID；更新开源行为参考必须固定新的 commit，不能使用浮动分支。
 
 ## Codex 派生文件
 
@@ -76,7 +99,7 @@ OpenClaw 的 Agent Core、通用 Plugin/Provider Runtime、Memory、多 Agent、
 - `crates/hachimi-storage/src/agent_store/review.rs`
 - `crates/hachimi-storage/src/agent_store/workspace_diff.rs`
 
-修改：替换为 Hachimi typed Item、UserInput Broker、Keyring reference、media hash reference、ScheduleGrant、restricted MCP Host 和 Review lineage。Elicitation 不等于 Approval，服务器 annotation 不授予权限。
+修改：替换为 Hachimi typed Item、UserInput Broker、Keyring reference、media hash reference、RunAuthoritySnapshot、restricted MCP Host 和 Review lineage。Elicitation 不等于 Approval，服务器 annotation 不授予权限。
 
 测试：Resources/Templates/Prompts、OAuth、progress、媒体边界、Elicitation accept/decline/cancel、Review target/Finding、Diff baseline/restart。
 
@@ -119,7 +142,7 @@ OpenClaw 的 Agent Core、通用 Plugin/Provider Runtime、Memory、多 Agent、
 - `crates/hachimi-skills/src/metadata.rs`
 - `crates/hachimi-skills/src/watcher.rs`
 
-修改：使用 Hachimi Run-scoped Catalog、SkillActivation、revision fencing、Workload classification、Built-in/User/Repo/System/Admin roots 和 ScheduleGrant；Skill metadata 只能声明兼容性/诊断，永远不授予权限。
+修改：使用 Hachimi Run-scoped Catalog、SkillActivation、revision fencing、Workload classification、Built-in/User/Repo/System/Admin roots 和 ScheduleDefinition revision fencing；Skill metadata 只能声明兼容性/诊断，永远不授予权限。
 
 测试：显式 ID、`$name`、隐式 activation、分页、资源越界、namespace、revision 漂移、Worktree 继承、Watcher 和 Office overlay。
 
@@ -133,7 +156,7 @@ OpenClaw 的 Agent Core、通用 Plugin/Provider Runtime、Memory、多 Agent、
 - `crates/hachimi-scheduler/src/service.rs`
 - `crates/hachimi-storage/src/agent_store/schedule.rs`
 
-修改：改为 Tokio lane/单 timer、SQLite invocation claim、ScheduleDefinition/Grant/TaskRun、fresh Hachimi Session/Run、后台并发、通知和重启 reconciliation。不复制 OpenClaw Agent Core、Prompt 或 Connector 产品逻辑。
+修改：改为 Tokio lane/单 timer、SQLite invocation claim、ScheduleDefinition/TaskRun、fresh Hachimi Session/Run、RunAuthoritySnapshot、后台并发、通知、typed Event ledger 和重启 reconciliation。不复制 OpenClaw Agent Core、Prompt 或 Connector 产品逻辑。
 
 测试：lane reset/generation、At/Every/Cron/DST、Skip/CatchUpOnce、重复 invocation、取消、重启、授权/Skill/MCP 漂移和脏 Worktree 上限。
 
@@ -143,6 +166,24 @@ OpenClaw 的 Agent Core、通用 Plugin/Provider Runtime、Memory、多 Agent、
 
 ## 原创模块说明
 
-`hachimi-model-runtime`、AgentStore fresh migrations、active delta hub、metadata-only Audit、Capability Grant、UserInput secret broker、Office Skills 内容、Workbench UI、Task Center、Tauri event bridge 和 StorageLayout 是按 Hachimi contract 独立实现；其行为可能与上述架构约束互操作，但未标记为 copied/translated/adapted。
+`hachimi-model-runtime`、AgentStore migrations、active delta hub、metadata-only Audit、Capability Grant、UserInput secret broker、Office Skills 内容、Workbench UI、Task Center、Tauri event bridge 和 StorageLayout 是按 Hachimi contract 独立实现；其行为可能与上述架构约束互操作，但未标记为 copied/translated/adapted。
+
+本期 Local Host 的以下实现同样是 Hachimi 原创代码，只使用上表的产品行为/安全边界参考，没有复制候选源码：
+
+- `crates/hachimi-browser/**` 与 `assets/browser-extension/**`；
+- `crates/hachimi-computer/**`；
+- `crates/hachimi-extensions/**` 与 `assets/plugins/sample-crm/**`；
+- `crates/hachimi-gateway/**`、`apps/desktop/src-tauri/src/{gateway_process,gateway_runtime}.rs`；
+- `crates/hachimi-protocol/src/agent/{hosts,plugins,gateway,local_hosts}.rs`；
+- `apps/desktop/src-tauri/src/{agent_host_tools,browser_extension_server,local_host_commands,managed_sandbox_runtime}.rs` 与 `app_domain_handler/local_hosts.rs`；
+- `packages/workbench/src/host-domain-settings.{tsx,css}`、`browser-site-policy-settings.tsx` 与 `computer-use-settings.tsx`。
+- `crates/hachimi-scheduler/src/event.rs`、`crates/hachimi-storage/src/agent_store/schedule_event.rs` 与 `packages/workbench/src/task-event-form.tsx`。
+- `crates/hachimi-agent/src/multi_agent.rs`、`crates/hachimi-protocol/src/agent/{agent_tasks,recovery,git_forge,enterprise}.rs`；
+- `crates/hachimi-llm/src/{responses,embeddings}.rs`、`crates/hachimi-model-runtime/src/lib.rs` 中的公开 Provider adapter；
+- `crates/hachimi-forge/**`、`apps/desktop/src-tauri/src/forge_commands.rs` 与 Git/Forge operation ledger；
+- `crates/hachimi-enterprise/**`、`crates/hachimi-extensions/src/enterprise_connector.rs`、`crates/hachimi-gateway/src/enterprise_provider.rs` 与 `assets/plugins/{wecom,dingtalk,feishu}/**`；
+- `packages/workbench/src/inspector/{browser-inspector,computer-inspector}.tsx` 与统一 Host durable state/action ledger。
+
+OpenClaw 的 Channel/Gateway 文件用于确定性 route、durable ledger 和 reconciliation 行为对照；当前 `hachimi-gateway` 没有标记为 OpenClaw 派生文件。若后续实质改写候选实现，必须先把精确目标文件移入上方“OpenClaw 派生文件”清单并补齐 MIT SPDX/来源头。
 
 `pnpm provenance:check` 扫描所有带 `Adapted from`、`Translated from` 或 `Modified for Hachimi:` 的源码，要求本文件存在精确目标路径、文件含 SPDX 和固定 commit。候选来源不能伪装成已移植代码。

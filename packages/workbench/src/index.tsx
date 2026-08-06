@@ -8,6 +8,7 @@ import {
   type LlmSettingsInput,
   type LlmSettingsView,
   type LlmTestResult,
+  type ProviderProtocolKind,
   type StructuredOutputMode,
   type Locale,
   type DiffMarkerMode,
@@ -35,6 +36,7 @@ import {
   DEFAULT_CODE_FONT,
   DEFAULT_UI_FONT,
   Dropdown,
+  Globe,
   Maximize2,
   Minus,
   Monitor,
@@ -85,7 +87,10 @@ import {
   onCleanup,
   onMount,
   untrack,
+  type JSX,
 } from "solid-js";
+
+import { runtimeFeatureVisibility } from "./runtime-feature-visibility";
 import "./workbench.css";
 import "./appearance-workbench.css";
 import "./workspace-browser.css";
@@ -93,11 +98,17 @@ import "./resource-settings.css";
 import "./motion.css";
 import "./extensions-settings.css";
 import "./ui-contract.css";
+import "./host-domain-settings.css";
+import "./host-inspectors.css";
+import "./platform-integrations-settings.css";
+import "./runtime-health.css";
 import { createSerializedAutosave, type AutosaveStatus } from "./appearance-save";
 import { HomePage } from "./home";
 import { MotionLabPage } from "./motion-lab";
 import { MotionSettingsPage } from "./motion-settings";
 import { McpSettingsPage } from "./mcp-settings";
+import { HostDomainSettingsPage } from "./host-domain-settings";
+import { PlatformIntegrationsSettings } from "./platform-integrations-settings";
 import { ResourceSettingsPage, VoiceSettingsPage } from "./resource-settings";
 import { SkillsSettingsPage } from "./skills-settings";
 import { normalizeWorkbenchRoute, SETTINGS_ROUTES } from "./routing";
@@ -256,7 +267,7 @@ function WindowChrome(props: {
             ]}
             onSelect={(id) => {
               if (id === "settings") props.onNavigate("settings/general");
-              else window.alert(text("Hachimi 0.2.0", "Hachimi 0.2.0"));
+              else window.alert(text("Hachimi 0.3.0-alpha.8", "Hachimi 0.3.0-alpha.8"));
             }}
           >
             {i18n.t("workbench.menu.help")}
@@ -401,47 +412,88 @@ function SettingsShell(props: {
   settings: AppSettings;
   setSettings: (settings: AppSettings) => void;
   fail: (message: string) => void;
-  mcpRuntimeEnabled: boolean;
+  featureFlags: BootstrapState["featureFlags"];
 }) {
   const i18n = useI18n();
+  const runtimeVisibility = () => runtimeFeatureVisibility(props.featureFlags);
   const [search, setSearch] = createSignal("");
   const groups = createMemo(() => {
+    const item = (
+      route: WorkbenchRoute | null,
+      label: string,
+      icon: JSX.Element,
+      options: { id?: string; disabled?: boolean; status?: string } = {},
+    ) => ({
+      route,
+      label,
+      icon,
+      id: options.id ?? route?.replace("settings/", "") ?? label.toLowerCase(),
+      disabled: options.disabled ?? false,
+      status: options.status,
+    });
     const all = [
       {
         label: i18n.t("settings.group.personal"),
         items: [
-          ["settings/general", i18n.t("settings.general"), <Settings size={17} />],
-          ["settings/appearance", i18n.t("settings.appearance"), <Palette size={17} />],
-          ["settings/voice", i18n.t("settings.voice"), <Volume2 size={17} />],
-          ["settings/llm", i18n.t("settings.configuration"), <Bot size={17} />],
-          ["settings/avatar", i18n.t("settings.pet"), <Box size={17} />],
-          [
+          item("settings/general", i18n.t("settings.general"), <Settings size={17} />),
+          item("settings/appearance", i18n.t("settings.appearance"), <Palette size={17} />),
+          item("settings/voice", i18n.t("settings.voice"), <Volume2 size={17} />),
+          item("settings/llm", i18n.t("settings.configuration"), <Bot size={17} />),
+          item("settings/avatar", i18n.t("settings.pet"), <Box size={17} />),
+          item(
             "settings/motion",
             i18n.locale() === "zh-CN" ? "交互" : "Interactions",
             <Play size={17} />,
-          ],
+          ),
         ],
       },
       {
-        label: i18n.t("settings.group.agentExtensions"),
+        label: i18n.locale() === "zh-CN" ? "能力与集成" : "Capabilities & integrations",
         items: [
-          ["settings/skills", i18n.t("settings.skills"), <Puzzle size={17} />],
-          ["settings/mcp", i18n.t("settings.mcp"), <Plug size={17} />],
+          item(
+            "settings/integrations",
+            i18n.locale() === "zh-CN" ? "平台集成" : "Platform integrations",
+            <Plug size={17} />,
+          ),
+          item(
+            "settings/browser",
+            i18n.locale() === "zh-CN" ? "浏览器" : "Browser",
+            <Globe size={17} />,
+          ),
+          item("settings/computer-use", "Computer Use", <Monitor size={17} />),
+          item("settings/skills", i18n.t("settings.skills"), <Puzzle size={17} />),
+          item("settings/mcp", i18n.t("settings.mcp"), <Plug size={17} />),
+          item(null, "Plugins", <Puzzle size={17} />, {
+            id: "plugins",
+            disabled: true,
+            status: i18n.locale() === "zh-CN" ? "规划中" : "Planned",
+          }),
         ],
       },
-    ] as const;
+      {
+        label: i18n.locale() === "zh-CN" ? "系统" : "System",
+        items: [
+          item("settings/runtime-security", "Runtime & Security", <Globe size={17} />),
+          item(
+            "settings/diagnostics",
+            i18n.locale() === "zh-CN" ? "诊断" : "Diagnostics",
+            <AlertTriangle size={17} />,
+          ),
+        ],
+      },
+    ];
     const query = search().trim().toLocaleLowerCase();
     return all
       .map((group) => ({
         ...group,
-        items: group.items.filter((item) => item[1].toLocaleLowerCase().includes(query)),
+        items: group.items.filter((entry) => entry.label.toLocaleLowerCase().includes(query)),
       }))
       .filter((group) => group.items.length > 0);
   });
   const activeLabel = createMemo(() => {
     for (const group of groups()) {
-      const item = group.items.find(([value]) => value === props.route);
-      if (item) return item[1];
+      const entry = group.items.find((entry) => entry.route === props.route);
+      if (entry) return entry.label;
     }
     return i18n.t("settings.title");
   });
@@ -479,16 +531,21 @@ function SettingsShell(props: {
                     <Button
                       type="button"
                       class="settings-nav-row"
-                      data-testid={`settings-nav-${item[0].replace("settings/", "")}`}
+                      data-testid={`settings-nav-${item.id}`}
                       classList={{
-                        selected: props.route === item[0],
-                        active: props.route === item[0],
+                        selected: props.route === item.route,
+                        active: props.route === item.route,
                       }}
-                      aria-current={props.route === item[0] ? "page" : undefined}
-                      onClick={() => props.navigate(item[0])}
+                      disabled={item.disabled}
+                      aria-disabled={item.disabled || undefined}
+                      aria-current={props.route === item.route ? "page" : undefined}
+                      onClick={() => item.route && props.navigate(item.route)}
                     >
-                      {item[2]}
-                      <span>{item[1]}</span>
+                      {item.icon}
+                      <span>{item.label}</span>
+                      <Show when={item.status}>
+                        <small class="settings-nav-status">{item.status}</small>
+                      </Show>
                     </Button>
                   )}
                 </For>
@@ -526,7 +583,10 @@ function SettingsShell(props: {
               />
             </Match>
             <Match when={props.route === "settings/llm"}>
-              <LlmSettingsPage />
+              <LlmSettingsPage
+                providerExtensionsEnabled={runtimeVisibility().providerExtensions}
+                providerRemoteContextEnabled={runtimeVisibility().providerRemoteContext}
+              />
             </Match>
             <Match when={props.route === "settings/avatar"}>
               <ResourceSettingsPage />
@@ -541,7 +601,30 @@ function SettingsShell(props: {
               <SkillsSettingsPage />
             </Match>
             <Match when={props.route === "settings/mcp"}>
-              <McpSettingsPage connectorEnabled={props.mcpRuntimeEnabled} />
+              <McpSettingsPage connectorEnabled={props.featureFlags.mcpRuntime} />
+            </Match>
+            <Match when={props.route === "settings/integrations"}>
+              <PlatformIntegrationsSettings />
+            </Match>
+            <Match when={props.route === "settings/browser"}>
+              <HostDomainSettingsPage featureFlags={props.featureFlags} section="browser" />
+            </Match>
+            <Match when={props.route === "settings/computer-use"}>
+              <HostDomainSettingsPage featureFlags={props.featureFlags} section="computer-use" />
+            </Match>
+            <Match when={props.route === "settings/runtime-security"}>
+              <HostDomainSettingsPage
+                featureFlags={props.featureFlags}
+                section="runtime-security"
+                developerMode={props.settings.developerMode ?? false}
+              />
+            </Match>
+            <Match when={props.route === "settings/diagnostics"}>
+              <DiagnosticsSettings
+                settings={props.settings}
+                setSettings={props.setSettings}
+                fail={props.fail}
+              />
             </Match>
           </Switch>
         </div>
@@ -556,8 +639,6 @@ function GeneralSettings(props: {
   fail: (message: string) => void;
 }) {
   const i18n = useI18n();
-  const [resetOpen, setResetOpen] = createSignal(false);
-  const [resetting, setResetting] = createSignal(false);
   async function persist(patch: Partial<AppSettings>) {
     const previous = props.settings;
     const next = { ...previous, ...patch };
@@ -573,16 +654,6 @@ function GeneralSettings(props: {
     try {
       props.setSettings(await commands.setAlwaysOnTop(enabled));
     } catch (error) {
-      props.fail(commandFailure(error).message);
-    }
-  }
-  async function resetAllLocalData() {
-    setResetting(true);
-    try {
-      await commands.resetLocalData();
-    } catch (error) {
-      setResetting(false);
-      setResetOpen(false);
       props.fail(commandFailure(error).message);
     }
   }
@@ -620,12 +691,60 @@ function GeneralSettings(props: {
               onChange={(enabled) => void changeAlwaysOnTop(enabled)}
             />
           </SettingsRow>
+        </SettingsCard>
+      </SettingsSection>
+    </div>
+  );
+}
+
+function DiagnosticsSettings(props: {
+  settings: AppSettings;
+  setSettings: (settings: AppSettings) => void;
+  fail: (message: string) => void;
+}) {
+  const i18n = useI18n();
+  const [resetOpen, setResetOpen] = createSignal(false);
+  const [resetting, setResetting] = createSignal(false);
+  async function persist(patch: Partial<AppSettings>) {
+    const previous = props.settings;
+    const next = { ...previous, ...patch };
+    props.setSettings(next);
+    try {
+      props.setSettings(await commands.updateSettings(next));
+    } catch (error) {
+      props.setSettings(previous);
+      props.fail(commandFailure(error).message);
+    }
+  }
+  async function resetAllLocalData() {
+    setResetting(true);
+    try {
+      await commands.resetLocalData();
+    } catch (error) {
+      setResetting(false);
+      setResetOpen(false);
+      props.fail(commandFailure(error).message);
+    }
+  }
+  return (
+    <div class="settings-page settings-page-demo">
+      <PageHeading
+        class="settings-page-heading"
+        title={i18n.locale() === "zh-CN" ? "诊断" : "Diagnostics"}
+        description={
+          i18n.locale() === "zh-CN"
+            ? "查看构建信息、开发者能力并管理本地数据。"
+            : "Inspect build information, developer capabilities, and local data."
+        }
+      />
+      <SettingsSection title={i18n.locale() === "zh-CN" ? "开发者" : "Developer"}>
+        <SettingsCard class="settings-card settings-card-demo">
           <SettingsRow
             label={i18n.locale() === "zh-CN" ? "开发者模式" : "Developer mode"}
             description={
               i18n.locale() === "zh-CN"
-                ? "Release 构建重启后显示程序实验室；Debug 构建始终可用。"
-                : "Shows Motion Library Lab after restarting a Release build; Debug builds always enable it."
+                ? "重启后显示开发者专用界面和完整 Browser CDP 能力。"
+                : "Shows developer-only surfaces and full Browser CDP controls after restart."
             }
           >
             <Toggle
@@ -636,8 +755,23 @@ function GeneralSettings(props: {
           </SettingsRow>
         </SettingsCard>
       </SettingsSection>
-      <SettingsSection title={i18n.t("settings.securityBoundary")}>
-        <StatusBanner tone="neutral">{i18n.t("settings.securityDescription")}</StatusBanner>
+      <SettingsSection title={i18n.t("settings.about.title")}>
+        <SettingsCard class="settings-card settings-card-demo">
+          <SettingsRow label={i18n.t("settings.about.version")}>
+            <Badge>v0.3.0-alpha.8</Badge>
+          </SettingsRow>
+          <SettingsRow
+            label={i18n.t("settings.about.sourceLicense")}
+            description={i18n.t("settings.about.sourceLicenseDescription")}
+          >
+            <Badge>Apache-2.0</Badge>
+          </SettingsRow>
+        </SettingsCard>
+        <StatusBanner tone="warning">
+          <strong>{i18n.t("settings.about.binaryBoundary")}</strong>
+          <span>{i18n.t("settings.about.binaryBoundaryDescription")}</span>
+          <small>{i18n.t("settings.about.notice")}</small>
+        </StatusBanner>
       </SettingsSection>
       <SettingsSection title={i18n.t("settings.data.title")}>
         <SettingsCard class="settings-card settings-card-demo">
@@ -1317,11 +1451,19 @@ function ThemeProfileEditor(props: {
   );
 }
 
-function LlmSettingsPage() {
+function LlmSettingsPage(props: {
+  providerExtensionsEnabled: boolean;
+  providerRemoteContextEnabled: boolean;
+}) {
   const i18n = useI18n();
   const [view, setView] = createSignal<LlmSettingsView>();
   const [baseUrl, setBaseUrl] = createSignal("");
   const [modelName, setModelName] = createSignal("");
+  const [protocol, setProtocol] = createSignal<ProviderProtocolKind>("chat_completions");
+  const [compatibilityProfileId, setCompatibilityProfileId] = createSignal("openai-strict");
+  const [embeddingModelName, setEmbeddingModelName] = createSignal("");
+  const [reasoningSummary, setReasoningSummary] = createSignal(false);
+  const [remoteCompaction, setRemoteCompaction] = createSignal(false);
   const [maxInput, setMaxInput] = createSignal(0);
   const [maxOutput, setMaxOutput] = createSignal(0);
   const [structuredOutputMode, setStructuredOutputMode] =
@@ -1336,6 +1478,19 @@ function LlmSettingsPage() {
     setView(next);
     setBaseUrl(next.baseUrl);
     setModelName(next.modelName);
+    setProtocol(props.providerExtensionsEnabled ? next.protocol : "chat_completions");
+    setCompatibilityProfileId(next.compatibilityProfileId);
+    setEmbeddingModelName(props.providerExtensionsEnabled ? next.embeddingModelName : "");
+    setReasoningSummary(
+      props.providerExtensionsEnabled && props.providerRemoteContextEnabled
+        ? next.reasoningSummary
+        : false,
+    );
+    setRemoteCompaction(
+      props.providerExtensionsEnabled && props.providerRemoteContextEnabled
+        ? next.remoteCompaction
+        : false,
+    );
     setMaxInput(next.maxInputTokens);
     setMaxOutput(next.maxOutputTokens);
     setStructuredOutputMode(next.structuredOutputMode);
@@ -1346,6 +1501,13 @@ function LlmSettingsPage() {
     return {
       baseUrl: baseUrl(),
       modelName: modelName(),
+      protocol: props.providerExtensionsEnabled ? protocol() : "chat_completions",
+      compatibilityProfileId: compatibilityProfileId(),
+      providerEndpointId: view()?.providerEndpointId ?? null,
+      providerAccountId: view()?.providerAccountId ?? null,
+      embeddingModelName: props.providerExtensionsEnabled ? embeddingModelName() : "",
+      reasoningSummary: props.providerRemoteContextEnabled ? reasoningSummary() : false,
+      remoteCompaction: props.providerRemoteContextEnabled ? remoteCompaction() : false,
       maxInputTokens: maxInput(),
       maxOutputTokens: maxOutput(),
       structuredOutputMode: structuredOutputMode(),
@@ -1393,6 +1555,41 @@ function LlmSettingsPage() {
       />
       <SettingsSection title={i18n.t("settings.connection")}>
         <SettingsCard class="settings-card unified-settings-card">
+          <SettingsRow
+            label={i18n.t("settings.providerProtocol")}
+            description={i18n.t("settings.providerProtocol.description")}
+          >
+            <SelectField
+              label={i18n.t("settings.providerProtocol")}
+              value={protocol()}
+              options={[
+                { value: "chat_completions", label: "OpenAI Chat Completions" },
+                ...(props.providerExtensionsEnabled
+                  ? [{ value: "responses", label: "OpenAI Responses" }]
+                  : []),
+              ]}
+              onChange={(value) => {
+                const next = value as ProviderProtocolKind;
+                setProtocol(next);
+                if (next !== "responses") {
+                  setReasoningSummary(false);
+                  setRemoteCompaction(false);
+                }
+              }}
+            />
+          </SettingsRow>
+          <Show when={props.providerExtensionsEnabled}>
+            <SettingsRow
+              label={i18n.t("settings.compatibilityProfile")}
+              description={i18n.t("settings.compatibilityProfile.description")}
+            >
+              <TextField
+                label={i18n.t("settings.compatibilityProfile")}
+                value={compatibilityProfileId()}
+                onInput={(event) => setCompatibilityProfileId(event.currentTarget.value)}
+              />
+            </SettingsRow>
+          </Show>
           <SettingsRow label={i18n.t("settings.interfaceUrl")}>
             <TextField
               label={i18n.t("settings.interfaceUrl")}
@@ -1441,6 +1638,41 @@ function LlmSettingsPage() {
               onInput={(event) => setModelName(event.currentTarget.value)}
             />
           </SettingsRow>
+          <Show when={props.providerExtensionsEnabled}>
+            <SettingsRow
+              label={i18n.t("settings.embeddingModel")}
+              description={i18n.t("settings.embeddingModel.description")}
+            >
+              <TextField
+                label={i18n.t("settings.embeddingModel")}
+                value={embeddingModelName()}
+                placeholder="text-embedding-3-small"
+                onInput={(event) => setEmbeddingModelName(event.currentTarget.value)}
+              />
+            </SettingsRow>
+          </Show>
+          <Show when={protocol() === "responses" && props.providerRemoteContextEnabled}>
+            <SettingsRow
+              label={i18n.t("settings.reasoningSummary")}
+              description={i18n.t("settings.reasoningSummary.description")}
+            >
+              <Toggle
+                checked={reasoningSummary()}
+                label={i18n.t("settings.reasoningSummary")}
+                onChange={setReasoningSummary}
+              />
+            </SettingsRow>
+            <SettingsRow
+              label={i18n.t("settings.remoteCompaction")}
+              description={i18n.t("settings.remoteCompaction.description")}
+            >
+              <Toggle
+                checked={remoteCompaction()}
+                label={i18n.t("settings.remoteCompaction")}
+                onChange={setRemoteCompaction}
+              />
+            </SettingsRow>
+          </Show>
           <SettingsRow
             label={i18n.t("settings.structuredOutput")}
             description={i18n.t("settings.structuredOutput.description")}
@@ -1521,6 +1753,7 @@ function LoadedWorkbench(props: {
   initialRoute: WorkbenchRoute;
 }) {
   const motionLabEnabled = untrack(() => props.bootstrap.featureFlags.motionLab);
+  const releaseFeatures = untrack(() => runtimeFeatureVisibility(props.bootstrap.featureFlags));
   const initialRoute =
     props.initialRoute === "developer/motion-lab" && !motionLabEnabled
       ? "home"
@@ -1529,7 +1762,7 @@ function LoadedWorkbench(props: {
   const [history, setHistory] = createSignal<WorkbenchRoute[]>([initialRoute]);
   const [historyIndex, setHistoryIndex] = createSignal(0);
   const [failure, setFailure] = createSignal<string>();
-  const [sidebarCollapsed, setSidebarCollapsed] = createSignal(false);
+  const [sidebarCollapsed, setSidebarCollapsed] = createSignal(window.innerWidth <= 760);
   const route = () => history()[historyIndex()] ?? "home";
   let stopNavigation: (() => void) | undefined;
   let stopSettings: (() => void) | undefined;
@@ -1605,7 +1838,7 @@ function LoadedWorkbench(props: {
                 settings={settings()}
                 setSettings={setSettings}
                 fail={setFailure}
-                mcpRuntimeEnabled={props.bootstrap.featureFlags.mcpRuntime}
+                featureFlags={props.bootstrap.featureFlags}
               />
             </Match>
             <Match when={route() === "developer/motion-lab" && motionLabEnabled}>
@@ -1615,6 +1848,9 @@ function LoadedWorkbench(props: {
               <HomePage
                 navigate={navigate}
                 motionLabEnabled={motionLabEnabled}
+                runRecoveryEnabled={releaseFeatures.runRecovery}
+                multiAgentEnabled={releaseFeatures.multiAgent}
+                gitRemoteMutationsEnabled={releaseFeatures.gitRemoteMutations}
                 workspaceToolsEnabled={props.bootstrap.featureFlags.workspaceTools}
                 schedulerEnabled={props.bootstrap.featureFlags.scheduler}
               />

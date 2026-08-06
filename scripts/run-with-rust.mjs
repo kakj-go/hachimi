@@ -1,6 +1,7 @@
-import { existsSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { copyFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { delimiter, dirname, join } from "node:path";
+import { delimiter, dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
 
@@ -37,6 +38,42 @@ const childEnvironment = {
   PATH: `${cargoBin}${delimiter}${process.env.PATH ?? ""}`,
 };
 
+function cargoTestProfileDirectory() {
+  const profileIndex = rustToolArguments.findIndex(
+    (argument) => argument === "--profile" || argument.startsWith("--profile="),
+  );
+  if (profileIndex >= 0) {
+    const argument = rustToolArguments[profileIndex];
+    const profile = argument.includes("=")
+      ? argument.split("=", 2)[1]
+      : rustToolArguments[profileIndex + 1];
+    return profile === "dev" || profile === "test" ? "debug" : profile;
+  }
+  return rustToolArguments.includes("--release") ? "release" : "debug";
+}
+
+function verifyAndStageWindowsTestRuntime(workspaceRoot, runtimeDirectory) {
+  const manifest = JSON.parse(readFileSync(join(runtimeDirectory, "manifest.json"), "utf8"));
+  const targetSetting = childEnvironment.CARGO_TARGET_DIR;
+  const targetRoot = targetSetting
+    ? isAbsolute(targetSetting)
+      ? targetSetting
+      : resolve(process.cwd(), targetSetting)
+    : join(workspaceRoot, "target");
+  const testExecutableDirectory = join(targetRoot, cargoTestProfileDirectory(), "deps");
+  mkdirSync(testExecutableDirectory, { recursive: true });
+
+  for (const fileName of ["DirectML.dll", "onnxruntime.dll", "sherpa-onnx-c-api.dll"]) {
+    const source = join(runtimeDirectory, fileName);
+    const expectedHash = manifest.files?.[fileName];
+    const actualHash = createHash("sha256").update(readFileSync(source)).digest("hex");
+    if (!expectedHash || actualHash !== expectedHash) {
+      throw new Error(`${fileName} does not match the verified native runtime manifest`);
+    }
+    copyFileSync(source, join(testExecutableDirectory, fileName));
+  }
+}
+
 if (process.platform === "win32") {
   const workspaceRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
   const directMlRuntime = join(
@@ -51,6 +88,12 @@ if (process.platform === "win32") {
   );
   if (existsSync(join(directMlRuntime, "sherpa-onnx-c-api.lib"))) {
     childEnvironment.SHERPA_ONNX_LIB_DIR = directMlRuntime;
+    childEnvironment.PATH = `${directMlRuntime}${delimiter}${childEnvironment.PATH}`;
+    if (rustTool === "cargo" && rustToolArguments[0] === "test") {
+      // Windows resolves System32 before PATH. Stage the verified pair beside
+      // Cargo's test executables so a system onnxruntime.dll cannot be loaded.
+      verifyAndStageWindowsTestRuntime(workspaceRoot, directMlRuntime);
+    }
   }
 
   // The sherpa build helper and Tauri's resource build both stage the same

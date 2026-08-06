@@ -1,5 +1,45 @@
 use super::*;
 
+pub(super) const fn release_feature_enabled(explicitly_disabled: bool) -> bool {
+    !explicitly_disabled
+}
+
+pub(super) fn env_disabled(name: &str) -> bool {
+    matches!(std::env::var(name).as_deref(), Ok("1" | "true" | "TRUE"))
+}
+
+pub(super) const fn release_runtime_feature_set(disabled: RuntimeFeatureSet) -> RuntimeFeatureSet {
+    RuntimeFeatureSet {
+        run_recovery: !disabled.run_recovery,
+        provider_extensions: !disabled.provider_extensions,
+        provider_remote_context: !disabled.provider_remote_context,
+        multi_agent: !disabled.multi_agent,
+        git_remote_mutations: !disabled.git_remote_mutations,
+        plugin_runtime: !disabled.plugin_runtime,
+        enterprise_integrations: !disabled.enterprise_integrations,
+    }
+}
+
+pub(super) fn release_agent_feature_flags(
+    workspace_disabled: bool,
+    mcp_disabled: bool,
+    scheduler_disabled: bool,
+) -> FeatureFlags {
+    FeatureFlags {
+        workbench: true,
+        workspace_tools: release_feature_enabled(workspace_disabled),
+        browser_control: true,
+        computer_observe: true,
+        computer_control: true,
+        plugin_runtime: true,
+        local_gateway: true,
+        mcp_runtime: release_feature_enabled(mcp_disabled),
+        scheduler: release_feature_enabled(scheduler_disabled),
+        runtime_features: RuntimeFeatureSet::all_enabled(),
+        ..FeatureFlags::all_disabled()
+    }
+}
+
 pub(super) fn absolute_path(path: PathBuf) -> PathBuf {
     if path.is_absolute() {
         path
@@ -7,6 +47,65 @@ pub(super) fn absolute_path(path: PathBuf) -> PathBuf {
         std::env::current_dir()
             .unwrap_or_else(|_| PathBuf::from("."))
             .join(path)
+    }
+}
+
+#[cfg(any(not(feature = "desktop-e2e"), test))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum SingleInstanceActivationTarget {
+    Workbench,
+    Pet,
+    StartupPending,
+}
+
+#[cfg(any(not(feature = "desktop-e2e"), test))]
+pub(super) const fn single_instance_activation_target(
+    has_workbench: bool,
+    has_pet: bool,
+) -> SingleInstanceActivationTarget {
+    if has_workbench {
+        SingleInstanceActivationTarget::Workbench
+    } else if has_pet {
+        SingleInstanceActivationTarget::Pet
+    } else {
+        SingleInstanceActivationTarget::StartupPending
+    }
+}
+
+#[cfg(not(feature = "desktop-e2e"))]
+pub(super) fn activate_existing_instance<R: Runtime>(app: &AppHandle<R>) {
+    let workbench = app.get_webview_window("workbench");
+    let pet = app.get_webview_window("pet");
+    match single_instance_activation_target(workbench.is_some(), pet.is_some()) {
+        SingleInstanceActivationTarget::Workbench => {
+            let workbench = workbench.expect("workbench target requires a window");
+            reveal_existing_window(&workbench, "workbench");
+        }
+        SingleInstanceActivationTarget::Pet => {
+            if let Some(state) = app.try_state::<DesktopState>() {
+                state.pet_hidden_by_user.store(false, Ordering::SeqCst);
+            }
+            let pet = pet.expect("pet target requires a window");
+            reveal_existing_window(&pet, "pet");
+            let _ = app.emit_to("pet", PET_VISIBILITY_EVENT, true);
+            refresh_tray_menu(app);
+        }
+        SingleInstanceActivationTarget::StartupPending => {
+            tracing::info!("secondary launch received while the desktop window is starting");
+        }
+    }
+}
+
+#[cfg(not(feature = "desktop-e2e"))]
+fn reveal_existing_window<R: Runtime>(window: &WebviewWindow<R>, label: &'static str) {
+    if let Err(error) = window.unminimize() {
+        tracing::warn!(window = label, %error, "failed to restore the existing instance window");
+    }
+    if let Err(error) = window.show() {
+        tracing::warn!(window = label, %error, "failed to show the existing instance window");
+    }
+    if let Err(error) = window.set_focus() {
+        tracing::warn!(window = label, %error, "failed to focus the existing instance window");
     }
 }
 
@@ -26,10 +125,7 @@ pub(super) fn exit_application(app: &AppHandle, state: &DesktopState) -> Result<
         capture_pet_placement(&pet, state)?;
     }
     state.save_settings()?;
-    // Match Codex's process-session shutdown semantics: terminate all owned
-    // process trees before handing control to the platform exit path.
-    tauri::async_runtime::block_on(state.process_registry.shutdown());
-    state.scheduler_handle.lock().take();
+    tauri::async_runtime::block_on(crate::shutdown_coordinator::shutdown(state));
     app.exit(0);
     Ok(())
 }
@@ -102,12 +198,25 @@ pub(super) fn motion_asset_url(entry_id: &str) -> String {
 pub(super) fn cancel_pet_activity(app: &AppHandle, state: &DesktopState, emit_cancelled: bool) {
     if let Some(active) = state.pet_run.lock().take() {
         active.cancellation.cancel();
+        let _ = state
+            .agent_executor
+            .registry()
+            .cancel(&active.agent_run_id, active.run_generation);
+        let approval_broker = state.approval_broker.clone();
+        let user_input_broker = state.user_input_broker.clone();
+        let authority_run_id = active.agent_run_id.clone();
+        tauri::async_runtime::spawn(async move {
+            let _ = approval_broker.cancel_run(authority_run_id.clone()).await;
+            let _ = user_input_broker.cancel_run(authority_run_id).await;
+        });
         if emit_cancelled {
             let _ = app.emit_to(
                 "pet",
                 PET_TURN_EVENT,
                 PetTurnEvent::Cancelled {
                     run_id: active.run_id,
+                    session_id: active.session_id,
+                    agent_run_id: active.agent_run_id,
                 },
             );
         }
@@ -116,7 +225,10 @@ pub(super) fn cancel_pet_activity(app: &AppHandle, state: &DesktopState, emit_ca
 }
 
 pub(super) fn enter_workbench_mode(app: &AppHandle, state: &DesktopState) {
-    cancel_pet_activity(app, state, true);
+    // Workbench and Pet are two presentations over the same persistent Run.
+    // Switching surfaces must not cancel pending Approval/UserInput or revoke
+    // the Run; only explicit Stop/cancel owns that transition.
+    state.voice_runtime.stop();
     let _ = app.emit_to("pet", "pet:close-composer", ());
     hide_pet(app);
 }

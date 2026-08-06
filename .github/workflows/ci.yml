@@ -14,6 +14,8 @@ jobs:
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
+        with:
+          lfs: true
       - uses: actions/setup-node@v4
         with:
           node-version: 24.10.0
@@ -23,11 +25,6 @@ jobs:
       - run: corepack enable
       - run: corepack prepare pnpm@11.15.1 --activate
       - run: pnpm install --frozen-lockfile
-      - run: pnpm format:check
-      - run: pnpm typecheck
-      - run: pnpm lint
-      - run: pnpm test
-      - run: pnpm contracts:check
-      - run: pnpm provenance:check
-      - run: pnpm test:p0-adversarial
-      - run: pnpm test:desktop:e2e
+      - run: pnpm --filter @hachimi/ui exec playwright install chromium
+      - run: pnpm check
+      - run: pnpm release:check-clean

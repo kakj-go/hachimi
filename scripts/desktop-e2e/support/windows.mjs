@@ -21,10 +21,29 @@ export async function switchToWorkbench() {
       return false;
     },
     {
-      timeout: 20_000,
+      timeout: 45_000,
       interval: 100,
       timeoutMsg: "Hachimi Workbench window was not ready",
     },
+  );
+}
+
+export async function switchToPet() {
+  await browser.waitUntil(
+    async () => {
+      const handles = await browser.getWindowHandles();
+      for (const handle of handles) {
+        try {
+          await browser.switchToWindow(handle);
+          const [title, url] = await Promise.all([browser.getTitle(), browser.getUrl()]);
+          if (title.includes("Hachimi Pet") || url.includes("/pet.html")) return true;
+        } catch {
+          // The Workbench can hide while the native shell restores the Pet.
+        }
+      }
+      return false;
+    },
+    { timeout: 20_000, interval: 100, timeoutMsg: "Hachimi Pet window was not ready" },
   );
 }
 

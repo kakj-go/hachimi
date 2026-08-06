@@ -63,6 +63,16 @@ for (const file of listed) {
   ) {
     failures.push(`${normalized}: contains the retired 700ms Agent event polling loop`);
   }
+  if (
+    normalized.startsWith("packages/workbench/src/") &&
+    !normalized.endsWith(".test.ts") &&
+    !normalized.endsWith(".test.tsx") &&
+    /protocolVersion\s*:\s*\d+/u.test(contents)
+  ) {
+    failures.push(
+      `${normalized}: hard-codes the control protocol version instead of using the generated contract`,
+    );
+  }
   if ([".rs", ".ts", ".tsx", ".css"].includes(extname(normalized))) {
     const lines = contents.split(/\r?\n/u).length;
     if (lines > 2000) failures.push(`${normalized}: ${lines} lines exceeds the 2000-line limit`);

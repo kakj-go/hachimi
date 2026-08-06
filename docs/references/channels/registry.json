@@ -1,0 +1,154 @@
+{
+  "schemaVersion": 1,
+  "auditedAt": "2026-08-04",
+  "implementationStatus": {
+    "channelCore": "implemented",
+    "deterministicRouting": "implemented",
+    "durableIngressOutbox": "implemented",
+    "pairingAndIdentityLink": "implemented",
+    "providerWireRuntimes": "implemented_with_local_fixtures_real_gates_not_run",
+    "wechatIlinkQrLogin": "implemented",
+    "wechatIlinkLongPoll": "implemented",
+    "wechatIlinkTextDelivery": "implemented",
+    "enterpriseManagedMediaIngress": "implemented_for_dingtalk_feishu_wecom_app",
+    "wecomAiBotMediaTransfer": "implemented_with_local_fixtures",
+    "wechatIlinkMediaTransfer": "implemented_with_local_fixtures",
+    "channelMediaEgress": "implemented_with_local_fixtures",
+    "settingsWizardAndAuthorizations": "implemented",
+    "fourDimensionProbe": "implemented_with_local_fixtures",
+    "atomicSessionRunBinding": "implemented",
+    "identityConflictTransfer": "implemented",
+    "fiveProviderStagingGate": "implemented_not_run",
+    "realEnvironmentGates": "not_run"
+  },
+  "sources": [
+    {
+      "name": "OpenClaw",
+      "repository": "https://github.com/openclaw/openclaw",
+      "commit": "f6d456235cf011004f7cffc71a95acf6fbf1fa0a",
+      "license": "MIT",
+      "classification": "behavior-only",
+      "files": [
+        "src/channels/plugins/binding-routing.ts",
+        "src/config/sessions/session-key.ts",
+        "src/channels/message/durable-receive.ts",
+        "src/channels/message/ingress-queue.ts",
+        "src/channels/turn/durable-delivery.ts",
+        "src/gateway/channel-health-monitor.ts"
+      ],
+      "usedFor": [
+        "provider registration and account-scoped health",
+        "deterministic session routing",
+        "durable ingress and delivery claim recovery"
+      ],
+      "implementationStatus": "adapted behavior implemented; Agent Runtime not used"
+    },
+    {
+      "name": "DeerFlow",
+      "repository": "https://github.com/bytedance/deer-flow",
+      "commit": "11bb8ddcd95f41e673783b7e20c4ab4cd5ee7e24",
+      "license": "MIT",
+      "classification": "behavior-only",
+      "files": [
+        "backend/docs/IM_CHANNEL_CONNECTIONS.md",
+        "backend/packages/harness/deerflow/persistence/channel_connections/model.py",
+        "backend/packages/harness/deerflow/persistence/channel_connections/sql.py"
+      ],
+      "usedFor": [
+        "single-use hashed connection codes",
+        "separation of provider account, identity, conversation, and credential"
+      ],
+      "implementationStatus": "implemented with ownership-conflict rejection"
+    },
+    {
+      "name": "cc-connect",
+      "repository": "https://github.com/chenhg5/cc-connect",
+      "commit": "f2e4ed83c6953297a92d66d49114196fc4402206",
+      "license": "NOASSERTION",
+      "classification": "behavior-only",
+      "files": ["agent/codex/session.go", "agent/codex/appserver_session.go"],
+      "usedFor": [
+        "separation of external conversation and Agent session",
+        "persistent Agent session recovery"
+      ],
+      "implementationStatus": "behavior considered; no source copied"
+    },
+    {
+      "name": "LangBot",
+      "repository": "https://github.com/langbot-app/LangBot",
+      "commit": "7820949d3a3d8ca0b6f07d060deab40cb86807ff",
+      "license": "Apache-2.0",
+      "classification": "behavior-only",
+      "files": [
+        "src/langbot/pkg/provider/session/sessionmgr.py",
+        "src/langbot/libs/wecom_ai_bot_api/ws_client.py",
+        "src/langbot/pkg/platform/sources/openclaw_weixin.py",
+        "src/langbot/libs/openclaw_weixin_api/client.py"
+      ],
+      "usedFor": [
+        "sender, conversation, event, and provider-session separation",
+        "WeCom AI Bot and iLink interoperability review"
+      ],
+      "implementationStatus": "normalization and network runtimes implemented with local fixtures; protected real-account gate not run"
+    },
+    {
+      "name": "AstrBot",
+      "repository": "https://github.com/AstrBotDevs/AstrBot",
+      "commit": "03a6edb29e7e742fb97d5926949c03c3214a31e5",
+      "license": "AGPL-3.0",
+      "classification": "behavior-only",
+      "files": [
+        "astrbot/api/message_components.py",
+        "astrbot/core/message/components.py",
+        "astrbot/core/platform/astr_message_event.py",
+        "astrbot/core/platform/message_session.py"
+      ],
+      "usedFor": ["typed text, image, file, source, and quote message parts"],
+      "implementationStatus": "independent Rust implementation; no AGPL source copied"
+    },
+    {
+      "name": "CowAgent",
+      "repository": "https://github.com/zhayujie/CowAgent",
+      "commit": "848a1a4eb171f3d891304370f7d5ed42046f3280",
+      "license": "MIT",
+      "classification": "behavior-only",
+      "files": [
+        "channel/wecom_bot/wecom_bot_channel.py",
+        "channel/weixin/weixin_api.py",
+        "channel/weixin/weixin_channel.py",
+        "channel/weixin/weixin_message.py"
+      ],
+      "usedFor": [
+        "WeCom AI Bot subscribe, heartbeat, and reconnect behavior",
+        "iLink QR login, long polling, typed item parsing, context token, and -14 relogin behavior"
+      ],
+      "implementationStatus": "WeCom AI Bot subscribe ACK, heartbeat, reconnect, typed ingress and chunked media transfer, plus iLink QR login, long polling, typed parts, per-conversation context token storage, text/media delivery, and -14 awaiting-auth transition implemented with local fixtures; protected real-account gate not run"
+    },
+    {
+      "name": "DingTalk Stream SDK for Go",
+      "repository": "https://github.com/open-dingtalk/dingtalk-stream-sdk-go",
+      "commit": "d1cc841e6013c3f6513a5bb01dfe3219b9c37d17",
+      "license": "MIT",
+      "classification": "behavior-only",
+      "files": ["client/client.go"],
+      "usedFor": ["DingTalk Stream handshake, callback ACK, heartbeat, and reconnect contract"],
+      "implementationStatus": "live Stream bootstrap, WebSocket ACK, heartbeat, reconnect, typed ingress, bounded managed attachment download, and OpenAPI text/media delivery implemented with local fixtures; DingTalk media request behavior follows the pinned sources but has not been independently verified against a real organization"
+    },
+    {
+      "name": "Feishu OpenAPI SDK for Go",
+      "repository": "https://github.com/larksuite/oapi-sdk-go",
+      "commit": "ff207b774541a195f0a98c5bfda1507905e45431",
+      "license": "MIT",
+      "classification": "behavior-only",
+      "files": [
+        "ws/client.go",
+        "ws/const.go",
+        "ws/model.go",
+        "ws/pbbp2.pb.go",
+        "service/im/v1/model.go"
+      ],
+      "usedFor": ["Feishu WebSocket protobuf framing, ACK, event fields, and message resources"],
+      "implementationStatus": "live endpoint bootstrap, protobuf WebSocket ACK, heartbeat, reconnect, frame reassembly, typed ingress, bounded message-resource download, and OpenAPI text/media delivery implemented with local fixtures; real-organization gate not run"
+    }
+  ]
+}

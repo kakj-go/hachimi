@@ -7,6 +7,7 @@ import {
   existsSync,
   mkdtempSync,
   mkdirSync,
+  readFileSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
@@ -16,6 +17,27 @@ import { fileURLToPath } from "node:url";
 
 import { createOfficeArtifact } from "./support/office-artifacts.mjs";
 import { cleanupExecutableProcesses, terminateProcessTree } from "./support/processes.mjs";
+
+async function allocateLoopbackPorts(count) {
+  const reservations = [];
+  try {
+    for (let index = 0; index < count; index += 1) {
+      const reservation = createServer();
+      await new Promise((resolveListen, rejectListen) => {
+        reservation.once("error", rejectListen);
+        reservation.listen(0, "127.0.0.1", resolveListen);
+      });
+      reservations.push(reservation);
+    }
+    return reservations.map((reservation) => reservation.address().port);
+  } finally {
+    await Promise.all(
+      reservations.map(
+        (reservation) => new Promise((resolveClose) => reservation.close(resolveClose)),
+      ),
+    );
+  }
+}
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const corepackCli = join(
@@ -44,6 +66,10 @@ if (!existsSync(driver) || !existsSync(nativeDriver)) {
 }
 mkdirSync(project, { recursive: true });
 mkdirSync(data, { recursive: true });
+writeFileSync(join(data, ".hachimi-data-root"), "com.hachimi.desktop", "utf8");
+const loopbackToken = "hachimi-desktop-e2e-loopback-token-00000001";
+mkdirSync(join(data, "gateway"), { recursive: true });
+writeFileSync(join(data, "gateway", "loopback.token"), loopbackToken, "utf8");
 mkdirSync(webviewData, { recursive: true });
 if (!artifacts.startsWith(`${targetRoot}${sep}`)) {
   throw new Error("Desktop E2E artifact path escaped the repository target directory.");
@@ -73,7 +99,48 @@ writeFileSync(attachment, "Use the deterministic Desktop E2E workflow.\n", "utf8
 
 let mcpToolSchemaRevision = 1;
 const mcpServer = createServer((request, response) => {
-  if (request.url === "/e2e/schema-v2" && request.method === "POST") {
+  const requestPath = new URL(request.url ?? "/", "http://127.0.0.1").pathname;
+  if (requestPath.includes("browser-")) {
+    console.log(`[desktop-e2e-browser-fixture] ${request.method} ${request.url}`);
+  }
+  if (requestPath === "/browser-fixture" && request.method === "GET") {
+    response.writeHead(200, {
+      "content-type": "text/html; charset=utf-8",
+      "cache-control": "no-store",
+    }).end(`<!doctype html>
+<html><head><title>Hachimi Browser Host E2E</title></head>
+<body>
+  <h1>Managed Browser scheduled fixture</h1>
+  <p id="resource-status">resource pending</p>
+  <input id="upload" type="file" />
+  <a id="download" href="/browser-download.txt" download="hachimi-browser-e2e.txt">Download fixture</a>
+  <script src="/browser-resource.js"></script>
+</body></html>`);
+    return;
+  }
+  if (requestPath === "/browser-resource.js" && request.method === "GET") {
+    response
+      .writeHead(200, {
+        "content-type": "text/javascript; charset=utf-8",
+        "cache-control": "no-store",
+      })
+      .end('document.querySelector("#resource-status").textContent = "resource loaded";');
+    return;
+  }
+  if (requestPath === "/browser-download.txt" && request.method === "GET") {
+    const body = "Hachimi managed Browser scheduled download fixture\n";
+    response
+      .writeHead(200, {
+        "content-type": "text/plain",
+        "content-disposition": "attachment; filename=hachimi-browser-e2e.txt",
+        "content-length": Buffer.byteLength(body),
+        connection: "close",
+        "cache-control": "no-store",
+      })
+      .end(body);
+    return;
+  }
+  if (requestPath === "/e2e/schema-v2" && request.method === "POST") {
     mcpToolSchemaRevision = 2;
     response.writeHead(204).end();
     return;
@@ -407,6 +474,9 @@ const mcpAddress = mcpServer.address();
 if (!mcpAddress || typeof mcpAddress === "string")
   throw new Error("Desktop E2E MCP failed to bind");
 const mcpUrl = `http://127.0.0.1:${mcpAddress.port}/mcp`;
+const browserFixtureUrl = `http://127.0.0.1:${mcpAddress.port}/browser-fixture`;
+const browserFixtureOrigin = `http://127.0.0.1:${mcpAddress.port}`;
+const [gatewayPort, gatewayWakePort] = await allocateLoopbackPorts(2);
 
 function checked(command, args, options = {}) {
   const result = spawnSync(command, args, {
@@ -455,10 +525,16 @@ const testEnvironment = {
   HACHIMI_DESKTOP_E2E_SANDBOX: "deterministic",
   HACHIMI_DESKTOP_E2E_PROVIDER: "deterministic",
   HACHIMI_DESKTOP_E2E_ARTIFACTS: artifacts,
+  HACHIMI_DESKTOP_E2E_LOOPBACK_TOKEN: loopbackToken,
+  HACHIMI_DESKTOP_E2E_GATEWAY_PORT: String(gatewayPort),
+  HACHIMI_DESKTOP_E2E_GATEWAY_WAKE_PORT: String(gatewayWakePort),
   HACHIMI_DESKTOP_E2E_MCP_URL: mcpUrl,
   HACHIMI_DESKTOP_E2E_MCP_STDIO_COMMAND: process.execPath,
   HACHIMI_DESKTOP_E2E_MCP_STDIO_ARGS: officeStdioServer,
   HACHIMI_DESKTOP_E2E_MCP_STDIO_CWD: artifacts,
+  HACHIMI_DESKTOP_E2E_BROWSER_URL: browserFixtureUrl,
+  HACHIMI_DESKTOP_E2E_BROWSER_ORIGIN: browserFixtureOrigin,
+  HACHIMI_MANAGED_CHROMIUM: join(root, "apps/desktop/src-tauri/managed-chromium/chrome.exe"),
 };
 
 checked("node", ["scripts/prepare-workspace-worker.mjs", "dev"], {
@@ -475,11 +551,65 @@ if (process.env.HACHIMI_DESKTOP_E2E_REAL_SANDBOX === "1") {
 checked(process.execPath, [corepackCli, "pnpm", "--dir", "apps/desktop/web", "build"], {
   env: testEnvironment,
 });
-checked("cargo", ["build", "--offline", "-p", "hachimi-desktop", "--features", "desktop-e2e"], {
-  env: testEnvironment,
-});
+const desktopPdb = join(buildTarget, "debug", "deps", "hachimi_desktop.pdb");
+if (!desktopPdb.startsWith(`${buildTarget}${sep}`)) {
+  throw new Error("Desktop E2E PDB path escaped the dedicated build directory.");
+}
+// MSVC can retain exhausted type-server state when repeatedly relinking this
+// large debug binary. The PDB is a disposable E2E build artifact; recreating
+// just this file avoids LNK1318 without cleaning any source or shared target.
+rmSync(desktopPdb, { force: true });
+checked(
+  process.execPath,
+  [
+    "scripts/run-with-rust.mjs",
+    "cargo",
+    "build",
+    "--offline",
+    "-p",
+    "hachimi-desktop",
+    "--features",
+    "desktop-e2e",
+  ],
+  { env: testEnvironment },
+);
 
 testEnvironment.HACHIMI_DESKTOP_E2E_APP = resolve(buildTarget, "debug/hachimi-desktop.exe");
+const consoleStopFile = join(artifacts, "console-window-monitor.stop");
+const consoleReportFile = join(artifacts, "console-window-monitor.json");
+let consoleMonitorProcess;
+let consoleMonitorExit;
+if (process.platform === "win32") {
+  consoleMonitorProcess = spawn(
+    "powershell.exe",
+    [
+      "-NoLogo",
+      "-NoProfile",
+      "-NonInteractive",
+      "-ExecutionPolicy",
+      "Bypass",
+      "-File",
+      join(root, "scripts/desktop-e2e/support/console-window-monitor.ps1"),
+      "-ApplicationPath",
+      testEnvironment.HACHIMI_DESKTOP_E2E_APP,
+      "-StopFile",
+      consoleStopFile,
+      "-ReportFile",
+      consoleReportFile,
+    ],
+    {
+      cwd: root,
+      env: testEnvironment,
+      stdio: ["ignore", "pipe", "pipe"],
+      windowsHide: true,
+    },
+  );
+  consoleMonitorProcess.stdout.pipe(process.stdout);
+  consoleMonitorProcess.stderr.pipe(process.stderr);
+  consoleMonitorExit = new Promise((resolveExit) => {
+    consoleMonitorProcess.once("exit", resolveExit);
+  });
+}
 const driverProcess = spawn(driver, ["--native-driver", nativeDriver], {
   cwd: root,
   env: testEnvironment,
@@ -510,6 +640,7 @@ async function waitForPort(port, description) {
 }
 
 let succeeded = false;
+let consoleWindowFailure;
 try {
   await waitForPort(4444, "tauri-driver");
   await checkedAsync(
@@ -522,6 +653,24 @@ try {
   for (const child of activeChildren) terminateProcessTree(child.pid);
   terminateProcessTree(driverProcess.pid);
   cleanupExecutableProcesses(testEnvironment.HACHIMI_DESKTOP_E2E_APP);
+  if (consoleMonitorProcess) {
+    writeFileSync(consoleStopFile, "stop", "utf8");
+    await Promise.race([
+      consoleMonitorExit,
+      new Promise((resolveDelay) => setTimeout(resolveDelay, 5_000)),
+    ]);
+    if (consoleMonitorProcess.exitCode == null) terminateProcessTree(consoleMonitorProcess.pid);
+    if (existsSync(consoleReportFile)) {
+      const report = JSON.parse(readFileSync(consoleReportFile, "utf8"));
+      if (Array.isArray(report.findings) && report.findings.length > 0) {
+        succeeded = false;
+        consoleWindowFailure = `Desktop E2E observed ${report.findings.length} descendant ConsoleWindowClass window(s)`;
+      }
+    } else if (succeeded) {
+      succeeded = false;
+      consoleWindowFailure = "Desktop E2E console-window monitor did not produce a report";
+    }
+  }
   driverLog.end();
   await new Promise((resolveClose) => mcpServer.close(resolveClose));
   if (succeeded && process.env.HACHIMI_KEEP_DESKTOP_E2E !== "1") {
@@ -530,3 +679,4 @@ try {
     console.error(`Desktop E2E fixture retained at ${temporaryRoot}`);
   }
 }
+if (consoleWindowFailure) throw new Error(consoleWindowFailure);

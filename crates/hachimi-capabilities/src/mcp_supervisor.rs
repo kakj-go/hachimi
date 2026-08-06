@@ -240,6 +240,8 @@ impl McpSupervisor {
                 protocol_version: Some(server_info.protocol_version.clone()),
                 tool_count: u32::try_from(tools.len()).unwrap_or(u32::MAX),
                 error_code: None,
+                failure_count: 0,
+                next_retry_at_ms: None,
                 checked_at_ms: now_ms(),
             };
             entry.tools = tools;
@@ -493,7 +495,7 @@ impl McpStdioSandboxHost {
         let root = cwd.to_string_lossy().into_owned();
         let temp = temp_root.to_string_lossy().into_owned();
         let grants = CapabilityGrantSet {
-            profile: PermissionProfile::WorkspaceWrite,
+            profile: PermissionProfile::Writable,
             scope: PermissionGrantScope::Run,
             session_id: session_id.clone(),
             run_id: Some(run_id.clone()),
@@ -518,6 +520,7 @@ impl McpStdioSandboxHost {
                 interactive: true,
                 allowed_commands: vec![executable.to_string_lossy().into_owned()],
             },
+            browser: Default::default(),
             computer: ComputerGrant::default(),
             review_each_command: false,
             expires_at_ms: None,
@@ -600,6 +603,8 @@ fn health(
         protocol_version: None,
         tool_count: 0,
         error_code: error_code.map(str::to_owned),
+        failure_count: 0,
+        next_retry_at_ms: None,
         checked_at_ms: now_ms(),
     }
 }

@@ -179,6 +179,7 @@ pub fn occurrences_after(
             expression,
             timezone,
         } => cron_occurrences(resolver, expression, timezone, after_ms, count),
+        ScheduleSpec::Event { .. } => Ok(Vec::new()),
     }
 }
 

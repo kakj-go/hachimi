@@ -596,6 +596,7 @@ impl SkillHost {
         let entry_path = root.join(ENTRY_FILE);
         let mut diagnostics = Vec::new();
         let mut description = stored.record.description.clone();
+        let mut frontmatter_display_name = None;
         if entry_path.is_file() {
             match fs::read_to_string(&entry_path) {
                 Ok(entry_content) => {
@@ -603,6 +604,8 @@ impl SkillHost {
                     match parse_frontmatter(&entry_content) {
                         Ok((frontmatter_name, parsed_description)) => {
                             description = parsed_description;
+                            frontmatter_display_name =
+                                parse_frontmatter_display_name(&entry_content);
                             if frontmatter_name != stored.record.name {
                                 diagnostics.push(diagnostic(
                                     "skill_name_mismatch",
@@ -669,6 +672,22 @@ impl SkillHost {
             if let Ok(content) = fs::read_to_string(&path) {
                 diagnostics.extend(validate_markdown(&content, &path, &root));
             }
+        }
+        match metadata::read_interface_and_policy(&root) {
+            Ok((mut interface, policy, metadata_diagnostics)) => {
+                diagnostics.extend(metadata_diagnostics);
+                if let Some(display_name) = frontmatter_display_name {
+                    interface.get_or_insert_default().display_name = Some(display_name);
+                }
+                stored.record.interface = interface;
+                stored.record.policy = policy;
+            }
+            Err(error) => diagnostics.push(diagnostic(
+                "skill_metadata_invalid",
+                &error.to_string(),
+                Some("agents/openai.yaml"),
+                SkillDiagnosticSeverity::Error,
+            )),
         }
         stored.record.description = description;
         stored.record.content_hash = content_hash.clone();
@@ -1210,6 +1229,16 @@ fn parse_frontmatter(content: &str) -> Result<(String, String), SkillHostError> 
     Ok((name, description))
 }
 
+fn parse_frontmatter_display_name(content: &str) -> Option<String> {
+    content
+        .lines()
+        .skip(1)
+        .take_while(|line| line.trim() != "---")
+        .find_map(|line| line.strip_prefix("display_name:"))
+        .map(|value| value.trim().trim_matches(['\'', '"']).to_owned())
+        .filter(|value| !value.is_empty())
+}
+
 fn validate_markdown(content: &str, file_path: &Path, root: &Path) -> Vec<SkillDiagnostic> {
     let mut diagnostics = Vec::new();
     for line in content.lines() {
@@ -1441,6 +1470,17 @@ mod tests {
         tree.children
             .iter()
             .find_map(|child| find_tree_node(child, path))
+    }
+
+    #[test]
+    fn reads_optional_user_facing_display_name() {
+        assert_eq!(
+            parse_frontmatter_display_name(
+                "---\nname: reports\ndisplay_name: Report Studio\ndescription: Build reports\n---\n"
+            )
+            .as_deref(),
+            Some("Report Studio")
+        );
     }
 
     #[tokio::test]

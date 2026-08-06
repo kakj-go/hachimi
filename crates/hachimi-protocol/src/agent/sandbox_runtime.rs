@@ -17,3 +17,25 @@ pub struct SandboxRuntimeSnapshot {
 pub struct SandboxRepairRequest {
     pub context: MutationContext,
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum SandboxBootstrapPhase {
+    NotStarted,
+    StagingRuntime,
+    InstallingProfile,
+    Attesting,
+    Ready,
+    RepairRequired,
+    Failed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct SandboxBootstrapState {
+    pub phase: SandboxBootstrapPhase,
+    pub runtime_root: String,
+    pub profile_sid: Option<String>,
+    pub snapshot: SandboxRuntimeSnapshot,
+    pub stable_error_code: Option<String>,
+}

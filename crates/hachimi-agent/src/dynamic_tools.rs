@@ -158,6 +158,7 @@ pub fn negotiate_provider_capabilities(
         http_transport: requested.http_transport && actual.http_transport,
         websocket_transport: requested.websocket_transport && actual.websocket_transport,
         remote_compaction: requested.remote_compaction && actual.remote_compaction,
+        embeddings: requested.embeddings && actual.embeddings,
         context_window: min_option(requested.context_window, actual.context_window),
         max_output_tokens: min_option(requested.max_output_tokens, actual.max_output_tokens),
     };
@@ -208,6 +209,7 @@ pub fn negotiate_provider_capabilities(
             requested.remote_compaction,
             negotiated.remote_compaction,
         ),
+        ("embeddings", requested.embeddings, negotiated.embeddings),
     ] {
         if wanted && !enabled {
             degradations.push(CapabilityDegradation {

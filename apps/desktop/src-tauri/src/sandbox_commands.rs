@@ -4,10 +4,10 @@ use std::sync::{
 };
 
 use hachimi_protocol::{
-    ControlMethod, McpServerTransport, MutationContext, SandboxRepairRequest,
-    SandboxRuntimeSnapshot,
+    ControlMethod, McpServerTransport, MutationContext, SandboxBootstrapState,
+    SandboxRepairRequest, SandboxRuntimeSnapshot,
 };
-use tauri::{State, WebviewWindow};
+use tauri::{AppHandle, Manager, State, WebviewWindow};
 
 use super::{CommandError, DesktopState, require_window};
 
@@ -126,6 +126,15 @@ pub(super) async fn get_sandbox_status(
 }
 
 #[tauri::command]
+pub(super) async fn get_sandbox_bootstrap_state(
+    window: WebviewWindow,
+    state: State<'_, DesktopState>,
+) -> Result<SandboxBootstrapState, CommandError> {
+    authorize(&window, &state)?;
+    Ok(state.sandbox_runtime.bootstrap_state())
+}
+
+#[tauri::command]
 pub(super) async fn refresh_sandbox_status(
     window: WebviewWindow,
     state: State<'_, DesktopState>,
@@ -135,7 +144,18 @@ pub(super) async fn refresh_sandbox_status(
 }
 
 #[tauri::command]
+pub(super) async fn attest_sandbox(
+    window: WebviewWindow,
+    state: State<'_, DesktopState>,
+) -> Result<SandboxBootstrapState, CommandError> {
+    authorize(&window, &state)?;
+    state.sandbox_runtime.refresh().await;
+    Ok(state.sandbox_runtime.bootstrap_state())
+}
+
+#[tauri::command]
 pub(super) async fn repair_sandbox(
+    app: AppHandle,
     window: WebviewWindow,
     state: State<'_, DesktopState>,
     request: SandboxRepairRequest,
@@ -168,6 +188,12 @@ pub(super) async fn repair_sandbox(
             "Sandbox activity started while repair was being prepared; stop it and retry",
         )
     })?;
+    let resource_root = app
+        .path()
+        .resource_dir()
+        .map_err(|error| CommandError::operation("sandbox_resource_lookup_failed", error))?;
+    crate::managed_sandbox_runtime::stage(&state.storage_layout.root, &resource_root)
+        .map_err(|error| CommandError::operation("sandbox_runtime_restage_failed", error))?;
     state
         .sandbox_runtime
         .repair()

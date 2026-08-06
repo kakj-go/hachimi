@@ -20,8 +20,8 @@ use hachimi_storage::StoredSkillRecord;
 
 use crate::{
     ENTRY_FILE, MAX_DEPTH, MAX_FILES, ScanBudget, SkillHost, SkillHostError, SkillRunSelection,
-    diagnostic, flatten_tree, hash_tree, now_ms, parse_frontmatter, reject_reparse,
-    reject_reparse_chain, scan_tree,
+    diagnostic, flatten_tree, hash_tree, now_ms, parse_frontmatter, parse_frontmatter_display_name,
+    reject_reparse, reject_reparse_chain, scan_tree,
 };
 
 const AGENTS_SKILLS_PATH: [&str; 2] = [".agents", "skills"];
@@ -63,6 +63,14 @@ pub struct SkillCatalogContext {
 }
 
 impl SkillHost {
+    #[must_use]
+    pub fn catalog_roots(&self) -> Vec<SkillCatalogRoot> {
+        self.catalog_roots
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
     /// Replaces app-owned Built-in/User-extra/System/Admin roots and invalidates
     /// the discovered-root snapshot. Missing roots are allowed and simply scan empty.
     pub fn set_catalog_roots(&self, roots: Vec<SkillCatalogRoot>) -> Result<(), SkillHostError> {
@@ -74,6 +82,12 @@ impl SkillHost {
                 ));
             }
         }
+        let mut discovered = BTreeSet::from([self.root.clone()]);
+        for root in &roots {
+            if let Some(canonical) = canonical_root_if_directory(&root.path)? {
+                discovered.insert(canonical);
+            }
+        }
         *self
             .catalog_roots
             .write()
@@ -81,8 +95,7 @@ impl SkillHost {
         *self
             .discovered_roots
             .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) =
-            BTreeSet::from([self.root.clone()]);
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = discovered;
         Ok(())
     }
 
@@ -318,8 +331,11 @@ impl SkillHost {
         }
         let (dependencies, dependency_diagnostics) = read_dependencies(skill_dir)?;
         diagnostics.extend(dependency_diagnostics);
-        let (interface, policy, metadata_diagnostics) =
+        let (mut interface, policy, metadata_diagnostics) =
             crate::metadata::read_interface_and_policy(skill_dir)?;
+        if let Some(display_name) = parse_frontmatter_display_name(&entry) {
+            interface.get_or_insert_default().display_name = Some(display_name);
+        }
         diagnostics.extend(metadata_diagnostics);
         let tree = scan_tree(skill_dir, skill_dir, 0, &mut ScanBudget::default())?;
         let mut index = Vec::new();
@@ -781,6 +797,48 @@ mod tests {
                 .await,
             Err(SkillHostError::NotFound(_))
         ));
+    }
+
+    #[tokio::test]
+    async fn static_skill_resources_remain_readable_before_the_first_post_restart_scan() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let store = AgentStore::connect_in_memory().await.expect("store");
+        let user_root = temp.path().join("user");
+        let builtin = temp.path().join("builtin");
+        write_skill(&builtin, "preview", "preview");
+        fs::write(
+            builtin.join("preview/reference.py"),
+            "print('restart-safe preview')\n",
+        )
+        .expect("preview resource");
+        let first = SkillHost::new(&user_root, store.clone()).expect("first host");
+        first
+            .set_catalog_roots(vec![SkillCatalogRoot::new(&builtin, SkillScope::BuiltIn)])
+            .expect("roots");
+        let skill = first
+            .list()
+            .await
+            .expect("initial scan")
+            .into_iter()
+            .next()
+            .expect("skill");
+
+        let restarted = SkillHost::new(&user_root, store).expect("restarted host");
+        restarted
+            .set_catalog_roots(vec![SkillCatalogRoot::new(&builtin, SkillScope::BuiltIn)])
+            .expect("roots");
+        let preview = restarted
+            .read_preview_resource(&hachimi_protocol::SkillPreviewResourceRequest {
+                skill_id: skill.id,
+                source_path: ENTRY_FILE.into(),
+                destination: "reference.py".into(),
+            })
+            .await
+            .expect("preview before list");
+        assert_eq!(
+            preview.text.as_deref(),
+            Some("print('restart-safe preview')\n")
+        );
     }
 
     #[cfg(windows)]

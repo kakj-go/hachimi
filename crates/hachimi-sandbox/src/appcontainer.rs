@@ -156,11 +156,14 @@ pub fn revoke_appcontainer_access(path: &Path) -> Result<(), String> {
     let sid = AppContainerSid::resolve()?.to_string_sid()?;
     let identity = format!("*{sid}");
     for mode in ["/remove:g", "/remove:d"] {
-        let status = std::process::Command::new("icacls.exe")
-            .arg(path)
-            .args([mode, identity.as_str(), "/Q"])
-            .status()
-            .map_err(|error| error.to_string())?;
+        let status = hachimi_process_policy::std_command(
+            "icacls.exe",
+            hachimi_process_policy::ProcessPolicy::HiddenCaptured,
+        )
+        .arg(path)
+        .args([mode, identity.as_str(), "/Q"])
+        .status()
+        .map_err(|error| error.to_string())?;
         if !status.success() {
             return Err(format!("icacls {mode} exited with {status}"));
         }
@@ -170,14 +173,17 @@ pub fn revoke_appcontainer_access(path: &Path) -> Result<(), String> {
 
 #[cfg(windows)]
 fn run_icacls<const N: usize>(path: &Path, arguments: [&str; N]) -> Result<(), String> {
-    let mut child = std::process::Command::new("icacls.exe")
-        .arg(path)
-        .args(arguments)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .map_err(|error| error.to_string())?;
+    let mut child = hachimi_process_policy::std_command(
+        "icacls.exe",
+        hachimi_process_policy::ProcessPolicy::HiddenCaptured,
+    )
+    .arg(path)
+    .args(arguments)
+    .stdin(std::process::Stdio::null())
+    .stdout(std::process::Stdio::null())
+    .stderr(std::process::Stdio::null())
+    .spawn()
+    .map_err(|error| error.to_string())?;
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
     loop {
         if let Some(status) = child.try_wait().map_err(|error| error.to_string())? {

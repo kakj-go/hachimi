@@ -1,0 +1,27 @@
+.runtime-health-banner {
+  width: 100%;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+}
+
+.runtime-health-banner > span {
+  min-width: 0;
+  display: grid;
+  gap: 3px;
+}
+
+.runtime-health-banner small {
+  color: inherit;
+  font-size: var(--font-size-xs);
+  line-height: 1.45;
+}
+
+@media (max-width: 620px) {
+  .runtime-health-banner {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+}

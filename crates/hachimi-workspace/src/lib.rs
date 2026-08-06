@@ -18,6 +18,9 @@ mod operation;
 mod patch;
 mod review_diff;
 mod watch;
+mod worker_io;
+
+use worker_io::*;
 
 pub use file_search::{SearchServerCommand, SearchServerRequest, run_search_server};
 pub use patch::{ApplyPatchPlan, WorkspacePatchChange, WorkspacePatchStatus, parse_apply_patch};
@@ -35,6 +38,7 @@ use std::{
 };
 
 use atomic_write_file::AtomicWriteFile;
+use hachimi_process_policy::ProcessPolicy;
 use hachimi_sandbox::{
     PathAccess, PathSecurityError, SandboxBackend, SandboxLaunchSpec, SandboxNetworkPolicy,
     resolve_checkout_path, validate_checkout_root,
@@ -158,6 +162,14 @@ pub enum WorkspaceOperation {
         author_email: String,
         history_limit: u16,
     },
+    GitRemotes,
+    GitPush {
+        remote_name: String,
+        expected_remote_url_hash: String,
+        source_ref: String,
+        target_ref: String,
+        expected_commit_oid: String,
+    },
     ReadGitBlob {
         path: String,
     },
@@ -208,6 +220,12 @@ pub enum WorkspaceOutput {
     },
     GitMutation {
         response: hachimi_protocol::GitMutationResponse,
+    },
+    GitRemotes {
+        remotes: Vec<hachimi_protocol::GitRemoteRecord>,
+    },
+    GitPush {
+        response: hachimi_protocol::GitPushResponse,
     },
     GitBlob {
         blob: GitBlob,
@@ -318,6 +336,9 @@ pub enum WorkspaceErrorCode {
     Unauthorized,
     StaleGeneration,
     PathOutsideCheckout,
+    UnsupportedWorkspaceRoot,
+    WorkspaceOwnershipMismatch,
+    ProtectedWorkspaceRoot,
     NotFound,
     NotText,
     TooLarge,
@@ -373,6 +394,9 @@ pub struct WorkspaceHostClient {
     sandbox_backend: Option<Arc<dyn SandboxBackend>>,
     sandbox_context: Option<WorkspaceSandboxContext>,
     launch_guard: Option<Arc<dyn WorkspaceLaunchGuard>>,
+    external_roots: Arc<Vec<PathBuf>>,
+    full_filesystem: bool,
+    interactive_external_access: bool,
 }
 
 impl std::fmt::Debug for WorkspaceHostClient {
@@ -401,6 +425,8 @@ pub struct WorkspaceLaunchCheck {
     pub run_id: hachimi_protocol::RunId,
     pub run_generation: u64,
     pub checkout_id: hachimi_protocol::CheckoutId,
+    pub workspace_root: PathBuf,
+    pub interactive_extension: bool,
     pub effect: hachimi_protocol::ToolEffect,
 }
 
@@ -430,7 +456,31 @@ impl WorkspaceHostClient {
             sandbox_backend: None,
             sandbox_context: None,
             launch_guard: None,
+            external_roots: Arc::new(Vec::new()),
+            full_filesystem: false,
+            interactive_external_access: false,
         }
+    }
+
+    #[must_use]
+    pub fn with_external_roots(mut self, mut roots: Vec<PathBuf>) -> Self {
+        roots.push(self.checkout_root.clone());
+        roots.sort();
+        roots.dedup();
+        self.external_roots = Arc::new(roots);
+        self
+    }
+
+    #[must_use]
+    pub const fn with_full_filesystem(mut self, enabled: bool) -> Self {
+        self.full_filesystem = enabled;
+        self
+    }
+
+    #[must_use]
+    pub const fn with_interactive_external_access(mut self, enabled: bool) -> Self {
+        self.interactive_external_access = enabled;
+        self
     }
 
     #[must_use]
@@ -753,6 +803,53 @@ impl WorkspaceHostClient {
         timeout: Duration,
         cancellation: CancellationToken,
     ) -> Result<WorkspaceOutput, WorkspaceError> {
+        if let Some(path) = operation_path(&operation)
+            && Path::new(path).is_absolute()
+        {
+            let target = PathBuf::from(path);
+            let explicit_root = self
+                .external_roots
+                .iter()
+                .filter(|root| path_within(root, &target))
+                .max_by_key(|root| root.components().count())
+                .cloned();
+            let interactive_extension = explicit_root.is_none()
+                && !self.full_filesystem
+                && self.interactive_external_access;
+            let root = explicit_root
+                .or_else(|| {
+                    (self.full_filesystem || interactive_extension)
+                        .then(|| full_access_root(&target))
+                })
+                .ok_or_else(|| {
+                    WorkspaceError::new(
+                        WorkspaceErrorCode::Unauthorized,
+                        "absolute path is not inside an authorized Workspace root",
+                    )
+                })?;
+            let relative = target
+                .strip_prefix(&root)
+                .map_err(|_| {
+                    WorkspaceError::new(
+                        WorkspaceErrorCode::Unauthorized,
+                        "absolute path could not be reduced to its authorized root",
+                    )
+                })?
+                .to_string_lossy()
+                .into_owned();
+            let operation = operation_with_path(operation, relative);
+            let scoped = self.scoped_root(root, interactive_extension);
+            return scoped.execute_inner(operation, timeout, cancellation).await;
+        }
+        self.execute_inner(operation, timeout, cancellation).await
+    }
+
+    async fn execute_inner(
+        &self,
+        operation: WorkspaceOperation,
+        timeout: Duration,
+        cancellation: CancellationToken,
+    ) -> Result<WorkspaceOutput, WorkspaceError> {
         if cancellation.is_cancelled() {
             return Err(WorkspaceError::new(
                 WorkspaceErrorCode::Cancelled,
@@ -863,6 +960,16 @@ impl WorkspaceHostClient {
         }
     }
 
+    fn scoped_root(&self, root: PathBuf, interactive_extension: bool) -> Self {
+        let mut scoped = self.clone();
+        scoped.checkout_id = format!("external-root:{}", root.to_string_lossy());
+        scoped.checkout_root = root;
+        scoped.external_roots = Arc::new(Vec::new());
+        scoped.full_filesystem = false;
+        scoped.interactive_external_access = interactive_extension;
+        scoped
+    }
+
     async fn execute_sandboxed(
         &self,
         operation: WorkspaceOperation,
@@ -894,6 +1001,8 @@ impl WorkspaceHostClient {
                 run_id: context.run_id.clone(),
                 run_generation: self.run_generation,
                 checkout_id: hachimi_protocol::CheckoutId::new(self.checkout_id.clone()),
+                workspace_root: self.checkout_root.clone(),
+                interactive_extension: self.interactive_external_access,
                 effect,
             })
             .await?;
@@ -936,13 +1045,26 @@ impl WorkspaceHostClient {
                 identity.file_index.to_string().into(),
             ]);
         }
+        let mut grants = context.grants.clone();
+        if self.interactive_external_access {
+            grants.file_system.push(hachimi_protocol::FileSystemGrant {
+                access: if effect == hachimi_protocol::ToolEffect::ReadOnly {
+                    hachimi_protocol::FileSystemAccess::Read
+                } else {
+                    hachimi_protocol::FileSystemAccess::Write
+                },
+                roots: vec![self.checkout_root.to_string_lossy().into_owned()],
+                globs: Vec::new(),
+                special_roots: Vec::new(),
+            });
+        }
         let spec = SandboxLaunchSpec {
             session_id: context.session_id.clone(),
             run_id: context.run_id.clone(),
             run_generation: self.run_generation,
             checkout_id: hachimi_protocol::CheckoutId::new(self.checkout_id.clone()),
             checkout_root: self.checkout_root.clone(),
-            grants: context.grants.clone(),
+            grants,
             required_effect: effect,
             executable: self.worker_program.clone(),
             args: worker_args,
@@ -1009,7 +1131,7 @@ impl WorkspaceHostClient {
         } else {
             Command::new(&self.worker_program)
         };
-        hide_background_window(&mut command);
+        ProcessPolicy::HiddenBackground.apply_tokio(&mut command);
         command.env_clear();
         copy_process_environment(&mut command);
         command
@@ -1024,17 +1146,6 @@ impl WorkspaceHostClient {
         })
     }
 }
-
-#[cfg(windows)]
-fn hide_background_window(command: &mut Command) {
-    use std::os::windows::process::CommandExt as _;
-
-    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-    command.as_std_mut().creation_flags(CREATE_NO_WINDOW);
-}
-
-#[cfg(not(windows))]
-fn hide_background_window(_command: &mut Command) {}
 
 #[derive(Debug)]
 struct RunTempDirectory {
@@ -1463,6 +1574,23 @@ impl WorkerContext {
                 self.git_create_empty_initial_commit(&author_name, &author_email, history_limit)
                     .await
             }
+            WorkspaceOperation::GitRemotes => self.git_remotes().await,
+            WorkspaceOperation::GitPush {
+                remote_name,
+                expected_remote_url_hash,
+                source_ref,
+                target_ref,
+                expected_commit_oid,
+            } => {
+                self.git_push(
+                    &remote_name,
+                    &expected_remote_url_hash,
+                    &source_ref,
+                    &target_ref,
+                    &expected_commit_oid,
+                )
+                .await
+            }
             WorkspaceOperation::ReadGitBlob { path } => self.read_git_blob(&path).await,
             WorkspaceOperation::Exec {
                 program,
@@ -1674,6 +1802,7 @@ impl WorkerContext {
         } else {
             std::ffi::OsString::from(program)
         });
+        ProcessPolicy::HiddenCaptured.apply_tokio(&mut command);
         command
             .args(args)
             .current_dir(restricted_process_cwd(cwd))
@@ -1710,204 +1839,69 @@ impl WorkerContext {
     }
 }
 
-struct SearchState<'a> {
-    root: &'a Path,
-    query: &'a str,
-    folded_query: Option<String>,
-    max_results: usize,
-    visited_files: usize,
-    matches: Vec<SearchMatch>,
-    truncated: bool,
+fn operation_path(operation: &WorkspaceOperation) -> Option<&str> {
+    match operation {
+        WorkspaceOperation::ReadFile { path }
+        | WorkspaceOperation::ListDirectory { path }
+        | WorkspaceOperation::ListDirectoryPage { path, .. }
+        | WorkspaceOperation::ReadFileChunk { path, .. }
+        | WorkspaceOperation::SearchText { path, .. }
+        | WorkspaceOperation::WriteFile { path, .. }
+        | WorkspaceOperation::ReplaceText { path, .. }
+        | WorkspaceOperation::GitDiffFileChunk { path, .. }
+        | WorkspaceOperation::ReadGitBlob { path } => Some(path),
+        WorkspaceOperation::Exec { cwd, .. } => Some(cwd),
+        _ => None,
+    }
 }
 
-fn search_path(path: &Path, state: &mut SearchState<'_>) -> Result<(), WorkspaceError> {
-    if state.matches.len() >= state.max_results || state.visited_files >= MAX_SEARCHED_FILES {
-        state.truncated = true;
-        return Ok(());
+fn operation_with_path(mut operation: WorkspaceOperation, relative: String) -> WorkspaceOperation {
+    match &mut operation {
+        WorkspaceOperation::ReadFile { path }
+        | WorkspaceOperation::ListDirectory { path }
+        | WorkspaceOperation::ListDirectoryPage { path, .. }
+        | WorkspaceOperation::ReadFileChunk { path, .. }
+        | WorkspaceOperation::SearchText { path, .. }
+        | WorkspaceOperation::WriteFile { path, .. }
+        | WorkspaceOperation::ReplaceText { path, .. }
+        | WorkspaceOperation::GitDiffFileChunk { path, .. }
+        | WorkspaceOperation::ReadGitBlob { path } => *path = relative,
+        WorkspaceOperation::Exec { cwd, .. } => *cwd = relative,
+        _ => {}
     }
-    let metadata = std::fs::symlink_metadata(path).map_err(io_error)?;
-    if metadata.file_type().is_symlink() {
-        return Ok(());
-    }
-    if metadata.is_dir() {
-        let mut entries = std::fs::read_dir(path)
-            .map_err(io_error)?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(io_error)?;
-        entries.sort_by_key(std::fs::DirEntry::file_name);
-        for entry in entries {
-            search_path(&entry.path(), state)?;
-            if state.truncated {
-                break;
+    operation
+}
+
+fn path_within(root: &Path, target: &Path) -> bool {
+    let root = root.components().collect::<Vec<_>>();
+    let target = target.components().collect::<Vec<_>>();
+    target.len() >= root.len()
+        && root.iter().zip(target.iter()).all(|(left, right)| {
+            #[cfg(windows)]
+            {
+                left.as_os_str()
+                    .to_string_lossy()
+                    .eq_ignore_ascii_case(&right.as_os_str().to_string_lossy())
             }
-        }
-        return Ok(());
-    }
-    if !metadata.is_file() || metadata.len() > MAX_TEXT_BYTES {
-        return Ok(());
-    }
-    state.visited_files += 1;
-    let mut bytes = Vec::with_capacity(usize::try_from(metadata.len()).unwrap_or_default());
-    std::fs::File::open(path)
-        .map_err(io_error)?
-        .read_to_end(&mut bytes)
-        .map_err(io_error)?;
-    let Ok(content) = String::from_utf8(bytes) else {
-        return Ok(());
-    };
-    for (index, line) in content.lines().enumerate() {
-        let matches = if let Some(query) = &state.folded_query {
-            line.to_lowercase().contains(query)
-        } else {
-            line.contains(state.query)
-        };
-        if matches {
-            state.matches.push(SearchMatch {
-                path: relative_display(state.root, path),
-                line: index + 1,
-                text: bounded(line, 500),
-            });
-            if state.matches.len() >= state.max_results {
-                state.truncated = true;
-                break;
+            #[cfg(not(windows))]
+            {
+                left == right
             }
-        }
-    }
-    Ok(())
-}
-
-fn read_bounded(path: &Path) -> Result<Vec<u8>, WorkspaceError> {
-    let metadata = std::fs::metadata(path).map_err(io_error)?;
-    if !metadata.is_file() {
-        return Err(WorkspaceError::new(
-            WorkspaceErrorCode::NotFound,
-            "workspace path is not a file",
-        ));
-    }
-    if metadata.len() > MAX_TEXT_BYTES {
-        return Err(WorkspaceError::new(
-            WorkspaceErrorCode::TooLarge,
-            "workspace file exceeds the 2 MiB text limit",
-        ));
-    }
-    let mut bytes = Vec::with_capacity(usize::try_from(metadata.len()).unwrap_or_default());
-    std::fs::File::open(path)
-        .map_err(io_error)?
-        .take(MAX_TEXT_BYTES + 1)
-        .read_to_end(&mut bytes)
-        .map_err(io_error)?;
-    if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > MAX_TEXT_BYTES {
-        return Err(WorkspaceError::new(
-            WorkspaceErrorCode::TooLarge,
-            "workspace file exceeds the 2 MiB text limit",
-        ));
-    }
-    Ok(bytes)
-}
-
-fn ensure_content_size(content: &str) -> Result<(), WorkspaceError> {
-    if u64::try_from(content.len()).unwrap_or(u64::MAX) > MAX_TEXT_BYTES {
-        return Err(WorkspaceError::new(
-            WorkspaceErrorCode::TooLarge,
-            "workspace content exceeds the 2 MiB text limit",
-        ));
-    }
-    Ok(())
-}
-
-fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), WorkspaceError> {
-    let mut file = AtomicWriteFile::open(path).map_err(io_error)?;
-    file.write_all(bytes).map_err(io_error)?;
-    file.commit().map_err(io_error)
-}
-
-fn write_output(root: &Path, path: &Path, bytes: &[u8], replacements: usize) -> WorkspaceOutput {
-    WorkspaceOutput::Write {
-        path: relative_display(root, path),
-        sha256: sha256(bytes),
-        byte_size: u64::try_from(bytes.len()).unwrap_or(u64::MAX),
-        replacements,
-    }
-}
-
-fn sha256(bytes: &[u8]) -> String {
-    Sha256::digest(bytes)
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
-}
-
-fn constant_time_eq(left: &str, right: &str) -> bool {
-    if left.len() != right.len() {
-        return false;
-    }
-    left.as_bytes()
-        .iter()
-        .zip(right.as_bytes())
-        .fold(0_u8, |difference, (left, right)| {
-            difference | (left ^ right)
         })
-        == 0
 }
 
-fn relative_display(root: &Path, path: &Path) -> String {
-    path.strip_prefix(root)
-        .unwrap_or(path)
-        .to_string_lossy()
-        .replace('\\', "/")
-}
-
-fn io_error(error: std::io::Error) -> WorkspaceError {
-    WorkspaceError::new(WorkspaceErrorCode::Io, error.to_string())
-}
-
-fn path_security_error(error: PathSecurityError) -> WorkspaceError {
-    match error {
-        PathSecurityError::NotFound => {
-            WorkspaceError::new(WorkspaceErrorCode::NotFound, error.to_string())
-        }
-        PathSecurityError::Io(error) => io_error(error),
-        PathSecurityError::UnsupportedRoot
-        | PathSecurityError::EscapesCheckout
-        | PathSecurityError::UnsupportedPathForm
-        | PathSecurityError::ReservedDeviceName
-        | PathSecurityError::ReparsePoint
-        | PathSecurityError::HardLink => {
-            WorkspaceError::new(WorkspaceErrorCode::PathOutsideCheckout, error.to_string())
-        }
+fn full_access_root(target: &Path) -> PathBuf {
+    if target.is_dir() {
+        return target.to_path_buf();
     }
-}
-
-fn bounded(value: &str, max_chars: usize) -> String {
-    value.chars().take(max_chars).collect()
-}
-
-fn bounded_bytes(bytes: &[u8]) -> (String, bool) {
-    let truncated = bytes.len() > MAX_PROCESS_OUTPUT_BYTES;
-    let bytes = &bytes[..bytes.len().min(MAX_PROCESS_OUTPUT_BYTES)];
-    (String::from_utf8_lossy(bytes).into_owned(), truncated)
-}
-
-fn copy_process_environment(command: &mut Command) {
-    const ALLOWED: &[&str] = &[
-        "PATH",
-        "PATHEXT",
-        "SYSTEMROOT",
-        "WINDIR",
-        "TEMP",
-        "TMP",
-        "USERPROFILE",
-        "LOCALAPPDATA",
-        "APPDATA",
-        "CARGO_HOME",
-        "RUSTUP_HOME",
-    ];
-    for key in ALLOWED {
-        if let Some(value) = std::env::var_os(key) {
-            command.env(OsStr::new(key), value);
-        }
+    let mut candidate = target.parent().unwrap_or(target);
+    while !candidate.is_dir() {
+        let Some(parent) = candidate.parent() else {
+            break;
+        };
+        candidate = parent;
     }
-    configure_restricted_git_environment(command);
+    candidate.to_path_buf()
 }
 
 #[cfg(test)]

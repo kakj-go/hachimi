@@ -1,0 +1,3 @@
+ALTER TABLE channel_provider_runtime_health ADD COLUMN last_handshake_at_ms INTEGER;
+ALTER TABLE channel_provider_runtime_health ADD COLUMN last_frame_at_ms INTEGER;
+ALTER TABLE channel_provider_runtime_health ADD COLUMN last_error_code TEXT;

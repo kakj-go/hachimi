@@ -4,9 +4,15 @@
 // @ 4c43465133428898aa84f0bfc02c306ed65fb66a.
 // Modified for Hachimi: Checkout-bound Git baselines and byte-bounded per-file Diff reads.
 
-use std::{fs::File, io::Read, process::Stdio, time::UNIX_EPOCH};
+use std::{
+    fs::File,
+    io::{Read, Seek, SeekFrom},
+    process::Stdio,
+    time::UNIX_EPOCH,
+};
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
+use hachimi_process_policy::{ProcessPolicy, tokio_command};
 use hachimi_protocol::{
     DiffHunk, DiffLine, DiffReadFileResponse, DiffScope, FileDiffStatus, FileDiffSummary,
     RunDiffSnapshot,
@@ -142,7 +148,7 @@ impl WorkerContext {
     }
 
     async fn git_output(&self, arguments: &[&str]) -> Result<Vec<u8>, WorkspaceError> {
-        let mut command = Command::new(crate::git_program());
+        let mut command = tokio_command(crate::git_program(), ProcessPolicy::HiddenCaptured);
         command
             .args(arguments)
             .current_dir(crate::restricted_process_cwd(&self.root))
@@ -174,7 +180,7 @@ impl WorkerContext {
         scope: DiffScope,
         base_revision: Option<&str>,
     ) -> Result<WorkspaceOutput, WorkspaceError> {
-        let mut command = Command::new(crate::git_program());
+        let mut command = tokio_command(crate::git_program(), ProcessPolicy::HiddenCaptured);
         command
             .args([
                 "diff",
@@ -217,10 +223,18 @@ impl WorkerContext {
                     .collect::<String>(),
             ));
         }
-        let truncated = output.stdout.len() > MAX_DIFF_BYTES;
+        let mut truncated = output.stdout.len() > MAX_DIFF_BYTES;
         let bytes = &output.stdout[..output.stdout.len().min(MAX_DIFF_BYTES)];
         let text = String::from_utf8_lossy(bytes);
-        let files = parse_unified_diff(&text, truncated);
+        let mut files = parse_unified_diff(&text, truncated);
+        if !matches!(&scope, DiffScope::Branch { .. }) {
+            let mut inline_budget = MAX_DIFF_BYTES.saturating_sub(bytes.len());
+            for path in self.untracked_paths().await? {
+                let summary = summarize_untracked(&self.root, &path, &mut inline_budget)?;
+                truncated |= summary.too_large;
+                files.push(summary);
+            }
+        }
         Ok(WorkspaceOutput::Diff {
             snapshot: RunDiffSnapshot {
                 scope,
@@ -241,11 +255,16 @@ impl WorkerContext {
         limit: u32,
         if_match: Option<&str>,
     ) -> Result<WorkspaceOutput, WorkspaceError> {
-        let DiffScope::Checkout { checkout_id } = &scope else {
-            return Err(WorkspaceError::new(
-                WorkspaceErrorCode::InvalidRequest,
-                "Workspace Host can only materialize Checkout Diff files",
-            ));
+        let checkout_id = match &scope {
+            DiffScope::Checkout { checkout_id }
+            | DiffScope::Session { checkout_id, .. }
+            | DiffScope::Branch { checkout_id, .. } => checkout_id,
+            DiffScope::Run { .. } => {
+                return Err(WorkspaceError::new(
+                    WorkspaceErrorCode::InvalidRequest,
+                    "Workspace Host cannot materialize Run Diff files",
+                ));
+            }
         };
         if checkout_id.as_str() != self.checkout_id {
             return Err(WorkspaceError::new(
@@ -261,6 +280,12 @@ impl WorkerContext {
         } else {
             limit.clamp(1, MAX_DIFF_CHUNK_BYTES)
         };
+
+        if !matches!(&scope, DiffScope::Branch { .. }) && self.is_untracked(&relative).await? {
+            let chunk =
+                untracked_diff_file_chunk(scope, &resolved, &relative, offset, limit, if_match)?;
+            return Ok(WorkspaceOutput::DiffFileChunk { chunk });
+        }
 
         let mut command = self.git_diff_command(base_revision);
         command.arg("--").arg(&relative);
@@ -361,7 +386,7 @@ impl WorkerContext {
     }
 
     fn git_diff_command(&self, base_revision: Option<&str>) -> Command {
-        let mut command = Command::new(crate::git_program());
+        let mut command = tokio_command(crate::git_program(), ProcessPolicy::HiddenCaptured);
         command
             .args([
                 "diff",
@@ -383,6 +408,281 @@ impl WorkerContext {
             command.arg(base_revision);
         }
         command
+    }
+
+    async fn untracked_paths(&self) -> Result<Vec<String>, WorkspaceError> {
+        let output = self
+            .git_output(&["ls-files", "--others", "--exclude-standard", "-z"])
+            .await?;
+        output
+            .split(|byte| *byte == 0)
+            .filter(|path| !path.is_empty())
+            .map(|path| {
+                String::from_utf8(path.to_vec()).map_err(|_| {
+                    WorkspaceError::new(
+                        WorkspaceErrorCode::NotText,
+                        "Git untracked path is not valid UTF-8",
+                    )
+                })
+            })
+            .collect()
+    }
+
+    async fn is_untracked(&self, path: &str) -> Result<bool, WorkspaceError> {
+        let output = self
+            .git_output(&[
+                "ls-files",
+                "--others",
+                "--exclude-standard",
+                "-z",
+                "--",
+                path,
+            ])
+            .await?;
+        Ok(output
+            .split(|byte| *byte == 0)
+            .any(|candidate| candidate == path.as_bytes()))
+    }
+}
+
+fn summarize_untracked(
+    root: &std::path::Path,
+    path: &str,
+    inline_budget: &mut usize,
+) -> Result<FileDiffSummary, WorkspaceError> {
+    let resolved = root.join(path);
+    let fingerprint = fingerprint_path(&resolved)?.ok_or_else(|| {
+        WorkspaceError::new(
+            WorkspaceErrorCode::NotFound,
+            "untracked file disappeared while building Diff",
+        )
+    })?;
+    if fingerprint.kind != "file" && fingerprint.kind != "symlink" {
+        return Ok(FileDiffSummary {
+            path: path.to_owned(),
+            previous_path: None,
+            status: FileDiffStatus::Added,
+            additions: 0,
+            deletions: 0,
+            binary: false,
+            too_large: false,
+            hunks: Vec::new(),
+        });
+    }
+    if fingerprint.binary {
+        return Ok(FileDiffSummary {
+            path: path.to_owned(),
+            previous_path: None,
+            status: FileDiffStatus::Binary,
+            additions: 0,
+            deletions: 0,
+            binary: true,
+            too_large: false,
+            hunks: Vec::new(),
+        });
+    }
+    let byte_size = usize::try_from(fingerprint.size).unwrap_or(usize::MAX);
+    if byte_size > *inline_budget {
+        return Ok(FileDiffSummary {
+            path: path.to_owned(),
+            previous_path: None,
+            status: FileDiffStatus::Added,
+            additions: 0,
+            deletions: 0,
+            binary: false,
+            too_large: true,
+            hunks: Vec::new(),
+        });
+    }
+    let bytes = if fingerprint.kind == "symlink" {
+        std::fs::read_link(&resolved)
+            .map_err(crate::io_error)?
+            .to_string_lossy()
+            .into_owned()
+            .into_bytes()
+    } else {
+        std::fs::read(&resolved).map_err(crate::io_error)?
+    };
+    *inline_budget = (*inline_budget).saturating_sub(bytes.len());
+    let text = std::str::from_utf8(&bytes).map_err(|_| {
+        WorkspaceError::new(
+            WorkspaceErrorCode::NotText,
+            "untracked file changed to binary while building Diff",
+        )
+    })?;
+    let lines = text
+        .lines()
+        .enumerate()
+        .map(|(index, text)| DiffLine {
+            kind: "addition".into(),
+            old_line: None,
+            new_line: Some(u32::try_from(index + 1).unwrap_or(u32::MAX)),
+            text: text.to_owned(),
+        })
+        .collect::<Vec<_>>();
+    let additions = u32::try_from(lines.len()).unwrap_or(u32::MAX);
+    let hunks = (!lines.is_empty())
+        .then(|| DiffHunk {
+            header: format!("@@ -0,0 +1,{additions} @@"),
+            lines,
+        })
+        .into_iter()
+        .collect();
+    Ok(FileDiffSummary {
+        path: path.to_owned(),
+        previous_path: None,
+        status: FileDiffStatus::Added,
+        additions,
+        deletions: 0,
+        binary: false,
+        too_large: false,
+        hunks,
+    })
+}
+
+fn untracked_diff_file_chunk(
+    scope: DiffScope,
+    resolved: &std::path::Path,
+    relative: &str,
+    offset: u64,
+    limit: u32,
+    if_match: Option<&str>,
+) -> Result<DiffReadFileResponse, WorkspaceError> {
+    let fingerprint = fingerprint_path(resolved)?.ok_or_else(|| {
+        WorkspaceError::new(
+            WorkspaceErrorCode::NotFound,
+            "untracked file no longer exists",
+        )
+    })?;
+    if fingerprint.binary || (fingerprint.kind != "file" && fingerprint.kind != "symlink") {
+        return Err(WorkspaceError::new(
+            WorkspaceErrorCode::NotText,
+            "untracked Diff is not a regular text file",
+        ));
+    }
+    let mut accumulator = DiffChunkAccumulator::new(offset, limit);
+    accumulator.feed(
+        format!(
+            "diff --git a/{relative} b/{relative}\nnew file mode {}\n--- /dev/null\n+++ b/{relative}\n@@ -0,0 +1 @@\n",
+            fingerprint.mode
+        )
+        .as_bytes(),
+    );
+    if fingerprint.kind == "symlink" {
+        let bytes = std::fs::read_link(resolved)
+            .map_err(crate::io_error)?
+            .to_string_lossy()
+            .into_owned()
+            .into_bytes();
+        feed_added_text(&mut accumulator, &bytes);
+    } else {
+        let mut file = File::open(resolved).map_err(crate::io_error)?;
+        file.seek(SeekFrom::Start(0)).map_err(crate::io_error)?;
+        let mut buffer = [0_u8; 64 * 1024];
+        let mut line_start = true;
+        loop {
+            let read = file.read(&mut buffer).map_err(crate::io_error)?;
+            if read == 0 {
+                break;
+            }
+            feed_added_bytes(&mut accumulator, &buffer[..read], &mut line_start);
+        }
+    }
+    accumulator.finish(scope, relative, if_match)
+}
+
+fn feed_added_text(accumulator: &mut DiffChunkAccumulator, bytes: &[u8]) {
+    let mut line_start = true;
+    feed_added_bytes(accumulator, bytes, &mut line_start);
+}
+
+fn feed_added_bytes(accumulator: &mut DiffChunkAccumulator, bytes: &[u8], line_start: &mut bool) {
+    let mut start = 0;
+    while start < bytes.len() {
+        if *line_start {
+            accumulator.feed(b"+");
+            *line_start = false;
+        }
+        let end = bytes[start..]
+            .iter()
+            .position(|byte| *byte == b'\n')
+            .map_or(bytes.len(), |position| start + position + 1);
+        accumulator.feed(&bytes[start..end]);
+        if end > start && bytes[end - 1] == b'\n' {
+            *line_start = true;
+        }
+        start = end;
+    }
+}
+
+struct DiffChunkAccumulator {
+    offset: u64,
+    requested_end: u64,
+    total: u64,
+    digest: Sha256,
+    bytes: Vec<u8>,
+}
+
+impl DiffChunkAccumulator {
+    fn new(offset: u64, limit: u32) -> Self {
+        Self {
+            offset,
+            requested_end: offset.saturating_add(u64::from(limit)),
+            total: 0,
+            digest: Sha256::new(),
+            bytes: Vec::with_capacity(usize::try_from(limit).unwrap_or_default()),
+        }
+    }
+
+    fn feed(&mut self, bytes: &[u8]) {
+        self.digest.update(bytes);
+        let start = self.total;
+        let end = start.saturating_add(u64::try_from(bytes.len()).unwrap_or(u64::MAX));
+        if end > self.offset && start < self.requested_end {
+            let local_start =
+                usize::try_from(self.offset.saturating_sub(start)).unwrap_or_default();
+            let local_end = usize::try_from(self.requested_end.min(end).saturating_sub(start))
+                .unwrap_or(bytes.len())
+                .min(bytes.len());
+            self.bytes
+                .extend_from_slice(&bytes[local_start.min(bytes.len())..local_end]);
+        }
+        self.total = end;
+    }
+
+    fn finish(
+        self,
+        scope: DiffScope,
+        path: &str,
+        if_match: Option<&str>,
+    ) -> Result<DiffReadFileResponse, WorkspaceError> {
+        if self.offset > self.total {
+            return Err(WorkspaceError::new(
+                WorkspaceErrorCode::InvalidRequest,
+                "Diff chunk offset exceeds the file Diff size",
+            ));
+        }
+        let etag = format!("sha256:{}", encode_hex(&self.digest.finalize()));
+        if if_match.is_some_and(|expected| expected != etag) {
+            return Err(WorkspaceError::new(
+                WorkspaceErrorCode::Conflict,
+                "file Diff changed while it was being read",
+            ));
+        }
+        let next_offset = self
+            .offset
+            .saturating_add(u64::try_from(self.bytes.len()).unwrap_or(u64::MAX));
+        Ok(DiffReadFileResponse {
+            scope,
+            path: path.to_owned(),
+            offset: self.offset,
+            next_offset,
+            byte_size: self.total,
+            eof: next_offset >= self.total,
+            data_base64: STANDARD.encode(&self.bytes),
+            utf8_text: String::from_utf8(self.bytes).ok(),
+            etag,
+        })
     }
 }
 
@@ -609,6 +909,8 @@ fn now_ms() -> i64 {
 
 #[cfg(test)]
 mod tests {
+    use std::process::Command as StdCommand;
+
     use super::*;
 
     #[test]
@@ -621,5 +923,119 @@ mod tests {
         assert_eq!(files[0].additions, 1);
         assert_eq!(files[0].deletions, 1);
         assert_eq!(files[0].hunks.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn branch_scope_diff_uses_the_selected_merge_base() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let git = |arguments: &[&str]| {
+            let output = StdCommand::new("git")
+                .arg("-C")
+                .arg(directory.path())
+                .args(arguments)
+                .output()
+                .expect("git");
+            assert!(
+                output.status.success(),
+                "git failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        git(&["init", "-b", "main"]);
+        git(&["config", "user.email", "test@example.com"]);
+        git(&["config", "user.name", "Hachimi Test"]);
+        std::fs::write(directory.path().join("base.txt"), "base\n").expect("base");
+        git(&["add", "base.txt"]);
+        git(&["commit", "-m", "base"]);
+        git(&["checkout", "-b", "feature"]);
+        std::fs::write(directory.path().join("feature.txt"), "feature\n").expect("feature");
+        git(&["add", "feature.txt"]);
+        git(&["commit", "-m", "feature"]);
+        git(&["checkout", "main"]);
+        std::fs::write(directory.path().join("main.txt"), "main\n").expect("main");
+        git(&["add", "main.txt"]);
+        git(&["commit", "-m", "main"]);
+
+        let worker =
+            WorkerContext::new(directory.path(), "checkout", 1, "token").expect("worker context");
+        let scope = DiffScope::Branch {
+            checkout_id: hachimi_protocol::CheckoutId::new("checkout"),
+            branch: "feature".into(),
+        };
+        let output = worker
+            .git_diff_structured(scope.clone(), Some("feature...HEAD"))
+            .await
+            .expect("branch diff");
+        let WorkspaceOutput::Diff { snapshot } = output else {
+            panic!("expected Diff output");
+        };
+        assert_eq!(snapshot.scope, scope);
+        assert!(snapshot.files.iter().any(|file| file.path == "main.txt"));
+        assert!(!snapshot.files.iter().any(|file| file.path == "feature.txt"));
+    }
+
+    #[tokio::test]
+    async fn checkout_diff_includes_untracked_text_and_binary_files() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let git = |arguments: &[&str]| {
+            let output = StdCommand::new("git")
+                .arg("-C")
+                .arg(directory.path())
+                .args(arguments)
+                .output()
+                .expect("git");
+            assert!(
+                output.status.success(),
+                "git failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        git(&["init", "-b", "main"]);
+        git(&["config", "user.email", "test@example.com"]);
+        git(&["config", "user.name", "Hachimi Test"]);
+        std::fs::write(directory.path().join("tracked.txt"), "tracked\n").expect("tracked");
+        git(&["add", "tracked.txt"]);
+        git(&["commit", "-m", "base"]);
+        std::fs::write(directory.path().join("notes.txt"), "first\nsecond\n").expect("notes");
+        std::fs::write(directory.path().join("asset.bin"), [0_u8, 1, 2]).expect("binary");
+
+        let worker =
+            WorkerContext::new(directory.path(), "checkout", 1, "token").expect("worker context");
+        let scope = DiffScope::Checkout {
+            checkout_id: hachimi_protocol::CheckoutId::new("checkout"),
+        };
+        let output = worker
+            .git_diff_structured(scope.clone(), Some("HEAD"))
+            .await
+            .expect("checkout diff");
+        let WorkspaceOutput::Diff { snapshot } = output else {
+            panic!("expected Diff output");
+        };
+        let text = snapshot
+            .files
+            .iter()
+            .find(|file| file.path == "notes.txt")
+            .expect("text summary");
+        assert_eq!(text.status, FileDiffStatus::Added);
+        assert_eq!(text.additions, 2);
+        assert_eq!(text.hunks[0].lines[1].text, "second");
+        let binary = snapshot
+            .files
+            .iter()
+            .find(|file| file.path == "asset.bin")
+            .expect("binary summary");
+        assert!(binary.binary);
+        assert_eq!(binary.status, FileDiffStatus::Binary);
+
+        let output = worker
+            .git_diff_file_chunk(scope.clone(), "notes.txt", Some("HEAD"), 0, 1024, None)
+            .await
+            .expect("untracked file Diff");
+        let WorkspaceOutput::DiffFileChunk { chunk } = output else {
+            panic!("expected Diff chunk");
+        };
+        assert_eq!(chunk.scope, scope);
+        assert!(chunk.eof);
+        assert!(chunk.utf8_text.expect("text Diff").contains("+second"));
     }
 }

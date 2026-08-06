@@ -42,6 +42,9 @@ export interface TextFieldProps {
   type?: JSX.InputHTMLAttributes<HTMLInputElement>["type"];
   maxLength?: number;
   autofocus?: boolean;
+  ref?: (element: HTMLInputElement) => void;
+  onFocus?: JSX.EventHandler<HTMLInputElement, FocusEvent>;
+  onBlur?: JSX.EventHandler<HTMLInputElement, FocusEvent>;
   onInput?: JSX.EventHandler<HTMLInputElement, InputEvent>;
   onKeyDown?: JSX.EventHandler<HTMLInputElement, KeyboardEvent>;
 }
@@ -72,6 +75,7 @@ export function TextField(props: TextFieldProps) {
         {props.label}
       </KTextField.Label>
       <KTextField.Input
+        ref={props.ref}
         class="ui-input"
         data-component="text-field-input"
         data-variant={props.variant ?? "default"}
@@ -95,6 +99,8 @@ export function TextField(props: TextFieldProps) {
         maxLength={props.maxLength}
         autofocus={props.autofocus}
         placeholder={props.placeholder ?? ""}
+        onFocus={props.onFocus}
+        onBlur={props.onBlur}
         onInput={props.onInput ?? (() => undefined)}
         onKeyDown={props.onKeyDown}
       />
@@ -152,6 +158,7 @@ export function FormField(props: FormFieldProps) {
 export interface SwitchProps {
   checked: boolean;
   label: string;
+  testId?: string;
   disabled?: boolean;
   loading?: boolean;
   size?: ControlSize;
@@ -169,6 +176,7 @@ export function Switch(props: SwitchProps) {
       disabled={Boolean(props.disabled || props.loading)}
       onChange={props.onChange ?? (() => undefined)}
       data-component="switch-root"
+      data-testid={props.testId}
       data-variant={props.variant ?? "default"}
       data-size={props.size ?? "normal"}
       data-tone={props.tone ?? "neutral"}
@@ -325,92 +333,98 @@ export function SelectField(props: SelectFieldProps) {
   const selected = createMemo(
     () => options().find((option) => option.value === props.value) ?? null,
   );
+  const state = () =>
+    props.loading
+      ? "loading"
+      : props.disabled
+        ? "disabled"
+        : props.invalid || props.error
+          ? "invalid"
+          : "idle";
   return (
-    <KSelect.Root<ResolvedSelectOption>
+    <div
       class="ui-select field-stack"
       data-component="select"
       data-variant={props.variant ?? "default"}
       data-size={props.size ?? "normal"}
       data-tone={props.tone ?? "neutral"}
       data-density={props.density}
-      data-state={
-        props.loading
-          ? "loading"
-          : props.disabled
-            ? "disabled"
-            : props.invalid || props.error
-              ? "invalid"
-              : "idle"
-      }
+      data-state={state()}
       data-invalid={props.invalid || Boolean(props.error)}
-      options={options()}
-      optionValue="key"
-      optionTextValue="label"
-      optionDisabled="disabled"
-      multiple={false}
-      value={selected()}
-      placeholder={props.placeholder ?? ""}
-      disabled={Boolean(props.disabled || props.loading)}
-      onChange={(option) => {
-        if (option && option.value !== props.value) props.onChange?.(option.value);
-      }}
-      itemComponent={(itemProps) => (
-        <KSelect.Item item={itemProps.item} class="ui-select-option" data-component="select-item">
-          <span data-component="select-item-main">
-            <SelectPreview option={itemProps.item.rawValue} />
-            <span data-component="select-item-copy">
-              <KSelect.ItemLabel>{itemProps.item.rawValue.label}</KSelect.ItemLabel>
-              <Show when={itemProps.item.rawValue.description}>
-                <span>{itemProps.item.rawValue.description}</span>
-              </Show>
-            </span>
-          </span>
-          <KSelect.ItemIndicator data-component="select-indicator">
-            <Check size={14} />
-          </KSelect.ItemIndicator>
-        </KSelect.Item>
-      )}
     >
-      <KSelect.Label class="field-label" data-component="form-label">
-        {props.label}
-      </KSelect.Label>
-      <KSelect.Trigger
-        class="ui-select-trigger"
-        classList={{ invalid: props.invalid || Boolean(props.error) }}
-        data-component="select-trigger"
-        data-value={props.value}
-        data-testid={props.testId}
-        aria-invalid={props.invalid || Boolean(props.error)}
-        aria-busy={props.loading || undefined}
-      >
-        <KSelect.Value<ResolvedSelectOption>>
-          {(state) => (
-            <span data-component="select-value">
-              <SelectPreview option={state.selectedOption()} />
-              <span>{state.selectedOption().label}</span>
+      <KSelect.Root<ResolvedSelectOption>
+        class="ui-select-control"
+        style={{ width: "100%", "min-width": "0", "max-width": "100%" }}
+        options={options()}
+        optionValue="key"
+        optionTextValue="label"
+        optionDisabled="disabled"
+        multiple={false}
+        value={selected()}
+        placeholder={props.placeholder ?? ""}
+        disabled={Boolean(props.disabled || props.loading)}
+        onChange={(option) => {
+          if (option && option.value !== props.value) props.onChange?.(option.value);
+        }}
+        itemComponent={(itemProps) => (
+          <KSelect.Item item={itemProps.item} class="ui-select-option" data-component="select-item">
+            <span data-component="select-item-main">
+              <SelectPreview option={itemProps.item.rawValue} />
+              <span data-component="select-item-copy">
+                <KSelect.ItemLabel>{itemProps.item.rawValue.label}</KSelect.ItemLabel>
+                <Show when={itemProps.item.rawValue.description}>
+                  <span>{itemProps.item.rawValue.description}</span>
+                </Show>
+              </span>
             </span>
-          )}
-        </KSelect.Value>
-        <KSelect.Icon data-component="select-icon">
-          <ChevronDown size={15} />
-        </KSelect.Icon>
-      </KSelect.Trigger>
-      <Show when={props.description && !props.error}>
-        <KSelect.Description data-component="field-description">
-          {props.description}
-        </KSelect.Description>
-      </Show>
-      <Show when={props.error}>
-        <span class="field-error" data-component="field-error">
-          {props.error}
-        </span>
-      </Show>
-      <KSelect.Portal>
-        <KSelect.Content class="ui-select-popover" data-component="select-content">
-          <KSelect.Listbox data-component="select-listbox" />
-        </KSelect.Content>
-      </KSelect.Portal>
-    </KSelect.Root>
+            <KSelect.ItemIndicator data-component="select-indicator">
+              <Check size={14} />
+            </KSelect.ItemIndicator>
+          </KSelect.Item>
+        )}
+      >
+        <KSelect.Label class="field-label" data-component="form-label">
+          {props.label}
+        </KSelect.Label>
+        <KSelect.Trigger
+          class="ui-select-trigger"
+          classList={{ invalid: props.invalid || Boolean(props.error) }}
+          style={{ width: "100%", "min-width": "0", "max-width": "100%" }}
+          data-component="select-trigger"
+          data-value={props.value}
+          data-testid={props.testId}
+          aria-invalid={props.invalid || Boolean(props.error)}
+          aria-busy={props.loading || undefined}
+        >
+          <KSelect.Value<ResolvedSelectOption>>
+            {(selectState) => (
+              <span data-component="select-value">
+                <SelectPreview option={selectState.selectedOption()} />
+                <span>{selectState.selectedOption().label}</span>
+              </span>
+            )}
+          </KSelect.Value>
+          <KSelect.Icon data-component="select-icon">
+            <ChevronDown size={15} />
+          </KSelect.Icon>
+        </KSelect.Trigger>
+        <Show when={props.description && !props.error}>
+          <KSelect.Description data-component="field-description">
+            {props.description}
+          </KSelect.Description>
+        </Show>
+        <Show when={props.error}>
+          <span class="field-error" data-component="field-error">
+            {props.error}
+          </span>
+        </Show>
+        <KSelect.Portal>
+          <KSelect.Content class="ui-select-popover" data-component="select-content">
+            <KSelect.Listbox data-component="select-listbox" />
+          </KSelect.Content>
+        </KSelect.Portal>
+      </KSelect.Root>
+    </div>
   );
 }
 
@@ -601,6 +615,7 @@ export interface SegmentOption<T extends string> {
 
 export function SegmentedControl<T extends string>(props: {
   label: string;
+  testId?: string;
   value: T;
   options: readonly SegmentOption<T>[];
   disabled?: boolean;
@@ -616,6 +631,7 @@ export function SegmentedControl<T extends string>(props: {
     <div
       class="ui-segmented"
       data-component="segmented-control"
+      data-testid={props.testId}
       data-variant={props.variant ?? "default"}
       data-size={props.size ?? "normal"}
       data-tone={props.tone ?? "neutral"}
@@ -632,6 +648,7 @@ export function SegmentedControl<T extends string>(props: {
             classList={{ selected: props.value === option.value }}
             type="button"
             aria-pressed={props.value === option.value}
+            data-testid={props.testId ? `${props.testId}-${option.value}` : undefined}
             disabled={props.disabled || props.loading}
             onClick={() => props.onChange?.(option.value)}
           >

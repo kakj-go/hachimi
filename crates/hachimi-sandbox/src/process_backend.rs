@@ -6,6 +6,7 @@
 
 use std::{ffi::OsString, future::Future, path::PathBuf, pin::Pin, process::Stdio, time::Duration};
 
+use hachimi_process_policy::ProcessPolicy;
 use hachimi_protocol::{
     CapabilityGrantSet, CheckoutId, FileSystemAccess, PermissionGrantScope, RunId, SessionId,
     ToolEffect,
@@ -13,6 +14,7 @@ use hachimi_protocol::{
 use thiserror::Error;
 use tokio::process::{Child, Command};
 use tokio_util::sync::CancellationToken;
+use zeroize::Zeroize;
 
 const MAX_OUTPUT_LIMIT: usize = 16 * 1024 * 1024;
 const ALLOWED_ENVIRONMENT: &[&str] = &[
@@ -82,7 +84,10 @@ pub struct SandboxedChild {
 }
 
 impl SandboxedChild {
-    pub(crate) fn new(
+    /// Creates the owned child returned by a trusted [`SandboxBackend`]
+    /// implementation. Callers must enforce the launch specification before
+    /// constructing this value; this constructor does not provide isolation.
+    pub fn new(
         child: Child,
         cancellation: CancellationToken,
         timeout: Duration,
@@ -174,6 +179,7 @@ pub(crate) fn spawn_with_launcher(
             }
         }
         let mut command = Command::new(launcher);
+        ProcessPolicy::HiddenCaptured.apply_tokio(&mut command);
         command
             .arg("--")
             .arg(&spec.executable)
@@ -190,7 +196,7 @@ pub(crate) fn spawn_with_launcher(
             .stderr(Stdio::piped())
             .kill_on_drop(true);
         let mut child = command.spawn().map_err(SandboxError::Spawn)?;
-        if let Some(input) = spec.stdin {
+        if let Some(mut input) = spec.stdin {
             use tokio::io::AsyncWriteExt as _;
 
             let mut stdin = child.stdin.take().ok_or_else(|| {
@@ -200,6 +206,7 @@ pub(crate) fn spawn_with_launcher(
             })?;
             stdin.write_all(&input).await.map_err(SandboxError::Spawn)?;
             stdin.shutdown().await.map_err(SandboxError::Spawn)?;
+            input.zeroize();
         }
         Ok(SandboxedChild::new(
             child,
@@ -253,9 +260,11 @@ fn validate_launch_spec(spec: &SandboxLaunchSpec) -> Result<(), SandboxError> {
             spec.grants.process.spawn
                 && grant_has_root(&spec.grants, FileSystemAccess::Write, &root)
         }
-        ToolEffect::ExternalSideEffect | ToolEffect::ComputerObserve | ToolEffect::ComputerAct => {
-            false
-        }
+        ToolEffect::ExternalSideEffect
+        | ToolEffect::BrowserObserve
+        | ToolEffect::BrowserAct
+        | ToolEffect::ComputerObserve
+        | ToolEffect::ComputerAct => false,
     };
     allowed.then_some(()).ok_or(SandboxError::GrantDenied)
 }
@@ -324,7 +333,7 @@ mod tests {
             checkout_id: CheckoutId::from("checkout-sandbox"),
             checkout_root: root.to_owned(),
             grants: CapabilityGrantSet {
-                profile: PermissionProfile::WorkspaceWrite,
+                profile: PermissionProfile::Writable,
                 scope: PermissionGrantScope::Run,
                 session_id,
                 run_id: Some(run_id),
@@ -349,6 +358,7 @@ mod tests {
                     interactive: false,
                     allowed_commands: Vec::new(),
                 },
+                browser: Default::default(),
                 computer: ComputerGrant::default(),
                 review_each_command: true,
                 expires_at_ms: None,
@@ -450,6 +460,7 @@ mod tests {
         let directory = tempfile::tempdir().expect("directory");
         let marker = directory.path().join("late-marker.txt");
         let mut command = Command::new("powershell.exe");
+        ProcessPolicy::HiddenCaptured.apply_tokio(&mut command);
         command
             .args([
                 "-NoProfile",

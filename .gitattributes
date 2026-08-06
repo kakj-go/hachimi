@@ -1,3 +1,7 @@
+# Keep deterministic generators and Prettier checks independent of the Windows
+# runner's global core.autocrlf setting.
+* text=auto eol=lf
+
 # Every packaged model file is checksum-verified. Disable text normalization so
 # Windows and Unix checkouts preserve identical bytes.
 apps/desktop/src-tauri/resources/ai-models/** -text

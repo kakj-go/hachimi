@@ -25,3 +25,20 @@ fn newly_generated_agent_ids_use_uuid_v7_while_legacy_ids_remain_opaque() {
     let legacy = RunId::from("legacy-not-a-uuid");
     assert_eq!(legacy.as_str(), "legacy-not-a-uuid");
 }
+
+#[test]
+fn legacy_assistant_payload_defaults_to_unknown_phase() {
+    let payload: ItemPayload = serde_json::from_value(serde_json::json!({
+        "type": "assistant",
+        "data": { "text": "legacy reply" }
+    }))
+    .expect("legacy assistant payload");
+
+    assert_eq!(
+        payload,
+        ItemPayload::Assistant {
+            text: "legacy reply".into(),
+            phase: AgentMessagePhase::Unknown,
+        }
+    );
+}

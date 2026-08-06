@@ -12,6 +12,7 @@
     --color-bg-sidebar-end: var(--appearance-sidebar-end, #ece7f1);
     --color-bg-floating: color-mix(in srgb, var(--color-bg-elevated) 92%, transparent);
     --color-bg-accent: var(--appearance-accent, #1677d2);
+    --color-bg-qr: #ffffff;
     --color-text-base: var(--appearance-foreground, #202126);
     --color-text-muted: var(--appearance-muted, #67686d);
     --color-text-faint: color-mix(in srgb, var(--color-text-base) 64%, var(--color-bg-base));

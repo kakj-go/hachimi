@@ -29,16 +29,19 @@ fn main() {
                     .map_err(|error| error.to_string())
             }),
         [operation, executable] if operation == "--spawn-child-assert-job" => {
-            std::process::Command::new(executable)
-                .arg("--assert-job")
-                .status()
-                .map_err(|error| error.to_string())
-                .and_then(|status| {
-                    status
-                        .success()
-                        .then_some(())
-                        .ok_or_else(|| format!("child job canary exited with {status}"))
-                })
+            hachimi_process_policy::std_command(
+                executable,
+                hachimi_process_policy::ProcessPolicy::HiddenCaptured,
+            )
+            .arg("--assert-job")
+            .status()
+            .map_err(|error| error.to_string())
+            .and_then(|status| {
+                status
+                    .success()
+                    .then_some(())
+                    .ok_or_else(|| format!("child job canary exited with {status}"))
+            })
         }
         [operation, path] if operation == "--sleep-touch" => {
             std::thread::sleep(Duration::from_secs(3));
@@ -46,17 +49,20 @@ fn main() {
                 .map_err(|error| error.to_string())
         }
         [operation, executable, path] if operation == "--spawn-child-sleep-touch" => {
-            std::process::Command::new(executable)
-                .arg("--sleep-touch")
-                .arg(path)
-                .status()
-                .map_err(|error| error.to_string())
-                .and_then(|status| {
-                    status
-                        .success()
-                        .then_some(())
-                        .ok_or_else(|| format!("sleep child exited with {status}"))
-                })
+            hachimi_process_policy::std_command(
+                executable,
+                hachimi_process_policy::ProcessPolicy::HiddenCaptured,
+            )
+            .arg("--sleep-touch")
+            .arg(path)
+            .status()
+            .map_err(|error| error.to_string())
+            .and_then(|status| {
+                status
+                    .success()
+                    .then_some(())
+                    .ok_or_else(|| format!("sleep child exited with {status}"))
+            })
         }
         [operation, raw_handle] if operation == "--write-handle" => raw_handle
             .to_string_lossy()

@@ -23,17 +23,18 @@ replay is adopted. Any later source adaptation must first use the fixed commit a
 
 1. `SchedulerService` calculates occurrences with an injected clock and launches them through the
    same `AgentRunFactory`, `AgentRunExecutor`, and `AgentExecutorRegistry` used by interactive Runs.
-2. A trigger creates a fresh `TaskRun`, `Session`, `Run`, generation, and transient Run grant.
+2. A `Standalone` trigger creates a fresh `TaskRun`, `Session`, `Run`, generation and transient Run
+   grant. A `SessionContinuation` trigger binds a fresh `TaskRun`/`Run` to an existing Session lane.
    Scheduler state never contains an Agent Tool Loop.
 3. The database is authoritative. A unique invocation key identifies a schedule occurrence. The
    nearest enabled occurrence owns the single wake-up timer; startup reconciliation recomputes it.
 4. At most one invocation per Schedule may be active. A later overlapping occurrence is recorded as
    `Skipped`. Background concurrency is separately limited and interactive work has priority.
-5. A user-signed `ScheduleGrant` is versioned independently from general configuration. Name,
-   prompt, timing, and delivery edits do not revoke it. Profile, context, execution target, tools,
-   Skills, MCP tools, file/process permissions, or external targets increment `permission_revision`
-   and require reauthorization.
-6. Every invocation intersects the stored authorization scope with current Policy, Sandbox and Host
+5. ScheduleDefinition is the permission owner. Name, prompt, timing, and delivery edits do not
+   change its permission revision. Profile, context, execution target, tools, Skills, MCP tools,
+   file/process permissions, or external targets increment `permission_revision` and replace the
+   persisted definition snapshot.
+6. Every invocation intersects the ScheduleDefinition policy with current Policy, Sandbox and Host
    readiness. Schema, Skill, MCP or Host identity changes can reduce access or produce
    `NeedsAttention`; they can never expand authorization.
 7. Background Approval, Elicitation, or UserInput outside the exact grant does not wait indefinitely.
@@ -44,13 +45,18 @@ replay is adopted. Any later source adaptation must first use the fixed commit a
    tracked independently from execution success.
 10. Completely exiting the process stops scheduling. Tray/background process lifetime is the
     supported execution lifetime; system wake and OS service installation are deferred.
+11. A continuation may read the Session's persisted compacted context, but it recaptures
+    StepContext, ToolPlan, contribution revisions and Host readiness. It never
+    restores Approval, UserInput secret, temporary Grant, Browser observation, Computer frame,
+    process lease or MCP session. Maximum occurrences, end time, stop-after-success and user disable
+    are deterministic stop conditions; every trigger appends a thread heartbeat Item.
 
 ## Consequences
 
 - General and Project scheduled work reuse all Agent lifecycle, Compaction, Approval, Sandbox,
   Diff, Evidence, and recovery semantics.
-- `ScheduleGrant` is neither an Approval nor an authority source available to model output, prompt,
-  Skill, MCP, Hook, or Elicitation.
+- ScheduleDefinition policy is neither an Approval nor an authority source available to model
+  output, prompt, Skill, MCP, Hook, or Elicitation.
 - Removing a Schedule retains TaskRun history by default. Dirty Worktree cleanup is a separate,
   reviewable operation.
 - Clock, notification, model factory, and Run launcher boundaries must be injectable for deterministic

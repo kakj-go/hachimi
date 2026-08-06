@@ -301,7 +301,7 @@ mod tests {
             session_id: session.id.clone(),
             status: RunStatus::Queued,
             purpose: RunPurpose::Task,
-            origin: RunOrigin::Interactive,
+            origin: RunOrigin::Manual,
             generation: 2,
             configuration: RunConfiguration {
                 model_snapshot: LlmSettings::default(),
@@ -355,6 +355,7 @@ mod tests {
             run_generation: run.generation,
             item_id: ItemId::new(format!("{id}-item")),
             questions: vec![question],
+            display_answers: Vec::new(),
             status: UserInputStatus::Pending,
             expires_at_ms,
             created_at_ms: now_ms(),

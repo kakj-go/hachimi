@@ -1,8 +1,10 @@
 use super::{
-    PendingAvatarImport, PendingVoiceImport, avatar_source_is_unchanged,
-    cancel_pending_avatar_import, cancel_pending_voice_import, consume_pending_avatar_import,
-    consume_pending_voice_import, debug_data_root, delete_theme_in_settings,
-    profile_supports_pet_voice, release_agent_feature_flags, release_feature_enabled,
+    PendingAvatarImport, PendingVoiceImport,
+    app_shell::{SingleInstanceActivationTarget, single_instance_activation_target},
+    avatar_source_is_unchanged, cancel_pending_avatar_import, cancel_pending_voice_import,
+    consume_pending_avatar_import, consume_pending_voice_import, debug_data_root,
+    delete_theme_in_settings, profile_supports_pet_voice, provider_settings_for_runtime,
+    release_agent_feature_flags, release_feature_enabled, release_runtime_feature_set,
     reset_theme_in_settings, sanitize_log_message, validate_app_settings,
     voice_source_is_unchanged,
 };
@@ -18,6 +20,22 @@ use hachimi_protocol::{
     ClientId, LipSyncCapability, ThemeProfile, ThemeScheme,
 };
 use hachimi_voice::{InspectedVoiceModel, VoiceAssetPaths};
+
+#[test]
+fn secondary_launch_prefers_workbench_then_pet_while_startup_remains_safe() {
+    assert_eq!(
+        single_instance_activation_target(true, true),
+        SingleInstanceActivationTarget::Workbench
+    );
+    assert_eq!(
+        single_instance_activation_target(false, true),
+        SingleInstanceActivationTarget::Pet
+    );
+    assert_eq!(
+        single_instance_activation_target(false, false),
+        SingleInstanceActivationTarget::StartupPending
+    );
+}
 
 fn compatible_inspection(sha256: &str, modified_millis: u128) -> InspectedAvatar {
     InspectedAvatar {
@@ -51,10 +69,58 @@ fn release_features_are_enabled_by_default_and_have_an_emergency_kill_switch() {
     assert!(defaults.workspace_tools);
     assert!(defaults.mcp_runtime);
     assert!(defaults.scheduler);
+    assert_eq!(
+        defaults.runtime_features,
+        hachimi_core::RuntimeFeatureSet::all_enabled()
+    );
     let disabled = release_agent_feature_flags(true, true, true);
     assert!(!disabled.workspace_tools);
     assert!(!disabled.mcp_runtime);
     assert!(!disabled.scheduler);
+
+    let runtime = release_runtime_feature_set(hachimi_core::RuntimeFeatureSet {
+        multi_agent: true,
+        ..hachimi_core::RuntimeFeatureSet::all_disabled()
+    });
+    assert!(!runtime.multi_agent);
+    assert!(runtime.run_recovery);
+    assert_eq!(
+        release_runtime_feature_set(hachimi_core::RuntimeFeatureSet::all_disabled()),
+        hachimi_core::RuntimeFeatureSet::all_enabled()
+    );
+    assert_eq!(
+        release_runtime_feature_set(hachimi_core::RuntimeFeatureSet::all_enabled()),
+        hachimi_core::RuntimeFeatureSet::all_disabled()
+    );
+}
+
+#[test]
+fn provider_switches_force_legacy_chat_and_strip_remote_context() {
+    let mut settings = hachimi_protocol::AppSettings::default().llm;
+    settings.protocol = hachimi_protocol::ProviderProtocolKind::Responses;
+    settings.embedding_model_name = "embedding-fixture".into();
+    settings.reasoning_summary = true;
+    settings.remote_compaction = true;
+    let mut features = hachimi_core::RuntimeFeatureSet::all_enabled();
+    features.provider_extensions = false;
+    let legacy = provider_settings_for_runtime(settings.clone(), features);
+    assert_eq!(
+        legacy.protocol,
+        hachimi_protocol::ProviderProtocolKind::ChatCompletions
+    );
+    assert!(legacy.embedding_model_name.is_empty());
+    assert!(!legacy.reasoning_summary);
+    assert!(!legacy.remote_compaction);
+
+    features.provider_extensions = true;
+    features.provider_remote_context = false;
+    let responses = provider_settings_for_runtime(settings, features);
+    assert_eq!(
+        responses.protocol,
+        hachimi_protocol::ProviderProtocolKind::Responses
+    );
+    assert!(!responses.reasoning_summary);
+    assert!(!responses.remote_compaction);
 }
 
 fn pending(owner: &str, expires_at: Instant) -> PendingAvatarImport {

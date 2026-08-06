@@ -67,6 +67,12 @@ pub struct McpReadyRuntime {
     pub tools: Vec<McpToolDefinition>,
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct McpReconciliationReport {
+    pub views: Vec<McpServerView>,
+    pub failures: u32,
+}
+
 #[derive(Clone)]
 pub struct McpControlService {
     store: AgentStore,
@@ -358,16 +364,68 @@ impl McpControlService {
         self.auth_status(server_id).await
     }
 
-    pub async fn reconcile_startup(&self) -> Result<Vec<McpServerView>, McpControlServiceError> {
-        let mut views = Vec::new();
+    pub async fn reconcile_startup(
+        &self,
+    ) -> Result<McpReconciliationReport, McpControlServiceError> {
+        let mut report = McpReconciliationReport::default();
         for server in self.store.list_mcp_servers().await? {
-            let health = self.apply_runtime(&server).await?;
-            views.push(McpServerView {
+            let (health, failed) = self.apply_isolated(&server).await;
+            report.failures = report.failures.saturating_add(u32::from(failed));
+            report.views.push(McpServerView {
                 configuration: server,
                 health,
             });
         }
-        Ok(views)
+        Ok(report)
+    }
+
+    pub async fn retry_due(
+        &self,
+        timestamp_ms: i64,
+    ) -> Result<McpReconciliationReport, McpControlServiceError> {
+        self.retry_failed(timestamp_ms, true).await
+    }
+
+    pub async fn retry_failed_now(
+        &self,
+    ) -> Result<McpReconciliationReport, McpControlServiceError> {
+        self.retry_failed(now_ms(), false).await
+    }
+
+    async fn retry_failed(
+        &self,
+        timestamp_ms: i64,
+        due_only: bool,
+    ) -> Result<McpReconciliationReport, McpControlServiceError> {
+        let health = self
+            .store
+            .list_mcp_server_health()
+            .await?
+            .into_iter()
+            .map(|value| (value.server_id.clone(), value))
+            .collect::<BTreeMap<_, _>>();
+        let mut report = McpReconciliationReport::default();
+        for server in self.store.list_mcp_servers().await? {
+            let Some(current) = health.get(&server.id) else {
+                continue;
+            };
+            if !server.enabled
+                || current.state != McpServerHealthState::Failed
+                || (due_only
+                    && current
+                        .next_retry_at_ms
+                        .is_some_and(|next| next > timestamp_ms))
+            {
+                continue;
+            }
+            let (next, failed) = self.apply_isolated(&server).await;
+            report.failures = report.failures.saturating_add(u32::from(failed));
+            report.views.push(McpServerView {
+                configuration: server,
+                health: next,
+            });
+        }
+        Ok(report)
     }
 
     pub async fn list(&self) -> Result<Vec<McpServerView>, McpControlServiceError> {
@@ -678,7 +736,66 @@ impl McpControlService {
                 return Err(error.into());
             }
         }
+        let previous = self.store.get_mcp_server_health(&server.id).await?;
+        if snapshot.health.state == McpServerHealthState::Failed {
+            let failures = previous
+                .as_ref()
+                .map_or(1, |health| health.failure_count.saturating_add(1));
+            snapshot.health.failure_count = failures;
+            snapshot.health.next_retry_at_ms = Some(now_ms().saturating_add(mcp_retry_delay_ms(
+                failures,
+                snapshot.health.error_code.as_deref(),
+            )));
+        } else {
+            snapshot.health.failure_count = 0;
+            snapshot.health.next_retry_at_ms = None;
+        }
         Ok(self.store.set_mcp_server_health(&snapshot.health).await?)
+    }
+
+    async fn apply_isolated(&self, server: &McpServerRecord) -> (McpServerHealthRecord, bool) {
+        match self.apply_runtime(server).await {
+            Ok(health) => {
+                let failed = health.state == McpServerHealthState::Failed;
+                (health, failed)
+            }
+            Err(error) => {
+                let code = mcp_service_error_code(&error);
+                eprintln!(
+                    "Hachimi MCP server recovery failed (server={}, code={}): {}",
+                    server.id, code, error
+                );
+                let previous = self
+                    .store
+                    .get_mcp_server_health(&server.id)
+                    .await
+                    .ok()
+                    .flatten();
+                let failures = previous
+                    .as_ref()
+                    .map_or(1, |health| health.failure_count.saturating_add(1));
+                let health = McpServerHealthRecord {
+                    server_id: server.id.clone(),
+                    state: if server.enabled {
+                        McpServerHealthState::Failed
+                    } else {
+                        McpServerHealthState::Disabled
+                    },
+                    server_name: None,
+                    server_version: None,
+                    protocol_version: None,
+                    tool_count: 0,
+                    error_code: server.enabled.then(|| code.into()),
+                    failure_count: if server.enabled { failures } else { 0 },
+                    next_retry_at_ms: server
+                        .enabled
+                        .then(|| now_ms().saturating_add(mcp_retry_delay_ms(failures, Some(code)))),
+                    checked_at_ms: now_ms(),
+                };
+                let _ = self.store.set_mcp_server_health(&health).await;
+                (health, server.enabled)
+            }
+        }
     }
 
     async fn filter_enabled(
@@ -890,6 +1007,33 @@ fn hex_digest(bytes: &[u8]) -> String {
 
 fn host_id(server_id: &McpServerId) -> String {
     format!("mcp:{}", server_id.as_str())
+}
+
+fn mcp_service_error_code(error: &McpControlServiceError) -> &'static str {
+    match error {
+        McpControlServiceError::Store(_) => "mcp_state_unavailable",
+        McpControlServiceError::Registry(_) => "capability_registration_failed",
+        McpControlServiceError::CredentialUnavailable => "mcp_credential_unavailable",
+        McpControlServiceError::RuntimeUnavailable => "mcp_runtime_unavailable",
+        McpControlServiceError::AuthenticationConflict => "mcp_authentication_conflict",
+        McpControlServiceError::OAuth(_) => "mcp_oauth_failed",
+        McpControlServiceError::Client(_) => "mcp_client_failed",
+    }
+}
+
+fn mcp_retry_delay_ms(failures: u32, error_code: Option<&str>) -> i64 {
+    if matches!(
+        error_code,
+        Some("mcp_credential_unavailable" | "mcp_authentication_conflict")
+    ) {
+        return 60_000;
+    }
+    match failures {
+        0 | 1 => 1_000,
+        2 => 5_000,
+        3 => 15_000,
+        _ => 60_000,
+    }
 }
 
 fn now_ms() -> i64 {

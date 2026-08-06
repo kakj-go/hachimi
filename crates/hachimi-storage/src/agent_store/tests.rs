@@ -1,23 +1,36 @@
 use hachimi_protocol::{
-    ApprovalGrantScope, ApprovalPolicy, BehaviorMode, CapabilityGrantSet, CheckoutId, CheckoutKind,
-    CheckoutStatus, ClientId, ComputerGrant, DeliveryPolicy, DeliveryStatus, EntryProfile,
-    ExecutionTarget, FileSystemAccess, FileSystemGrant, ItemId, LlmSettings, MisfirePolicy,
-    NetworkGrant, PermissionGrantScope, PermissionProfile, ProcessGrant, ProcessSessionId,
-    ProcessSessionRecord, ProcessStatus, ProjectId, ProviderCapabilities, ReviewDelivery,
-    ReviewFinding, ReviewFindingId, ReviewFindingStatus, ReviewId, ReviewOutput, ReviewRecord,
-    ReviewSeverity, ReviewTarget, RunBudget, RunConfiguration, RunDriverKind, RunOrigin,
-    RunPurpose, SandboxCapabilityReport, SandboxReadiness, ScheduleContextTemplate,
-    ScheduleDefinition, ScheduleHealth, ScheduleId, SchedulePermissionConfig, ScheduleSpec,
+    AgentPermissionPolicy, AgentWorkspaceKind, AgentWorkspaceStatus, ApprovalGrantScope,
+    ApprovalPolicy, BehaviorMode, CapabilityGrantSet, CheckoutId, CheckoutKind, CheckoutStatus,
+    ClientId, ComputerGrant, DeliveryPolicy, DeliveryStatus, DiffScope, EntryProfile,
+    ExecutionTarget, FileDiffStatus, FileDiffSummary, FileSystemAccess, FileSystemGrant, ItemId,
+    LlmSettings, MisfirePolicy, MutationContext, NetworkGrant, PermissionGrantScope,
+    PermissionProfile, ProcessGrant, ProcessSessionId, ProcessSessionRecord, ProcessStatus,
+    ProjectId, ProviderCapabilities, RequestId, ReviewDelivery, ReviewFinding, ReviewFindingId,
+    ReviewFindingStatus, ReviewId, ReviewOutput, ReviewRecord, ReviewSeverity, ReviewTarget,
+    RunBudget, RunConfiguration, RunDiffSnapshot, RunDriverKind, RunOrigin, RunPurpose,
+    RunRecoveryDecisionAction, RunRecoveryDecisionRequest, RunRecoveryState, RunStepCheckpoint,
+    RunStepCheckpointId, RunStepPhase, SandboxCapabilityReport, SandboxReadiness,
+    ScheduleContextTemplate, ScheduleDefinition, ScheduleHealth, ScheduleId, ScheduleSpec,
     SessionContextBinding, SideEffectExecutionId, SideEffectExecutionRecord,
     SideEffectExecutionStatus, SkillId, SkillRecord, TaskRunId, TaskRunRecord, TaskRunStatus,
-    TaskRunTrigger, UserInputQuestion, UserInputRequestId, UserInputRequestRecord, UserInputStatus,
-    WorkloadKind,
+    TaskRunTrigger, ToolRecoveryPolicy, UserInputQuestion, UserInputRequestId,
+    UserInputRequestRecord, UserInputStatus, WorkloadKind,
 };
 
 use super::*;
 
-async fn seeded_store() -> (AgentStore, SessionRecord) {
-    let store = AgentStore::connect_in_memory().await.expect("store");
+#[path = "workspace_authority_tests.rs"]
+mod workspace_authority_tests;
+
+pub(super) async fn seeded_store() -> (AgentStore, SessionRecord) {
+    seed_store(AgentStore::connect_in_memory().await.expect("store")).await
+}
+
+pub(super) async fn seeded_store_at(path: &std::path::Path) -> (AgentStore, SessionRecord) {
+    seed_store(AgentStore::connect(path).await.expect("store")).await
+}
+
+async fn seed_store(store: AgentStore) -> (AgentStore, SessionRecord) {
     let now = now_ms();
     let project = ProjectRecord {
         id: ProjectId::from("project-1"),
@@ -59,31 +72,6 @@ async fn seeded_store() -> (AgentStore, SessionRecord) {
     };
     store.create_session(&session).await.expect("session");
     (store, session)
-}
-
-#[tokio::test]
-async fn fresh_database_uses_only_the_three_kernel_baselines() {
-    let store = AgentStore::connect_in_memory().await.expect("fresh store");
-    let migration_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM _sqlx_migrations")
-        .fetch_one(store.pool())
-        .await
-        .expect("migration count");
-    assert_eq!(migration_count, 3);
-
-    let payload_columns: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM pragma_table_info('transcript_items') WHERE name = 'payload_json'",
-    )
-    .fetch_one(store.pool())
-    .await
-    .expect("typed payload column");
-    let legacy_columns: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM pragma_table_info('transcript_items') WHERE name IN ('content_json', 'item_type_v2', 'payload_version', 'typed_payload')",
-    )
-    .fetch_one(store.pool())
-    .await
-    .expect("legacy columns");
-    assert_eq!(payload_columns, 1);
-    assert_eq!(legacy_columns, 0);
 }
 
 #[tokio::test]
@@ -257,14 +245,14 @@ async fn review_output_and_findings_are_completed_once_and_remain_updateable() {
     );
 }
 
-fn run(session: &SessionRecord, id: &str) -> RunRecord {
+pub(super) fn run(session: &SessionRecord, id: &str) -> RunRecord {
     let now = now_ms();
     RunRecord {
         id: RunId::from(id),
         session_id: session.id.clone(),
         status: RunStatus::Queued,
         purpose: RunPurpose::Task,
-        origin: RunOrigin::Interactive,
+        origin: RunOrigin::Manual,
         generation: 1,
         configuration: RunConfiguration {
             model_snapshot: LlmSettings::default(),
@@ -276,7 +264,7 @@ fn run(session: &SessionRecord, id: &str) -> RunRecord {
                 project_id: session.context.project_id().expect("project").clone(),
             }),
             approval_policy: ApprovalPolicy::OnlyWhenNeeded,
-            permission_profile: PermissionProfile::WorkspaceWrite,
+            permission_profile: PermissionProfile::Writable,
             budget: RunBudget::default(),
             accepted_plan_id: None,
             accepted_plan_revision: None,
@@ -295,7 +283,7 @@ fn run(session: &SessionRecord, id: &str) -> RunRecord {
     }
 }
 
-fn side_effect(
+pub(super) fn side_effect(
     session: &SessionRecord,
     run: &RunRecord,
     id: &str,
@@ -321,7 +309,11 @@ fn side_effect(
     }
 }
 
-async fn create_running_run(store: &AgentStore, session: &SessionRecord, id: &str) -> RunRecord {
+pub(super) async fn create_running_run(
+    store: &AgentStore,
+    session: &SessionRecord,
+    id: &str,
+) -> RunRecord {
     let run = run(session, id);
     store
         .create_run_idempotent("user", id, &run)
@@ -336,6 +328,286 @@ async fn create_running_run(store: &AgentStore, session: &SessionRecord, id: &st
         .await
         .expect("running");
     run
+}
+
+#[tokio::test]
+async fn terminal_run_summary_is_an_immutable_diff_snapshot() {
+    let (store, session) = seeded_store().await;
+    let run = create_running_run(&store, &session, "run-summary-snapshot").await;
+    let checkout_id = CheckoutId::from("checkout-1");
+    let first = RunDiffSnapshot {
+        scope: DiffScope::Run {
+            run_id: run.id.clone(),
+        },
+        files: vec![FileDiffSummary {
+            path: "src/lib.rs".into(),
+            previous_path: None,
+            status: FileDiffStatus::Modified,
+            additions: 4,
+            deletions: 2,
+            binary: false,
+            too_large: false,
+            hunks: Vec::new(),
+        }],
+        artifact_id: None,
+        truncated: false,
+        generated_at_ms: 10,
+    };
+    store
+        .put_run_diff_manifest(&run.id, &checkout_id, &first)
+        .await
+        .expect("first manifest");
+    store
+        .transition_run(&run.id, RunStatus::Succeeded, None)
+        .await
+        .expect("terminal");
+    let summary = store
+        .get_run_summary(&run.id)
+        .await
+        .expect("summary")
+        .expect("summary record");
+    assert_eq!(
+        (summary.changed_files, summary.additions, summary.deletions),
+        (1, 4, 2)
+    );
+
+    let mut later = first;
+    later.files[0].additions = 99;
+    later.generated_at_ms = 20;
+    store
+        .put_run_diff_manifest(&run.id, &checkout_id, &later)
+        .await
+        .expect("later workspace state");
+    assert_eq!(
+        store
+            .get_run_summary(&run.id)
+            .await
+            .expect("summary reload")
+            .expect("summary record")
+            .additions,
+        4
+    );
+}
+
+fn pending_user_input(session: &SessionRecord, run: &RunRecord) -> UserInputRequestRecord {
+    UserInputRequestRecord {
+        id: UserInputRequestId::from("concurrent-input"),
+        session_id: session.id.clone(),
+        run_id: run.id.clone(),
+        run_generation: run.generation,
+        item_id: ItemId::from("concurrent-input-item"),
+        questions: vec![UserInputQuestion {
+            id: "choice".into(),
+            header: "Choice".into(),
+            prompt: "Continue?".into(),
+            options: Vec::new(),
+            secret: false,
+            auto_resolution_ms: None,
+            default_answer: None,
+        }],
+        display_answers: Vec::new(),
+        status: UserInputStatus::Pending,
+        expires_at_ms: None,
+        created_at_ms: now_ms(),
+        resolved_at_ms: None,
+        resolved_by: None,
+    }
+}
+
+#[tokio::test]
+async fn concurrent_pet_and_workbench_user_input_resolution_has_one_winner() {
+    let (store, session) = seeded_store().await;
+    let run = create_running_run(&store, &session, "run-concurrent-input").await;
+    let request = pending_user_input(&session, &run);
+    store
+        .create_user_input_request(&request)
+        .await
+        .expect("user input");
+    let resolution = hachimi_protocol::UserInputResolution {
+        request_id: request.id.clone(),
+        expected_run_id: run.id.clone(),
+        expected_generation: run.generation,
+        action: hachimi_protocol::UserInputResolutionAction::Submit,
+        answers: vec![hachimi_protocol::UserInputAnswer {
+            question_id: "choice".into(),
+            value: "yes".into(),
+        }],
+        resolved_by: "window:pet".into(),
+        resolved_at_ms: now_ms(),
+    };
+    let workbench_resolution = hachimi_protocol::UserInputResolution {
+        resolved_by: "window:workbench".into(),
+        ..resolution.clone()
+    };
+    let (pet, workbench) = tokio::join!(
+        store.resolve_user_input(&resolution),
+        store.resolve_user_input(&workbench_resolution)
+    );
+    assert_eq!(usize::from(pet.is_ok()) + usize::from(workbench.is_ok()), 1);
+    let stored = store
+        .get_user_input_request(&request.id)
+        .await
+        .expect("lookup")
+        .expect("request");
+    assert_eq!(stored.status, UserInputStatus::Resolved);
+    assert_eq!(stored.display_answers.len(), 1);
+    assert_eq!(stored.display_answers[0].value.as_deref(), Some("yes"));
+    assert!(!stored.display_answers[0].secret_provided);
+    let event_count = store
+        .list_events(&session.id, 0)
+        .await
+        .expect("events")
+        .into_iter()
+        .filter(|event| event.event_name() == "user_input.resolved")
+        .count();
+    assert_eq!(event_count, 1);
+}
+
+#[tokio::test]
+async fn concurrent_pet_and_workbench_approval_resolution_has_one_winner() {
+    let (store, session) = seeded_store().await;
+    let run = create_running_run(&store, &session, "run-concurrent-approval").await;
+    store
+        .transition_run(&run.id, RunStatus::WaitingApproval, None)
+        .await
+        .expect("waiting approval");
+    let timestamp = now_ms();
+    let approval = ApprovalRequestRecord {
+        id: ApprovalId::from("concurrent-approval"),
+        session_id: session.id.clone(),
+        run_id: run.id.clone(),
+        tool_call_id: ToolCallId::from("concurrent-call"),
+        run_generation: run.generation,
+        status: ApprovalStatus::Pending,
+        action: "workspace.exec".into(),
+        resource: "cargo test".into(),
+        parameter_hash: "sha256:concurrent".into(),
+        risk_summary: "execute a command".into(),
+        target_host: "workspace-worker".into(),
+        required_scopes: vec!["workspace.exec".into()],
+        grant_scope: ApprovalGrantScope::Once,
+        uses_remaining: 1,
+        requester_principal: "user".into(),
+        resolved_by: None,
+        expires_at_ms: Some(timestamp + 60_000),
+        created_at_ms: timestamp,
+        resolved_at_ms: None,
+    };
+    store.create_approval(&approval).await.expect("approval");
+    let pet_resolution = ApprovalResolution {
+        approval_id: approval.id.clone(),
+        decision: ApprovalStatus::Approved,
+        parameter_hash: approval.parameter_hash.clone(),
+        run_generation: run.generation,
+        resolved_by: "window:pet".into(),
+        resolved_at_ms: timestamp + 1,
+    };
+    let workbench_resolution = ApprovalResolution {
+        resolved_by: "window:workbench".into(),
+        ..pet_resolution.clone()
+    };
+    let (pet, workbench) = tokio::join!(
+        store.resolve_approval(&pet_resolution),
+        store.resolve_approval(&workbench_resolution)
+    );
+    assert_eq!(usize::from(pet.is_ok()) + usize::from(workbench.is_ok()), 1);
+    let stored = store
+        .get_approval(&approval.id)
+        .await
+        .expect("lookup")
+        .expect("approval");
+    assert_eq!(stored.status, ApprovalStatus::Approved);
+    let event_count = store
+        .list_events(&session.id, 0)
+        .await
+        .expect("events")
+        .into_iter()
+        .filter(|event| event.event_name() == "approval.resolved")
+        .count();
+    assert_eq!(event_count, 1);
+}
+
+#[tokio::test]
+async fn approved_session_tool_authority_is_reusable_and_clearable() {
+    let (store, session) = seeded_store().await;
+    let run = create_running_run(&store, &session, "run-session-authority").await;
+    store
+        .transition_run(&run.id, RunStatus::WaitingApproval, None)
+        .await
+        .expect("waiting approval");
+    let timestamp = now_ms();
+    let approval = ApprovalRequestRecord {
+        id: ApprovalId::from("session-authority"),
+        session_id: session.id.clone(),
+        run_id: run.id.clone(),
+        tool_call_id: ToolCallId::from("session-authority-call"),
+        run_generation: run.generation,
+        status: ApprovalStatus::Pending,
+        action: "mcp_server_read_schema".into(),
+        resource: "mcp:server:tool:read:schema:abc".into(),
+        parameter_hash: "sha256:session-authority".into(),
+        risk_summary: "read MCP data".into(),
+        target_host: "mcp:server".into(),
+        required_scopes: vec!["connectors.invoke".into()],
+        grant_scope: ApprovalGrantScope::Session,
+        uses_remaining: u32::MAX,
+        requester_principal: "user".into(),
+        resolved_by: None,
+        expires_at_ms: None,
+        created_at_ms: timestamp,
+        resolved_at_ms: None,
+    };
+    store.create_approval(&approval).await.expect("approval");
+    store
+        .resolve_approval(&ApprovalResolution {
+            approval_id: approval.id.clone(),
+            decision: ApprovalStatus::Approved,
+            parameter_hash: approval.parameter_hash.clone(),
+            run_generation: run.generation,
+            resolved_by: "window:workbench".into(),
+            resolved_at_ms: timestamp + 1,
+        })
+        .await
+        .expect("resolve");
+
+    let reusable = store
+        .approved_session_tool_authority(
+            &session.id,
+            &approval.action,
+            &approval.resource,
+            &approval.target_host,
+        )
+        .await
+        .expect("lookup")
+        .expect("reusable authority");
+    assert_eq!(reusable.id, approval.id);
+    assert_eq!(
+        store
+            .list_session_tool_authorities(&session.id)
+            .await
+            .expect("summary")
+            .len(),
+        1
+    );
+    assert_eq!(
+        store
+            .clear_session_tool_authorities(&session.id, timestamp + 2)
+            .await
+            .expect("clear"),
+        1
+    );
+    assert!(
+        store
+            .approved_session_tool_authority(
+                &session.id,
+                &approval.action,
+                &approval.resource,
+                &approval.target_host,
+            )
+            .await
+            .expect("cleared lookup")
+            .is_none()
+    );
 }
 
 #[tokio::test]
@@ -561,6 +833,7 @@ async fn restart_marks_active_work_lost_without_restoring_authority() {
             auto_resolution_ms: None,
             default_answer: None,
         }],
+        display_answers: Vec::new(),
         status: UserInputStatus::Pending,
         expires_at_ms: None,
         created_at_ms: now_ms(),
@@ -578,11 +851,11 @@ async fn restart_marks_active_work_lost_without_restoring_authority() {
             schedule_revision: None,
             trigger: TaskRunTrigger::Manual,
             scheduled_for_ms: None,
+            event_context: None,
             invocation_key: "test:task-1".into(),
             requester_session_id: Some(session.id.clone()),
             execution_session_id: Some(session.id.clone()),
             run_id: Some(run.id.clone()),
-            permission_snapshot_hash: None,
             status: TaskRunStatus::Running,
             progress_percent: None,
             result_summary: None,
@@ -602,9 +875,10 @@ async fn restart_marks_active_work_lost_without_restoring_authority() {
     assert_eq!(report.interrupted_runs, 1);
     assert_eq!(report.lost_tasks, 1);
     assert_eq!(report.interrupted_user_inputs, 1);
+    assert_eq!(report.awaiting_decision_run_ids, vec![run.id.clone()]);
     assert_eq!(
         store.get_run(&run.id).await.expect("get").unwrap().status,
-        RunStatus::Interrupted
+        RunStatus::WaitingRecoveryDecision
     );
     assert_eq!(
         store
@@ -615,6 +889,321 @@ async fn restart_marks_active_work_lost_without_restoring_authority() {
             .status,
         UserInputStatus::Interrupted
     );
+}
+
+#[tokio::test]
+async fn disabled_run_recovery_keeps_legacy_interrupted_state_without_pending_decisions() {
+    let (store, session) = seeded_store().await;
+    let run = create_running_run(&store, &session, "run-recovery-disabled").await;
+    store
+        .record_run_step_checkpoint(&RunStepCheckpoint {
+            id: RunStepCheckpointId::random(),
+            session_id: session.id,
+            run_id: run.id.clone(),
+            run_generation: run.generation,
+            step_index: 1,
+            phase: RunStepPhase::Sampling,
+            tool_call_id: None,
+            tool_name: None,
+            side_effect_execution_id: None,
+            recovery_policy: ToolRecoveryPolicy::ReadOnlyReplayable,
+            parameter_hash: None,
+            world_revision: "host-v1".into(),
+            provider_revision: "provider-v1".into(),
+            revision_snapshot: Default::default(),
+            created_at_ms: now_ms(),
+        })
+        .await
+        .expect("checkpoint");
+    let report = store
+        .recover_interrupted_with_run_recovery(false)
+        .await
+        .expect("legacy recovery");
+    assert!(report.auto_resume_run_ids.is_empty());
+    assert!(report.awaiting_decision_run_ids.is_empty());
+    assert!(
+        store
+            .list_pending_run_recoveries()
+            .await
+            .expect("pending")
+            .is_empty()
+    );
+    let recovered = store.get_run(&run.id).await.expect("run").expect("run row");
+    assert_eq!(recovered.status, RunStatus::Interrupted);
+    assert_eq!(
+        recovered.failure_code.as_deref(),
+        Some("run_recovery_feature_disabled")
+    );
+}
+
+#[tokio::test]
+async fn restart_classifies_a_read_only_checkpoint_for_same_run_resume() {
+    let (store, session) = seeded_store().await;
+    let run = create_running_run(&store, &session, "run-read-recovery").await;
+    let checkpoint = RunStepCheckpoint {
+        id: RunStepCheckpointId::from("checkpoint-read-recovery"),
+        session_id: session.id.clone(),
+        run_id: run.id.clone(),
+        run_generation: run.generation,
+        step_index: 1,
+        phase: RunStepPhase::Sampling,
+        tool_call_id: None,
+        tool_name: None,
+        side_effect_execution_id: None,
+        recovery_policy: ToolRecoveryPolicy::ReadOnlyReplayable,
+        parameter_hash: None,
+        world_revision: "world-v1".into(),
+        provider_revision: "provider-v1".into(),
+        revision_snapshot: Default::default(),
+        created_at_ms: now_ms(),
+    };
+    store
+        .record_run_step_checkpoint(&checkpoint)
+        .await
+        .expect("checkpoint");
+
+    let report = store.recover_interrupted().await.expect("recovery");
+    assert_eq!(report.auto_resume_run_ids, vec![run.id.clone()]);
+    let pending = store
+        .list_pending_run_recoveries()
+        .await
+        .expect("pending recoveries");
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].recovery.state, RunRecoveryState::EligibleAuto);
+    assert_eq!(pending[0].checkpoint, Some(checkpoint));
+
+    let recovery = store
+        .resolve_run_recovery(
+            &RunRecoveryDecisionRequest {
+                context: MutationContext {
+                    request_id: RequestId("request-read-recovery".to_string()),
+                    client_id: ClientId("system:restart".to_string()),
+                    protocol_version: hachimi_protocol::CONTROL_PROTOCOL_VERSION,
+                    idempotency_key: "resume-read-recovery".into(),
+                    expected_run_id: Some(run.id.clone()),
+                    expected_generation: Some(run.generation),
+                },
+                recovery_id: pending[0].recovery.id.clone(),
+                expected_run_id: run.id.clone(),
+                expected_interrupted_generation: run.generation,
+                action: RunRecoveryDecisionAction::ResumeSafeRemainder,
+            },
+            "system:restart",
+            now_ms(),
+        )
+        .await
+        .expect("resume decision");
+    assert_eq!(recovery.recovery.state, RunRecoveryState::Resuming);
+    let resumed_run = store.get_run(&run.id).await.expect("run").expect("run row");
+    assert_eq!(resumed_run.status, RunStatus::Queued);
+    assert_eq!(resumed_run.generation, run.generation + 1);
+
+    store
+        .finish_run_recovery(&run.id, resumed_run.generation, true, now_ms())
+        .await
+        .expect("finish recovery");
+    let completed = store
+        .get_run_recovery_snapshot(&recovery.recovery.id)
+        .await
+        .expect("recovery")
+        .expect("recovery row");
+    assert_eq!(completed.recovery.state, RunRecoveryState::Resumed);
+}
+
+#[tokio::test]
+async fn six_run_checkpoint_crash_boundaries_reopen_without_duplicate_side_effects() {
+    for crash_phase in [
+        RunStepPhase::Sampling,
+        RunStepPhase::ToolPrepared,
+        RunStepPhase::ToolClaimed,
+        RunStepPhase::ToolDispatched,
+        RunStepPhase::ToolCompleted,
+        RunStepPhase::ProjectionCommitted,
+    ] {
+        let fixture = tempfile::tempdir().expect("crash fixture");
+        let database = fixture.path().join("agent.sqlite3");
+        let (store, session) = seed_store(
+            AgentStore::connect(&database)
+                .await
+                .expect("file-backed store"),
+        )
+        .await;
+        let run = create_running_run(&store, &session, "run-six-phase-crash").await;
+        let call_id = hachimi_protocol::ToolCallId::from("call-side-effect");
+        let revisions = hachimi_protocol::RecoveryRevisionSnapshot {
+            agents_revision: "agents-v1".into(),
+            skills_revision: "skills-v1".into(),
+            mcp_revision: "mcp-v1".into(),
+            plugin_revision: "plugin-v1".into(),
+            host_revision: "host-v1".into(),
+            provider_revision: "provider-v1".into(),
+        };
+        let checkpoint = |phase, tool: bool| RunStepCheckpoint {
+            id: RunStepCheckpointId::random(),
+            session_id: session.id.clone(),
+            run_id: run.id.clone(),
+            run_generation: run.generation,
+            step_index: 1,
+            phase,
+            tool_call_id: tool.then(|| call_id.clone()),
+            tool_name: tool.then(|| "workspace.write".into()),
+            side_effect_execution_id: None,
+            recovery_policy: ToolRecoveryPolicy::IdempotentWithReceipt,
+            parameter_hash: tool.then(|| "sha256:six-phase".into()),
+            world_revision: revisions.host_revision.clone(),
+            provider_revision: revisions.provider_revision.clone(),
+            revision_snapshot: revisions.clone(),
+            created_at_ms: now_ms(),
+        };
+        store
+            .record_run_step_checkpoint(&checkpoint(RunStepPhase::Sampling, false))
+            .await
+            .expect("sampling checkpoint");
+
+        let effect = side_effect(
+            &session,
+            &run,
+            "execution-six-phase",
+            "sha256:six-phase",
+            None,
+        );
+        if crash_phase != RunStepPhase::Sampling {
+            store
+                .record_run_step_checkpoint(&checkpoint(RunStepPhase::ToolPrepared, true))
+                .await
+                .expect("prepared checkpoint");
+        }
+        if matches!(
+            crash_phase,
+            RunStepPhase::ToolClaimed
+                | RunStepPhase::ToolDispatched
+                | RunStepPhase::ToolCompleted
+                | RunStepPhase::ProjectionCommitted
+        ) {
+            store
+                .claim_side_effect(&effect)
+                .await
+                .expect("effect claim");
+        }
+        if matches!(
+            crash_phase,
+            RunStepPhase::ToolDispatched
+                | RunStepPhase::ToolCompleted
+                | RunStepPhase::ProjectionCommitted
+        ) {
+            store
+                .mark_side_effect_dispatched_if_current(
+                    &effect.id,
+                    &run.id,
+                    run.generation,
+                    "host:six-phase",
+                    now_ms(),
+                )
+                .await
+                .expect("effect dispatch");
+        }
+        if matches!(
+            crash_phase,
+            RunStepPhase::ToolCompleted | RunStepPhase::ProjectionCommitted
+        ) {
+            store
+                .finish_side_effect(
+                    &effect.id,
+                    SideEffectExecutionStatus::Succeeded,
+                    Some("succeeded"),
+                    None,
+                    Some(&json!({
+                        "modelContent": "completed once",
+                        "structuredContent": { "operationId": "remote-1" }
+                    })),
+                    now_ms(),
+                )
+                .await
+                .expect("effect completion");
+            store
+                .record_run_step_checkpoint(&checkpoint(RunStepPhase::ToolCompleted, true))
+                .await
+                .expect("completed checkpoint");
+        }
+        if crash_phase == RunStepPhase::ProjectionCommitted {
+            store
+                .record_run_step_checkpoint(&checkpoint(RunStepPhase::ProjectionCommitted, true))
+                .await
+                .expect("projection checkpoint");
+        }
+        drop(store);
+
+        let reopened = AgentStore::connect(&database)
+            .await
+            .expect("reopen after crash");
+        let report = reopened
+            .recover_interrupted()
+            .await
+            .expect("reconcile crash");
+        let pending = reopened
+            .list_pending_run_recoveries()
+            .await
+            .expect("pending recovery");
+        assert_eq!(pending.len(), 1, "phase {crash_phase:?}");
+        assert_eq!(
+            pending[0].checkpoint.as_ref().map(|value| value.phase),
+            Some(crash_phase),
+            "phase {crash_phase:?}"
+        );
+        if crash_phase == RunStepPhase::ToolDispatched {
+            assert_eq!(report.indeterminate_side_effects, 1);
+            assert_eq!(report.awaiting_decision_run_ids, vec![run.id.clone()]);
+            continue;
+        }
+        assert_eq!(report.auto_resume_run_ids, vec![run.id.clone()]);
+        let resolved = reopened
+            .resolve_run_recovery(
+                &RunRecoveryDecisionRequest {
+                    context: MutationContext {
+                        request_id: RequestId(format!("resume-{crash_phase:?}")),
+                        client_id: ClientId("system:test".into()),
+                        protocol_version: hachimi_protocol::CONTROL_PROTOCOL_VERSION,
+                        idempotency_key: format!("resume-{crash_phase:?}"),
+                        expected_run_id: Some(run.id.clone()),
+                        expected_generation: Some(run.generation),
+                    },
+                    recovery_id: pending[0].recovery.id.clone(),
+                    expected_run_id: run.id.clone(),
+                    expected_interrupted_generation: run.generation,
+                    action: RunRecoveryDecisionAction::ResumeSafeRemainder,
+                },
+                "system:test",
+                now_ms(),
+            )
+            .await
+            .expect("safe resume");
+        assert_eq!(resolved.recovery.state, RunRecoveryState::Resuming);
+        let fence = reopened
+            .recovery_tool_fence(
+                &run.id,
+                run.generation + 1,
+                "workspace.write",
+                "sha256:six-phase",
+            )
+            .await
+            .expect("recovery fence");
+        match crash_phase {
+            RunStepPhase::ToolClaimed => assert_eq!(
+                fence,
+                Some(RecoveryToolFence::RetryWithIdempotencyKey(
+                    "side-effect-key".into()
+                ))
+            ),
+            RunStepPhase::ToolCompleted | RunStepPhase::ProjectionCommitted => assert!(matches!(
+                fence,
+                Some(RecoveryToolFence::ReuseCompleted {
+                    succeeded: true,
+                    ..
+                })
+            )),
+            _ => assert_eq!(fence, None),
+        }
+    }
 }
 
 #[tokio::test]
@@ -638,25 +1227,31 @@ async fn retained_worktree_count_only_includes_dirty_schedule_checkouts() {
         },
         entry_profile: EntryProfile::Workbench,
         workload_override: Some(WorkloadKind::Coding),
-        context_template: ScheduleContextTemplate::General,
-        tool_allowlist: Vec::new(),
+        context_template: ScheduleContextTemplate::Workspace {
+            workspace: hachimi_protocol::ScheduleWorkspaceSpec::Managed,
+            conversation_mode: hachimi_protocol::ScheduleConversationMode::PerRunSession,
+        },
         skill_allowlist: Vec::new(),
+        skill_revisions: Vec::new(),
         mcp_tool_allowlist: Vec::new(),
-        permission_config: SchedulePermissionConfig::default(),
+        contribution_revisions: Vec::new(),
+        host_revision_snapshot: hachimi_protocol::HostRevisionSnapshot::default(),
+        permission_policy: AgentPermissionPolicy::default(),
         permission_revision: 1,
         timeout_ms: 120_000,
         misfire_policy: MisfirePolicy::Skip,
         delivery_policy: DeliveryPolicy::TaskTabOnly,
+        stop_conditions: hachimi_protocol::ScheduleStopConditions::default(),
         config_revision: 1,
         created_by: "user".into(),
         next_run_at_ms: None,
-        health: ScheduleHealth::NeedsAuthorization,
+        health: ScheduleHealth::NeedsAttention,
         health_reason: Some("test".into()),
         created_at_ms: now,
         updated_at_ms: now,
     };
     store
-        .create_schedule_idempotent("user", "retained", &schedule, None)
+        .create_schedule_idempotent("user", "retained", &schedule)
         .await
         .expect("schedule");
     store
@@ -666,11 +1261,11 @@ async fn retained_worktree_count_only_includes_dirty_schedule_checkouts() {
             schedule_revision: Some(1),
             trigger: TaskRunTrigger::Manual,
             scheduled_for_ms: Some(now),
+            event_context: None,
             invocation_key: "retained:1".into(),
             requester_session_id: None,
             execution_session_id: Some(session.id),
             run_id: None,
-            permission_snapshot_hash: None,
             status: TaskRunStatus::Succeeded,
             progress_percent: Some(100),
             result_summary: None,
@@ -994,6 +1589,26 @@ async fn restart_marks_dispatched_side_effect_indeterminate_and_never_replays_it
         .mark_side_effect_dispatched(&record.id, "host-request-unknown", now_ms())
         .await
         .expect("dispatch");
+    store
+        .record_run_step_checkpoint(&RunStepCheckpoint {
+            id: RunStepCheckpointId::from("checkpoint-side-effect-restart"),
+            session_id: session.id.clone(),
+            run_id: run.id.clone(),
+            run_generation: run.generation,
+            step_index: 1,
+            phase: RunStepPhase::ToolPrepared,
+            tool_call_id: Some(record.tool_call_id.clone()),
+            tool_name: Some("workspace.write".into()),
+            side_effect_execution_id: Some(record.id.clone()),
+            recovery_policy: ToolRecoveryPolicy::IdempotentWithReceipt,
+            parameter_hash: Some(record.parameter_hash.clone()),
+            world_revision: "world-v1".into(),
+            provider_revision: "provider-v1".into(),
+            revision_snapshot: Default::default(),
+            created_at_ms: now_ms(),
+        })
+        .await
+        .expect("checkpoint");
 
     let recovery = store.recover_interrupted().await.expect("recovery");
     assert_eq!(recovery.indeterminate_side_effects, 1);
@@ -1013,6 +1628,120 @@ async fn restart_marks_dispatched_side_effect_indeterminate_and_never_replays_it
         SideEffectExecutionStatus::Indeterminate
     );
     assert!(retry.persisted_result.is_none());
+
+    let pending = store
+        .list_pending_run_recoveries()
+        .await
+        .expect("pending recovery");
+    let resolved = store
+        .resolve_run_recovery(
+            &RunRecoveryDecisionRequest {
+                context: MutationContext {
+                    request_id: RequestId("confirm-side-effect".into()),
+                    client_id: ClientId("test".into()),
+                    protocol_version: hachimi_protocol::CONTROL_PROTOCOL_VERSION,
+                    idempotency_key: "confirm-side-effect".into(),
+                    expected_run_id: Some(run.id.clone()),
+                    expected_generation: Some(run.generation),
+                },
+                recovery_id: pending[0].recovery.id.clone(),
+                expected_run_id: run.id.clone(),
+                expected_interrupted_generation: run.generation,
+                action: RunRecoveryDecisionAction::ConfirmEffectSucceeded,
+            },
+            "user",
+            now_ms(),
+        )
+        .await
+        .expect("confirm effect");
+    assert_eq!(resolved.recovery.state, RunRecoveryState::Resuming);
+    assert!(matches!(
+        store
+            .recovery_tool_fence(
+                &run.id,
+                run.generation + 1,
+                "workspace.write",
+                "sha256:once"
+            )
+            .await
+            .expect("recovery fence"),
+        Some(RecoveryToolFence::ReuseCompleted {
+            succeeded: true,
+            ..
+        })
+    ));
+}
+
+#[tokio::test]
+async fn idempotent_recovery_retry_reuses_the_original_host_key() {
+    let (store, session) = seeded_store().await;
+    let run = create_running_run(&store, &session, "run-idempotent-retry").await;
+    let record = side_effect(&session, &run, "execution-idempotent", "sha256:same", None);
+    store.claim_side_effect(&record).await.expect("claim");
+    store
+        .mark_side_effect_dispatched(&record.id, "host-request-unknown", now_ms())
+        .await
+        .expect("dispatch");
+    store
+        .record_run_step_checkpoint(&RunStepCheckpoint {
+            id: RunStepCheckpointId::from("checkpoint-idempotent-retry"),
+            session_id: session.id.clone(),
+            run_id: run.id.clone(),
+            run_generation: run.generation,
+            step_index: 1,
+            phase: RunStepPhase::ToolPrepared,
+            tool_call_id: Some(record.tool_call_id.clone()),
+            tool_name: Some("forge.create_pr".into()),
+            side_effect_execution_id: Some(record.id.clone()),
+            recovery_policy: ToolRecoveryPolicy::IdempotentWithReceipt,
+            parameter_hash: Some(record.parameter_hash.clone()),
+            world_revision: "world-v1".into(),
+            provider_revision: "provider-v1".into(),
+            revision_snapshot: Default::default(),
+            created_at_ms: now_ms(),
+        })
+        .await
+        .expect("checkpoint");
+    store.recover_interrupted().await.expect("recover");
+    let pending = store
+        .list_pending_run_recoveries()
+        .await
+        .expect("pending recovery");
+    store
+        .resolve_run_recovery(
+            &RunRecoveryDecisionRequest {
+                context: MutationContext {
+                    request_id: RequestId("retry-side-effect".into()),
+                    client_id: ClientId("test".into()),
+                    protocol_version: hachimi_protocol::CONTROL_PROTOCOL_VERSION,
+                    idempotency_key: "retry-side-effect".into(),
+                    expected_run_id: Some(run.id.clone()),
+                    expected_generation: Some(run.generation),
+                },
+                recovery_id: pending[0].recovery.id.clone(),
+                expected_run_id: run.id.clone(),
+                expected_interrupted_generation: run.generation,
+                action: RunRecoveryDecisionAction::RetryIdempotentEffect,
+            },
+            "user",
+            now_ms(),
+        )
+        .await
+        .expect("retry effect");
+    assert_eq!(
+        store
+            .recovery_tool_fence(
+                &run.id,
+                run.generation + 1,
+                "forge.create_pr",
+                "sha256:same"
+            )
+            .await
+            .expect("recovery fence"),
+        Some(RecoveryToolFence::RetryWithIdempotencyKey(
+            "side-effect-key".into()
+        ))
+    );
 }
 
 #[tokio::test]
@@ -1024,7 +1753,7 @@ async fn security_snapshot_is_recoverable_and_grants_can_be_invalidated_once() {
         .await
         .expect("run");
     let grants = CapabilityGrantSet {
-        profile: PermissionProfile::WorkspaceWrite,
+        profile: PermissionProfile::Writable,
         scope: PermissionGrantScope::Run,
         session_id: session.id.clone(),
         run_id: Some(run.id.clone()),
@@ -1037,6 +1766,7 @@ async fn security_snapshot_is_recoverable_and_grants_can_be_invalidated_once() {
         }],
         network: NetworkGrant::default(),
         process: ProcessGrant::default(),
+        browser: Default::default(),
         computer: ComputerGrant::default(),
         review_each_command: true,
         expires_at_ms: None,
@@ -1207,6 +1937,8 @@ async fn mcp_configuration_and_health_are_persistent_and_restart_safe() {
         protocol_version: Some("2025-06-18".into()),
         tool_count: 1,
         error_code: None,
+        failure_count: 0,
+        next_retry_at_ms: None,
         checked_at_ms: configured_at + 1,
     };
     store.set_mcp_server_health(&ready).await.expect("ready");
@@ -1254,121 +1986,4 @@ async fn mcp_configuration_rejects_values_outside_transport_limits() {
         store.upsert_mcp_server(&invalid).await,
         Err(AgentStoreError::InvalidMcpServerConfiguration("server ID"))
     ));
-}
-
-#[tokio::test]
-async fn mutation_idempotency_claims_cache_responses_and_fence_conflicts() {
-    let store = AgentStore::connect_in_memory().await.expect("store");
-    let first = store
-        .claim_idempotent_mutation::<serde_json::Value>(
-            "user",
-            "schedule.update",
-            "key-1",
-            "schedule-1",
-            now_ms(),
-        )
-        .await
-        .expect("claim");
-    assert_eq!(first, IdempotentMutationClaim::Claimed);
-    let in_flight = store
-        .claim_idempotent_mutation::<serde_json::Value>(
-            "user",
-            "schedule.update",
-            "key-1",
-            "schedule-1",
-            now_ms(),
-        )
-        .await
-        .expect("repeat claim");
-    assert_eq!(in_flight, IdempotentMutationClaim::Indeterminate);
-
-    let response = serde_json::json!({ "revision": 2 });
-    store
-        .complete_idempotent_mutation("user", "schedule.update", "key-1", &response)
-        .await
-        .expect("complete");
-    let replay = store
-        .claim_idempotent_mutation::<serde_json::Value>(
-            "user",
-            "schedule.update",
-            "key-1",
-            "schedule-1",
-            now_ms(),
-        )
-        .await
-        .expect("replay");
-    assert_eq!(replay, IdempotentMutationClaim::Completed(response));
-    assert!(matches!(
-        store
-            .claim_idempotent_mutation::<serde_json::Value>(
-                "user",
-                "schedule.update",
-                "key-1",
-                "schedule-2",
-                now_ms(),
-            )
-            .await,
-        Err(AgentStoreError::IdempotencyConflict)
-    ));
-
-    store
-        .claim_idempotent_mutation::<bool>(
-            "user",
-            "schedule.remove",
-            "key-2",
-            "schedule-1",
-            now_ms(),
-        )
-        .await
-        .expect("removal claim");
-    store
-        .abandon_idempotent_mutation("user", "schedule.remove", "key-2")
-        .await
-        .expect("abandon");
-    assert_eq!(
-        store
-            .claim_idempotent_mutation::<bool>(
-                "user",
-                "schedule.remove",
-                "key-2",
-                "schedule-1",
-                now_ms(),
-            )
-            .await
-            .expect("reclaim"),
-        IdempotentMutationClaim::Claimed
-    );
-}
-
-#[tokio::test]
-async fn active_checkout_runs_follow_the_tagged_session_context_after_migration() {
-    let (store, session) = seeded_store().await;
-    let checkout_id = session.context.checkout_id().expect("checkout").clone();
-    assert!(
-        !store
-            .checkout_has_active_runs(&checkout_id)
-            .await
-            .expect("empty")
-    );
-    let run = run(&session, "active-checkout-run");
-    store
-        .create_run_idempotent("user", "active-checkout-run", &run)
-        .await
-        .expect("run");
-    assert!(
-        store
-            .checkout_has_active_runs(&checkout_id)
-            .await
-            .expect("active")
-    );
-    store
-        .transition_run(&run.id, RunStatus::Cancelled, None)
-        .await
-        .expect("cancel");
-    assert!(
-        !store
-            .checkout_has_active_runs(&checkout_id)
-            .await
-            .expect("terminal")
-    );
 }

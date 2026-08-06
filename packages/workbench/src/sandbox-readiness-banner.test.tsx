@@ -100,7 +100,7 @@ describe("SandboxReadinessBanner", () => {
     const repair = root.querySelector<HTMLButtonElement>('[data-testid="sandbox-repair"]');
     repair?.click();
     expect(repair?.disabled).toBe(true);
-    expect(root.textContent).toContain("等待 UAC");
+    expect(root.textContent).toContain("正在修复");
     finishRepair?.(snapshot(4, true));
     await settle();
 

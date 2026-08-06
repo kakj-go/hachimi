@@ -1,0 +1,27 @@
+{
+  "manifestVersion": 1,
+  "id": "feishu",
+  "name": "飞书",
+  "version": "1.0.0",
+  "description": "Hachimi 飞书 Connector、Channel 与事件源",
+  "contributions": [
+    {
+      "kind": "connector",
+      "id": "feishu",
+      "relativePath": "connectors/feishu.json",
+      "requiredScopes": ["connectors.invoke", "contacts.read", "channel.send"]
+    },
+    {
+      "kind": "event_source",
+      "id": "feishu-events",
+      "relativePath": "events/feishu.json",
+      "requiredScopes": ["channel.receive"]
+    },
+    {
+      "kind": "channel",
+      "id": "feishu-channel",
+      "relativePath": "channels/feishu.json",
+      "requiredScopes": ["channel.receive", "channel.send"]
+    }
+  ]
+}

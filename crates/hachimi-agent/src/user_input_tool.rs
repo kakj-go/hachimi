@@ -138,6 +138,7 @@ impl ToolExecutor for RequestUserInputTool {
                 run_generation: invocation.run_generation,
                 item_id: ItemId::random(),
                 questions: arguments.questions,
+                display_answers: Vec::new(),
                 status: UserInputStatus::Pending,
                 expires_at_ms,
                 created_at_ms,

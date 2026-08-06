@@ -31,8 +31,10 @@ const targetRoot = process.env.CARGO_TARGET_DIR
   ? resolve(workspaceRoot, process.env.CARGO_TARGET_DIR)
   : resolve(workspaceRoot, "target");
 const binaries = resolve(workspaceRoot, "apps", "desktop", "src-tauri", "binaries");
+const samplePluginBin = resolve(workspaceRoot, "assets", "plugins", "sample-crm", "bin");
 const suffix = process.platform === "win32" ? ".exe" : "";
 mkdirSync(binaries, { recursive: true });
+mkdirSync(samplePluginBin, { recursive: true });
 
 for (const release of profiles) {
   for (const sidecar of sidecars) {
@@ -52,5 +54,20 @@ for (const release of profiles) {
       `Prepared ${profileDirectory} sidecar ${sidecar.binary}: ${source}${release ? " (externalBin source)" : ""}\n`,
     );
   }
+  const fixtureBinary = "hachimi-sidecar-fixture";
+  const fixtureArgs = ["build", "-p", "hachimi-extensions", "--bin", fixtureBinary];
+  if (release) fixtureArgs.push("--release");
+  const fixtureBuild = spawnSync("cargo", fixtureArgs, {
+    cwd: workspaceRoot,
+    stdio: "inherit",
+  });
+  if (fixtureBuild.status !== 0) process.exit(fixtureBuild.status ?? 1);
+  const profileDirectory = release ? "release" : "debug";
+  const fixtureSource = resolve(targetRoot, profileDirectory, `${fixtureBinary}${suffix}`);
+  const fixtureDestination = resolve(samplePluginBin, `${fixtureBinary}${suffix}`);
+  copyFileSync(fixtureSource, fixtureDestination);
+  process.stdout.write(
+    `Prepared ${profileDirectory} sample Plugin sidecar ${fixtureBinary}: ${fixtureSource}\n`,
+  );
 }
 process.stdout.write(`Prepared ${sidecars.length} external sidecars in ${binaries}\n`);

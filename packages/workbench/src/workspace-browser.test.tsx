@@ -1,7 +1,6 @@
 import type {
   FsChangeEvent,
   FsListPage,
-  FsSearchSnapshot,
   RunDiffSnapshot,
   WorkbenchSessionSnapshot,
 } from "@hachimi/contracts";
@@ -46,7 +45,6 @@ vi.mock("@hachimi/ui", () => {
 });
 
 type ChangeHandler = (event: FsChangeEvent) => void;
-type SearchHandler = (snapshot: FsSearchSnapshot) => void;
 
 function snapshot(): WorkbenchSessionSnapshot {
   return {
@@ -111,7 +109,6 @@ function diffSnapshot(additions = 1): RunDiffSnapshot {
 
 function createPort() {
   let changeHandler: ChangeHandler | undefined;
-  let searchHandler: SearchHandler | undefined;
   let listVersion = 0;
   const port = {
     listWorkspaceFiles: vi.fn(async () => filePage(++listVersion)),
@@ -148,17 +145,10 @@ function createPort() {
         changeHandler = undefined;
       };
     }),
-    onWorkspaceSearch: vi.fn(async (handler: SearchHandler) => {
-      searchHandler = handler;
-      return () => {
-        searchHandler = undefined;
-      };
-    }),
   } as unknown as WorkbenchCommandPort;
   return {
     port,
     handler: () => changeHandler,
-    searchHandler: () => searchHandler,
   };
 }
 
@@ -168,13 +158,13 @@ async function settle() {
   await Promise.resolve();
 }
 
-function mount(port: WorkbenchCommandPort) {
+function mount(port: WorkbenchCommandPort, mode: "files" | "review" = "files") {
   const host = document.createElement("div");
   document.body.append(host);
   const dispose = render(
     () => (
       <I18nProvider initialLocale="en-US">
-        <WorkspaceBrowser snapshot={snapshot()} commandPort={port} />
+        <WorkspaceBrowser mode={mode} snapshot={snapshot()} commandPort={port} />
       </I18nProvider>
     ),
     host,
@@ -195,6 +185,8 @@ describe("WorkspaceBrowser command adapter", () => {
     const list = vi.mocked(adapter.port.listWorkspaceFiles);
     expect(list).toHaveBeenCalledTimes(1);
     expect(host.textContent).toContain("version-1.rs");
+    expect(host.textContent).not.toContain("Search");
+    expect(host.textContent).not.toContain("Git");
 
     adapter.handler()?.({
       watchId: "watch-1",
@@ -228,12 +220,7 @@ describe("WorkspaceBrowser command adapter", () => {
     vi.mocked(adapter.port.getWorkspaceDiff)
       .mockResolvedValueOnce(diffSnapshot(1))
       .mockResolvedValueOnce(diffSnapshot(2));
-    const { host, dispose } = mount(adapter.port);
-    await settle();
-    const diffButton = [...host.querySelectorAll("button")].find(
-      (button) => button.textContent?.trim() === "Diff",
-    );
-    diffButton?.click();
+    const { host, dispose } = mount(adapter.port, "review");
     await settle();
     expect(host.textContent).toContain("+1 −0");
 
@@ -260,6 +247,19 @@ describe("WorkspaceBrowser command adapter", () => {
     dispose();
   });
 
+  it("reports an empty file chunk response without throwing a bridge TypeError", async () => {
+    const adapter = createPort();
+    vi.mocked(adapter.port.readWorkspaceFileChunk).mockResolvedValue(null as never);
+    const { host, dispose } = mount(adapter.port);
+    await settle();
+    [...host.querySelectorAll("button")]
+      .find((button) => button.textContent?.includes("version-1.rs"))
+      ?.click();
+    await settle();
+    expect(host.textContent).toContain("Workspace file read returned an empty response.");
+    dispose();
+  });
+
   it("loads an oversized Run Diff through the bounded diff.read_file adapter", async () => {
     const adapter = createPort();
     const large = diffSnapshot();
@@ -279,11 +279,7 @@ describe("WorkspaceBrowser command adapter", () => {
       utf8Text: "@@ -1 +1 @@\n+bounded\n",
       etag: "sha256:diff",
     });
-    const { host, dispose } = mount(adapter.port);
-    await settle();
-    [...host.querySelectorAll("button")]
-      .find((button) => button.textContent?.trim() === "Diff")
-      ?.click();
+    const { host, dispose } = mount(adapter.port, "review");
     await settle();
     [...host.querySelectorAll("button")]
       .find((button) => button.textContent?.includes("Load full Diff"))
@@ -293,53 +289,6 @@ describe("WorkspaceBrowser command adapter", () => {
     expect(adapter.port.readWorkspaceDiffFile).toHaveBeenCalledWith(
       expect.objectContaining({ path: "src/lib.rs", offset: 0, limit: 256 * 1024 }),
     );
-    dispose();
-  });
-
-  it("cancels a late fuzzy-search generation instead of projecting it", async () => {
-    vi.useFakeTimers();
-    const adapter = createPort();
-    let resolveFirst!: (snapshot: FsSearchSnapshot) => void;
-    const first = new Promise<FsSearchSnapshot>((resolve) => {
-      resolveFirst = resolve;
-    });
-    vi.mocked(adapter.port.startWorkspaceFileSearch)
-      .mockReturnValueOnce(first)
-      .mockResolvedValueOnce({
-        searchId: "search-2",
-        generation: 1,
-        query: "beta",
-        results: [{ path: "beta.rs", score: 10, matchIndices: [0, 1, 2, 3] }],
-        complete: true,
-        truncated: false,
-      });
-    const { host, dispose } = mount(adapter.port);
-    await settle();
-    const searchTab = [...host.querySelectorAll("button")].find((button) =>
-      button.textContent?.includes("Search"),
-    );
-    searchTab?.click();
-    const input = host.querySelector<HTMLInputElement>(".workspace-search-panel input")!;
-    input.value = "alpha";
-    input.dispatchEvent(new InputEvent("input", { bubbles: true }));
-    await vi.advanceTimersByTimeAsync(150);
-    input.value = "beta";
-    input.dispatchEvent(new InputEvent("input", { bubbles: true }));
-    await vi.advanceTimersByTimeAsync(150);
-    await settle();
-    expect(host.textContent).toContain("beta.rs");
-
-    resolveFirst({
-      searchId: "search-1",
-      generation: 1,
-      query: "alpha",
-      results: [{ path: "alpha.rs", score: 10, matchIndices: [0] }],
-      complete: true,
-      truncated: false,
-    });
-    await settle();
-    expect(host.textContent).not.toContain("alpha.rs");
-    expect(adapter.port.cancelWorkspaceFileSearch).toHaveBeenCalledWith("search-1");
     dispose();
   });
 

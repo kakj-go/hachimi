@@ -59,6 +59,29 @@
   border-right: 0;
 }
 
+.skill-scope-tabs {
+  padding: 0 10px 10px;
+  border-bottom: 1px solid var(--color-border-muted);
+}
+
+.skill-scope-tabs [data-component="tabs-list"] {
+  width: 100%;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  padding: 3px;
+  border: 1px solid var(--color-border-muted);
+  border-radius: var(--radius-md);
+  background: var(--color-bg-subtle);
+}
+
+.skill-scope-tabs [data-component="tabs-trigger"] {
+  justify-content: center;
+}
+
+.skill-scope-tabs [data-component="tabs-content"] {
+  display: none;
+}
+
 .extension-splitter {
   position: relative;
   width: 7px;
@@ -446,33 +469,15 @@
 
 .skill-wysiwyg-metadata {
   display: grid;
-  grid-template-columns: minmax(150px, 0.35fr) minmax(240px, 1fr);
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 14px;
   padding: 14px 18px;
   border-bottom: 1px solid var(--color-border-muted);
   background: color-mix(in srgb, var(--color-bg-control) 48%, transparent);
 }
 
-.skill-wysiwyg-metadata > div {
-  display: grid;
-  align-content: start;
-  gap: 8px;
-}
-
-.skill-wysiwyg-metadata span {
-  color: var(--color-text-muted);
-  font-size: var(--font-xs);
-}
-
-.skill-wysiwyg-metadata code {
-  min-height: 34px;
-  display: flex;
-  align-items: center;
-  padding: 0 10px;
-  border: 1px solid var(--color-border-muted);
-  border-radius: var(--radius-md);
-  background: var(--color-bg-base);
-  color: var(--color-text-base);
+.skill-wysiwyg-description {
+  grid-column: 1 / -1;
 }
 
 .skill-wysiwyg-toolbar {

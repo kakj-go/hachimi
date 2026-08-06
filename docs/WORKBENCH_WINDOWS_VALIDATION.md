@@ -1,6 +1,6 @@
 # Workbench Windows 验收清单
 
-更新时间：2026-07-28
+更新时间：2026-08-02
 
 ## 普通 Desktop E2E
 
@@ -20,7 +20,9 @@
 - [x] Scheduler Rust 测试验证 retry 终态约束、fresh TaskRun/invocation key，以及通知失败不改变成功执行状态；
 - [x] 真实 `SystemClock` release soak 覆盖短期 At、anchored Every、6-field Cron 和 20+ occurrence；
 - [x] Terminal Vitest/真实 WebView2 覆盖 base64 bytes、分段 UTF-8、非法字节、output cap、resize、stdin echo、reload reattach、kill 和孙进程终止；
-- [x] Desktop runner 在 restart/session/failure/finally 精确回收 E2E 应用和 WebDriver 进程树；Workspace Worker/MCP stdio 使用 `CREATE_NO_WINDOW`。完整 3-spec 回归中应用实例最大为 1，结束后残留为 0；
+- [x] Desktop runner 在 restart/session/failure/finally 精确回收 E2E 应用和 WebDriver 进程树；Workspace、Git、Diff、MCP、Gateway、Sandbox helper、子代理与 sidecar 统一使用 `hachimi-process-policy`，后台捕获进程在 Windows 使用 `CREATE_NO_WINDOW`，用户主动打开的应用保持可见；
+- [x] 完整 5-spec Desktop E2E 持续枚举 Desktop 进程树中的可见 `ConsoleWindowClass`；监控器失效或发现 Git、PowerShell、cmd、helper 等可见控制台都会使回归失败，当前报告 `findings: []`；
+- [x] Workbench 使用 `agent-v2.sqlite3`，Run/Item、Run Summary、计划修订、UserInput 脱敏、Git 高层操作和 Session 活动状态均通过真实 WebView2 恢复验证；
 - [ ] 真实墙钟自然触发 At/Every/Cron、系统通知展示和 UI retry 的长时间 WebView2 E2E 仍待发布环境执行。
 
 ## 管理员 Windows Runner
@@ -41,19 +43,26 @@
 ## 固定命令
 
 ```text
-pnpm format:check
-pnpm typecheck
-pnpm lint
-pnpm test
-cargo test --workspace
-cargo clippy --workspace --all-targets --all-features -- -D warnings
-pnpm contracts:check
-pnpm provenance:check
-pnpm test:p0-adversarial
-pnpm test:desktop:e2e
+pnpm check
+pnpm test:windows:standard-user
 pnpm test:windows:release
-cargo test -p hachimi-sandbox --features windows-smoke -- --ignored --test-threads=1
 ```
+
+`pnpm check` 是普通本地/托管 CI 的完整聚合入口，包含 format、typecheck、lint/Clippy、workspace tests、contracts、provenance/architecture、P0、Storybook、视觉/可访问性、build 和 Desktop E2E。
+
+## 真实环境测试归属
+
+下列测试保留 `#[ignore]` 是为了防止普通 `cargo test --workspace` 修改系统状态或误用交互桌面；它们不是遗漏，而是由发布 Gate 使用 `--ignored` 精确执行：
+
+| 环境测试                                                              | 所属 Gate                 | 自动入口                          |
+| --------------------------------------------------------------------- | ------------------------- | --------------------------------- |
+| managed Chromium 真实页面、上传和下载                                 | standard-user             | `pnpm test:windows:standard-user` |
+| WGC/Notepad 真实截图和输入                                            | standard-user             | `pnpm test:windows:standard-user` |
+| Gateway 当前用户启动项往返                                            | standard-user             | `pnpm test:windows:standard-user` |
+| SystemClock At/Every/Cron soak                                        | standard-user、elevated   | 两个 Windows Gate 均显式执行      |
+| Sandbox ACL/路径攻击、Workspace Worker、Agent Exec、MCP stdio、ConPTY | standard-user 或 elevated | 对应 Windows Gate 显式执行        |
+
+长时间 WebView2 自然触发、Toast UI Automation 和 retry 仍是上述发布环境证据的一部分；未取得对应 `summary.json` 前保持未勾选，不降低已经完成的代码能力，也不得据此创建正式发布标记。
 
 失败产物只保留脱敏截图、WebDriver 日志和运行状态；不得保存 Prompt、secret、完整 Tool 输出或用户路径。
 

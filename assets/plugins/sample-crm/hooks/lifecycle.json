@@ -1,0 +1,14 @@
+{
+  "protocolVersion": 1,
+  "runtime": "sandboxed_stdio_json_rpc",
+  "entrypoint": "bin/hachimi-sidecar-fixture.exe",
+  "args": ["--mode=success"],
+  "events": [
+    "run.before",
+    "run.after",
+    "tool.before",
+    "tool.after",
+    "schedule.before",
+    "schedule.after"
+  ]
+}

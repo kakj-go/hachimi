@@ -2,11 +2,18 @@
 
 mod agent_store;
 
-pub use agent_store::side_effects::SideEffectClaim;
+pub use agent_store::side_effects::{SideEffectAuthority, SideEffectClaim};
 pub use agent_store::{
-    AgentStore, AgentStoreError, AuditMetadataRecord, CreatedAgentRun, IdempotentMutationClaim,
-    ManagedAttachmentRecord, ManagedRunDiffFile, RecoveryReport, RunFileBaselineRecord,
-    ScheduleInvocationClaim, SkillFileIndexRecord, StoredSkillRecord,
+    AgentStore, AgentStoreError, AgentTaskExecutionClaim, AtomicRunLaunchInput,
+    AuditMetadataRecord, BrowserDownloadRuntimeUpdate, BrowserTabRuntimeUpdate,
+    ChannelAgentRunCreateInput, ChannelRunBindingInput, CreatedAgentRun, HostActionLedgerInput,
+    IdempotentMutationClaim, ManagedAttachmentRecord, ManagedRunDiffFile, PluginHookEventRecord,
+    PluginHookRuntime, PluginHookRuntimeFuture, PluginHookSubscription, PreparedAgentWorkspace,
+    RecoveryReport, RecoveryToolFence, RunFileBaselineRecord, ScheduleEventIngestClaim,
+    ScheduleEventLaunchClaim, ScheduleInvocationClaim, SessionCheckoutBindingUpdate,
+    SessionEnvironmentState, SessionHostAuthorizationSummary, SkillFileIndexRecord,
+    StoredSkillRecord, WorkbenchHandoffJournalRecord, WorkspaceOwnerRef,
+    WorkspaceReconciliationReport, canonical_session_source_url,
 };
 
 use std::{

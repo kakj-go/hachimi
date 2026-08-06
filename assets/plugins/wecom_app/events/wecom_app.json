@@ -1,0 +1,4 @@
+{
+  "sourceId": "integration:wecom_app",
+  "eventTypes": ["message", "text", "event"]
+}

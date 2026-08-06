@@ -5,8 +5,8 @@ use std::{future::Future, pin::Pin, sync::Arc};
 use futures_util::Stream;
 use hachimi_protocol::{
     ModelCompactionRequest, ModelCompactionResult, ModelEvent, ModelMessage, ModelRequest,
-    ProviderCapabilities, ProviderCapabilityProbe, RunConfiguration, TokenCountSource,
-    WorkloadKind,
+    ProviderCapabilities, ProviderCapabilityProbe, ProviderEmbeddingRequest,
+    ProviderEmbeddingResult, RunConfiguration, TokenCountSource, WorkloadKind,
 };
 use thiserror::Error;
 use tokio_util::sync::CancellationToken;
@@ -15,6 +15,8 @@ pub type ModelEventStream =
     Pin<Box<dyn Stream<Item = Result<ModelEvent, ModelRuntimeError>> + Send>>;
 pub type ModelCompactionFuture =
     Pin<Box<dyn Future<Output = Result<ModelCompactionResult, ModelRuntimeError>> + Send>>;
+pub type ModelEmbeddingFuture =
+    Pin<Box<dyn Future<Output = Result<ProviderEmbeddingResult, ModelRuntimeError>> + Send>>;
 pub type ModelClientFuture =
     Pin<Box<dyn Future<Output = Result<Arc<dyn ModelClientSession>, ModelRuntimeError>> + Send>>;
 pub type WorkloadClassificationFuture =
@@ -49,6 +51,8 @@ pub enum ModelRuntimeError {
     ContextOverflow,
     #[error("model provider returned an invalid stream: {0}")]
     InvalidStream(String),
+    #[error("agent run requires attention: {0}")]
+    NeedsAttention(String),
 }
 
 pub trait ModelRuntime: Send + Sync {
@@ -70,6 +74,14 @@ pub trait ModelRuntime: Send + Sync {
                 "remote_compaction",
             ))
         })
+    }
+
+    fn embed(
+        &self,
+        _request: ProviderEmbeddingRequest,
+        _cancellation: CancellationToken,
+    ) -> ModelEmbeddingFuture {
+        Box::pin(async { Err(ModelRuntimeError::UnsupportedCapability("embeddings")) })
     }
 
     /// Strict structured classifier surface. Providers must explicitly advertise

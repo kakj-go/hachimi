@@ -24,6 +24,7 @@ import {
   PageHeading,
   Plus,
   StatusBanner,
+  Tabs,
   TextField,
   Upload,
   Workspace,
@@ -31,6 +32,7 @@ import {
 import { For, Show, createMemo, createSignal, onCleanup, onMount } from "solid-js";
 
 import { TextEditor } from "./text-editor";
+import { skillDisplayName } from "./skill-display";
 
 type RenameTarget =
   | { kind: "skill"; skillId: string; currentName: string }
@@ -93,17 +95,38 @@ export function SkillsSettingsPage() {
   const [dropActive, setDropActive] = createSignal(false);
   const [dropTargetKey, setDropTargetKey] = createSignal<string>();
   const [dropNotice, setDropNotice] = createSignal<string>();
+  const [skillScope, setSkillScope] = createSignal<"built_in" | "custom">("built_in");
   let workspaceElement: HTMLElement | undefined;
   let stopChanges: (() => void) | undefined;
   let stopNativeDrag: (() => void) | undefined;
   let skillSubscriptionId: SkillSubscriptionId | undefined;
+  let skillSelectionGeneration = 0;
+  let fileLoadGeneration = 0;
+  let externalRefreshGeneration = 0;
 
   const selectedSkill = createMemo(() => skills().find((skill) => skill.id === selectedSkillId()));
+  const visibleSkills = createMemo(() =>
+    skills().filter((skill) =>
+      skillScope() === "built_in" ? skill.scope === "built_in" : skill.scope !== "built_in",
+    ),
+  );
+
+  function changeSkillScope(scope: string) {
+    const nextScope = scope as "built_in" | "custom";
+    setSkillScope(nextScope);
+    const next = skills().find((skill) =>
+      nextScope === "built_in" ? skill.scope === "built_in" : skill.scope !== "built_in",
+    );
+    if (next && next.id !== selectedSkillId()) void selectSkill(next.id);
+  }
 
   async function loadSkills(selectId?: string) {
     const next = await commands.listSkills();
     setSkills(next);
     const id = selectId ?? selectedSkillId() ?? next[0]?.id;
+    const target = next.find((skill) => skill.id === id);
+    if (target) setSkillScope(target.scope === "built_in" ? "built_in" : "custom");
+    else if (!next.some((skill) => skill.scope === "built_in")) setSkillScope("custom");
     if (id && id !== selectedSkillId()) await selectSkill(id, true);
   }
 
@@ -121,18 +144,23 @@ export function SkillsSettingsPage() {
       });
       return;
     }
+    const generation = ++skillSelectionGeneration;
+    fileLoadGeneration += 1;
+    externalRefreshGeneration += 1;
     setSelectedSkillId(skillId);
+    setSelectedPath("");
+    setFile();
+    setDraft("");
+    setDirty(false);
+    setConflict(false);
     const nextTree = await commands.getSkillTree(skillId);
+    if (generation !== skillSelectionGeneration || selectedSkillId() !== skillId) return;
     setTree(nextTree);
     if (findNode(nextTree, "SKILL.md")) {
       setSelectedPath("SKILL.md");
       await loadFile(skillId, "SKILL.md", true);
     } else {
-      setSelectedPath("");
-      setFile();
-      setDraft("");
-      setDirty(false);
-      setConflict(false);
+      fileLoadGeneration += 1;
     }
   }
 
@@ -150,8 +178,20 @@ export function SkillsSettingsPage() {
       });
       return;
     }
-    const snapshot = await commands.readSkillFile(skillId, relativePath);
+    const generation = ++fileLoadGeneration;
+    externalRefreshGeneration += 1;
     setSelectedPath(relativePath);
+    setFile();
+    setDraft("");
+    setDirty(false);
+    setConflict(false);
+    const snapshot = await commands.readSkillFile(skillId, relativePath);
+    if (
+      generation !== fileLoadGeneration ||
+      selectedSkillId() !== skillId ||
+      selectedPath() !== relativePath
+    )
+      return;
     setFile(snapshot);
     setDraft(snapshot.content ?? "");
     setDirty(false);
@@ -159,14 +199,33 @@ export function SkillsSettingsPage() {
   }
 
   async function refreshExternalChanges() {
+    const refreshGeneration = ++externalRefreshGeneration;
     try {
       const nextSkills = await commands.listSkills();
+      if (refreshGeneration !== externalRefreshGeneration) return;
       setSkills(nextSkills);
       const skillId = selectedSkillId();
+      if (skillId) {
+        const nextTree = await commands.getSkillTree(skillId);
+        if (refreshGeneration !== externalRefreshGeneration || selectedSkillId() !== skillId)
+          return;
+        setTree(nextTree);
+      }
       const current = file();
-      if (skillId) setTree(await commands.getSkillTree(skillId));
+      const currentFileLoadGeneration = fileLoadGeneration;
       if (skillId && current) {
         const disk = await commands.readSkillFile(skillId, current.relativePath);
+        const active = file();
+        if (
+          refreshGeneration !== externalRefreshGeneration ||
+          currentFileLoadGeneration !== fileLoadGeneration ||
+          selectedSkillId() !== skillId ||
+          !active ||
+          active.skillId !== current.skillId ||
+          active.relativePath !== current.relativePath ||
+          active.revision !== current.revision
+        )
+          return;
         if (disk.revision !== current.revision) {
           if (dirty()) setConflict(true);
           else {
@@ -565,6 +624,16 @@ export function SkillsSettingsPage() {
           <div class="extension-panel-toolbar">
             <strong>{copy("技能列表", "Skills")}</strong>
           </div>
+          <div class="skill-scope-tabs">
+            <Tabs
+              value={skillScope()}
+              onChange={changeSkillScope}
+              tabs={[
+                { value: "built_in", label: copy("内置技能", "Built-in"), content: <></> },
+                { value: "custom", label: copy("自定义技能", "Custom"), content: <></> },
+              ]}
+            />
+          </div>
           <div class="skill-tree" data-component="skill-tree" data-drop-active={dropActive()}>
             <Show
               when={!loading()}
@@ -572,7 +641,7 @@ export function SkillsSettingsPage() {
                 <div class="extension-empty">{copy("正在加载 Skills…", "Loading Skills…")}</div>
               }
             >
-              <For each={skills()}>
+              <For each={visibleSkills()}>
                 {(skill) => (
                   <section class="skill-tree-section">
                     <div
@@ -597,7 +666,7 @@ export function SkillsSettingsPage() {
                           <Folder size={15} />
                         )}
                         <span title={skill.qualifiedName}>
-                          {skill.interface?.displayName ?? skill.qualifiedName}
+                          {skillDisplayName(skill, i18n.locale() === "zh-CN")}
                         </span>
                         <Show when={!skill.editable}>
                           <span class="skill-disabled-indicator">{skill.scope}</span>

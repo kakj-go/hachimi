@@ -9,10 +9,13 @@ mod mcp_progress;
 mod mcp_resource_tools;
 mod mcp_tools;
 mod model_view;
+mod multi_agent;
+mod plan_tool;
 mod profiles;
 mod review;
 mod review_tools;
 mod run_diff;
+mod run_launcher;
 mod run_projection;
 mod run_runtime;
 #[cfg(test)]
@@ -40,20 +43,26 @@ pub use apply_patch::{APPLY_PATCH_TOOL, apply_patch_tool};
 pub use model_view::{
     ModelView, ModelViewLimits, build_model_view, build_model_view_with_checkpoint,
 };
-pub use profiles::{
-    WorkloadProfileSpec, profile_allows_tool, profile_runtime_context, workload_profile_spec,
+pub use multi_agent::{
+    AGENT_CANCEL_TOOL, AGENT_COLLECT_TOOL, AGENT_SEND_TOOL, AGENT_SPAWN_TOOL, AGENT_WAIT_TOOL,
+    MultiAgentCoordinator,
 };
+pub use plan_tool::{UPDATE_PLAN_TOOL, update_plan_tool};
+pub use profiles::{WorkloadProfileSpec, profile_runtime_context, workload_profile_spec};
 pub use review::{
     ParsedReviewOutput, build_review_prompt, materialize_review_findings, parse_review_output,
     priority_to_severity,
 };
 pub use review_tools::{REVIEW_DIFF_TOOL, review_diff_tool};
 pub use run_diff::RunDiffTracker;
-pub use run_projection::{PersistedRunError, PersistedToolLoop, RunStepContext};
+pub use run_launcher::{AgentRunLaunchRequest, AgentRunLauncher, LaunchedAgentRun};
+pub use run_projection::{
+    AUTHORITY_NEEDS_ATTENTION_EVENT, PersistedRunError, PersistedToolLoop, RunStepContext,
+};
 pub use run_runtime::{
     ActiveAgentRun, AgentExecutionError, AgentExecutorRegistry, AgentExecutorRegistryError,
-    AgentPreparationFuture, AgentRunCreateRequest, AgentRunExecutor, AgentRunFactory,
-    AgentRunFactoryError, AgentRunPreparer, AgentRunPriority, AgentRunRequest, PreparedAgentRun,
+    AgentPreparationFuture, AgentRunCreateRequest, AgentRunExecutor, AgentRunFactoryError,
+    AgentRunPreparer, AgentRunPriority, AgentRunRequest, PreparedAgentRun, UserInputAvailability,
 };
 pub use security_tools::{AuthorizedToolContext, PersistentAuditSink, authorized_tool};
 pub use session_lane::{LaneError, LaneMarker, SessionLanePermit, SessionLanes};
@@ -61,10 +70,11 @@ pub use skill_runtime::{SKILLS_LIST_TOOL, SKILLS_READ_TOOL, skill_runtime_tools}
 pub use step_context::{
     AgentInstructionLayer, StepContext, StepContextFactory, StepContextInput, StepRuntimeSnapshot,
     StepRuntimeState, StepWorldState, StepWorldStateRefreshFuture, StepWorldStateRefresher,
-    ToolPlan,
+    ToolPlan, ToolPlanConstraints,
 };
 pub use tool_loop::{
-    LoopEvent, SteeringFuture, SteeringSource, ToolLoopDriver, ToolLoopOutcome, ToolLoopRunOptions,
+    LoopEvent, RunCheckpointDraft, RunCheckpointFuture, RunCheckpointReporter, SteeringFuture,
+    SteeringSource, ToolLoopDriver, ToolLoopOutcome, ToolLoopRunOptions,
 };
 pub use tool_orchestrator::ToolOrchestrator;
 pub use tool_registry::{
@@ -79,7 +89,7 @@ pub use workload_resolver::{
 };
 pub use workspace_tools::{
     WorkspaceToolKind, register_workspace_tools, workspace_tool_executors,
-    workspace_tool_executors_with_diff_tracking,
+    workspace_tool_executors_with_diff_tracker, workspace_tool_executors_with_diff_tracking,
 };
 
 pub type ToolFuture = Pin<Box<dyn Future<Output = Result<ToolResult, ToolExecutionError>> + Send>>;

@@ -8,6 +8,7 @@ import { AlertTriangle, Button, RefreshCw, ShieldCheck } from "@hachimi/ui";
 import { Show, createSignal, onMount } from "solid-js";
 
 import type { WorkbenchCommandPort } from "./workbench-command-port";
+import { directUserMutationContext } from "./mutation-context";
 
 export function SandboxReadinessBanner(props: {
   commandPort: WorkbenchCommandPort;
@@ -38,14 +39,7 @@ export function SandboxReadinessBanner(props: {
     try {
       setSnapshot(
         await props.commandPort.repairSandbox({
-          context: {
-            requestId: crypto.randomUUID(),
-            clientId: "window:workbench",
-            protocolVersion: 18,
-            idempotencyKey: crypto.randomUUID(),
-            expectedRunId: null,
-            expectedGeneration: null,
-          },
+          context: directUserMutationContext(),
         }),
       );
     } catch (error) {
@@ -107,8 +101,8 @@ export function SandboxReadinessBanner(props: {
           <ShieldCheck size={14} />
           {busy() === "repair"
             ? zh()
-              ? "等待 UAC…"
-              : "Waiting for UAC…"
+              ? "正在修复…"
+              : "Repairing…"
             : zh()
               ? "安装/修复"
               : "Install/repair"}

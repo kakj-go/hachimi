@@ -13,6 +13,7 @@ export default defineConfig({
       input: {
         pet: fileURLToPath(new URL("pet.html", import.meta.url)),
         workbench: fileURLToPath(new URL("workbench.html", import.meta.url)),
+        startup: fileURLToPath(new URL("startup.html", import.meta.url)),
       },
     },
   },

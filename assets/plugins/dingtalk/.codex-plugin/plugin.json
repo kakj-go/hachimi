@@ -1,0 +1,27 @@
+{
+  "manifestVersion": 1,
+  "id": "dingtalk",
+  "name": "钉钉",
+  "version": "1.0.0",
+  "description": "Hachimi 钉钉 Connector、Channel 与事件源",
+  "contributions": [
+    {
+      "kind": "connector",
+      "id": "dingtalk",
+      "relativePath": "connectors/dingtalk.json",
+      "requiredScopes": ["connectors.invoke", "contacts.read", "channel.send"]
+    },
+    {
+      "kind": "event_source",
+      "id": "dingtalk-events",
+      "relativePath": "events/dingtalk.json",
+      "requiredScopes": ["channel.receive"]
+    },
+    {
+      "kind": "channel",
+      "id": "dingtalk-channel",
+      "relativePath": "channels/dingtalk.json",
+      "requiredScopes": ["channel.receive", "channel.send"]
+    }
+  ]
+}

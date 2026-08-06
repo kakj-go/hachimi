@@ -16,6 +16,7 @@ import {
   Dialog,
   PageHeading,
   Plus,
+  RefreshCw,
   SegmentedControl,
   StatusBanner,
   Switch as Toggle,
@@ -29,6 +30,7 @@ import { For, Show, createMemo, createSignal, onCleanup, onMount } from "solid-j
 import { McpInventoryPanel } from "./mcp-inventory-panel";
 import { McpCallHistory } from "./mcp-call-history";
 import { McpAuthPanel } from "./mcp-auth-panel";
+import { RuntimeHealthBanner, mcpHealthMessage } from "./runtime-health";
 
 export function McpSettingsPage(props: { connectorEnabled: boolean }) {
   const i18n = useI18n();
@@ -296,6 +298,21 @@ export function McpSettingsPage(props: { connectorEnabled: boolean }) {
     }
   }
 
+  async function retrySelected() {
+    const serverId = selectedId();
+    if (!serverId) return;
+    setBusy(true);
+    setError();
+    try {
+      await commands.refreshMcpServer(serverId);
+      await reload(serverId);
+    } catch (reason) {
+      setError(commandFailure(reason).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function remove(view: McpServerView) {
     try {
       await commands.removeMcpServer(view.configuration.id);
@@ -380,6 +397,7 @@ export function McpSettingsPage(props: { connectorEnabled: boolean }) {
       <Show when={error()}>
         {(message) => <StatusBanner tone="danger">{message()}</StatusBanner>}
       </Show>
+      <RuntimeHealthBanner component="mcp" zh={i18n.locale() === "zh-CN"} />
       <Workspace class="extension-workspace">
         <aside class="extension-sidebar">
           <div class="extension-panel-toolbar">
@@ -433,10 +451,23 @@ export function McpSettingsPage(props: { connectorEnabled: boolean }) {
                 <strong>
                   {selected()?.configuration.displayName ?? copy("新增 MCP 服务", "New MCP server")}
                 </strong>
-                <small>{selected()?.health.state ?? copy("尚未保存", "Not saved")}</small>
+                <small>
+                  {selected()?.health.errorCode
+                    ? mcpHealthMessage(selected()!.health.errorCode, i18n.locale() === "zh-CN")
+                    : (selected()?.health.state ?? copy("尚未保存", "Not saved"))}
+                </small>
               </div>
               <div class="extension-toolbar-actions">
                 <Show when={selected()}>
+                  <Show
+                    when={
+                      selected()!.configuration.enabled && selected()!.health.state === "failed"
+                    }
+                  >
+                    <Button disabled={busy()} onClick={() => void retrySelected()}>
+                      <RefreshCw size={14} /> {copy("立即重试", "Retry now")}
+                    </Button>
+                  </Show>
                   <div class="mcp-server-exposure">
                     <div>
                       <strong>{copy("提供给 Agent", "Available to Agent")}</strong>

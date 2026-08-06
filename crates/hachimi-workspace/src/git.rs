@@ -10,12 +10,12 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+use hachimi_process_policy::{ProcessPolicy, tokio_command};
 use hachimi_protocol::{
-    GitCommitSummary, GitFileStatus, GitMutationResponse, GitWorkspaceSnapshot, ProjectGitSnapshot,
-    ProjectGitState, ProjectId,
+    ForgeKind, GitCommitSummary, GitFileStatus, GitMutationResponse, GitPushResponse,
+    GitRemoteRecord, GitWorkspaceSnapshot, ProjectGitSnapshot, ProjectGitState, ProjectId,
 };
 use tokio::io::AsyncWriteExt;
-use tokio::process::Command;
 
 use crate::{WorkerContext, WorkspaceError, WorkspaceErrorCode, WorkspaceOutput, relative_display};
 
@@ -298,10 +298,132 @@ impl WorkerContext {
         })
     }
 
+    pub(crate) async fn git_remotes(&self) -> Result<WorkspaceOutput, WorkspaceError> {
+        let names = self.git_checked(["remote"], true).await?;
+        let names = String::from_utf8(names.stdout).map_err(|_| {
+            WorkspaceError::new(
+                WorkspaceErrorCode::NotText,
+                "Git remote names are not UTF-8",
+            )
+        })?;
+        let mut remotes = Vec::new();
+        for name in names.lines().map(str::trim).filter(|name| !name.is_empty()) {
+            validate_remote_name(name)?;
+            let url = self.git_checked(["remote", "get-url", name], true).await?;
+            let url = String::from_utf8(url.stdout).map_err(|_| {
+                WorkspaceError::new(WorkspaceErrorCode::NotText, "Git remote URL is not UTF-8")
+            })?;
+            let url = url.trim();
+            if url.is_empty() || url.len() > 4_096 {
+                return Err(WorkspaceError::new(
+                    WorkspaceErrorCode::InvalidRequest,
+                    "Git remote URL is empty or too large",
+                ));
+            }
+            remotes.push(GitRemoteRecord {
+                name: name.to_owned(),
+                display_url: redact_remote_url(url),
+                remote_url_hash: hash_remote_url(url),
+                forge_kind: infer_forge_kind(url),
+            });
+        }
+        Ok(WorkspaceOutput::GitRemotes { remotes })
+    }
+
+    pub(crate) async fn git_push(
+        &self,
+        remote_name: &str,
+        expected_remote_url_hash: &str,
+        source_ref: &str,
+        target_ref: &str,
+        expected_commit_oid: &str,
+    ) -> Result<WorkspaceOutput, WorkspaceError> {
+        validate_remote_name(remote_name)?;
+        validate_git_ref(source_ref, false)?;
+        validate_git_ref(target_ref, true)?;
+        validate_oid(expected_commit_oid)?;
+        if expected_remote_url_hash.len() != 64
+            || !expected_remote_url_hash
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit())
+        {
+            return Err(WorkspaceError::new(
+                WorkspaceErrorCode::InvalidRequest,
+                "Git remote URL hash must be a SHA-256 value",
+            ));
+        }
+        let remote_url = self
+            .git_checked(["remote", "get-url", remote_name], true)
+            .await?;
+        let remote_url = String::from_utf8(remote_url.stdout).map_err(|_| {
+            WorkspaceError::new(WorkspaceErrorCode::NotText, "Git remote URL is not UTF-8")
+        })?;
+        if hash_remote_url(remote_url.trim()) != expected_remote_url_hash {
+            return Err(WorkspaceError::new(
+                WorkspaceErrorCode::Conflict,
+                "Git remote URL changed after approval",
+            ));
+        }
+        let resolved = self
+            .git_checked(
+                ["rev-parse", "--verify", &format!("{source_ref}^{{commit}}")],
+                true,
+            )
+            .await?;
+        let resolved = String::from_utf8_lossy(&resolved.stdout)
+            .trim()
+            .to_ascii_lowercase();
+        if resolved != expected_commit_oid.to_ascii_lowercase() {
+            return Err(WorkspaceError::new(
+                WorkspaceErrorCode::Conflict,
+                "Git source ref changed after approval",
+            ));
+        }
+        self.git_checked(
+            [
+                "push".to_owned(),
+                "--porcelain".to_owned(),
+                "--".to_owned(),
+                remote_name.to_owned(),
+                format!("{source_ref}:{target_ref}"),
+            ],
+            false,
+        )
+        .await?;
+        let receipt = self
+            .git_checked(["ls-remote", "--refs", remote_name, target_ref], true)
+            .await?;
+        let confirmed = String::from_utf8_lossy(&receipt.stdout)
+            .lines()
+            .filter_map(|line| line.split_whitespace().next())
+            .any(|oid| oid.eq_ignore_ascii_case(expected_commit_oid));
+        if !confirmed {
+            return Err(WorkspaceError::new(
+                WorkspaceErrorCode::Conflict,
+                "Git push returned without a matching remote ref receipt",
+            ));
+        }
+        Ok(WorkspaceOutput::GitPush {
+            response: GitPushResponse {
+                remote_name: remote_name.to_owned(),
+                remote_url_hash: expected_remote_url_hash.to_ascii_lowercase(),
+                source_ref: source_ref.to_owned(),
+                target_ref: target_ref.to_owned(),
+                commit_oid: expected_commit_oid.to_ascii_lowercase(),
+                confirmed: true,
+                result_code: "git_push_confirmed".into(),
+            },
+        })
+    }
+
     async fn git_snapshot(
         &self,
         history_limit: u16,
     ) -> Result<GitWorkspaceSnapshot, WorkspaceError> {
+        let raw_status = self
+            .git_raw(["status", "--porcelain=v1", "-z"], true)
+            .await?;
+        let status_fingerprint = crate::worker_io::sha256(&raw_status.stdout);
         let status = self.git_status_snapshot().await?;
         let WorkspaceOutput::GitStatusSnapshot { entries } = status else {
             return Err(WorkspaceError::new(
@@ -338,6 +460,7 @@ impl WorkerContext {
             detached: head_sha.is_some() && branch.is_none(),
             branch,
             head_sha,
+            status_fingerprint,
             status: entries
                 .into_iter()
                 .map(|entry| GitFileStatus {
@@ -411,13 +534,14 @@ impl WorkerContext {
             .collect()
     }
 
-    async fn git_checked<I>(
+    async fn git_checked<I, S>(
         &self,
         arguments: I,
         optional_locks: bool,
     ) -> Result<std::process::Output, WorkspaceError>
     where
-        I: IntoIterator<Item = OsString>,
+        I: IntoIterator<Item = S>,
+        S: AsRef<OsStr>,
     {
         let output = self.git_raw(arguments, optional_locks).await?;
         if output.status.success() {
@@ -436,7 +560,7 @@ impl WorkerContext {
         I: IntoIterator<Item = S>,
         S: AsRef<std::ffi::OsStr>,
     {
-        let mut command = Command::new(crate::git_program());
+        let mut command = tokio_command(crate::git_program(), ProcessPolicy::HiddenCaptured);
         command
             .arg("-c")
             .arg(format!("core.hooksPath={DISABLED_HOOKS_PATH}"))
@@ -479,7 +603,7 @@ impl WorkerContext {
         I: IntoIterator<Item = S>,
         S: AsRef<OsStr>,
     {
-        let mut command = Command::new(crate::git_program());
+        let mut command = tokio_command(crate::git_program(), ProcessPolicy::HiddenCaptured);
         command
             .arg("-c")
             .arg(format!("core.hooksPath={DISABLED_HOOKS_PATH}"))
@@ -546,6 +670,93 @@ fn validate_identity<'a>(
         ));
     }
     Ok((name, email))
+}
+
+fn validate_remote_name(value: &str) -> Result<(), WorkspaceError> {
+    let valid = !value.is_empty()
+        && value.len() <= 256
+        && !value.starts_with('-')
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'));
+    if !valid {
+        return Err(WorkspaceError::new(
+            WorkspaceErrorCode::InvalidRequest,
+            "Git remote name is invalid",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_git_ref(value: &str, require_branch: bool) -> Result<(), WorkspaceError> {
+    let valid = !value.is_empty()
+        && value.len() <= 1_024
+        && !value.starts_with('-')
+        && !value.ends_with('/')
+        && !value.ends_with('.')
+        && !value.contains("..")
+        && !value.contains("@{")
+        && !value.contains("//")
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'/' | b'.' | b'_' | b'-'))
+        && (!require_branch || value.starts_with("refs/heads/"));
+    if !valid {
+        return Err(WorkspaceError::new(
+            WorkspaceErrorCode::InvalidRequest,
+            "Git ref is invalid or target is not a branch ref",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_oid(value: &str) -> Result<(), WorkspaceError> {
+    if value.len() != 40 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(WorkspaceError::new(
+            WorkspaceErrorCode::InvalidRequest,
+            "Git commit OID must contain 40 hexadecimal characters",
+        ));
+    }
+    Ok(())
+}
+
+fn hash_remote_url(value: &str) -> String {
+    crate::worker_io::sha256(value.trim().as_bytes())
+}
+
+fn infer_forge_kind(value: &str) -> ForgeKind {
+    let normalized = value.to_ascii_lowercase();
+    if normalized.contains("github.com") {
+        ForgeKind::GitHub
+    } else if normalized.contains("gitlab") {
+        ForgeKind::GitLab
+    } else if normalized.contains("gitee.com") {
+        ForgeKind::Gitee
+    } else if normalized.contains("gitea") || normalized.contains("forgejo") {
+        ForgeKind::GiteaForgejo
+    } else {
+        ForgeKind::Unknown
+    }
+}
+
+fn redact_remote_url(value: &str) -> String {
+    let trimmed = value.trim();
+    let Some(scheme) = trimmed.find("://") else {
+        return trimmed.to_owned();
+    };
+    let authority_start = scheme + 3;
+    let authority_end = trimmed[authority_start..]
+        .find('/')
+        .map_or(trimmed.len(), |index| authority_start + index);
+    let authority = &trimmed[authority_start..authority_end];
+    let Some(at) = authority.rfind('@') else {
+        return trimmed.to_owned();
+    };
+    format!(
+        "{}{}",
+        &trimmed[..authority_start],
+        &trimmed[authority_start + at + 1..]
+    )
 }
 
 fn now_ms() -> i64 {
@@ -713,11 +924,14 @@ mod tests {
                 .iter()
                 .any(|entry| entry.path == "staged.txt" && entry.index_status == "A")
         );
-        let tree = std::process::Command::new(crate::git_program())
-            .args(["show", "--pretty=", "--name-only", "HEAD"])
-            .current_dir(fixture.path())
-            .output()
-            .expect("show commit");
+        let tree = hachimi_process_policy::std_command(
+            crate::git_program(),
+            ProcessPolicy::HiddenCaptured,
+        )
+        .args(["show", "--pretty=", "--name-only", "HEAD"])
+        .current_dir(fixture.path())
+        .output()
+        .expect("show commit");
         assert!(tree.status.success());
         assert!(
             tree.stdout.is_empty(),
@@ -725,12 +939,73 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn standard_remote_push_is_oid_and_url_hash_fenced() {
+        let fixture = tempfile::tempdir().expect("fixture");
+        let remote = tempfile::tempdir().expect("remote");
+        run_git(remote.path(), &["init", "--bare"]);
+        run_git(fixture.path(), &["init", "-b", "main"]);
+        run_git(fixture.path(), &["config", "user.name", "Hachimi Test"]);
+        run_git(
+            fixture.path(),
+            &["config", "user.email", "test@example.invalid"],
+        );
+        std::fs::write(fixture.path().join("README.md"), "push test\n").expect("fixture");
+        run_git(fixture.path(), &["add", "README.md"]);
+        run_git(fixture.path(), &["commit", "-m", "initial"]);
+        let remote_path = remote.path().to_string_lossy().into_owned();
+        run_git(fixture.path(), &["remote", "add", "origin", &remote_path]);
+        let worker = WorkerContext::new(fixture.path(), "checkout", 1, "token").expect("worker");
+        let WorkspaceOutput::GitRemotes { remotes } = worker.git_remotes().await.expect("remotes")
+        else {
+            panic!("unexpected remote output")
+        };
+        assert_eq!(remotes.len(), 1);
+        assert_eq!(remotes[0].forge_kind, ForgeKind::Unknown);
+        let head = hachimi_process_policy::std_command(
+            crate::git_program(),
+            ProcessPolicy::HiddenCaptured,
+        )
+        .args(["rev-parse", "HEAD"])
+        .current_dir(fixture.path())
+        .output()
+        .expect("head");
+        let head = String::from_utf8_lossy(&head.stdout).trim().to_owned();
+        let WorkspaceOutput::GitPush { response } = worker
+            .git_push(
+                "origin",
+                &remotes[0].remote_url_hash,
+                "HEAD",
+                "refs/heads/main",
+                &head,
+            )
+            .await
+            .expect("push")
+        else {
+            panic!("unexpected push output")
+        };
+        assert!(response.confirmed);
+        assert_eq!(response.commit_oid, head);
+        let stale = worker
+            .git_push("origin", &"0".repeat(64), "HEAD", "refs/heads/main", &head)
+            .await
+            .expect_err("stale remote hash");
+        assert_eq!(stale.code, WorkspaceErrorCode::Conflict);
+        assert_eq!(
+            redact_remote_url("https://user:secret@example.test/owner/repo.git"),
+            "https://example.test/owner/repo.git"
+        );
+    }
+
     fn run_git(cwd: &std::path::Path, arguments: &[&str]) {
-        let output = std::process::Command::new(crate::git_program())
-            .args(arguments)
-            .current_dir(crate::restricted_process_cwd(cwd))
-            .output()
-            .expect("git command");
+        let output = hachimi_process_policy::std_command(
+            crate::git_program(),
+            ProcessPolicy::HiddenCaptured,
+        )
+        .args(arguments)
+        .current_dir(crate::restricted_process_cwd(cwd))
+        .output()
+        .expect("git command");
         assert!(
             output.status.success(),
             "git {arguments:?}: {}",

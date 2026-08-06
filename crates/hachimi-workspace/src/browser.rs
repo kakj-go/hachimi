@@ -2,11 +2,11 @@ use std::{
     fs::File,
     io::{Read, Seek, SeekFrom},
     path::Path,
-    process::Command,
     time::UNIX_EPOCH,
 };
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
+use hachimi_process_policy::{ProcessPolicy, std_command};
 use hachimi_protocol::{
     FsEntry, FsEntryKind, FsFileChunk, FsListPage, FsSearchId, FsSearchResult, FsSearchSnapshot,
 };
@@ -262,7 +262,7 @@ fn encode_hex(bytes: &[u8]) -> String {
 }
 
 pub(crate) fn candidate_files(root: &Path) -> Result<(Vec<String>, bool), WorkspaceError> {
-    let mut command = Command::new(crate::git_program());
+    let mut command = std_command(crate::git_program(), ProcessPolicy::HiddenCaptured);
     command
         .args([
             "-c",

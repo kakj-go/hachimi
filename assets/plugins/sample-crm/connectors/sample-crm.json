@@ -1,0 +1,8 @@
+{
+  "hostIdentity": "hachimi.sample-crm.local.v1",
+  "transport": "local",
+  "actions": ["get", "search", "create", "update", "webhook_emit", "webhook_next", "poll"],
+  "webhook": true,
+  "poll": true,
+  "externalNetwork": false
+}

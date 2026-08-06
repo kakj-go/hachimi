@@ -1,0 +1,4 @@
+{
+  "sourceId": "enterprise:feishu",
+  "eventTypes": ["im.message.receive_v1", "contact.user.updated_v3"]
+}

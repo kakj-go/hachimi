@@ -149,6 +149,15 @@ pub(super) fn compaction_checkpoint_from_row(
                 .transpose()?,
             trimmed_history_groups: u32::try_from(row.get::<i64, _>("trimmed_history_groups"))
                 .unwrap_or(u32::MAX),
+            summary_source: enum_from_db(row.get("summary_source"), "compaction summary source")?,
+            provider_endpoint_id: row
+                .get::<Option<String>, _>("provider_endpoint_id")
+                .map(hachimi_protocol::ProviderEndpointId::new),
+            provider_account_id: row
+                .get::<Option<String>, _>("provider_account_id")
+                .map(hachimi_protocol::ProviderAccountId::new),
+            capability_revision: row.get("capability_revision"),
+            fallback_reason: row.get("fallback_reason"),
         },
         summary: serde_json::from_str(row.get("summary_json"))?,
         quality: serde_json::from_str(row.get("quality_json"))?,
@@ -331,6 +340,8 @@ pub(super) fn mcp_server_health_from_row(
         protocol_version: row.get("protocol_version"),
         tool_count: u32::try_from(row.get::<i64, _>("tool_count")).unwrap_or_default(),
         error_code: row.get("error_code"),
+        failure_count: u32::try_from(row.get::<i64, _>("failure_count")).unwrap_or(u32::MAX),
+        next_retry_at_ms: row.get("next_retry_at_ms"),
         checked_at_ms: row.get("checked_at_ms"),
     })
 }
@@ -439,9 +450,8 @@ pub(super) fn session_context_kind(
     context: &hachimi_protocol::SessionContextBinding,
 ) -> &'static str {
     match context {
-        hachimi_protocol::SessionContextBinding::General => "general",
+        hachimi_protocol::SessionContextBinding::Workspace { .. } => "workspace",
         hachimi_protocol::SessionContextBinding::Project { .. } => "project",
-        hachimi_protocol::SessionContextBinding::Avatar { .. } => "avatar",
     }
 }
 
@@ -459,6 +469,7 @@ pub(super) fn transcript_kind_db(kind: TranscriptItemKind) -> &'static str {
         TranscriptItemKind::FileChange => "file_change",
         TranscriptItemKind::McpCall => "mcp_call",
         TranscriptItemKind::DynamicToolCall => "dynamic_tool_call",
+        TranscriptItemKind::CollabToolCall => "collab_tool_call",
         TranscriptItemKind::ContextCompaction => "context_compaction",
         TranscriptItemKind::Review => "review",
     }

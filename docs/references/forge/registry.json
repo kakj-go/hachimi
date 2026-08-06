@@ -1,0 +1,50 @@
+{
+  "schemaVersion": 1,
+  "licenseBoundary": "Official Forge API documentation is used only as a bounded wire-contract reference; no vendor SDK or documentation corpus is redistributed.",
+  "references": [
+    {
+      "id": "GITHUB-API-20260730",
+      "sourceProduct": "GitHub REST API 2022-11-28",
+      "sourceVersion": "2022-11-28+snapshot-sha256:db24ab98cc2aa46aa0bb53c82432d18f7b90141969cbb8a50faeb0f9044e0fc1",
+      "canonicalUrl": "https://docs.github.com/en/rest/pulls/pulls?apiVersion=2022-11-28",
+      "retrievedAt": "2026-07-30T20:10:00+08:00",
+      "rawPath": "docs/references/forge/raw/GITHUB-API-20260730.md",
+      "rawSha256": "db24ab98cc2aa46aa0bb53c82432d18f7b90141969cbb8a50faeb0f9044e0fc1",
+      "normalizedPath": "docs/references/forge/normalized/GITHUB-API-20260730.md",
+      "normalizedSha256": "c51153d94c44c2d6d62d058cfc3f9e48bc507062f31a011c9f806e88175eadd8"
+    },
+    {
+      "id": "GITLAB-API-20260730",
+      "sourceProduct": "GitLab Merge Requests API",
+      "sourceVersion": "snapshot-sha256:63fdb6163c5208784f43ce0a54483896a4927e7c495fce227c98aa158fa501f9",
+      "canonicalUrl": "https://docs.gitlab.com/api/merge_requests/",
+      "retrievedAt": "2026-07-30T20:10:00+08:00",
+      "rawPath": "docs/references/forge/raw/GITLAB-API-20260730.md",
+      "rawSha256": "63fdb6163c5208784f43ce0a54483896a4927e7c495fce227c98aa158fa501f9",
+      "normalizedPath": "docs/references/forge/normalized/GITLAB-API-20260730.md",
+      "normalizedSha256": "05193cb0fdee8910f43c358efe84830083540739ddcb2e4c2405740b932160a5"
+    },
+    {
+      "id": "GITEE-API-20260730",
+      "sourceProduct": "Gitee API v5",
+      "sourceVersion": "v5+snapshot-sha256:958adb1a282cbdfcd37d07a26726e3f3666b6d280a230eee0a356ede54fd45bc",
+      "canonicalUrl": "https://gitee.com/api/v5/swagger",
+      "retrievedAt": "2026-07-30T20:10:00+08:00",
+      "rawPath": "docs/references/forge/raw/GITEE-API-20260730.md",
+      "rawSha256": "958adb1a282cbdfcd37d07a26726e3f3666b6d280a230eee0a356ede54fd45bc",
+      "normalizedPath": "docs/references/forge/normalized/GITEE-API-20260730.md",
+      "normalizedSha256": "1d45a3a337e043581f5b04b78f89e0383feed145c1357176ca8841da5404329e"
+    },
+    {
+      "id": "GITEA-FORGEJO-API-20260730",
+      "sourceProduct": "Gitea 1.22 and Forgejo v1 API",
+      "sourceVersion": "gitea-1.22+snapshot-sha256:fe002452b0ac933db98fb898b55005f08b2fcf42e95c64f69899acd840ac0a2e",
+      "canonicalUrl": "https://forgejo.org/docs/latest/user/api-usage/",
+      "retrievedAt": "2026-07-30T20:10:00+08:00",
+      "rawPath": "docs/references/forge/raw/GITEA-FORGEJO-API-20260730.md",
+      "rawSha256": "fe002452b0ac933db98fb898b55005f08b2fcf42e95c64f69899acd840ac0a2e",
+      "normalizedPath": "docs/references/forge/normalized/GITEA-FORGEJO-API-20260730.md",
+      "normalizedSha256": "b01faebc0833969f226a67503acf740d33756ba3833849a49a023e52d5608246"
+    }
+  ]
+}

@@ -300,15 +300,14 @@ pub enum PetTurnEvent {
     Started {
         #[serde(rename = "runId")]
         run_id: String,
-    },
-    TextDelta {
-        #[serde(rename = "runId")]
-        run_id: String,
-        delta: String,
+        session_id: SessionId,
+        agent_run_id: RunId,
     },
     Completed {
         #[serde(rename = "runId")]
         run_id: String,
+        session_id: SessionId,
+        agent_run_id: RunId,
         text: String,
         #[serde(rename = "speechQueued")]
         speech_queued: bool,
@@ -316,10 +315,22 @@ pub enum PetTurnEvent {
     Cancelled {
         #[serde(rename = "runId")]
         run_id: String,
+        session_id: SessionId,
+        agent_run_id: RunId,
+    },
+    NeedsAttention {
+        #[serde(rename = "runId")]
+        run_id: String,
+        session_id: SessionId,
+        agent_run_id: RunId,
+        code: String,
+        message: String,
     },
     Failed {
         #[serde(rename = "runId")]
         run_id: String,
+        session_id: SessionId,
+        agent_run_id: RunId,
         code: String,
         message: String,
     },

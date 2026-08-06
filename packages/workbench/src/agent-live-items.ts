@@ -24,9 +24,9 @@ export function reduceLiveItemDeltas(
   for (const event of events) {
     switch (event.payload.type) {
       case "item_started":
-        next[event.payload.data.item_id] ??= {
+        next[event.payload.data.item.id] ??= {
           text: "",
-          kind: event.payload.data.kind,
+          kind: event.payload.data.item.kind,
         };
         break;
       case "item_delta": {
@@ -37,14 +37,17 @@ export function reduceLiveItemDeltas(
         if (!item) break;
         // Keep at most 256 KiB in the WebView even if a provider streams an
         // unbounded response.  This is only a display cache, never a result.
-        item.text = `${item.text}${event.payload.data.delta}`.slice(-262_144);
+        const delta = event.payload.data.delta;
+        const text =
+          delta.type === "text" || delta.type === "command_output" ? delta.data.text : "";
+        item.text = `${item.text}${text}`.slice(-262_144);
         next[event.payload.data.item_id] = item;
         break;
       }
       case "item_completed":
         // The completed payload is authoritative, so a late delta can never
         // overwrite it after the event batch has been reduced in order.
-        delete next[event.payload.data.item_id];
+        delete next[event.payload.data.item.id];
         break;
       default:
         break;

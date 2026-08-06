@@ -16,9 +16,9 @@ use std::{
 use parking_lot::RwLock;
 
 use hachimi_protocol::{
-    BehaviorMode, EntryProfile, McpToolSelection, ModelMessage, ProviderCapabilities, RunBudget,
-    RunId, RunOrigin, SandboxCapabilityReport, SandboxReadiness, SessionContextBinding, SessionId,
-    SkillActivation, ToolDescriptor, WorkloadResolution,
+    BehaviorMode, CapabilityGrantSet, EntryProfile, McpToolSelection, ModelMessage,
+    ProviderCapabilities, RunBudget, RunId, RunOrigin, SandboxCapabilityReport, SandboxReadiness,
+    SessionContextBinding, SessionId, SkillActivation, ToolDescriptor, WorkloadResolution,
 };
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -209,24 +209,49 @@ pub struct ToolPlan {
     descriptors: Arc<[ToolDescriptor]>,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct ToolPlanConstraints<'a> {
+    pub run_allowlist: Option<&'a [String]>,
+    pub disabled_tool_names: &'a [String],
+    pub capability_grants: Option<&'a CapabilityGrantSet>,
+    pub host_ready: bool,
+}
+
 impl ToolPlan {
     #[must_use]
     pub fn build(
-        entry_profile: EntryProfile,
-        workload: hachimi_protocol::WorkloadKind,
+        _entry_profile: EntryProfile,
+        _workload: hachimi_protocol::WorkloadKind,
         mode: BehaviorMode,
         provider: ProviderCapabilities,
         mut descriptors: Vec<ToolDescriptor>,
-        run_allowlist: Option<&[String]>,
-        disabled_tool_names: &[String],
+        constraints: ToolPlanConstraints<'_>,
     ) -> Self {
+        let fail_closed_for_unknown_host =
+            !constraints.host_ready && constraints.disabled_tool_names.is_empty();
         descriptors.retain(|descriptor| {
-            crate::profile_allows_tool(entry_profile, workload, &descriptor.name)
+            !fail_closed_for_unknown_host
                 && (mode != BehaviorMode::Plan
-                    || descriptor.effect == hachimi_protocol::ToolEffect::ReadOnly)
-                && run_allowlist
+                    || matches!(
+                        descriptor.effect,
+                        hachimi_protocol::ToolEffect::ReadOnly
+                            | hachimi_protocol::ToolEffect::BrowserObserve
+                            | hachimi_protocol::ToolEffect::ComputerObserve
+                    ))
+                && constraints.capability_grants.is_none_or(|grants| {
+                    hachimi_policy::capability_grant_allows(grants, descriptor.effect)
+                        || (descriptor.name == "connector_invoke"
+                            && grants
+                                .network
+                                .protocols
+                                .iter()
+                                .any(|protocol| protocol == "managed-connector"))
+                })
+                && constraints
+                    .run_allowlist
                     .is_none_or(|allowlist| allowlist.iter().any(|name| name == &descriptor.name))
-                && !disabled_tool_names
+                && !constraints
+                    .disabled_tool_names
                     .iter()
                     .any(|name| name == &descriptor.name)
         });
@@ -235,8 +260,6 @@ impl ToolPlan {
             descriptors.clear();
         }
         let hash = canonical_hash(&(
-            entry_profile,
-            workload,
             mode,
             provider.tool_calls,
             provider.strict_json_schema,
@@ -335,6 +358,7 @@ pub struct StepContextInput {
     pub registered_tools: Vec<ToolDescriptor>,
     pub registry_revision: String,
     pub run_tool_allowlist: Option<Vec<String>>,
+    pub capability_grants: Option<CapabilityGrantSet>,
 }
 
 #[derive(Debug, Default)]
@@ -355,8 +379,12 @@ impl StepContextFactory {
             input.behavior_mode,
             input.provider,
             input.registered_tools,
-            input.run_tool_allowlist.as_deref(),
-            &input.world.disabled_tool_names,
+            ToolPlanConstraints {
+                run_allowlist: input.run_tool_allowlist.as_deref(),
+                disabled_tool_names: &input.world.disabled_tool_names,
+                capability_grants: input.capability_grants.as_ref(),
+                host_ready: input.world.host_ready,
+            },
         );
         Arc::new(StepContext {
             session_id: input.session_id,
@@ -390,7 +418,8 @@ fn canonical_hash(value: &impl Serialize) -> String {
 mod tests {
     use super::*;
     use hachimi_protocol::{
-        ScheduleId, TaskRunId, ToolEffect, WorkloadKind, WorkloadResolutionSource,
+        AgentPermissionPolicy, ConnectorPermissionRule, PermissionProfile, ScheduleId,
+        ScopedPermissionRules, TaskRunId, ToolEffect, WorkloadKind, WorkloadResolutionSource,
     };
 
     fn resolution() -> WorkloadResolution {
@@ -400,6 +429,15 @@ mod tests {
             activated_skill_ids: Vec::new(),
             reason: "test".into(),
             classifier_revision: None,
+        }
+    }
+
+    fn unconstrained_tool_plan() -> ToolPlanConstraints<'static> {
+        ToolPlanConstraints {
+            run_allowlist: None,
+            disabled_tool_names: &[],
+            capability_grants: None,
+            host_ready: true,
         }
     }
 
@@ -432,8 +470,7 @@ mod tests {
                 ..ProviderCapabilities::default()
             },
             descriptors.clone(),
-            None,
-            &[],
+            unconstrained_tool_plan(),
         );
         let second = ToolPlan::build(
             EntryProfile::Workbench,
@@ -444,12 +481,266 @@ mod tests {
                 ..ProviderCapabilities::default()
             },
             descriptors,
-            None,
-            &[],
+            unconstrained_tool_plan(),
         );
         assert_eq!(first.hash(), second.hash());
         assert!(first.allows("workspace_read_file"));
         assert!(!first.allows("workspace_write_file"));
+    }
+
+    #[test]
+    fn read_only_connector_rule_exposes_only_the_typed_dispatcher() {
+        let mut rules = ScopedPermissionRules::default();
+        rules.connectors.push(ConnectorPermissionRule {
+            account_id: hachimi_protocol::ConnectorAccountId::from("account"),
+            actions: vec!["search".into()],
+            read_only_actions: vec!["search".into()],
+            contribution_revision: "action-revision".into(),
+        });
+        let grants = hachimi_policy::expand_permission_policy(
+            &AgentPermissionPolicy {
+                level: PermissionProfile::ReadOnly,
+                rules,
+                revision: 1,
+            },
+            hachimi_protocol::AuthorityMode::Unattended,
+            BehaviorMode::Default,
+            SessionId::from("session"),
+            RunId::from("run"),
+            "C:\\workspace".into(),
+        );
+        let descriptors = vec![
+            ToolDescriptor {
+                name: "connector_invoke".into(),
+                description: "connector".into(),
+                input_schema: serde_json::json!({"type": "object"}),
+                effect: ToolEffect::ExternalSideEffect,
+                parallel_safe: false,
+                required_scopes: vec!["connectors.invoke".into()],
+            },
+            ToolDescriptor {
+                name: "unscoped_external_tool".into(),
+                description: "external".into(),
+                input_schema: serde_json::json!({"type": "object"}),
+                effect: ToolEffect::ExternalSideEffect,
+                parallel_safe: false,
+                required_scopes: vec!["connectors.invoke".into()],
+            },
+        ];
+        let plan = ToolPlan::build(
+            EntryProfile::Workbench,
+            WorkloadKind::General,
+            BehaviorMode::Default,
+            ProviderCapabilities {
+                tool_calls: true,
+                ..ProviderCapabilities::default()
+            },
+            descriptors,
+            ToolPlanConstraints {
+                capability_grants: Some(&grants),
+                ..unconstrained_tool_plan()
+            },
+        );
+        assert!(plan.allows("connector_invoke"));
+        assert!(!plan.allows("unscoped_external_tool"));
+    }
+
+    #[test]
+    fn multi_agent_tool_plan_honors_mode_and_run_allowlists_for_every_entry() {
+        let descriptors = vec![
+            ToolDescriptor {
+                name: "agent.spawn".into(),
+                description: "spawn".into(),
+                input_schema: serde_json::json!({"type":"object"}),
+                effect: ToolEffect::ExternalSideEffect,
+                parallel_safe: false,
+                required_scopes: vec!["agent.run".into()],
+            },
+            ToolDescriptor {
+                name: "agent.wait".into(),
+                description: "wait".into(),
+                input_schema: serde_json::json!({"type":"object"}),
+                effect: ToolEffect::ReadOnly,
+                parallel_safe: true,
+                required_scopes: vec!["agent.run".into()],
+            },
+        ];
+        let provider = ProviderCapabilities {
+            tool_calls: true,
+            ..ProviderCapabilities::default()
+        };
+        let scheduled = ToolPlan::build(
+            EntryProfile::Workbench,
+            WorkloadKind::General,
+            BehaviorMode::Default,
+            provider,
+            descriptors.clone(),
+            ToolPlanConstraints {
+                run_allowlist: Some(&["agent.wait".into()]),
+                ..unconstrained_tool_plan()
+            },
+        );
+        assert!(scheduled.allows("agent.wait"));
+        assert!(!scheduled.allows("agent.spawn"));
+
+        let plan = ToolPlan::build(
+            EntryProfile::Workbench,
+            WorkloadKind::General,
+            BehaviorMode::Plan,
+            provider,
+            descriptors.clone(),
+            unconstrained_tool_plan(),
+        );
+        assert!(plan.allows("agent.wait"));
+        assert!(!plan.allows("agent.spawn"));
+
+        let pet = ToolPlan::build(
+            EntryProfile::PetConversation,
+            WorkloadKind::General,
+            BehaviorMode::Default,
+            provider,
+            descriptors.clone(),
+            unconstrained_tool_plan(),
+        );
+        assert!(pet.allows("agent.spawn"));
+        assert!(pet.allows("agent.wait"));
+    }
+
+    #[test]
+    fn tool_plan_intersects_profile_mode_feature_grant_allowlist_and_host_readiness() {
+        let descriptors = [
+            ("agent.spawn", ToolEffect::ExternalSideEffect),
+            ("agent.send", ToolEffect::ExternalSideEffect),
+            ("agent.wait", ToolEffect::ReadOnly),
+            ("agent.cancel", ToolEffect::ExternalSideEffect),
+            ("agent.collect", ToolEffect::ReadOnly),
+        ]
+        .into_iter()
+        .map(|(name, effect)| ToolDescriptor {
+            name: name.into(),
+            description: name.into(),
+            input_schema: serde_json::json!({"type":"object"}),
+            effect,
+            parallel_safe: effect == ToolEffect::ReadOnly,
+            required_scopes: vec!["agent.run".into()],
+        })
+        .collect::<Vec<_>>();
+        let provider = ProviderCapabilities {
+            tool_calls: true,
+            ..ProviderCapabilities::default()
+        };
+        let full_grants = hachimi_policy::expand_permission_profile(
+            PermissionProfile::FullAccess,
+            BehaviorMode::Default,
+            SessionId::from("matrix-session"),
+            RunId::from("matrix-run"),
+            "C:\\workspace".into(),
+        );
+        let read_only_grants = hachimi_policy::expand_permission_profile(
+            PermissionProfile::ReadOnly,
+            BehaviorMode::Default,
+            SessionId::from("matrix-session"),
+            RunId::from("matrix-run"),
+            "C:\\workspace".into(),
+        );
+
+        for workload in [
+            WorkloadKind::General,
+            WorkloadKind::Coding,
+            WorkloadKind::Office,
+        ] {
+            let default = ToolPlan::build(
+                EntryProfile::Workbench,
+                workload,
+                BehaviorMode::Default,
+                provider,
+                descriptors.clone(),
+                ToolPlanConstraints {
+                    capability_grants: Some(&full_grants),
+                    ..unconstrained_tool_plan()
+                },
+            );
+            assert_eq!(default.descriptors().len(), 5);
+
+            let plan = ToolPlan::build(
+                EntryProfile::Workbench,
+                workload,
+                BehaviorMode::Plan,
+                provider,
+                descriptors.clone(),
+                ToolPlanConstraints {
+                    capability_grants: Some(&full_grants),
+                    ..unconstrained_tool_plan()
+                },
+            );
+            assert_eq!(
+                plan.descriptors()
+                    .iter()
+                    .map(|descriptor| descriptor.name.as_str())
+                    .collect::<Vec<_>>(),
+                vec!["agent.collect", "agent.wait"]
+            );
+
+            let pet = ToolPlan::build(
+                EntryProfile::PetConversation,
+                workload,
+                BehaviorMode::Default,
+                provider,
+                descriptors.clone(),
+                ToolPlanConstraints {
+                    capability_grants: Some(&full_grants),
+                    ..unconstrained_tool_plan()
+                },
+            );
+            assert_eq!(pet.descriptors(), default.descriptors());
+            assert_eq!(pet.hash(), default.hash());
+        }
+
+        let narrowed = ToolPlan::build(
+            EntryProfile::Workbench,
+            WorkloadKind::General,
+            BehaviorMode::Default,
+            provider,
+            descriptors.clone(),
+            ToolPlanConstraints {
+                run_allowlist: Some(&["agent.spawn".into(), "agent.wait".into()]),
+                capability_grants: Some(&read_only_grants),
+                ..unconstrained_tool_plan()
+            },
+        );
+        assert_eq!(narrowed.descriptors()[0].name, "agent.wait");
+
+        assert!(
+            ToolPlan::build(
+                EntryProfile::Workbench,
+                WorkloadKind::General,
+                BehaviorMode::Default,
+                provider,
+                descriptors.clone(),
+                ToolPlanConstraints {
+                    capability_grants: Some(&full_grants),
+                    host_ready: false,
+                    ..unconstrained_tool_plan()
+                },
+            )
+            .descriptors()
+            .is_empty()
+        );
+        assert!(
+            ToolPlan::build(
+                EntryProfile::Workbench,
+                WorkloadKind::General,
+                BehaviorMode::Default,
+                provider,
+                Vec::new(),
+                ToolPlanConstraints {
+                    capability_grants: Some(&full_grants),
+                    ..unconstrained_tool_plan()
+                },
+            )
+            .descriptors()
+            .is_empty()
+        );
     }
 
     fn equivalent_input(origin: RunOrigin) -> StepContextInput {
@@ -461,7 +752,9 @@ mod tests {
             workload: resolution(),
             behavior_mode: BehaviorMode::Default,
             origin,
-            context: SessionContextBinding::General,
+            context: SessionContextBinding::Workspace {
+                workspace_id: hachimi_protocol::WorkspaceId::random(),
+            },
             world: StepWorldState {
                 context_revision: 1,
                 profile_revision: 1,
@@ -504,32 +797,45 @@ mod tests {
             }],
             registry_revision: "registry-fixture".into(),
             run_tool_allowlist: Some(vec!["request_user_input".into()]),
+            capability_grants: None,
         }
     }
 
     #[test]
-    fn interactive_and_scheduled_origins_share_the_same_semantic_step_and_tool_plan() {
-        let interactive =
-            StepContextFactory::default().capture(equivalent_input(RunOrigin::Interactive));
-        let scheduled =
-            StepContextFactory::default().capture(equivalent_input(RunOrigin::Scheduled {
+    fn all_run_origins_share_the_same_semantic_step_and_tool_plan() {
+        let origins = vec![
+            RunOrigin::Project,
+            RunOrigin::Manual,
+            RunOrigin::Channel {
+                channel: "test".into(),
+                account: "account".into(),
+                peer: "peer".into(),
+                thread: "thread".into(),
+                message_id: hachimi_protocol::ChannelMessageId::from("message"),
+            },
+            RunOrigin::Scheduled {
                 schedule_id: ScheduleId::from("schedule"),
                 task_run_id: TaskRunId::from("task"),
                 scheduled_for_ms: 1_800_000_000_000,
-            }));
-
-        assert_eq!(interactive.context_hash(), scheduled.context_hash());
-        assert_eq!(interactive.tool_plan.hash(), scheduled.tool_plan.hash());
-        assert_eq!(
-            interactive.tool_plan.descriptors(),
-            scheduled.tool_plan.descriptors()
-        );
-        assert_ne!(interactive.origin, scheduled.origin);
+                event_context: None,
+            },
+            RunOrigin::Pet,
+        ];
+        let baseline = StepContextFactory::default().capture(equivalent_input(origins[0].clone()));
+        for origin in origins.into_iter().skip(1) {
+            let candidate = StepContextFactory::default().capture(equivalent_input(origin));
+            assert_eq!(baseline.context_hash(), candidate.context_hash());
+            assert_eq!(baseline.tool_plan.hash(), candidate.tool_plan.hash());
+            assert_eq!(
+                baseline.tool_plan.descriptors(),
+                candidate.tool_plan.descriptors()
+            );
+        }
     }
 
     #[test]
     fn sandbox_repair_cannot_widen_an_existing_run_snapshot() {
-        let input = equivalent_input(RunOrigin::Interactive);
+        let input = equivalent_input(RunOrigin::Manual);
         let state = StepRuntimeState::new(input.world, input.workload);
         state.narrow_sandbox(SandboxCapabilityReport {
             backend: "windows-appcontainer".into(),
@@ -555,7 +861,7 @@ mod tests {
 
     #[test]
     fn mcp_schema_or_host_revision_change_advances_context_revision() {
-        let input = equivalent_input(RunOrigin::Interactive);
+        let input = equivalent_input(RunOrigin::Manual);
         let state = StepRuntimeState::new(input.world.clone(), input.workload);
         let mut refreshed = input.world;
         refreshed.mcp_revision = "schema-and-host-v2".into();

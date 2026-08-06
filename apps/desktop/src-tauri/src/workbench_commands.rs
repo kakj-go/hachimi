@@ -1,7 +1,14 @@
 use super::*;
+use hachimi_agent::ModelRuntime;
 #[cfg(all(debug_assertions, feature = "desktop-e2e"))]
 use hachimi_agent::ModelRuntimeError;
 use hachimi_control_plane::{AppServerContext, AppServerRequest, AppServerResponse};
+
+#[path = "workbench_mcp_settings_commands.rs"]
+mod mcp_settings_commands;
+pub(super) use mcp_settings_commands::*;
+#[path = "workbench_interactive_grants.rs"]
+mod interactive_grants;
 
 #[tauri::command]
 pub(super) async fn list_workbench_projects(
@@ -29,283 +36,215 @@ pub(super) fn require_mcp_runtime(state: &DesktopState) -> Result<(), CommandErr
 }
 
 #[tauri::command]
-pub(super) fn get_mcp_echo_server_url(
+pub(super) async fn list_run_recoveries(
     window: WebviewWindow,
     state: State<'_, DesktopState>,
-) -> Result<String, CommandError> {
-    state.authorize(&window, ControlMethod::ConnectorsManage)?;
+) -> Result<Vec<hachimi_protocol::RunRecoverySnapshot>, CommandError> {
+    state.authorize(&window, ControlMethod::WorkbenchWindow)?;
     require_window(&window, "workbench")?;
-    Ok(state.mcp_echo_server.url().to_owned())
-}
-
-#[tauri::command]
-pub(super) async fn list_mcp_servers(
-    window: WebviewWindow,
-    state: State<'_, DesktopState>,
-) -> Result<Vec<McpServerView>, CommandError> {
-    state.authorize(&window, ControlMethod::ConnectorsManage)?;
-    require_window(&window, "workbench")?;
-    state
-        .mcp_control
-        .list()
-        .await
-        .map_err(|error| CommandError::operation("mcp_list_failed", error))
-}
-
-#[tauri::command]
-pub(super) async fn get_mcp_server(
-    window: WebviewWindow,
-    state: State<'_, DesktopState>,
-    server_id: hachimi_protocol::McpServerId,
-) -> Result<McpServerView, CommandError> {
-    state.authorize(&window, ControlMethod::ConnectorsManage)?;
-    require_window(&window, "workbench")?;
-    state
-        .mcp_control
-        .get(&server_id)
-        .await
-        .map_err(|error| CommandError::operation("mcp_get_failed", error))
-}
-
-#[tauri::command]
-pub(super) async fn upsert_mcp_server(
-    window: WebviewWindow,
-    state: State<'_, DesktopState>,
-    request: McpServerUpsertRequest,
-) -> Result<McpServerView, CommandError> {
-    state.authorize(&window, ControlMethod::ConnectorsManage)?;
-    require_window(&window, "workbench")?;
-    if request.enabled {
-        require_mcp_runtime(&state)?;
+    if !state
+        .control_plane
+        .feature_flags()
+        .runtime_features
+        .run_recovery
+    {
+        return Err(CommandError::new("feature_disabled", "run_recovery"));
     }
-    let _sandbox_activity = request
-        .enabled
-        .then(|| enter_sandbox_activity(&state))
-        .transpose()?;
-    let now = i64::try_from(epoch_millis()).unwrap_or(i64::MAX);
-    let existing = state
-        .mcp_control
-        .list()
+    state
+        .agent_store
+        .list_pending_run_recoveries()
         .await
-        .map_err(|error| CommandError::operation("mcp_list_failed", error))?
-        .into_iter()
-        .find(|view| view.configuration.id == request.id)
-        .map(|view| view.configuration);
-    let previous_headers = existing
-        .as_ref()
-        .map(|configuration| configuration.headers.as_slice())
-        .unwrap_or_default();
-    let (headers, created_references) =
-        state
-            .mcp_secrets
-            .prepare_headers(&request.id, &request.headers, previous_headers)?;
-    let mut read_only_tools = request.read_only_tools;
-    read_only_tools.sort();
-    read_only_tools.dedup();
-    let record = McpServerRecord {
-        id: request.id,
-        display_name: request.display_name,
-        enabled: request.enabled,
-        transport: request.transport,
-        headers,
-        read_only_tools,
-        startup_timeout_ms: request.startup_timeout_ms,
-        request_timeout_ms: request.request_timeout_ms,
-        max_message_bytes: request.max_message_bytes,
-        created_at_ms: existing.as_ref().map_or(now, |record| record.created_at_ms),
-        updated_at_ms: now,
-    };
-    let outcome = state
-        .mcp_control
-        .upsert(&record)
+        .map_err(|error| CommandError::operation("run_recovery_list_failed", error))
+}
+
+#[tauri::command]
+pub(super) async fn resolve_run_recovery(
+    app: AppHandle,
+    window: WebviewWindow,
+    state: State<'_, DesktopState>,
+    request: hachimi_protocol::RunRecoveryDecisionRequest,
+) -> Result<hachimi_protocol::RunRecoverySnapshot, CommandError> {
+    let client = state.authorize(&window, ControlMethod::WorkbenchWindow)?;
+    require_window(&window, "workbench")?;
+    if !state
+        .control_plane
+        .feature_flags()
+        .runtime_features
+        .run_recovery
+    {
+        return Err(CommandError::new("feature_disabled", "run_recovery"));
+    }
+    validate_recovery_context(&request, &client.client_id)?;
+    let before = state
+        .agent_store
+        .get_run_recovery_snapshot(&request.recovery_id)
         .await
-        .map_err(|error| CommandError::operation("mcp_upsert_failed", error));
-    match outcome {
-        Ok(view) => {
-            let cleanup_failures = state
-                .mcp_secrets
-                .cleanup_replaced(previous_headers, &record.headers);
-            defer_mcp_secret_cleanup_failures(&state.agent_store, cleanup_failures).await;
-            Ok(view)
+        .map_err(|error| CommandError::operation("run_recovery_get_failed", error))?
+        .ok_or_else(|| CommandError::new("run_recovery_not_found", "Run recovery not found"))?;
+    let resolved = state
+        .agent_store
+        .resolve_run_recovery(&request, &client.client_id.0, now_ms())
+        .await
+        .map_err(|error| CommandError::operation("run_recovery_resolve_failed", error))?;
+    if matches!(
+        before.recovery.state,
+        hachimi_protocol::RunRecoveryState::EligibleAuto
+            | hachimi_protocol::RunRecoveryState::AwaitingUser
+    ) && resolved.recovery.state == hachimi_protocol::RunRecoveryState::Resuming
+    {
+        launch_recovered_workbench_run(app, &state, client, &resolved).await?;
+    }
+    Ok(resolved)
+}
+
+fn validate_recovery_context(
+    request: &hachimi_protocol::RunRecoveryDecisionRequest,
+    client_id: &hachimi_protocol::ClientId,
+) -> Result<(), CommandError> {
+    let context = &request.context;
+    if context.protocol_version != hachimi_protocol::CONTROL_PROTOCOL_VERSION
+        || &context.client_id != client_id
+        || context.idempotency_key.trim().is_empty()
+        || context.idempotency_key.len() > 128
+        || context.expected_run_id.as_ref() != Some(&request.expected_run_id)
+        || context.expected_generation != Some(request.expected_interrupted_generation)
+    {
+        return Err(CommandError::new(
+            "run_recovery_context_invalid",
+            "Run recovery requires an authenticated, generation-fenced mutation context",
+        ));
+    }
+    Ok(())
+}
+
+async fn launch_recovered_workbench_run(
+    app: AppHandle,
+    state: &DesktopState,
+    client: ClientContext,
+    recovery: &hachimi_protocol::RunRecoverySnapshot,
+) -> Result<(), CommandError> {
+    let run = state
+        .agent_store
+        .get_run(&recovery.recovery.run_id)
+        .await
+        .map_err(|error| CommandError::operation("run_recovery_run_get_failed", error))?
+        .ok_or_else(|| CommandError::new("run_not_found", "Recovered Run not found"))?;
+    let session = state
+        .agent_store
+        .get_session(&run.session_id)
+        .await
+        .map_err(|error| CommandError::operation("run_recovery_session_get_failed", error))?
+        .ok_or_else(|| CommandError::new("session_not_found", "Recovered Session not found"))?;
+    if session.entry_profile != hachimi_protocol::EntryProfile::Workbench {
+        return Err(CommandError::new(
+            "run_recovery_profile_unsupported",
+            "Automatic recovery currently requires a Workbench Session",
+        ));
+    }
+    let (project, checkout) = match &session.context {
+        hachimi_protocol::SessionContextBinding::Project {
+            project_id,
+            checkout_id,
+        } => {
+            let project = state
+                .agent_store
+                .get_project(project_id)
+                .await
+                .map_err(|error| {
+                    CommandError::operation("run_recovery_project_get_failed", error)
+                })?;
+            let checkout = state
+                .agent_store
+                .get_checkout(checkout_id)
+                .await
+                .map_err(|error| {
+                    CommandError::operation("run_recovery_checkout_get_failed", error)
+                })?;
+            (project, checkout)
         }
-        Err(error) => {
-            let mut cleanup_failures = Vec::new();
-            for reference in created_references {
-                if state.mcp_secrets.clear(&reference).is_err() {
-                    cleanup_failures.push(reference);
+        hachimi_protocol::SessionContextBinding::Workspace { .. } => (None, None),
+    };
+    spawn_workbench_run_with_recovery(
+        app,
+        client,
+        WorkbenchTaskSnapshot {
+            project,
+            checkout,
+            session,
+            run,
+        },
+        Vec::new(),
+        recovery.checkpoint.clone(),
+    );
+    Ok(())
+}
+
+pub(super) fn schedule_auto_resume_runs(app: AppHandle, run_ids: Vec<hachimi_protocol::RunId>) {
+    if run_ids.is_empty() {
+        return;
+    }
+    tauri::async_runtime::spawn(async move {
+        for run_id in run_ids {
+            let state = app.state::<DesktopState>();
+            let pending = match state.agent_store.list_pending_run_recoveries().await {
+                Ok(pending) => pending,
+                Err(error) => {
+                    tracing::warn!(%run_id, %error, "failed to list recoverable Runs");
+                    continue;
                 }
+            };
+            let Some(recovery) = pending.into_iter().find(|candidate| {
+                candidate.recovery.run_id == run_id
+                    && candidate.recovery.state == hachimi_protocol::RunRecoveryState::EligibleAuto
+            }) else {
+                continue;
+            };
+            let principal = hachimi_protocol::ClientId("system:restart".to_string());
+            let request = hachimi_protocol::RunRecoveryDecisionRequest {
+                context: hachimi_protocol::MutationContext {
+                    request_id: hachimi_protocol::RequestId(format!(
+                        "recovery:{}",
+                        recovery.recovery.id
+                    )),
+                    client_id: principal.clone(),
+                    protocol_version: hachimi_protocol::CONTROL_PROTOCOL_VERSION,
+                    idempotency_key: format!("auto-resume:{}", recovery.recovery.id),
+                    expected_run_id: Some(run_id.clone()),
+                    expected_generation: Some(recovery.recovery.interrupted_generation),
+                },
+                recovery_id: recovery.recovery.id.clone(),
+                expected_run_id: run_id.clone(),
+                expected_interrupted_generation: recovery.recovery.interrupted_generation,
+                action: hachimi_protocol::RunRecoveryDecisionAction::ResumeSafeRemainder,
+            };
+            let resolved = match state
+                .agent_store
+                .resolve_run_recovery(&request, &principal.0, now_ms())
+                .await
+            {
+                Ok(resolved) => resolved,
+                Err(error) => {
+                    tracing::warn!(%run_id, %error, "automatic Run recovery decision failed");
+                    continue;
+                }
+            };
+            let mut client = ClientContext::for_window(hachimi_core::WindowKind::Service);
+            client.client_id = principal;
+            if let Err(error) =
+                launch_recovered_workbench_run(app.clone(), &state, client, &resolved).await
+            {
+                tracing::warn!(%run_id, code = error.code, "automatic Run recovery launch failed");
             }
-            defer_mcp_secret_cleanup_failures(&state.agent_store, cleanup_failures).await;
-            Err(error)
         }
-    }
+    });
 }
 
-#[tauri::command]
-pub(super) async fn test_mcp_server(
-    window: WebviewWindow,
-    state: State<'_, DesktopState>,
-    request: McpServerUpsertRequest,
-) -> Result<hachimi_protocol::McpConnectionTestResult, CommandError> {
-    state.authorize(&window, ControlMethod::ConnectorsManage)?;
-    require_window(&window, "workbench")?;
-    require_mcp_runtime(&state)?;
-    let _sandbox_activity = enter_sandbox_activity(&state)?;
-    let existing = state
-        .mcp_control
-        .list()
-        .await
-        .map_err(|error| CommandError::operation("mcp_list_failed", error))?
-        .into_iter()
-        .find(|view| view.configuration.id == request.id)
-        .map(|view| view.configuration);
-    let previous_headers = existing
-        .as_ref()
-        .map(|configuration| configuration.headers.as_slice())
-        .unwrap_or_default();
-    let resolved_headers = state
-        .mcp_secrets
-        .resolve_inputs(&request.headers, previous_headers)?;
-    let now = i64::try_from(epoch_millis()).unwrap_or(i64::MAX);
-    let record = McpServerRecord {
-        id: request.id,
-        display_name: request.display_name,
-        enabled: true,
-        transport: request.transport,
-        headers: Vec::new(),
-        read_only_tools: request.read_only_tools,
-        startup_timeout_ms: request.startup_timeout_ms,
-        request_timeout_ms: request.request_timeout_ms,
-        max_message_bytes: request.max_message_bytes,
-        created_at_ms: now,
-        updated_at_ms: now,
-    };
-    Ok(state
-        .mcp_control
-        .test_connection(&record, resolved_headers)
-        .await)
-}
-
-#[tauri::command]
-pub(super) async fn list_mcp_tools(
-    window: WebviewWindow,
-    state: State<'_, DesktopState>,
-    server_id: hachimi_protocol::McpServerId,
-) -> Result<Vec<hachimi_protocol::McpToolView>, CommandError> {
-    state.authorize(&window, ControlMethod::ConnectorsManage)?;
-    require_window(&window, "workbench")?;
-    state
-        .mcp_control
-        .list_tools(&server_id)
-        .await
-        .map_err(|error| CommandError::operation("mcp_tools_failed", error))
-}
-
-#[tauri::command]
-pub(super) async fn discover_mcp_tools(
-    window: WebviewWindow,
-    state: State<'_, DesktopState>,
-    server_id: hachimi_protocol::McpServerId,
-) -> Result<hachimi_protocol::McpConnectionTestResult, CommandError> {
-    state.authorize(&window, ControlMethod::ConnectorsManage)?;
-    require_window(&window, "workbench")?;
-    require_mcp_runtime(&state)?;
-    let _sandbox_activity = enter_sandbox_activity(&state)?;
-    state
-        .mcp_control
-        .discover_tools(&server_id)
-        .await
-        .map_err(|error| CommandError::operation("mcp_discovery_failed", error))
-}
-
-#[tauri::command]
-pub(super) async fn set_mcp_tool_enabled(
-    window: WebviewWindow,
-    state: State<'_, DesktopState>,
-    server_id: hachimi_protocol::McpServerId,
-    tool_name: String,
-    enabled: bool,
-) -> Result<hachimi_protocol::McpToolView, CommandError> {
-    state.authorize(&window, ControlMethod::ConnectorsManage)?;
-    require_window(&window, "workbench")?;
-    state
-        .mcp_control
-        .set_tool_enabled(
-            &server_id,
-            &tool_name,
-            enabled,
-            i64::try_from(epoch_millis()).unwrap_or(i64::MAX),
-        )
-        .await
-        .map_err(|error| CommandError::operation("mcp_tool_enable_failed", error))
-}
-
-#[tauri::command]
-pub(super) async fn set_mcp_server_enabled(
-    window: WebviewWindow,
-    state: State<'_, DesktopState>,
-    server_id: hachimi_protocol::McpServerId,
-    enabled: bool,
-) -> Result<McpServerView, CommandError> {
-    state.authorize(&window, ControlMethod::ConnectorsManage)?;
-    require_window(&window, "workbench")?;
-    require_mcp_runtime(&state)?;
-    let _sandbox_activity = enter_sandbox_activity(&state)?;
-    state
-        .mcp_control
-        .set_enabled(
-            &server_id,
-            enabled,
-            i64::try_from(epoch_millis()).unwrap_or(i64::MAX),
-        )
-        .await
-        .map_err(|error| CommandError::operation("mcp_enable_failed", error))
-}
-
-#[tauri::command]
-pub(super) async fn refresh_mcp_server(
-    window: WebviewWindow,
-    state: State<'_, DesktopState>,
-    server_id: hachimi_protocol::McpServerId,
-) -> Result<McpServerHealthRecord, CommandError> {
-    state.authorize(&window, ControlMethod::ConnectorsManage)?;
-    require_window(&window, "workbench")?;
-    require_mcp_runtime(&state)?;
-    let _sandbox_activity = enter_sandbox_activity(&state)?;
-    state
-        .mcp_control
-        .refresh_health(&server_id)
-        .await
-        .map_err(|error| CommandError::operation("mcp_health_failed", error))
-}
-
-#[tauri::command]
-pub(super) async fn remove_mcp_server(
-    window: WebviewWindow,
-    state: State<'_, DesktopState>,
-    server_id: hachimi_protocol::McpServerId,
-) -> Result<bool, CommandError> {
-    state.authorize(&window, ControlMethod::ConnectorsManage)?;
-    require_window(&window, "workbench")?;
-    let previous = state
-        .mcp_control
-        .list()
-        .await
-        .map_err(|error| CommandError::operation("mcp_list_failed", error))?
-        .into_iter()
-        .find(|view| view.configuration.id == server_id)
-        .map(|view| view.configuration.headers)
-        .unwrap_or_default();
-    let removed = state
-        .mcp_control
-        .remove(&server_id)
-        .await
-        .map_err(|error| CommandError::operation("mcp_remove_failed", error))?;
-    if removed {
-        let cleanup_failures = state.mcp_secrets.cleanup_replaced(&previous, &[]);
-        defer_mcp_secret_cleanup_failures(&state.agent_store, cleanup_failures).await;
-    }
-    Ok(removed)
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .min(i64::MAX as u128) as i64
 }
 
 #[tauri::command]
@@ -360,11 +299,20 @@ pub(super) async fn manage_workbench_project(
     match action.as_str() {
         "open" => {
             #[cfg(target_os = "windows")]
-            let mut command = std::process::Command::new("explorer.exe");
+            let mut command = hachimi_process_policy::std_command(
+                "explorer.exe",
+                hachimi_process_policy::ProcessPolicy::VisibleApplication,
+            );
             #[cfg(target_os = "macos")]
-            let mut command = std::process::Command::new("open");
+            let mut command = hachimi_process_policy::std_command(
+                "open",
+                hachimi_process_policy::ProcessPolicy::VisibleApplication,
+            );
             #[cfg(all(unix, not(target_os = "macos")))]
-            let mut command = std::process::Command::new("xdg-open");
+            let mut command = hachimi_process_policy::std_command(
+                "xdg-open",
+                hachimi_process_policy::ProcessPolicy::VisibleApplication,
+            );
             command
                 .arg(&project.root_path)
                 .spawn()
@@ -435,11 +383,26 @@ pub(super) async fn import_workbench_attachment(
 }
 
 #[tauri::command]
+pub(super) async fn read_workbench_attachment(
+    window: WebviewWindow,
+    state: State<'_, DesktopState>,
+    attachment_id: hachimi_protocol::AttachmentId,
+) -> Result<hachimi_protocol::WorkbenchAttachmentPreview, CommandError> {
+    state.authorize(&window, ControlMethod::WorkbenchWindow)?;
+    require_window(&window, "workbench")?;
+    state
+        .workbench
+        .attachment_preview(&attachment_id)
+        .await
+        .map_err(|error| CommandError::operation("workbench_attachment_preview_failed", error))
+}
+
+#[tauri::command]
 pub(super) async fn list_workbench_sessions(
     window: WebviewWindow,
     state: State<'_, DesktopState>,
     project_id: Option<ProjectId>,
-) -> Result<Vec<SessionRecord>, CommandError> {
+) -> Result<Vec<hachimi_protocol::WorkbenchSessionListItem>, CommandError> {
     state.authorize(&window, ControlMethod::WorkbenchWindow)?;
     require_window(&window, "workbench")?;
     state
@@ -659,8 +622,20 @@ pub(super) async fn start_workbench_task(
         )
         .await
         .map_err(|error| CommandError::operation("workbench_task_start_failed", error))?;
+    if !request.attachment_ids.is_empty()
+        && let Ok(environment) = state
+            .workbench
+            .environment_snapshot(&snapshot.session.id)
+            .await
+    {
+        crate::environment_commands::emit_workbench_environment(
+            &app,
+            &environment,
+            vec![hachimi_protocol::WorkbenchEnvironmentChangeReason::Sources],
+        );
+    }
     if snapshot.run.status == hachimi_protocol::RunStatus::Queued {
-        spawn_workbench_run(app, client, snapshot.clone(), request.skill_ids);
+        spawn_workbench_run(app.clone(), client, snapshot.clone(), request.skill_ids);
     }
     Ok(snapshot)
 }
@@ -670,6 +645,16 @@ pub(super) fn spawn_workbench_run(
     client: ClientContext,
     snapshot: WorkbenchTaskSnapshot,
     explicit_skill_ids: Vec<hachimi_protocol::SkillId>,
+) {
+    spawn_workbench_run_with_recovery(app, client, snapshot, explicit_skill_ids, None);
+}
+
+pub(super) fn spawn_workbench_run_with_recovery(
+    app: AppHandle,
+    client: ClientContext,
+    snapshot: WorkbenchTaskSnapshot,
+    explicit_skill_ids: Vec<hachimi_protocol::SkillId>,
+    recovery_checkpoint: Option<hachimi_protocol::RunStepCheckpoint>,
 ) {
     tauri::async_runtime::spawn(async move {
         let run_id = snapshot.run.id.clone();
@@ -686,26 +671,72 @@ pub(super) fn spawn_workbench_run(
             .into_iter()
             .map(|attachment| attachment.attachment.id)
             .collect();
-        let capability_grants = expand_permission_profile(
-            snapshot.run.configuration.permission_profile,
+        let authority = store
+            .authority_snapshot(&snapshot.run.id)
+            .await
+            .ok()
+            .flatten();
+        let Some(authority) = authority else {
+            tracing::warn!(run_id = %run_id, "workbench Run has no immutable authority snapshot");
+            if let Ok(Some(current)) = store.get_run(&run_id).await
+                && current.status == hachimi_protocol::RunStatus::Queued
+            {
+                let _ = store
+                    .transition_run(&run_id, hachimi_protocol::RunStatus::Preparing, None)
+                    .await;
+                let _ = store
+                    .transition_run(
+                        &run_id,
+                        hachimi_protocol::RunStatus::Failed,
+                        Some("run_authority_snapshot_missing"),
+                    )
+                    .await;
+            }
+            if let Ok(Some(run)) = store.get_run(&run_id).await {
+                emit_workbench_run_completion(&app, run);
+            }
+            return;
+        };
+        let policy = authority.policy.clone();
+        let workspace_root = authority.workspace_root.clone();
+        let mut capability_grants = hachimi_policy::expand_permission_policy(
+            &policy,
+            hachimi_protocol::AuthorityMode::Interactive,
             snapshot.run.configuration.behavior_mode,
             snapshot.session.id.clone(),
             snapshot.run.id.clone(),
-            snapshot.checkout.path.clone(),
+            workspace_root,
+        );
+        if snapshot.run.configuration.behavior_mode != hachimi_protocol::BehaviorMode::Plan {
+            capability_grants
+                .network
+                .protocols
+                .extend(["managed-connector".into(), "model-runtime".into()]);
+        }
+        let capability_grants = interactive_grants::for_workbench_run(
+            capability_grants,
+            snapshot.run.configuration.behavior_mode,
         );
         let execution = executor
             .execute(hachimi_agent::AgentRunRequest {
                 principal: client.client_id.0,
                 session: snapshot.session.clone(),
                 run: snapshot.run.clone(),
+                authority,
                 priority: hachimi_agent::AgentRunPriority::Interactive,
+                user_input_availability: hachimi_agent::UserInputAvailability::Available,
                 capability_grants,
                 sandbox_snapshot: sandbox_report,
                 attachment_ids: attachments,
                 skill_allowlist: explicit_skill_ids,
                 mcp_tool_allowlist: Vec::new(),
                 run_tool_allowlist: None,
+                host_revision_snapshot: None,
                 workload_override: snapshot.run.configuration.workload_override,
+                recovery_checkpoint,
+                parent_agent_task_id: None,
+                parent_run_id: None,
+                agent_depth: 0,
             })
             .await;
         if let Err(error) = &execution {
@@ -731,57 +762,9 @@ pub(super) fn spawn_workbench_run(
             tracing::warn!(run_id = %run_id, %error, "failed to persist structured Review output");
         }
         if let Ok(Some(run)) = store.get_run(&run_id).await {
-            let _ = app.emit_to("workbench", WORKBENCH_RUN_EVENT, run);
+            emit_workbench_run_completion(&app, run);
         }
     });
-}
-
-async fn finalize_review_run(
-    store: &AgentStore,
-    snapshot: &WorkbenchTaskSnapshot,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    if snapshot.run.purpose != hachimi_protocol::RunPurpose::Review {
-        return Ok(());
-    }
-    let Some(current) = store.get_run(&snapshot.run.id).await? else {
-        return Ok(());
-    };
-    if current.status != hachimi_protocol::RunStatus::Succeeded {
-        return Ok(());
-    }
-    let Some(review) = store.get_review_by_run(&snapshot.run.id).await? else {
-        return Ok(());
-    };
-    let transcript = store.list_transcript(&snapshot.session.id).await?;
-    let final_text = transcript
-        .iter()
-        .rev()
-        .find(|item| {
-            item.run_id.as_ref() == Some(&snapshot.run.id)
-                && item.kind == hachimi_protocol::TranscriptItemKind::Assistant
-                && item.status == hachimi_protocol::ItemStatus::Completed
-        })
-        .and_then(|item| match &item.payload {
-            hachimi_protocol::ItemPayload::Assistant { text } => Some(text.clone()),
-            _ => None,
-        })
-        .unwrap_or_default();
-    let parsed = hachimi_agent::parse_review_output(&final_text);
-    let findings = hachimi_agent::materialize_review_findings(
-        &review.id,
-        Path::new(&snapshot.checkout.path),
-        &parsed.output,
-    );
-    store
-        .complete_review(
-            &review,
-            &parsed.output,
-            &findings,
-            parsed.used_plain_text_fallback,
-            i64::try_from(epoch_millis()).unwrap_or(i64::MAX),
-        )
-        .await?;
-    Ok(())
 }
 
 #[cfg(all(debug_assertions, feature = "desktop-e2e"))]
@@ -815,6 +798,9 @@ impl hachimi_agent::ModelRuntime for DesktopE2eModel {
         if cancellation.is_cancelled() {
             return Box::pin(stream::iter([Err(ModelRuntimeError::Cancelled)]));
         }
+        if let Some(response) = crate::desktop_e2e_agent_tools::response(&request) {
+            return Box::pin(stream::iter(response));
+        }
         let plan_mode = request.messages.iter().any(|message| {
             message.role == ModelRole::System && message.content.contains("mode=Plan")
         });
@@ -834,6 +820,10 @@ impl hachimi_agent::ModelRuntime for DesktopE2eModel {
             message.role == ModelRole::User
                 && message.content.contains("[desktop-e2e:schedule-success]")
         });
+        let scheduled_hosts = request.messages.iter().any(|message| {
+            message.role == ModelRole::User
+                && message.content.contains("[desktop-e2e:schedule-hosts]")
+        });
         let scheduled_wait = request.messages.iter().any(|message| {
             message.role == ModelRole::User
                 && message.content.contains("[desktop-e2e:schedule-wait]")
@@ -848,13 +838,47 @@ impl hachimi_agent::ModelRuntime for DesktopE2eModel {
                     .content
                     .contains("[desktop-e2e:office-implicit-recovery]")
         });
+        let pet_cross_window = request.messages.iter().any(|message| {
+            message.role == ModelRole::User
+                && message.content.contains("[desktop-e2e:pet-cross-window]")
+        });
         if scheduled_wait {
             return Box::pin(stream::once(async move {
                 cancellation.cancelled().await;
                 Err(ModelRuntimeError::Cancelled)
             }));
         }
-        let response = if implicit_office_workflow && !completed_tools.contains(&"skills.list") {
+        let response = if pet_cross_window && !completed_tools.contains(&"request_user_input") {
+            tool_call_events(ModelToolCall {
+                id: ToolCallId::from("desktop-e2e-pet-input"),
+                name: "request_user_input".into(),
+                arguments: serde_json::json!({
+                    "questions": [{
+                        "id": "pet_verification_secret",
+                        "header": "Pet verification",
+                        "prompt": "Enter the Pet cross-window ephemeral secret.",
+                        "options": [],
+                        "secret": true,
+                        "autoResolutionMs": null,
+                        "defaultAnswer": null
+                    }]
+                }),
+            })
+        } else if pet_cross_window && !completed_tools.contains(&"workspace_write_file") {
+            tool_call_events(ModelToolCall {
+                id: ToolCallId::from("desktop-e2e-pet-workspace-write"),
+                name: "workspace_write_file".into(),
+                arguments: serde_json::json!({
+                    "path": "pet-cross-window-evidence.txt",
+                    "content": "Pet unified Agent workspace evidence\n",
+                    "expectedSha256": null
+                }),
+            })
+        } else if pet_cross_window {
+            desktop_e2e_text_response(
+                "Pet cross-window UserInput and writable Workspace action completed on one Agent Run.",
+            )
+        } else if implicit_office_workflow && !completed_tools.contains(&"skills.list") {
             tool_call_events(ModelToolCall {
                 id: ToolCallId::from("desktop-e2e-skills-list"),
                 name: "skills.list".into(),
@@ -1046,6 +1070,182 @@ impl hachimi_agent::ModelRuntime for DesktopE2eModel {
                     }),
                 ]
             }
+        } else if scheduled_hosts && !completed_tools.contains(&"connector_list_accounts") {
+            tool_call_events(ModelToolCall {
+                id: ToolCallId::from("desktop-e2e-schedule-connector-list"),
+                name: "connector_list_accounts".into(),
+                arguments: serde_json::json!({}),
+            })
+        } else if scheduled_hosts && !completed_tools.contains(&"connector_invoke") {
+            match desktop_e2e_tool_json(&request.messages, "connector_list_accounts").and_then(
+                |value| {
+                    value
+                        .as_array()
+                        .and_then(|accounts| accounts.first())
+                        .cloned()
+                },
+            ) {
+                Some(account) => {
+                    let account_id = account.get("id").and_then(serde_json::Value::as_str);
+                    let revision = account.get("revision");
+                    match (account_id, revision) {
+                        (Some(account_id), Some(revision)) => tool_call_events(ModelToolCall {
+                            id: ToolCallId::from("desktop-e2e-schedule-connector-search"),
+                            name: "connector_invoke".into(),
+                            arguments: serde_json::json!({
+                                "accountId": account_id,
+                                "action": "search",
+                                "arguments": { "query": "" },
+                                "idempotencyKey": "desktop-e2e-schedule-hosts-search-v1",
+                                "expectedRevision": revision
+                            }),
+                        }),
+                        _ => desktop_e2e_model_failure(
+                            "Connector account metadata omitted its ID or pinned revision",
+                        ),
+                    }
+                }
+                None => desktop_e2e_model_failure(
+                    "Scheduled Host E2E could not decode a Connector account",
+                ),
+            }
+        } else if scheduled_hosts && !completed_tools.contains(&"browser_start") {
+            match std::env::var("HACHIMI_DESKTOP_E2E_BROWSER_URL") {
+                Ok(initial_url) => tool_call_events(ModelToolCall {
+                    id: ToolCallId::from("desktop-e2e-schedule-browser-start"),
+                    name: "browser_start".into(),
+                    arguments: serde_json::json!({
+                        "initialUrl": initial_url,
+                        "surface": "embedded"
+                    }),
+                }),
+                Err(_) => desktop_e2e_model_failure("HACHIMI_DESKTOP_E2E_BROWSER_URL is missing"),
+            }
+        } else if scheduled_hosts
+            && (!completed_tools.contains(&"browser_observe")
+                || !desktop_e2e_tool_json(&request.messages, "browser_observe").is_some_and(
+                    |observation| {
+                        observation
+                            .get("text")
+                            .and_then(serde_json::Value::as_str)
+                            .is_some_and(|text| text.contains("Managed Browser scheduled fixture"))
+                    },
+                ))
+        {
+            match desktop_e2e_tool_json(&request.messages, "browser_start")
+                .and_then(|value| value.pointer("/lease/id").cloned())
+            {
+                Some(lease_id) => {
+                    let attempt = request
+                        .messages
+                        .iter()
+                        .filter(|message| {
+                            message.role == ModelRole::Tool
+                                && message.name.as_deref() == Some("browser_observe")
+                        })
+                        .count()
+                        + 1;
+                    tool_call_events(ModelToolCall {
+                        id: ToolCallId::new(format!(
+                            "desktop-e2e-schedule-browser-observe-{attempt}"
+                        )),
+                        name: "browser_observe".into(),
+                        arguments: serde_json::json!({
+                            "leaseId": lease_id
+                        }),
+                    })
+                }
+                None => desktop_e2e_model_failure(
+                    "Scheduled Host E2E Browser start did not return an automation lease",
+                ),
+            }
+        } else if scheduled_hosts && !completed_tools.contains(&"browser_act") {
+            match desktop_e2e_tool_json(&request.messages, "browser_observe") {
+                Some(observation) => {
+                    let lease_id = observation.get("leaseId");
+                    let observation_id = observation.get("observationId");
+                    let tab_revision = observation.get("tabRevision");
+                    let input_epoch = observation.get("inputEpoch");
+                    match (lease_id, observation_id, tab_revision, input_epoch) {
+                        (
+                            Some(lease_id),
+                            Some(observation_id),
+                            Some(tab_revision),
+                            Some(input_epoch),
+                        ) => tool_call_events(ModelToolCall {
+                            id: ToolCallId::from("desktop-e2e-schedule-browser-click"),
+                            name: "browser_act".into(),
+                            arguments: serde_json::json!({
+                                "leaseId": lease_id,
+                                "observationId": observation_id,
+                                "expectedTabRevision": tab_revision,
+                                "expectedInputEpoch": input_epoch,
+                                "action": {
+                                    "kind": "click",
+                                    "selector": "h1"
+                                }
+                            }),
+                        }),
+                        _ => desktop_e2e_model_failure(
+                            "Browser observation omitted its fencing identifiers",
+                        ),
+                    }
+                }
+                None => desktop_e2e_model_failure(
+                    "Scheduled Host E2E could not decode the Browser observation",
+                ),
+            }
+        } else if scheduled_hosts && !completed_tools.contains(&"browser_stop") {
+            match desktop_e2e_tool_json(&request.messages, "browser_start")
+                .and_then(|value| value.pointer("/lease/id").cloned())
+            {
+                Some(lease_id) => tool_call_events(ModelToolCall {
+                    id: ToolCallId::from("desktop-e2e-schedule-browser-stop"),
+                    name: "browser_stop".into(),
+                    arguments: serde_json::json!({
+                        "leaseId": lease_id
+                    }),
+                }),
+                None => desktop_e2e_model_failure(
+                    "Scheduled Host E2E lost Browser lease ownership before Stop",
+                ),
+            }
+        } else if scheduled_hosts {
+            let connector_ok = desktop_e2e_tool_json(&request.messages, "connector_invoke")
+                .and_then(|value| {
+                    value
+                        .get("action")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_owned)
+                })
+                .as_deref()
+                == Some("search");
+            let observation_ok = desktop_e2e_tool_json(&request.messages, "browser_observe")
+                .and_then(|value| {
+                    value
+                        .get("text")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_owned)
+                })
+                .is_some_and(|text| text.contains("Managed Browser scheduled fixture"));
+            let action_ok = desktop_e2e_tool_json(&request.messages, "browser_act")
+                .and_then(|value| {
+                    value
+                        .get("resultCode")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_owned)
+                })
+                .as_deref()
+                == Some("performed");
+            if connector_ok && observation_ok && action_ok {
+                desktop_e2e_text_response(
+                    "Scheduled Host E2E completed sample-crm search, embedded Browser Observe and Act, and lease Stop on one fresh Run.",
+                )
+            } else {
+                desktop_e2e_model_failure(
+                    "Scheduled Host E2E did not produce verified Connector, Observe, and Act results",
+                )
+            }
         } else if scheduled_success {
             vec![
                 Ok(ModelEvent::TextDelta {
@@ -1167,6 +1367,28 @@ fn desktop_e2e_text_response(
 }
 
 #[cfg(all(debug_assertions, feature = "desktop-e2e"))]
+fn desktop_e2e_model_failure(
+    message: &str,
+) -> Vec<Result<hachimi_protocol::ModelEvent, ModelRuntimeError>> {
+    vec![Err(ModelRuntimeError::Provider(message.to_owned()))]
+}
+
+#[cfg(all(debug_assertions, feature = "desktop-e2e"))]
+fn desktop_e2e_tool_json(
+    messages: &[hachimi_protocol::ModelMessage],
+    tool_name: &str,
+) -> Option<serde_json::Value> {
+    messages
+        .iter()
+        .rev()
+        .find(|message| {
+            message.role == hachimi_protocol::ModelRole::Tool
+                && message.name.as_deref() == Some(tool_name)
+        })
+        .and_then(|message| serde_json::from_str(&message.content).ok())
+}
+
+#[cfg(all(debug_assertions, feature = "desktop-e2e"))]
 fn desktop_e2e_skill_id(
     messages: &[hachimi_protocol::ModelMessage],
     qualified_name: &str,
@@ -1191,15 +1413,39 @@ fn desktop_e2e_skill_id(
 
 #[derive(Debug, Clone)]
 pub(super) struct DesktopModelRuntimeFactory {
-    production: hachimi_llm::OpenAiCompatibleRuntimeFactory,
+    store: AgentStore,
+    runtime_features: hachimi_core::RuntimeFeatureSet,
 }
 
 impl DesktopModelRuntimeFactory {
-    pub(super) fn new() -> Self {
+    pub(super) fn new(
+        store: AgentStore,
+        runtime_features: hachimi_core::RuntimeFeatureSet,
+    ) -> Self {
         Self {
-            production: hachimi_llm::OpenAiCompatibleRuntimeFactory::system(),
+            store,
+            runtime_features,
         }
     }
+}
+
+pub(super) fn provider_settings_for_runtime(
+    mut settings: hachimi_protocol::LlmSettings,
+    features: hachimi_core::RuntimeFeatureSet,
+) -> hachimi_protocol::LlmSettings {
+    if !features.provider_extensions {
+        settings.protocol = hachimi_protocol::ProviderProtocolKind::ChatCompletions;
+        settings.compatibility_profile_id = "openai-strict".into();
+        settings.provider_endpoint_id = None;
+        settings.provider_account_id = None;
+        settings.embedding_model_name.clear();
+        settings.reasoning_summary = false;
+        settings.remote_compaction = false;
+    } else if !features.provider_remote_context {
+        settings.reasoning_summary = false;
+        settings.remote_compaction = false;
+    }
+    settings
 }
 
 impl hachimi_agent::ModelRuntimeFactory for DesktopModelRuntimeFactory {
@@ -1208,7 +1454,8 @@ impl hachimi_agent::ModelRuntimeFactory for DesktopModelRuntimeFactory {
         configuration: &hachimi_protocol::RunConfiguration,
     ) -> hachimi_agent::ModelClientFuture {
         let configuration = configuration.clone();
-        let production = self.production.clone();
+        let store = self.store.clone();
+        let runtime_features = self.runtime_features;
         Box::pin(async move {
             if deterministic_e2e_provider_enabled() {
                 #[cfg(all(debug_assertions, feature = "desktop-e2e"))]
@@ -1220,12 +1467,105 @@ impl hachimi_agent::ModelRuntimeFactory for DesktopModelRuntimeFactory {
                 #[cfg(not(all(debug_assertions, feature = "desktop-e2e")))]
                 unreachable!("desktop E2E provider cannot be enabled in this build")
             }
-            hachimi_agent::ModelRuntimeFactory::create_session(&production, &configuration).await
+            let settings =
+                provider_settings_for_runtime(configuration.model_snapshot, runtime_features);
+            let api_key = hachimi_llm::SystemApiKeyStore
+                .get()
+                .map_err(|error| hachimi_agent::ModelRuntimeError::Provider(error.to_string()))?;
+            let structured_probe = hachimi_llm::resolve_structured_output_capabilities(
+                &settings,
+                api_key.as_deref(),
+                false,
+            )
+            .await;
+            let mut runtime = hachimi_llm::OpenAiCompatibleRuntime::tool_calling_with_probe(
+                settings.clone(),
+                api_key,
+                &structured_probe,
+            )
+            .map_err(|error| hachimi_agent::ModelRuntimeError::Provider(error.to_string()))?;
+            let proposed = runtime.capabilities();
+            let verified = if runtime_features.provider_extensions
+                && let Some(endpoint_id) = settings.provider_endpoint_id.as_ref()
+            {
+                store
+                    .latest_provider_probe(endpoint_id)
+                    .await
+                    .map_err(|error| hachimi_agent::ModelRuntimeError::Provider(error.to_string()))?
+                    .filter(|report| {
+                        report.status == hachimi_protocol::ProviderProbeStatus::Succeeded
+                            && report.account_id == settings.provider_account_id
+                            && report.capability_revision
+                                == provider_runtime_capability_revision(&settings, &proposed)
+                    })
+            } else {
+                None
+            };
+            runtime.apply_verified_optional_capabilities(
+                runtime_features.provider_remote_context
+                    && verified
+                        .as_ref()
+                        .is_some_and(|report| report.capabilities.reasoning_summary),
+                runtime_features.provider_remote_context
+                    && verified
+                        .as_ref()
+                        .is_some_and(|report| report.capabilities.remote_compaction),
+                runtime_features.provider_extensions
+                    && verified
+                        .as_ref()
+                        .is_some_and(|report| report.capabilities.embeddings),
+            );
+            Ok(Arc::new(runtime) as Arc<dyn hachimi_agent::ModelClientSession>)
         })
     }
 }
 
+fn provider_runtime_capability_revision(
+    settings: &hachimi_protocol::LlmSettings,
+    capabilities: &hachimi_protocol::ProviderCapabilities,
+) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(serde_json::to_vec(&(settings, capabilities)).unwrap_or_default());
+    hasher
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+static MANAGED_WORKSPACE_WORKER: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+static MANAGED_SANDBOX_RUNTIME_ROOT: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
+pub(super) fn set_managed_workspace_runtime(
+    runtime_root: PathBuf,
+    worker: PathBuf,
+) -> Result<(), String> {
+    if !runtime_root.is_absolute() || !runtime_root.is_dir() || !worker.is_file() {
+        return Err("managed Workspace Worker path is invalid".into());
+    }
+    if let (Some(existing_root), Some(existing_worker)) = (
+        MANAGED_SANDBOX_RUNTIME_ROOT.get(),
+        MANAGED_WORKSPACE_WORKER.get(),
+    ) {
+        return if existing_root == &runtime_root && existing_worker == &worker {
+            Ok(())
+        } else {
+            Err("managed Workspace Runtime was already initialized to another path".into())
+        };
+    }
+    MANAGED_SANDBOX_RUNTIME_ROOT
+        .set(runtime_root)
+        .map_err(|_| "managed Sandbox Runtime root was already initialized".to_owned())?;
+    MANAGED_WORKSPACE_WORKER
+        .set(worker)
+        .map_err(|_| "managed Workspace Worker path was already initialized".into())
+}
+
 pub(super) fn workspace_worker_path() -> PathBuf {
+    if let Some(path) = MANAGED_WORKSPACE_WORKER.get() {
+        return path.clone();
+    }
     if let Some(path) = std::env::var_os("HACHIMI_WORKSPACE_WORKER_PATH") {
         return PathBuf::from(path);
     }
@@ -1246,9 +1586,14 @@ pub(super) fn sandbox_sidecar_path(name: &str) -> PathBuf {
     } else {
         name.to_owned()
     };
-    std::env::current_exe()
-        .ok()
-        .and_then(|path| path.parent().map(|parent| parent.join(executable_name)))
+    MANAGED_SANDBOX_RUNTIME_ROOT
+        .get()
+        .map(|root| root.join(&executable_name))
+        .or_else(|| {
+            std::env::current_exe()
+                .ok()
+                .and_then(|path| path.parent().map(|parent| parent.join(&executable_name)))
+        })
         .unwrap_or_else(|| PathBuf::from(name))
 }
 

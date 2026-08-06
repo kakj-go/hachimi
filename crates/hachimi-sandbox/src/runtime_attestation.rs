@@ -3,9 +3,15 @@
 // Commit: 4c43465133428898aa84f0bfc02c306ed65fb66a
 // Modified for Hachimi: AppContainer canaries and per-Run Checkout/Git/TEMP attestation.
 
-use std::{path::Path, process::Stdio};
+use std::{
+    io::Read,
+    path::{Component, Path, PathBuf},
+    process::Stdio,
+};
 
 use hachimi_protocol::{SandboxCapabilityReport, SandboxReadiness};
+use serde::Deserialize;
+use sha2::{Digest, Sha256};
 
 use crate::{
     SandboxSetupMarker,
@@ -99,6 +105,16 @@ pub fn attest_windows_runtime(
     canary: &Path,
     attestation_root: &Path,
 ) -> SandboxCapabilityReport {
+    attest_windows_runtime_with_integrity(marker_path, launcher, canary, attestation_root, &[])
+}
+
+pub(crate) fn attest_windows_runtime_with_integrity(
+    marker_path: &Path,
+    launcher: &Path,
+    canary: &Path,
+    attestation_root: &Path,
+    expected_integrity: &[(PathBuf, String)],
+) -> SandboxCapabilityReport {
     if !cfg!(windows) {
         return degraded(
             SandboxReadiness::Unavailable,
@@ -158,6 +174,16 @@ pub fn attest_windows_runtime(
             Some(marker.version),
         );
     }
+    if !expected_integrity.is_empty()
+        && let Err((code, message)) = verify_managed_runtime(launcher, expected_integrity)
+    {
+        return degraded(
+            SandboxReadiness::SetupRequired,
+            code,
+            &message,
+            Some(marker.version),
+        );
+    }
     let canary_root = attestation_root.join(format!("runtime-{}", std::process::id()));
     let allowed = canary_root.join("allowed");
     let forbidden = canary_root.join("forbidden");
@@ -193,6 +219,109 @@ pub fn attest_windows_runtime(
             Some(marker.version),
         ),
     }
+}
+
+#[derive(Debug, Deserialize)]
+struct ManagedGitManifest {
+    version: String,
+    files: std::collections::BTreeMap<String, String>,
+}
+
+fn verify_managed_runtime(
+    launcher: &Path,
+    expected_integrity: &[(PathBuf, String)],
+) -> Result<(), (&'static str, String)> {
+    let root = launcher.parent().ok_or_else(|| {
+        (
+            "sandbox_runtime_path_invalid",
+            "managed Sandbox Runtime has no root directory".into(),
+        )
+    })?;
+    for (path, expected) in expected_integrity {
+        if !path.is_absolute()
+            || !path.starts_with(root)
+            || !hash_file(path).is_ok_and(|actual| actual == expected.as_str())
+        {
+            return Err((
+                "sandbox_runtime_integrity_mismatch",
+                format!(
+                    "managed Runtime file failed SHA-256 attestation: {}",
+                    path.display()
+                ),
+            ));
+        }
+    }
+    let git_root = root.join("managed-git");
+    let manifest_path = git_root.join("manifest.json");
+    let manifest: ManagedGitManifest =
+        serde_json::from_slice(&std::fs::read(&manifest_path).map_err(|_| {
+            (
+                "sandbox_managed_git_missing",
+                "managed Git manifest is missing".into(),
+            )
+        })?)
+        .map_err(|_| {
+            (
+                "sandbox_managed_git_manifest_invalid",
+                "managed Git manifest is invalid".into(),
+            )
+        })?;
+    if manifest.version.trim().is_empty() || manifest.files.is_empty() {
+        return Err((
+            "sandbox_managed_git_manifest_invalid",
+            "managed Git manifest is incomplete".into(),
+        ));
+    }
+    for (relative, expected) in manifest.files {
+        let relative = safe_manifest_relative(&relative)?;
+        let path = git_root.join(relative);
+        if !hash_file(&path).is_ok_and(|actual| actual == expected) {
+            return Err((
+                "sandbox_managed_git_integrity_mismatch",
+                format!(
+                    "managed Git file failed SHA-256 attestation: {}",
+                    path.display()
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn safe_manifest_relative(value: &str) -> Result<PathBuf, (&'static str, String)> {
+    let path = Path::new(value);
+    if path.as_os_str().is_empty()
+        || path.components().any(|component| {
+            matches!(
+                component,
+                Component::ParentDir | Component::RootDir | Component::Prefix(_)
+            )
+        })
+    {
+        return Err((
+            "sandbox_managed_git_manifest_invalid",
+            "managed Git manifest path escapes its Runtime".into(),
+        ));
+    }
+    Ok(path.to_owned())
+}
+
+fn hash_file(path: &Path) -> Result<String, std::io::Error> {
+    let mut file = std::fs::File::open(path)?;
+    let mut digest = Sha256::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let read = file.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        digest.update(&buffer[..read]);
+    }
+    Ok(digest
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect())
 }
 
 fn run_canaries(
@@ -304,15 +433,18 @@ fn run_canary(
     cwd: &Path,
     arguments: &[&str],
 ) -> std::io::Result<std::process::ExitStatus> {
-    std::process::Command::new(launcher)
-        .arg("--")
-        .arg(canary)
-        .args(arguments)
-        .current_dir(cwd)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
+    hachimi_process_policy::std_command(
+        launcher,
+        hachimi_process_policy::ProcessPolicy::HiddenCaptured,
+    )
+    .arg("--")
+    .arg(canary)
+    .args(arguments)
+    .current_dir(cwd)
+    .stdin(Stdio::null())
+    .stdout(Stdio::null())
+    .stderr(Stdio::null())
+    .status()
 }
 
 fn read_marker(marker_path: &Path) -> Result<SandboxSetupMarker, SandboxCapabilityReport> {
@@ -325,7 +457,7 @@ fn read_marker(marker_path: &Path) -> Result<SandboxSetupMarker, SandboxCapabili
         degraded(
             readiness,
             code,
-            "elevated Windows sandbox setup has not completed",
+            "per-user Windows sandbox setup has not completed",
             None,
         )
     })?;
@@ -355,5 +487,52 @@ fn degraded(
         version,
         stable_error_code: Some(code.into()),
         diagnostics: vec![diagnostic.into()],
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn managed_runtime_integrity_detects_sidecar_and_git_tampering() {
+        let root = tempfile::tempdir().expect("root");
+        let launcher = root.path().join("hachimi-sandbox-launcher.exe");
+        std::fs::write(&launcher, b"launcher").expect("launcher");
+        let git_root = root.path().join("managed-git");
+        std::fs::create_dir_all(git_root.join("cmd")).expect("git root");
+        let git = git_root.join("cmd/git.exe");
+        std::fs::write(&git, b"git").expect("git");
+        let git_hash = hash_file(&git).expect("git hash");
+        std::fs::write(
+            git_root.join("manifest.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "version": "2.53.0",
+                "files": { "cmd/git.exe": git_hash }
+            }))
+            .expect("manifest"),
+        )
+        .expect("manifest file");
+        let expected = vec![(
+            launcher.clone(),
+            hash_file(&launcher).expect("launcher hash"),
+        )];
+        verify_managed_runtime(&launcher, &expected).expect("integrity");
+
+        std::fs::write(&launcher, b"tampered").expect("tamper launcher");
+        assert_eq!(
+            verify_managed_runtime(&launcher, &expected)
+                .expect_err("tamper must fail")
+                .0,
+            "sandbox_runtime_integrity_mismatch"
+        );
+        std::fs::write(&launcher, b"launcher").expect("restore launcher");
+        std::fs::write(&git, b"tampered git").expect("tamper git");
+        assert_eq!(
+            verify_managed_runtime(&launcher, &expected)
+                .expect_err("Git tamper must fail")
+                .0,
+            "sandbox_managed_git_integrity_mismatch"
+        );
     }
 }

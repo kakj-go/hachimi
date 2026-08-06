@@ -55,6 +55,30 @@ impl DesktopDomainRunLauncher for DesktopDomainRunLauncherAdapter {
                 .map_err(domain_error)
         })
     }
+
+    fn dispatch_channel_ingress(
+        &self,
+        principal: String,
+        message: hachimi_protocol::VerifiedChannelMessage,
+    ) -> DesktopDomainLaunchFuture<hachimi_protocol::IngressReceipt> {
+        let app = self.app.clone();
+        Box::pin(async move {
+            let state = app.state::<DesktopState>();
+            crate::channel_agent_dispatch::process_ingress(
+                &app,
+                &state.gateway,
+                &principal,
+                &message,
+            )
+            .await
+            .map_err(|error| {
+                hachimi_control_plane::AppServerDomainError::new(
+                    "channel_agent_dispatch_failed",
+                    error.to_string(),
+                )
+            })
+        })
+    }
 }
 
 fn domain_error(error: CommandError) -> hachimi_control_plane::AppServerDomainError {

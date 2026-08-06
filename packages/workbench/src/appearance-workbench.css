@@ -243,17 +243,17 @@ html[data-diff-markers="signs"] .diff-preview-pane code {
 
 .theme-profile-toolbar {
   min-height: 82px;
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
   align-items: end;
-  justify-content: space-between;
   gap: 18px;
   padding: 16px 18px;
   border-bottom: 1px solid var(--color-border-muted);
 }
 
 .theme-profile-toolbar > [data-component="form-field"] {
-  min-width: 230px;
-  flex: 1;
+  width: 100%;
+  min-width: 0;
 }
 
 .theme-profile-actions {
@@ -303,6 +303,26 @@ html[data-diff-markers="signs"] .diff-preview-pane code {
 
 .appearance-preferences [data-component="select-trigger"] {
   width: 230px;
+}
+
+.unified-settings-card [data-component="select-trigger"] {
+  width: 100%;
+}
+
+@media (max-width: 900px) {
+  .theme-profile-toolbar {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+}
+
+@media (max-width: 620px) {
+  .theme-profile-toolbar {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .theme-profile-actions {
+    justify-content: flex-start;
+  }
 }
 
 .global-error {

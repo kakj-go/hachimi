@@ -1,8 +1,9 @@
 import type {
-  ApprovalPolicy,
   GitRefRecord,
+  PermissionProfile,
   ProjectGitSnapshot,
   ProjectRecord,
+  SessionExtraAuthorizationSummary,
   SkillRecord,
 } from "@hachimi/contracts";
 import { useI18n } from "@hachimi/i18n";
@@ -16,18 +17,20 @@ import {
   FolderOpen,
   GitBranch,
   GitFork,
-  Hand,
   Laptop,
   Lightbulb,
   Paperclip,
+  Pencil,
   Plus,
   RefreshCw,
-  ShieldAlert,
-  ShieldCheck,
   ShieldOff,
   Sparkles,
+  Trash2,
+  Tooltip,
+  X,
 } from "@hachimi/ui";
 import { For, Show, type JSX } from "solid-js";
+import { skillDisplayName } from "./skill-display";
 
 export type ComposerPopoverId = "project" | "execution" | "branch" | "options" | "approval";
 
@@ -36,13 +39,15 @@ interface PopoverStateProps {
   onOpenChange: (id: ComposerPopoverId, open: boolean) => void;
 }
 
+type MenuRowTone = "neutral" | "recommended" | "danger";
+
 function MenuRow(props: {
   icon: JSX.Element;
   label: string;
   description?: string;
   selected?: boolean;
   disabled?: boolean;
-  warning?: boolean;
+  tone?: MenuRowTone;
   testId?: string;
   onSelect: () => void;
 }) {
@@ -50,7 +55,8 @@ function MenuRow(props: {
     <Button
       type="button"
       class="composer-popover-row"
-      classList={{ selected: props.selected, warning: props.warning }}
+      classList={{ selected: props.selected }}
+      data-tone={props.tone ?? "neutral"}
       data-testid={props.testId}
       disabled={props.disabled ?? false}
       aria-pressed={props.selected ?? false}
@@ -198,31 +204,33 @@ export function ComposerContextControls(
         </div>
       </FloatingPopover>
 
-      <div class="composer-git-state" data-testid="workbench-project-git-state">
-        <GitBranch size={15} aria-hidden="true" />
-        <span>{gitLabel()}</span>
-        <Show when={props.gitSnapshot?.state.kind === "unborn"}>
+      <Show when={props.executionKind === "local"}>
+        <div class="composer-git-state" data-testid="workbench-project-git-state">
+          <GitBranch size={15} aria-hidden="true" />
+          <span>{gitLabel()}</span>
+          <Show when={props.gitSnapshot?.state.kind === "unborn"}>
+            <Button
+              type="button"
+              variant="ghost"
+              size="small"
+              data-testid="project-git-create-initial"
+              onClick={props.onCreateInitialCommit}
+            >
+              {copy("创建首提", "Create initial commit")}
+            </Button>
+          </Show>
           <Button
             type="button"
             variant="ghost"
             size="small"
-            data-testid="project-git-create-initial"
-            onClick={props.onCreateInitialCommit}
+            aria-label={copy("刷新 Git 状态", "Refresh Git status")}
+            disabled={props.gitLoading || !props.selectedProject}
+            onClick={props.onRefreshGit}
           >
-            {copy("创建首提", "Create initial commit")}
+            <RefreshCw size={14} classList={{ "is-spinning": props.gitLoading }} />
           </Button>
-        </Show>
-        <Button
-          type="button"
-          variant="ghost"
-          size="small"
-          aria-label={copy("刷新 Git 状态", "Refresh Git status")}
-          disabled={props.gitLoading || !props.selectedProject}
-          onClick={props.onRefreshGit}
-        >
-          <RefreshCw size={14} classList={{ "is-spinning": props.gitLoading }} />
-        </Button>
-      </div>
+        </div>
+      </Show>
 
       <Show when={props.executionKind === "managed_worktree"}>
         <FloatingPopover
@@ -242,6 +250,17 @@ export function ComposerContextControls(
           }
         >
           <div class="composer-popover-heading">{i18n.t("workbench.branchPopoverTitle")}</div>
+          <Button
+            type="button"
+            variant="ghost"
+            size="small"
+            class="composer-branch-refresh"
+            disabled={props.gitLoading || !props.selectedProject}
+            onClick={props.onRefreshGit}
+          >
+            <RefreshCw size={14} classList={{ "is-spinning": props.gitLoading }} />
+            {copy("刷新分支", "Refresh branches")}
+          </Button>
           <div class="composer-popover-list composer-branch-list" role="listbox">
             <For each={props.gitRefs}>
               {(entry) => (
@@ -273,7 +292,7 @@ export function ComposerOptionsPopover(
     skillsLoading: boolean;
     skillsError: string | undefined;
     selectedSkillIds: string[];
-    onChooseAttachments: (kind: "files" | "folder") => void;
+    onChooseAttachments: () => void;
     onTogglePlanMode: () => void;
     onToggleSkill: (skillId: string) => void;
   },
@@ -299,7 +318,7 @@ export function ComposerOptionsPopover(
             type="button"
             class="composer-attachment-file-button"
             data-testid="workbench-add-attachment"
-            onClick={() => props.onChooseAttachments("files")}
+            onClick={props.onChooseAttachments}
           >
             <span class="composer-popover-row-icon" aria-hidden="true">
               <Paperclip size={18} />
@@ -308,17 +327,6 @@ export function ComposerOptionsPopover(
               <strong>{i18n.t("workbench.addAttachment")}</strong>
               <small>{i18n.t("workbench.addAttachmentDescription")}</small>
             </span>
-          </Button>
-          <Button
-            type="button"
-            class="composer-attachment-folder-button"
-            data-testid="workbench-add-folder"
-            aria-label={i18n.t("workbench.chooseFolder")}
-            title={i18n.t("workbench.chooseFolder")}
-            onClick={() => props.onChooseAttachments("folder")}
-          >
-            <FolderOpen size={14} />
-            <span>{i18n.t("workbench.folder")}</span>
           </Button>
         </div>
         <MenuRow
@@ -352,7 +360,7 @@ export function ComposerOptionsPopover(
           {(skill, index) => {
             const hasErrors = () => skill.diagnostics.some((item) => item.severity === "error");
             const unavailable = () => !skill.enabled || hasErrors();
-            const displayName = () => skill.qualifiedName || skill.name;
+            const displayName = () => skillDisplayName(skill, i18n.locale() === "zh-CN");
             const description = () =>
               unavailable()
                 ? !skill.enabled
@@ -384,78 +392,134 @@ export function ComposerOptionsPopover(
   );
 }
 
-export function ApprovalPolicyPopover(
+export function PermissionProfilePopover(
   props: PopoverStateProps & {
-    value: ApprovalPolicy;
-    onChange: (policy: ApprovalPolicy) => void;
+    value: PermissionProfile;
+    onChange: (profile: PermissionProfile) => void;
+    extraAuthorizations?: SessionExtraAuthorizationSummary[];
+    onClearExtraAuthorizations?: () => void;
   },
 ) {
   const i18n = useI18n();
-  const policies: Array<{
-    value: ApprovalPolicy;
+  const profiles: Array<{
+    value: PermissionProfile;
     icon: JSX.Element;
     label: string;
     description: string;
-    warning?: boolean;
+    tone: MenuRowTone;
   }> = [
     {
-      value: "always_ask_side_effects",
-      icon: <Hand size={18} />,
-      label: i18n.t("workbench.approvalAlwaysAsk"),
-      description: i18n.t("workbench.approvalAlwaysAskDescription"),
+      value: "read_only",
+      icon: <FileText size={18} />,
+      label: i18n.t("workbench.permissionReadOnly"),
+      description: i18n.t("workbench.permissionReadOnlyDescription"),
+      tone: "neutral",
     },
     {
-      value: "only_when_needed",
-      icon: <ShieldCheck size={18} />,
-      label: i18n.t("workbench.approvalOnlyWhenNeeded"),
-      description: i18n.t("workbench.approvalOnlyWhenNeededDescription"),
+      value: "writable",
+      icon: <Pencil size={18} />,
+      label: i18n.t("workbench.permissionWritable"),
+      description: i18n.t("workbench.permissionWritableDescription"),
+      tone: "recommended",
     },
     {
-      value: "never_prompt",
+      value: "full_access",
       icon: <ShieldOff size={18} />,
-      label: i18n.t("workbench.approvalNeverPrompt"),
-      description: i18n.t("workbench.approvalNeverPromptDescription"),
-      warning: true,
+      label: i18n.t("workbench.permissionFullAccess"),
+      description: i18n.t("workbench.permissionFullAccessDescription"),
+      tone: "danger",
     },
   ];
-  const selected = () => policies.find((policy) => policy.value === props.value) ?? policies[1]!;
+  const selected = () => profiles.find((profile) => profile.value === props.value) ?? profiles[1]!;
 
   return (
     <FloatingPopover
       open={props.activePopover === "approval"}
       onOpenChange={(open) => props.onOpenChange("approval", open)}
-      label={i18n.t("workbench.approvalPolicy")}
-      triggerClass="composer-approval-trigger composer-policy"
-      triggerTestId="workbench-approval-policy"
+      label={i18n.t("workbench.permissionLevel")}
+      triggerClass={`composer-approval-trigger composer-policy policy-${selected().tone}`}
+      triggerTestId="workbench-permission-profile"
       contentClass="composer-popover composer-approval-popover"
-      contentTestId="workbench-approval-popover"
+      contentTestId="workbench-permission-popover"
       trigger={
         <>
-          <ShieldAlert size={17} />
+          {selected().icon}
           <span>{selected().label}</span>
           <ChevronDown class="composer-trigger-chevron" size={13} aria-hidden="true" />
         </>
       }
     >
-      <div class="composer-popover-heading">{i18n.t("workbench.approvalPopoverTitle")}</div>
+      <div class="composer-popover-heading">{i18n.t("workbench.permissionPopoverTitle")}</div>
       <div class="composer-popover-list">
-        <For each={policies}>
-          {(policy) => (
+        <For each={profiles}>
+          {(profile) => (
             <MenuRow
-              icon={policy.icon}
-              label={policy.label}
-              description={policy.description}
-              selected={props.value === policy.value}
-              warning={policy.warning ?? false}
+              icon={profile.icon}
+              label={profile.label}
+              description={profile.description}
+              selected={props.value === profile.value}
+              tone={profile.tone}
+              testId={`workbench-permission-${profile.value}`}
               onSelect={() => {
-                props.onChange(policy.value);
+                props.onChange(profile.value);
                 props.onOpenChange("approval", false);
               }}
             />
           )}
         </For>
       </div>
+      <Show when={(props.extraAuthorizations?.length ?? 0) > 0}>
+        <div class="composer-permission-extra">
+          <div class="composer-permission-extra-heading">
+            <strong>{i18n.locale() === "zh-CN" ? "会话额外授权" : "Session authorizations"}</strong>
+            <Button
+              type="button"
+              class="composer-permission-extra-clear"
+              onClick={() => props.onClearExtraAuthorizations?.()}
+            >
+              <Trash2 size={14} aria-hidden="true" />
+              {i18n.locale() === "zh-CN" ? "全部清除" : "Clear all"}
+            </Button>
+          </div>
+          <ul>
+            <For each={props.extraAuthorizations}>
+              {(authorization) => (
+                <li>
+                  <span>{authorization.action}</span>
+                  <code>{authorization.resource}</code>
+                </li>
+              )}
+            </For>
+          </ul>
+        </div>
+      </Show>
     </FloatingPopover>
+  );
+}
+
+export function PlanModeChip(props: { onDisable: () => void }) {
+  const i18n = useI18n();
+  const disableLabel = () => i18n.t("workbench.disablePlanMode");
+
+  return (
+    <>
+      <span class="composer-options-divider" aria-hidden="true" />
+      <Tooltip label={disableLabel()}>
+        <Button
+          type="button"
+          class="composer-plan-mode-chip"
+          data-testid="workbench-plan-mode-chip"
+          aria-label={disableLabel()}
+          onClick={props.onDisable}
+        >
+          <span class="composer-plan-mode-icon" aria-hidden="true">
+            <Lightbulb class="composer-plan-mode-default-icon" size={17} />
+            <X class="composer-plan-mode-remove-icon" size={16} />
+          </span>
+          <span>{i18n.t("workbench.planModeChip")}</span>
+        </Button>
+      </Tooltip>
+    </>
   );
 }
 
@@ -469,7 +533,7 @@ export function SkillReferenceList(props: {
       <div class="composer-skill-references" aria-label={i18n.t("workbench.skillReferences")}>
         <For each={props.skills}>
           {(skill, index) => {
-            const displayName = skill.qualifiedName || skill.name;
+            const displayName = skillDisplayName(skill, i18n.locale() === "zh-CN");
             return (
               <Button
                 type="button"

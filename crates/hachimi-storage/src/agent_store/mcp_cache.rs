@@ -415,7 +415,9 @@ mod tests {
         let (store, server_id) = store_with_server().await;
         let session = SessionRecord {
             id: SessionId::from("mcp-session"),
-            context: SessionContextBinding::General,
+            context: SessionContextBinding::Workspace {
+                workspace_id: hachimi_protocol::WorkspaceId::random(),
+            },
             entry_profile: EntryProfile::Workbench,
             title: "MCP".into(),
             archived: false,
@@ -431,7 +433,7 @@ mod tests {
             session_id: session.id.clone(),
             status: RunStatus::Running,
             purpose: RunPurpose::Task,
-            origin: RunOrigin::Interactive,
+            origin: RunOrigin::Manual,
             generation: 4,
             configuration: RunConfiguration {
                 model_snapshot: LlmSettings::default(),

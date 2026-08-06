@@ -17,10 +17,9 @@ use hachimi_control_plane::{
 use hachimi_core::FeatureFlags;
 use hachimi_protocol::{
     CheckoutId, CheckoutRecord, ClientContext, DiffScope, McpServerHealthState, McpServerTransport,
-    MutationContext, PermissionProfile, ReviewStartRequest, ReviewStartSnapshot, RunDiffSnapshot,
-    RunRecord, ScheduleAuthorizationScope, ScheduleContextTemplate, ScheduleDefinition,
-    ScheduleSkillSelection, SessionId, SkillDiagnosticSeverity, TaskInteractiveContinuation,
-    TaskRunId,
+    MutationContext, ReviewStartRequest, ReviewStartSnapshot, RunDiffSnapshot, RunRecord,
+    ScheduleContextTemplate, ScheduleDefinition, ScheduleSkillSelection, SessionId,
+    SkillDiagnosticSeverity, TaskInteractiveContinuation, TaskRunId,
 };
 use hachimi_storage::{AgentStore, AgentStoreError, IdempotentMutationClaim};
 use parking_lot::Mutex;
@@ -37,6 +36,8 @@ use hachimi_workspace::{WorkspaceHostClient, WorkspaceOperation, WorkspaceOutput
 const FILE_OPERATION_TIMEOUT: Duration = Duration::from_secs(20);
 const DIFF_OPERATION_TIMEOUT: Duration = Duration::from_secs(60);
 
+mod local_hosts;
+mod plugin_products;
 mod process;
 
 struct DomainWorkspace {
@@ -60,6 +61,12 @@ pub(super) trait DesktopDomainRunLauncher: Send + Sync {
         task_run_id: TaskRunId,
         idempotency_key: String,
     ) -> DesktopDomainLaunchFuture<TaskInteractiveContinuation>;
+
+    fn dispatch_channel_ingress(
+        &self,
+        principal: String,
+        message: hachimi_protocol::VerifiedChannelMessage,
+    ) -> DesktopDomainLaunchFuture<hachimi_protocol::IngressReceipt>;
 }
 
 #[derive(Clone)]
@@ -75,6 +82,13 @@ pub(super) struct DesktopAppDomainHandler {
     workspace_searches: Arc<Mutex<BTreeMap<hachimi_protocol::FsSearchId, ActiveWorkspaceSearch>>>,
     features: FeatureFlags,
     sandbox_activity: SandboxActivityTracker,
+    browser: Arc<hachimi_browser::BrowserHost>,
+    computer: Arc<hachimi_computer::ComputerHost>,
+    plugins: hachimi_extensions::PluginHost,
+    plugin_surfaces: crate::plugin_content_protocol::PluginSurfaceRegistry,
+    gateway: hachimi_gateway::GatewayHost,
+    loopback_channel: hachimi_gateway::LoopbackWebhookChannel,
+    mock_poll_channel: hachimi_gateway::MockPollChannel,
 }
 
 pub(super) struct DesktopAppDomainDependencies {
@@ -88,6 +102,13 @@ pub(super) struct DesktopAppDomainDependencies {
     pub workspace_watches: Arc<Mutex<BTreeMap<hachimi_protocol::FsWatchId, ActiveWorkspaceWatch>>>,
     pub workspace_searches:
         Arc<Mutex<BTreeMap<hachimi_protocol::FsSearchId, ActiveWorkspaceSearch>>>,
+    pub browser: Arc<hachimi_browser::BrowserHost>,
+    pub computer: Arc<hachimi_computer::ComputerHost>,
+    pub plugins: hachimi_extensions::PluginHost,
+    pub plugin_surfaces: crate::plugin_content_protocol::PluginSurfaceRegistry,
+    pub gateway: hachimi_gateway::GatewayHost,
+    pub loopback_channel: hachimi_gateway::LoopbackWebhookChannel,
+    pub mock_poll_channel: hachimi_gateway::MockPollChannel,
 }
 
 impl std::fmt::Debug for DesktopAppDomainHandler {
@@ -115,6 +136,13 @@ impl DesktopAppDomainHandler {
             run_launcher,
             workspace_watches,
             workspace_searches,
+            browser,
+            computer,
+            plugins,
+            plugin_surfaces,
+            gateway,
+            loopback_channel,
+            mock_poll_channel,
         } = dependencies;
         Self {
             store,
@@ -128,6 +156,13 @@ impl DesktopAppDomainHandler {
             workspace_searches,
             features,
             sandbox_activity,
+            browser,
+            computer,
+            plugins,
+            plugin_surfaces,
+            gateway,
+            loopback_channel,
+            mock_poll_channel,
         }
     }
 
@@ -406,26 +441,39 @@ impl DesktopAppDomainHandler {
         .await
     }
 
-    async fn schedule_scope(
+    async fn pin_schedule_runtime_revisions(
         &self,
-        schedule: &ScheduleDefinition,
-    ) -> Result<ScheduleAuthorizationScope, AppServerDomainError> {
+        schedule: &mut ScheduleDefinition,
+    ) -> Result<(), AppServerDomainError> {
+        crate::host_revision_snapshots::validate_enterprise_attachment_scope(schedule)
+            .map_err(|error| AppServerDomainError::new(error.code, error.message))?;
+        crate::host_revision_snapshots::validate_connector_revision_selections(
+            &self.plugins,
+            &schedule.host_revision_snapshot.connectors,
+        )
+        .await
+        .map_err(|error| AppServerDomainError::new(error.code, error.message))?;
+        self.plugins
+            .verify_contribution_revisions(&schedule.contribution_revisions)
+            .await
+            .map_err(domain_error("schedule_contribution_drift"))?;
         let skill_context = match &schedule.context_template {
-            ScheduleContextTemplate::General => hachimi_skills::SkillCatalogContext::default(),
-            ScheduleContextTemplate::Project { project_id, .. } => {
-                let project = self
-                    .store
-                    .get_project(project_id)
-                    .await
-                    .map_err(domain_error("schedule_project_lookup_failed"))?
-                    .ok_or_else(|| {
-                        AppServerDomainError::new(
-                            "schedule_project_unavailable",
-                            "Schedule Project no longer exists",
-                        )
-                    })?;
+            ScheduleContextTemplate::Workspace { workspace, .. } => {
+                let project_root = match workspace {
+                    hachimi_protocol::ScheduleWorkspaceSpec::Managed => self
+                        .store
+                        .workspace_for_owner(hachimi_storage::WorkspaceOwnerRef::Schedule(
+                            &schedule.id,
+                        ))
+                        .await
+                        .map_err(domain_error("schedule_workspace_lookup_failed"))?
+                        .map(|workspace| PathBuf::from(workspace.root_path)),
+                    hachimi_protocol::ScheduleWorkspaceSpec::SelectedDirectory { root_path } => {
+                        Some(PathBuf::from(root_path))
+                    }
+                };
                 hachimi_skills::SkillCatalogContext {
-                    project_root: Some(PathBuf::from(project.root_path)),
+                    project_root,
                     checkout_root: None,
                 }
             }
@@ -512,35 +560,39 @@ impl DesktopAppDomainHandler {
                         ),
                     ));
                 };
-                if !runtime
+                let requires_write = !runtime
                     .configuration
                     .read_only_tools
-                    .contains(&selection.tool_name)
-                {
-                    let target = format!(
-                        "mcp:{}:{}",
-                        selection.server_id.as_str(),
-                        selection.tool_name
-                    );
-                    if schedule.permission_config.permission_profile
-                        != PermissionProfile::ExternalSandbox
-                        || !schedule
-                            .permission_config
-                            .external_targets
-                            .contains(&target)
-                    {
-                        return Err(AppServerDomainError::new(
-                            "schedule_mcp_side_effect_not_authorized",
-                            "MCP side effects require an exact persisted target",
-                        ));
-                    }
+                    .contains(&selection.tool_name);
+                if !schedule.permission_policy.allows_mcp(
+                    &selection.server_id,
+                    &selection.tool_name,
+                    &selection.schema_hash,
+                    requires_write,
+                ) {
+                    return Err(AppServerDomainError::new(
+                        "schedule_mcp_tool_not_authorized",
+                        "MCP tools require an exact persisted rule",
+                    ));
                 }
             }
         }
-        let mut scope = base_schedule_scope(schedule);
-        scope.skill_revisions = skill_revisions;
-        normalize_scope(&mut scope);
-        Ok(scope)
+        for selection in &schedule.host_revision_snapshot.connectors {
+            for action in &selection.allowed_actions {
+                if !schedule
+                    .permission_policy
+                    .allows_connector(&selection.account_id, action, true)
+                {
+                    return Err(AppServerDomainError::new(
+                        "schedule_connector_action_not_authorized",
+                        "Connector actions require an exact persisted writable rule",
+                    ));
+                }
+            }
+        }
+        schedule.skill_revisions = skill_revisions;
+        hachimi_scheduler::normalize_schedule_definition(schedule);
+        Ok(())
     }
 
     async fn dispatch_schedule(
@@ -551,12 +603,10 @@ impl DesktopAppDomainHandler {
         self.require_scheduler()?;
         let response = match request {
             ScheduleAppRequest::Create(request) => {
-                let fingerprint = mutation_fingerprint(
-                    request.definition.id.as_str(),
-                    &(&request.definition, request.authorize),
-                )?;
-                let definition = request.definition;
-                let authorize = request.authorize;
+                let mut definition = request.definition;
+                hachimi_scheduler::normalize_schedule_definition(&mut definition);
+                self.pin_schedule_runtime_revisions(&mut definition).await?;
+                let fingerprint = mutation_fingerprint(definition.id.as_str(), &definition)?;
                 ScheduleAppResponse::Created(
                     self.idempotent(
                         context,
@@ -564,17 +614,11 @@ impl DesktopAppDomainHandler {
                         "schedule.create.command",
                         &fingerprint,
                         || async {
-                            let scope = if authorize {
-                                Some(self.schedule_scope(&definition).await?)
-                            } else {
-                                None
-                            };
                             self.scheduler
-                                .create_with_grant_scope(
+                                .create(
                                     &context.principal,
                                     &request.context.idempotency_key,
                                     definition,
-                                    scope,
                                 )
                                 .await
                                 .map_err(domain_error("scheduler_failed"))
@@ -599,11 +643,13 @@ impl DesktopAppDomainHandler {
                 ScheduleAppResponse::Preview(self.scheduler.preview(&schedule, count.clamp(1, 20)))
             }
             ScheduleAppRequest::Update(request) => {
+                let mut definition = request.definition;
+                hachimi_scheduler::normalize_schedule_definition(&mut definition);
+                self.pin_schedule_runtime_revisions(&mut definition).await?;
                 let fingerprint = mutation_fingerprint(
-                    request.definition.id.as_str(),
-                    &(&request.definition, request.expected_config_revision),
+                    definition.id.as_str(),
+                    &(&definition, request.expected_config_revision),
                 )?;
-                let definition = request.definition;
                 let revision = request.expected_config_revision;
                 ScheduleAppResponse::Schedule(
                     self.idempotent(
@@ -662,64 +708,6 @@ impl DesktopAppDomainHandler {
                     .await?,
                 )
             }
-            ScheduleAppRequest::Reauthorize {
-                context: mutation,
-                schedule_id,
-            } => {
-                let resource = schedule_id.as_str().to_owned();
-                ScheduleAppResponse::Grant(Some(
-                    self.idempotent(
-                        context,
-                        &mutation,
-                        "schedule.reauthorize",
-                        &resource,
-                        || async {
-                            let schedule = self
-                                .store
-                                .get_schedule(&schedule_id)
-                                .await
-                                .map_err(domain_error("scheduler_store_failed"))?
-                                .ok_or_else(|| {
-                                    AppServerDomainError::new(
-                                        "schedule_not_found",
-                                        "Schedule does not exist",
-                                    )
-                                })?;
-                            let scope = self.schedule_scope(&schedule).await?;
-                            self.scheduler
-                                .reauthorize_with_grant_scope(
-                                    &schedule_id,
-                                    &context.principal,
-                                    scope,
-                                )
-                                .await
-                                .map_err(domain_error("scheduler_failed"))
-                        },
-                    )
-                    .await?,
-                ))
-            }
-            ScheduleAppRequest::RevokeGrant {
-                context: mutation,
-                schedule_id,
-            } => {
-                let resource = schedule_id.as_str().to_owned();
-                ScheduleAppResponse::Grant(
-                    self.idempotent(
-                        context,
-                        &mutation,
-                        "schedule.revoke_grant",
-                        &resource,
-                        || async {
-                            self.scheduler
-                                .revoke_grant(&schedule_id)
-                                .await
-                                .map_err(domain_error("scheduler_failed"))
-                        },
-                    )
-                    .await?,
-                )
-            }
             ScheduleAppRequest::RunNow {
                 context: mutation,
                 schedule_id,
@@ -741,6 +729,34 @@ impl DesktopAppDomainHandler {
                     .await?,
                 )
             }
+            ScheduleAppRequest::IngestEvent(request) => {
+                Self::validate_mutation(context, &request.context)?;
+                let envelope = hachimi_protocol::ScheduleEventEnvelope {
+                    event_id: request.event_id,
+                    source: hachimi_protocol::ScheduleEventSource {
+                        kind: request.source_kind,
+                        principal: context.principal.clone(),
+                        id: request.source_id,
+                    },
+                    event_type: request.event_type,
+                    subject: request.subject,
+                    labels: request.labels,
+                    resource: request.resource,
+                    occurred_at_ms: request.occurred_at_ms,
+                };
+                ScheduleAppResponse::EventReceipt(
+                    self.scheduler
+                        .ingest_event(envelope)
+                        .await
+                        .map_err(schedule_event_domain_error)?,
+                )
+            }
+            ScheduleAppRequest::ListEvents { limit } => ScheduleAppResponse::EventReceipts(
+                self.store
+                    .list_schedule_event_receipts(limit)
+                    .await
+                    .map_err(domain_error("scheduler_store_failed"))?,
+            ),
         };
         Ok(response)
     }
@@ -894,6 +910,27 @@ impl DesktopAppDomainHandler {
         session_id: &SessionId,
         checkout_id: &CheckoutId,
     ) -> Result<DomainWorkspace, AppServerDomainError> {
+        let checkout = self
+            .resolve_session_checkout(session_id, checkout_id)
+            .await?;
+        let run = self
+            .store
+            .list_runs(session_id)
+            .await
+            .map_err(domain_error("workspace_runs_failed"))?
+            .into_iter()
+            .last()
+            .ok_or_else(|| {
+                AppServerDomainError::new("workspace_run_not_found", "session has no run")
+            })?;
+        Ok(DomainWorkspace { checkout, run })
+    }
+
+    async fn resolve_session_checkout(
+        &self,
+        session_id: &SessionId,
+        checkout_id: &CheckoutId,
+    ) -> Result<CheckoutRecord, AppServerDomainError> {
         let session = self
             .store
             .get_session(session_id)
@@ -908,25 +945,13 @@ impl DesktopAppDomainHandler {
                 "checkout is not bound to this session",
             ));
         }
-        let checkout = self
-            .store
+        self.store
             .get_checkout(checkout_id)
             .await
             .map_err(domain_error("workspace_checkout_failed"))?
             .ok_or_else(|| {
                 AppServerDomainError::new("workspace_checkout_not_found", "checkout does not exist")
-            })?;
-        let run = self
-            .store
-            .list_runs(session_id)
-            .await
-            .map_err(domain_error("workspace_runs_failed"))?
-            .into_iter()
-            .last()
-            .ok_or_else(|| {
-                AppServerDomainError::new("workspace_run_not_found", "session has no run")
-            })?;
-        Ok(DomainWorkspace { checkout, run })
+            })
     }
 
     async fn resolve_diff_workspace(
@@ -973,7 +998,51 @@ impl DesktopAppDomainHandler {
                     })?;
                 Ok(DomainWorkspace { checkout, run })
             }
-            DiffScope::Checkout { checkout_id } => {
+            DiffScope::Session {
+                session_id,
+                checkout_id,
+            } => {
+                let session = self
+                    .store
+                    .get_session(session_id)
+                    .await
+                    .map_err(domain_error("workspace_session_failed"))?
+                    .ok_or_else(|| {
+                        AppServerDomainError::new(
+                            "workspace_session_not_found",
+                            "session does not exist",
+                        )
+                    })?;
+                if session.context.checkout_id() != Some(checkout_id) {
+                    return Err(AppServerDomainError::new(
+                        "workspace_session_checkout_mismatch",
+                        "session is not bound to the requested checkout",
+                    ));
+                }
+                let checkout = self
+                    .store
+                    .get_checkout(checkout_id)
+                    .await
+                    .map_err(domain_error("workspace_checkout_failed"))?
+                    .ok_or_else(|| {
+                        AppServerDomainError::new(
+                            "workspace_checkout_not_found",
+                            "checkout does not exist",
+                        )
+                    })?;
+                let run = self
+                    .store
+                    .list_runs(session_id)
+                    .await
+                    .map_err(domain_error("workspace_runs_failed"))?
+                    .into_iter()
+                    .last()
+                    .ok_or_else(|| {
+                        AppServerDomainError::new("workspace_run_not_found", "session has no run")
+                    })?;
+                Ok(DomainWorkspace { checkout, run })
+            }
+            DiffScope::Checkout { checkout_id } | DiffScope::Branch { checkout_id, .. } => {
                 let checkout = self
                     .store
                     .get_checkout(checkout_id)
@@ -1021,6 +1090,25 @@ impl DesktopAppDomainHandler {
             workspace.checkout.id.as_str(),
             workspace.run.generation,
         )
+    }
+
+    async fn diff_base_revision(
+        &self,
+        scope: &DiffScope,
+        workspace: &DomainWorkspace,
+    ) -> Result<Option<String>, AppServerDomainError> {
+        match scope {
+            DiffScope::Branch { branch, .. } => Ok(Some(format!("{branch}...HEAD"))),
+            DiffScope::Session { session_id, .. } => Ok(self
+                .store
+                .get_session_environment_state(session_id)
+                .await
+                .map_err(domain_error("workspace_environment_failed"))?
+                .and_then(|state| state.baseline_revision)),
+            DiffScope::Run { .. } | DiffScope::Checkout { .. } => {
+                Ok(workspace.checkout.base_revision.clone())
+            }
+        }
     }
 
     async fn dispatch_fs(
@@ -1088,11 +1176,12 @@ impl DesktopAppDomainHandler {
                         });
                     FsAppResponse::Diff(snapshot)
                 } else {
+                    let base_revision = self.diff_base_revision(&scope, &workspace).await?;
                     match Self::workspace_client(&workspace)
                         .execute(
                             WorkspaceOperation::GitDiffStructured {
                                 scope,
-                                base_revision: workspace.checkout.base_revision.clone(),
+                                base_revision,
                             },
                             DIFF_OPERATION_TIMEOUT,
                             tokio_util::sync::CancellationToken::new(),
@@ -1150,25 +1239,33 @@ impl DesktopAppDomainHandler {
                                 .map_err(domain_error("workspace_diff_artifact_read_failed"))?,
                         )
                     }
-                    DiffScope::Checkout { .. } => match Self::workspace_client(&workspace)
-                        .execute(
-                            WorkspaceOperation::GitDiffFileChunk {
-                                scope: request.scope,
-                                path: request.path,
-                                base_revision: workspace.checkout.base_revision.clone(),
-                                offset: request.offset,
-                                limit: request.limit,
-                                if_match: request.if_match,
-                            },
-                            DIFF_OPERATION_TIMEOUT,
-                            tokio_util::sync::CancellationToken::new(),
-                        )
-                        .await
-                        .map_err(workspace_domain_error)?
-                    {
-                        WorkspaceOutput::DiffFileChunk { chunk } => FsAppResponse::DiffFile(chunk),
-                        _ => return Err(workspace_protocol_error("file Diff chunk")),
-                    },
+                    DiffScope::Checkout { .. }
+                    | DiffScope::Session { .. }
+                    | DiffScope::Branch { .. } => {
+                        let base_revision =
+                            self.diff_base_revision(&request.scope, &workspace).await?;
+                        match Self::workspace_client(&workspace)
+                            .execute(
+                                WorkspaceOperation::GitDiffFileChunk {
+                                    scope: request.scope,
+                                    path: request.path,
+                                    base_revision,
+                                    offset: request.offset,
+                                    limit: request.limit,
+                                    if_match: request.if_match,
+                                },
+                                DIFF_OPERATION_TIMEOUT,
+                                tokio_util::sync::CancellationToken::new(),
+                            )
+                            .await
+                            .map_err(workspace_domain_error)?
+                        {
+                            WorkspaceOutput::DiffFileChunk { chunk } => {
+                                FsAppResponse::DiffFile(chunk)
+                            }
+                            _ => return Err(workspace_protocol_error("file Diff chunk")),
+                        }
+                    }
                 }
             }
             FsAppRequest::Watch(request) => {
@@ -1361,6 +1458,7 @@ impl AppServerDomainHandler for DesktopAppDomainHandler {
                 AppServerDomainRequest::Schedule(request) => self
                     .dispatch_schedule(context, *request)
                     .await
+                    .map(Box::new)
                     .map(AppServerDomainResponse::Schedule),
                 AppServerDomainRequest::Task(request) => self
                     .dispatch_task(context, request)
@@ -1369,6 +1467,7 @@ impl AppServerDomainHandler for DesktopAppDomainHandler {
                 AppServerDomainRequest::Review(request) => self
                     .dispatch_review(context, request)
                     .await
+                    .map(Box::new)
                     .map(AppServerDomainResponse::Review),
                 AppServerDomainRequest::Fs(request) => self
                     .dispatch_fs(request)
@@ -1378,6 +1477,30 @@ impl AppServerDomainHandler for DesktopAppDomainHandler {
                     .dispatch_process(context, request)
                     .await
                     .map(AppServerDomainResponse::Process),
+                AppServerDomainRequest::Browser(request) => self
+                    .dispatch_browser(context, request)
+                    .await
+                    .map(AppServerDomainResponse::Browser),
+                AppServerDomainRequest::Computer(request) => self
+                    .dispatch_computer(context, request)
+                    .await
+                    .map(AppServerDomainResponse::Computer),
+                AppServerDomainRequest::Plugin(request) => self
+                    .dispatch_plugin(request)
+                    .await
+                    .map(AppServerDomainResponse::Plugin),
+                AppServerDomainRequest::Connector(request) => self
+                    .dispatch_connector(request)
+                    .await
+                    .map(AppServerDomainResponse::Connector),
+                AppServerDomainRequest::Channel(request) => self
+                    .dispatch_channel(context, request)
+                    .await
+                    .map(AppServerDomainResponse::Channel),
+                AppServerDomainRequest::Gateway(request) => self
+                    .dispatch_gateway(request)
+                    .await
+                    .map(AppServerDomainResponse::Gateway),
             }
         })
     }
@@ -1387,6 +1510,18 @@ fn domain_error<E: std::fmt::Display>(
     code: &'static str,
 ) -> impl FnOnce(E) -> AppServerDomainError {
     move |error| AppServerDomainError::new(code, error.to_string())
+}
+
+fn schedule_event_domain_error(error: hachimi_scheduler::SchedulerError) -> AppServerDomainError {
+    let code = if matches!(
+        error,
+        hachimi_scheduler::SchedulerError::Store(AgentStoreError::ScheduleEventConflict)
+    ) {
+        "schedule_event_conflict"
+    } else {
+        "scheduler_failed"
+    };
+    AppServerDomainError::new(code, error.to_string())
 }
 
 fn workspace_domain_error(error: hachimi_workspace::WorkspaceError) -> AppServerDomainError {
@@ -1413,49 +1548,6 @@ fn mutation_fingerprint<T: Serialize>(
         .map(|byte| format!("{byte:02x}"))
         .collect::<String>();
     Ok(format!("{resource_id}:{hash}"))
-}
-
-fn base_schedule_scope(schedule: &ScheduleDefinition) -> ScheduleAuthorizationScope {
-    ScheduleAuthorizationScope {
-        entry_profile: schedule.entry_profile,
-        workload_override: schedule.workload_override,
-        context_template: schedule.context_template.clone(),
-        tool_allowlist: schedule.tool_allowlist.clone(),
-        skill_allowlist: schedule.skill_allowlist.clone(),
-        skill_revisions: Vec::new(),
-        mcp_tool_allowlist: schedule.mcp_tool_allowlist.clone(),
-        permission_config: schedule.permission_config.clone(),
-    }
-}
-
-fn normalize_scope(scope: &mut ScheduleAuthorizationScope) {
-    scope.tool_allowlist.sort();
-    scope.tool_allowlist.dedup();
-    scope.skill_allowlist.sort();
-    scope.skill_allowlist.dedup();
-    scope
-        .skill_revisions
-        .sort_by(|left, right| left.skill_id.cmp(&right.skill_id));
-    scope
-        .skill_revisions
-        .dedup_by(|left, right| left.skill_id == right.skill_id);
-    scope.mcp_tool_allowlist.sort_by(|left, right| {
-        (
-            &left.server_id,
-            &left.tool_name,
-            &left.schema_hash,
-            &left.host_identity_hash,
-        )
-            .cmp(&(
-                &right.server_id,
-                &right.tool_name,
-                &right.schema_hash,
-                &right.host_identity_hash,
-            ))
-    });
-    scope.mcp_tool_allowlist.dedup();
-    scope.permission_config.external_targets.sort();
-    scope.permission_config.external_targets.dedup();
 }
 
 fn mcp_dependency_available(
@@ -1487,6 +1579,31 @@ fn schema_hash(value: &serde_json::Value) -> String {
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect()
+}
+
+pub(super) fn plugin_skill_namespace(plugin_id: &str) -> String {
+    let slug = plugin_id
+        .bytes()
+        .map(|byte| {
+            if byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-' {
+                char::from(byte)
+            } else {
+                '-'
+            }
+        })
+        .take(40)
+        .collect::<String>()
+        .trim_matches('-')
+        .to_owned();
+    let hash = Sha256::digest(plugin_id.as_bytes());
+    let suffix = hash[..6]
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    format!(
+        "plugin-{}-{suffix}",
+        if slug.is_empty() { "local" } else { &slug }
+    )
 }
 
 fn now_ms() -> i64 {

@@ -12,6 +12,7 @@ use std::{
     time::Duration,
 };
 
+use hachimi_process_policy::ProcessPolicy;
 use hachimi_protocol::{
     McpPrompt, McpPromptResult, McpResource, McpResourceContent, McpResourceTemplate,
 };
@@ -782,7 +783,7 @@ impl std::fmt::Debug for McpProcess {
 impl McpProcess {
     fn spawn(config: &McpStdioServerConfig) -> Result<Self, McpClientError> {
         let mut command = Command::new(&config.command);
-        hide_background_window(&mut command);
+        ProcessPolicy::HiddenBackground.apply_tokio(&mut command);
         command
             .args(&config.args)
             .stdin(Stdio::piped())
@@ -963,17 +964,6 @@ impl McpProcess {
         Ok(())
     }
 }
-
-#[cfg(windows)]
-fn hide_background_window(command: &mut Command) {
-    use std::os::windows::process::CommandExt as _;
-
-    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-    command.as_std_mut().creation_flags(CREATE_NO_WINDOW);
-}
-
-#[cfg(not(windows))]
-fn hide_background_window(_command: &mut Command) {}
 
 async fn read_bounded_json_line(
     reader: &mut BufReader<ChildStdout>,

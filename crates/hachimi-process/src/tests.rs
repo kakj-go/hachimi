@@ -160,6 +160,177 @@ async fn pty_supports_stdin_resize_and_idempotent_write() {
 
 #[cfg(windows)]
 #[tokio::test]
+async fn direct_terminal_preserves_cwd_and_ctrl_c_interrupts_foreground_command() {
+    async fn write(
+        registry: &ProcessRegistry,
+        process_id: &ProcessSessionId,
+        write_id: &str,
+        bytes: &[u8],
+    ) -> Result<(), String> {
+        registry
+            .write_base64(
+                &ClientId("workbench".into()),
+                process_id,
+                write_id,
+                Some(&STANDARD.encode(bytes)),
+                false,
+            )
+            .await
+            .map_err(|error| error.to_string())
+    }
+
+    async fn read_until(
+        registry: &ProcessRegistry,
+        process_id: &ProcessSessionId,
+        after: &mut Option<u64>,
+        output: &mut Vec<u8>,
+        needle: &str,
+    ) -> Result<(), String> {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let snapshot = registry
+                    .read(process_id, *after, None, Some(Duration::from_millis(500)))
+                    .await
+                    .map_err(|error| error.to_string())?;
+                for chunk in snapshot.chunks {
+                    output.extend(
+                        STANDARD
+                            .decode(chunk.delta_base64)
+                            .map_err(|error| error.to_string())?,
+                    );
+                }
+                *after = Some(snapshot.next_sequence);
+                if String::from_utf8_lossy(output).contains(needle) {
+                    return Ok(());
+                }
+                if snapshot.closed {
+                    return Err(format!(
+                        "terminal exited before {needle:?}; output: {:?}",
+                        String::from_utf8_lossy(output)
+                    ));
+                }
+            }
+        })
+        .await
+        .map_err(|_| {
+            format!(
+                "timed out waiting for {needle:?}; output: {:?}",
+                String::from_utf8_lossy(output)
+            )
+        })?
+    }
+
+    async fn wait_until_closed(
+        registry: &ProcessRegistry,
+        process_id: &ProcessSessionId,
+        after: &mut Option<u64>,
+        output: &mut Vec<u8>,
+    ) -> Result<(), String> {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let snapshot = registry
+                    .read(process_id, *after, None, Some(Duration::from_millis(500)))
+                    .await
+                    .map_err(|error| error.to_string())?;
+                for chunk in snapshot.chunks {
+                    output.extend(
+                        STANDARD
+                            .decode(chunk.delta_base64)
+                            .map_err(|error| error.to_string())?,
+                    );
+                }
+                *after = Some(snapshot.next_sequence);
+                if snapshot.closed {
+                    return Ok(());
+                }
+            }
+        })
+        .await
+        .map_err(|_| {
+            format!(
+                "timed out waiting for terminal exit; output: {:?}",
+                String::from_utf8_lossy(output)
+            )
+        })?
+    }
+
+    let root = tempfile::tempdir().expect("terminal root");
+    let registry = ProcessRegistry::default();
+    let mut launch = spec(
+        root.path(),
+        vec![
+            "powershell.exe".into(),
+            "-NoLogo".into(),
+            "-NoProfile".into(),
+        ],
+        true,
+        64 * 1024,
+    );
+    launch.environment = std::env::vars().collect();
+    launch.timeout = Some(Duration::from_secs(30));
+    let launched = registry.spawn(launch).await.expect("direct terminal");
+    let process_id = launched.id.clone();
+    let mut after = None;
+    let mut output = Vec::new();
+
+    let result = async {
+        write(
+            &registry,
+            &process_id,
+            "cwd",
+            b"Write-Output ('cwd:' + (Get-Location).Path)\r",
+        )
+        .await?;
+        let expected = root.path().to_string_lossy().to_ascii_lowercase();
+        read_until(
+            &registry,
+            &process_id,
+            &mut after,
+            &mut output,
+            &root.path().to_string_lossy(),
+        )
+        .await?;
+        let actual = String::from_utf8_lossy(&output).to_ascii_lowercase();
+        if !actual.contains(&expected) {
+            return Err(format!(
+                "terminal cwd did not match {expected:?}; output: {actual:?}"
+            ));
+        }
+
+        write(&registry, &process_id, "ping", b"ping.exe -t 127.0.0.1\r").await?;
+        read_until(&registry, &process_id, &mut after, &mut output, "TTL=").await?;
+        write(&registry, &process_id, "interrupt", b"\x03").await?;
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        write(
+            &registry,
+            &process_id,
+            "after-interrupt",
+            b"Write-Output ('interrupt' + '-ok')\r",
+        )
+        .await?;
+        read_until(
+            &registry,
+            &process_id,
+            &mut after,
+            &mut output,
+            "interrupt-ok",
+        )
+        .await?;
+        write(&registry, &process_id, "exit", b"exit\r").await?;
+        wait_until_closed(&registry, &process_id, &mut after, &mut output).await
+    }
+    .await;
+
+    if result.is_err() {
+        let _ = registry
+            .terminate(&ClientId("workbench".into()), &process_id)
+            .await;
+    }
+    assert!(result.is_ok(), "{}", result.unwrap_err());
+}
+
+#[cfg(windows)]
+#[tokio::test]
 async fn duplicate_handle_and_detached_ttl_fail_closed() {
     let root = tempfile::tempdir().unwrap();
     let registry = ProcessRegistry::default();
@@ -185,7 +356,7 @@ async fn duplicate_handle_and_detached_ttl_fail_closed() {
 
 #[cfg(windows)]
 #[tokio::test]
-#[ignore = "requires the elevated Windows sandbox release environment"]
+#[ignore = "requires the standard-user Windows sandbox release environment"]
 async fn terminal_conpty_uses_the_restricted_launcher_and_kills_its_process_tree() {
     let root = tempfile::tempdir().expect("terminal root");
     hachimi_sandbox::grant_restricted_code_access(root.path(), true).expect("terminal root ACL");

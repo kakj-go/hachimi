@@ -11,20 +11,21 @@ use std::{
 use hachimi_agent::{
     AgentExecutionError, AgentInstructionLayer, AgentPreparationFuture, AgentRunPreparer,
     AgentRunRequest, AgentsMdLoader, AuthorizedToolContext, McpToolPolicy, McpToolRuntimeContext,
-    ModelViewLimits, PersistentAuditSink, PreparedAgentRun, StepRuntimeSnapshot, StepRuntimeState,
-    StepWorldState, StepWorldStateRefreshFuture, StepWorldStateRefresher, ToolExecutor,
-    apply_patch_tool, authorized_tool, build_model_view_with_checkpoint,
-    mcp_elicitation_handler_with_store, mcp_resource_tool_executors,
-    mcp_tool_executors_with_gate_and_elicitation, request_user_input_tool, skill_runtime_tools,
-    workspace_tool_executors_with_diff_tracking,
+    ModelViewLimits, MultiAgentCoordinator, PersistentAuditSink, PreparedAgentRun,
+    StepRuntimeSnapshot, StepRuntimeState, StepWorldState, StepWorldStateRefreshFuture,
+    StepWorldStateRefresher, ToolExecutor, UserInputAvailability, apply_patch_tool,
+    authorized_tool, build_model_view_with_checkpoint, mcp_elicitation_handler_with_store,
+    mcp_resource_tool_executors, mcp_tool_executors_with_gate_and_elicitation,
+    request_user_input_tool, skill_runtime_tools, workspace_tool_executors,
+    workspace_tool_executors_with_diff_tracker,
 };
 use hachimi_capabilities::mcp_exposed_tool_name;
 use hachimi_control_plane::McpControlService;
 use hachimi_policy::DefaultPolicy;
 use hachimi_protocol::{
-    ClientContext, ClientId, CompactionCheckpoint, FileSystemAccess, ItemPayload, McpToolSelection,
-    ModelMessage, ModelRole, RunOrigin, RunPurpose, SandboxCapabilityReport, SandboxReadiness,
-    Scope, SessionContextBinding, SkillActivation, SkillActivationId, SkillScope, WorkloadKind,
+    ClientContext, ClientId, CompactionCheckpoint, ItemPayload, McpToolSelection, ModelMessage,
+    ModelRole, PermissionProfile, RunPurpose, SandboxCapabilityReport, SandboxReadiness, Scope,
+    SessionContextBinding, SkillActivation, SkillActivationId, SkillScope, WorkloadKind,
     WorkloadResolution,
 };
 use hachimi_sandbox::{SandboxBackend, SandboxStatus};
@@ -32,11 +33,62 @@ use hachimi_storage::AgentStore;
 use hachimi_user_input::PersistentUserInputBroker;
 use hachimi_workspace::{WorkspaceHostClient, WorkspaceLaunchCheck, WorkspaceLaunchGuard};
 use sha2::{Digest, Sha256};
+use tauri::AppHandle;
 use tokio_util::sync::CancellationToken;
 
 use crate::workbench_commands::{sandbox_sidecar_path, workspace_worker_path};
 
 const RUNTIME_DRIFT_EVENT: &str = "runtime.extension_drift.needs_attention";
+
+fn should_restrict_workspace(
+    status: SandboxStatus,
+    backend: &str,
+    profile: PermissionProfile,
+) -> bool {
+    status == SandboxStatus::Enforced
+        && backend != "desktop-e2e-deterministic"
+        && profile != PermissionProfile::FullAccess
+}
+
+fn is_git_workspace(root: &Path) -> bool {
+    let marker = root.join(".git");
+    std::fs::metadata(marker).is_ok()
+}
+
+fn authorized_workspace_roots(request: &AgentRunRequest, primary_root: &Path) -> Vec<PathBuf> {
+    request
+        .capability_grants
+        .file_system
+        .iter()
+        .flat_map(|grant| grant.roots.iter())
+        .map(PathBuf::from)
+        .filter(|root| root != primary_root && root.is_dir())
+        .collect()
+}
+
+fn prepare_authorized_root_acls(
+    request: &AgentRunRequest,
+    primary_root: &Path,
+    read_only_roots: &mut Vec<PathBuf>,
+) -> Result<(), String> {
+    for grant in &request.capability_grants.file_system {
+        if grant.access == hachimi_protocol::FileSystemAccess::Deny {
+            continue;
+        }
+        for root in &grant.roots {
+            let root = Path::new(root);
+            if root == primary_root || !root.is_dir() {
+                continue;
+            }
+            let writable = grant.access == hachimi_protocol::FileSystemAccess::Write;
+            hachimi_sandbox::grant_restricted_code_access(root, writable)?;
+            if !writable {
+                read_only_roots.push(root.to_path_buf());
+            }
+        }
+    }
+    Ok(())
+}
 
 #[derive(Clone)]
 struct DesktopStepWorldStateRefresher {
@@ -51,7 +103,7 @@ struct DesktopStepWorldStateRefresher {
     initial_mcp_bindings: Arc<[McpToolSelection]>,
     session_id: hachimi_protocol::SessionId,
     run_id: hachimi_protocol::RunId,
-    origin: RunOrigin,
+    unattended: bool,
     drift_reported: Arc<AtomicBool>,
 }
 
@@ -162,7 +214,7 @@ impl DesktopStepWorldStateRefresher {
                 Vec::new()
             }
         };
-        filter_mcp_runtimes(&mut live_mcp, &self.initial_mcp_bindings, false);
+        filter_mcp_runtimes(&mut live_mcp, &self.initial_mcp_bindings, false, false);
         let live_bindings = mcp_runtime_bindings(&live_mcp);
         for binding in self.initial_mcp_bindings.iter() {
             if !live_bindings.iter().any(|live| live == binding) {
@@ -218,7 +270,7 @@ impl DesktopStepWorldStateRefresher {
             &world.sandbox,
         ));
 
-        if matches!(self.origin, RunOrigin::Scheduled { .. }) && !drift_codes.is_empty() {
+        if self.unattended && !drift_codes.is_empty() {
             if !self.drift_reported.swap(true, Ordering::AcqRel) {
                 self.store
                     .append_event(
@@ -244,6 +296,7 @@ impl DesktopStepWorldStateRefresher {
 
 #[derive(Clone)]
 pub(super) struct DesktopAgentRunPreparer {
+    app: AppHandle,
     store: AgentStore,
     workbench: hachimi_workbench::WorkbenchService,
     approvals: hachimi_approvals::PersistentApprovalBroker,
@@ -251,19 +304,41 @@ pub(super) struct DesktopAgentRunPreparer {
     skills: hachimi_skills::SkillHost,
     mcp: McpControlService,
     sandbox_backend: Option<Arc<dyn SandboxBackend>>,
+    browser: Arc<hachimi_browser::BrowserHost>,
+    embedded_browser: Arc<crate::embedded_browser_agent::EmbeddedAgentBrowser>,
+    computer: Arc<hachimi_computer::ComputerHost>,
+    plugins: hachimi_extensions::PluginHost,
+    multi_agent: MultiAgentCoordinator,
+    runtime_features: hachimi_core::RuntimeFeatureSet,
+    browser_control: bool,
+    computer_observe: bool,
+    computer_control: bool,
+}
+
+pub(super) struct DesktopAgentRunDependencies {
+    pub(super) app: AppHandle,
+    pub(super) store: AgentStore,
+    pub(super) workbench: hachimi_workbench::WorkbenchService,
+    pub(super) approvals: hachimi_approvals::PersistentApprovalBroker,
+    pub(super) user_input: PersistentUserInputBroker,
+    pub(super) skills: hachimi_skills::SkillHost,
+    pub(super) mcp: McpControlService,
+    pub(super) sandbox_backend: Option<Arc<dyn SandboxBackend>>,
+    pub(super) browser: Arc<hachimi_browser::BrowserHost>,
+    pub(super) embedded_browser: Arc<crate::embedded_browser_agent::EmbeddedAgentBrowser>,
+    pub(super) computer: Arc<hachimi_computer::ComputerHost>,
+    pub(super) plugins: hachimi_extensions::PluginHost,
+    pub(super) multi_agent: MultiAgentCoordinator,
+    pub(super) runtime_features: hachimi_core::RuntimeFeatureSet,
+    pub(super) browser_control: bool,
+    pub(super) computer_observe: bool,
+    pub(super) computer_control: bool,
 }
 
 impl DesktopAgentRunPreparer {
-    pub(super) fn new(
-        store: AgentStore,
-        workbench: hachimi_workbench::WorkbenchService,
-        approvals: hachimi_approvals::PersistentApprovalBroker,
-        user_input: PersistentUserInputBroker,
-        skills: hachimi_skills::SkillHost,
-        mcp: McpControlService,
-        sandbox_backend: Option<Arc<dyn SandboxBackend>>,
-    ) -> Self {
-        Self {
+    pub(super) fn new(dependencies: DesktopAgentRunDependencies) -> Self {
+        let DesktopAgentRunDependencies {
+            app,
             store,
             workbench,
             approvals,
@@ -271,7 +346,57 @@ impl DesktopAgentRunPreparer {
             skills,
             mcp,
             sandbox_backend,
+            browser,
+            embedded_browser,
+            computer,
+            plugins,
+            multi_agent,
+            runtime_features,
+            browser_control,
+            computer_observe,
+            computer_control,
+        } = dependencies;
+        Self {
+            app,
+            store,
+            workbench,
+            approvals,
+            user_input,
+            skills,
+            mcp,
+            sandbox_backend,
+            browser,
+            embedded_browser,
+            computer,
+            plugins,
+            multi_agent,
+            runtime_features,
+            browser_control,
+            computer_observe,
+            computer_control,
         }
+    }
+
+    fn environment_change_sink(
+        &self,
+        reasons: Vec<hachimi_protocol::WorkbenchEnvironmentChangeReason>,
+    ) -> crate::agent_host_tools::EnvironmentChangeSink {
+        let app = self.app.clone();
+        let workbench = self.workbench.clone();
+        Arc::new(move |session_id| {
+            let app = app.clone();
+            let workbench = workbench.clone();
+            let reasons = reasons.clone();
+            tauri::async_runtime::spawn(async move {
+                if let Ok(environment) = workbench.environment_snapshot(&session_id).await {
+                    crate::environment_commands::emit_workbench_environment(
+                        &app,
+                        &environment,
+                        reasons,
+                    );
+                }
+            });
+        })
     }
 }
 
@@ -344,13 +469,10 @@ impl DesktopAgentRunPreparer {
                 )
                 .await
             }
-            SessionContextBinding::General => {
-                self.prepare_general(request, prompt, model_view, model, cancellation)
+            SessionContextBinding::Workspace { .. } => {
+                self.prepare_workspace(request, prompt, model_view, model, cancellation)
                     .await
             }
-            SessionContextBinding::Avatar { .. } => Err(AgentExecutionError::Preparation(
-                "Avatar execution is disabled".into(),
-            )),
         }
     }
 
@@ -373,17 +495,8 @@ impl DesktopAgentRunPreparer {
         let (enabled_skills, selected_skills) = if is_review {
             (Vec::new(), Vec::new())
         } else {
-            let selection_prompt = if matches!(request.run.origin, RunOrigin::Scheduled { .. }) {
-                ""
-            } else {
-                &prompt
-            };
             self.skills
-                .select_for_run_in_context(
-                    selection_prompt,
-                    &request.skill_allowlist,
-                    &skill_context,
-                )
+                .select_for_run_in_context(&prompt, &request.skill_allowlist, &skill_context)
                 .await
                 .map_err(|error| AgentExecutionError::Preparation(error.to_string()))?
         };
@@ -416,10 +529,24 @@ impl DesktopAgentRunPreparer {
             &mut mcp_runtimes,
             &request.mcp_tool_allowlist,
             allow_unpinned_mcp(&request),
+            request.authority.policy.level == PermissionProfile::FullAccess,
         );
         let mcp_bindings = mcp_runtime_bindings(&mcp_runtimes);
         if !mcp_runtimes.is_empty() {
             client.scopes.insert(Scope::ConnectorsInvoke);
+        }
+        client.scopes.insert(Scope::ConnectorsInvoke);
+        if request.capability_grants.browser.observe {
+            client.scopes.insert(Scope::BrowserObserve);
+        }
+        if browser_control_granted(&request.capability_grants.browser) {
+            client.scopes.insert(Scope::BrowserControl);
+        }
+        if request.capability_grants.computer.observe {
+            client.scopes.insert(Scope::ComputerObserve);
+        }
+        if request.capability_grants.computer.act {
+            client.scopes.insert(Scope::ComputerControl);
         }
         self.store
             .persist_run_security_snapshot(
@@ -435,17 +562,29 @@ impl DesktopAgentRunPreparer {
             &checkout.path,
             checkout.id.as_str(),
             request.run.generation,
+        )
+        .with_external_roots(authorized_workspace_roots(
+            &request,
+            Path::new(&checkout.path),
+        ))
+        .with_full_filesystem(request.authority.policy.level == PermissionProfile::FullAccess)
+        .with_interactive_external_access(
+            request.authority.mode == hachimi_protocol::AuthorityMode::Interactive,
         );
         let sandbox_status = SandboxStatus::from_report(&request.sandbox_snapshot);
-        if sandbox_status == SandboxStatus::Enforced
-            && request.sandbox_snapshot.backend != "desktop-e2e-deterministic"
-        {
-            let read_only_roots = hachimi_sandbox::prepare_workspace_acl(
+        if should_restrict_workspace(
+            sandbox_status,
+            &request.sandbox_snapshot.backend,
+            request.run.configuration.permission_profile,
+        ) {
+            let mut read_only_roots = hachimi_sandbox::prepare_workspace_acl(
                 Path::new(&checkout.path),
                 workspace_host.run_temp_dir(),
                 &worker_program,
             )
             .map_err(|error| AgentExecutionError::Preparation(error.to_string()))?;
+            prepare_authorized_root_acls(&request, Path::new(&checkout.path), &mut read_only_roots)
+                .map_err(AgentExecutionError::Preparation)?;
             hachimi_sandbox::attest_workspace_boundaries(
                 &sandbox_sidecar_path("hachimi-sandbox-launcher"),
                 &sandbox_sidecar_path("hachimi-sandbox-canary"),
@@ -490,7 +629,7 @@ impl DesktopAgentRunPreparer {
             workload.clone(),
         );
         persist_initial_skill_activations(&self.store, &request.run.id, &state).await?;
-        let runtime_skills = runtime_skill_catalog(&request, &enabled_skills);
+        let runtime_skills = runtime_skill_catalog(&enabled_skills);
         let authorization = authorization_context(
             &request,
             client,
@@ -500,17 +639,41 @@ impl DesktopAgentRunPreparer {
             &self.approvals,
         );
         let mut tool_executors = Vec::new();
-        for tool in workspace_tool_executors_with_diff_tracking(
+        let (workspace_tools, diff_tracker) = workspace_tool_executors_with_diff_tracker(
             Arc::clone(&workspace_host),
             self.store.clone(),
             request.session.id.clone(),
             request.run.id.clone(),
             checkout.id.clone(),
-        ) {
+        );
+        for tool in workspace_tools {
             if is_review && tool.descriptor().effect != hachimi_protocol::ToolEffect::ReadOnly {
                 continue;
             }
             tool_executors.push(authorized_tool(tool, authorization.clone()));
+        }
+        if !is_review && is_git_workspace(Path::new(&checkout.path)) {
+            let remote_network_grant = crate::git_forge_host::project_remote_network_grant(
+                &workspace_host,
+                cancellation.child_token(),
+            )
+            .await
+            .unwrap_or_default();
+            let mut remote_authorization = authorization.clone();
+            remote_authorization.capability_host = "git-forge-host".into();
+            remote_authorization.capability_grants.network = remote_network_grant.clone();
+            for tool in crate::agent_git_forge_tools::agent_git_forge_tool_executors(
+                crate::agent_git_forge_tools::AgentGitForgeToolContext {
+                    workspace: Arc::clone(&workspace_host),
+                    store: self.store.clone(),
+                    session_id: request.session.id.clone(),
+                    run_id: request.run.id.clone(),
+                    network_grant: remote_network_grant,
+                    mutations_enabled: self.runtime_features.git_remote_mutations,
+                },
+            ) {
+                tool_executors.push(authorized_tool(tool, remote_authorization.clone()));
+            }
         }
         if !is_review {
             tool_executors.push(authorized_tool(
@@ -543,7 +706,7 @@ impl DesktopAgentRunPreparer {
             mcp_runtimes,
             &authorization,
             &mut tool_executors,
-            !is_review && matches!(request.run.origin, RunOrigin::Interactive),
+            !is_review && request.user_input_availability == UserInputAvailability::Available,
         )
         .await?;
         let attachment_context = self
@@ -564,14 +727,21 @@ impl DesktopAgentRunPreparer {
         messages.extend(model_view.messages);
         append_selected_skill_messages(&mut messages, &selected_skills);
         if let Some(context) = attachment_context {
-            messages.push(ModelMessage::user(context.content));
+            messages.push(ModelMessage::user_with_images(
+                context.content,
+                context.input_images,
+            ));
         }
         messages.push(ModelMessage::user(prompt));
         let workspace_tool_names = tool_executors
             .iter()
             .map(|tool| tool.descriptor().name)
             .filter(|name| {
-                name.starts_with("workspace_") || name == "apply_patch" || name == "review_diff"
+                name.starts_with("workspace_")
+                    || name.starts_with("git.")
+                    || name.starts_with("forge.")
+                    || name == "apply_patch"
+                    || name == "review_diff"
             })
             .collect::<Vec<_>>();
         let world_refresher: Arc<dyn StepWorldStateRefresher> =
@@ -587,7 +757,7 @@ impl DesktopAgentRunPreparer {
                 initial_mcp_bindings: mcp_bindings.into(),
                 session_id: request.session.id.clone(),
                 run_id: request.run.id.clone(),
-                origin: request.run.origin.clone(),
+                unattended: request.authority.mode == hachimi_protocol::AuthorityMode::Unattended,
                 drift_reported: Arc::new(AtomicBool::new(false)),
             });
         Ok(PreparedAgentRun {
@@ -599,34 +769,60 @@ impl DesktopAgentRunPreparer {
             )),
             state,
             world_refresher: Some(world_refresher),
+            diff_tracker: Some(diff_tracker),
         })
     }
 
-    async fn prepare_general(
+    async fn prepare_workspace(
         &self,
-        mut request: AgentRunRequest,
+        request: AgentRunRequest,
         prompt: String,
         model_view: hachimi_agent::ModelView,
         model: Arc<dyn hachimi_agent::ModelRuntime>,
         cancellation: CancellationToken,
     ) -> Result<PreparedAgentRun, AgentExecutionError> {
-        request
-            .capability_grants
-            .file_system
-            .retain(|grant| grant.access == FileSystemAccess::Read);
-        request.capability_grants.process = hachimi_protocol::ProcessGrant::default();
-        let selection_prompt = if matches!(request.run.origin, RunOrigin::Scheduled { .. }) {
-            ""
-        } else {
-            &prompt
+        let (workspace_id, workspace_root) = match &request.session.context {
+            SessionContextBinding::Workspace { workspace_id } => {
+                let workspace = self
+                    .store
+                    .workspace(workspace_id)
+                    .await
+                    .map_err(AgentExecutionError::Store)?
+                    .ok_or_else(|| {
+                        AgentExecutionError::Preparation("Workspace not found".into())
+                    })?;
+                (
+                    workspace_id.as_str().to_owned(),
+                    PathBuf::from(workspace.root_path),
+                )
+            }
+            SessionContextBinding::Project { .. } => {
+                return Err(AgentExecutionError::Preparation(
+                    "non-Project preparer received an incompatible context".into(),
+                ));
+            }
+        };
+        if !workspace_root.is_dir() {
+            return Err(AgentExecutionError::Preparation(format!(
+                "Workspace is unavailable: {}",
+                workspace_root.display()
+            )));
+        }
+        self.store
+            .persist_run_security_snapshot(
+                &request.capability_grants,
+                &request.sandbox_snapshot,
+                now_ms(),
+            )
+            .await
+            .map_err(AgentExecutionError::Store)?;
+        let skill_context = hachimi_skills::SkillCatalogContext {
+            project_root: None,
+            checkout_root: Some(workspace_root.clone()),
         };
         let (enabled_skills, selected_skills) = self
             .skills
-            .select_for_run_in_context(
-                selection_prompt,
-                &request.skill_allowlist,
-                &hachimi_skills::SkillCatalogContext::default(),
-            )
+            .select_for_run_in_context(&prompt, &request.skill_allowlist, &skill_context)
             .await
             .map_err(|error| AgentExecutionError::Preparation(error.to_string()))?;
         let workload = hachimi_agent::resolve_workload(
@@ -635,7 +831,7 @@ impl DesktopAgentRunPreparer {
             &selected_skills,
             model,
             &self.store,
-            cancellation,
+            cancellation.child_token(),
         )
         .await;
         let mut mcp_runtimes = self
@@ -647,36 +843,142 @@ impl DesktopAgentRunPreparer {
             &mut mcp_runtimes,
             &request.mcp_tool_allowlist,
             allow_unpinned_mcp(&request),
+            request.authority.policy.level == PermissionProfile::FullAccess,
         );
         let mcp_bindings = mcp_runtime_bindings(&mcp_runtimes);
+        let worker_program = workspace_worker_path();
+        let mut workspace_host = WorkspaceHostClient::new(
+            &worker_program,
+            &workspace_root,
+            &workspace_id,
+            request.run.generation,
+        )
+        .with_external_roots(authorized_workspace_roots(&request, &workspace_root))
+        .with_full_filesystem(request.authority.policy.level == PermissionProfile::FullAccess)
+        .with_interactive_external_access(
+            request.authority.mode == hachimi_protocol::AuthorityMode::Interactive,
+        );
+        let sandbox_status = SandboxStatus::from_report(&request.sandbox_snapshot);
+        if should_restrict_workspace(
+            sandbox_status,
+            &request.sandbox_snapshot.backend,
+            request.run.configuration.permission_profile,
+        ) {
+            let mut read_only_roots = hachimi_sandbox::prepare_workspace_acl(
+                &workspace_root,
+                workspace_host.run_temp_dir(),
+                &worker_program,
+            )
+            .map_err(|error| AgentExecutionError::Preparation(error.to_string()))?;
+            prepare_authorized_root_acls(&request, &workspace_root, &mut read_only_roots)
+                .map_err(AgentExecutionError::Preparation)?;
+            hachimi_sandbox::attest_workspace_boundaries(
+                &sandbox_sidecar_path("hachimi-sandbox-launcher"),
+                &sandbox_sidecar_path("hachimi-sandbox-canary"),
+                &workspace_root,
+                workspace_host.run_temp_dir(),
+                &worker_program,
+                &read_only_roots,
+            )
+            .map_err(|error| AgentExecutionError::Preparation(error.to_string()))?;
+            let backend = self.sandbox_backend.clone().ok_or_else(|| {
+                AgentExecutionError::Preparation(
+                    "Sandbox is Enforced without a restricted process backend".into(),
+                )
+            })?;
+            workspace_host = workspace_host.with_sandbox(
+                backend,
+                hachimi_workspace::WorkspaceSandboxContext {
+                    session_id: request.session.id.clone(),
+                    run_id: request.run.id.clone(),
+                    grants: request.capability_grants.clone(),
+                },
+                Arc::new(StoreWorkspaceLaunchGuard {
+                    store: self.store.clone(),
+                }),
+            );
+        }
+        let workspace_host = Arc::new(workspace_host);
+        let agents = AgentsMdLoader::new(workspace_host.clone())
+            .load("", cancellation.child_token())
+            .await
+            .map_err(|error| AgentExecutionError::Preparation(error.to_string()))?;
         let state = StepRuntimeState::new(
             world_state(
                 &request.sandbox_snapshot,
                 &selected_skills,
                 &workload,
                 &mcp_bindings,
-                "general",
-                &hash_json(&Vec::<AgentInstructionLayer>::new()),
-                Vec::new(),
+                &workspace_id,
+                &agents.revision,
+                agents.layers.clone(),
             ),
             workload.clone(),
         );
         persist_initial_skill_activations(&self.store, &request.run.id, &state).await?;
-        let runtime_skills = runtime_skill_catalog(&request, &enabled_skills);
+        let runtime_skills = runtime_skill_catalog(&enabled_skills);
         let mut client = service_client(&request.principal);
-        client.scopes.extend([Scope::AgentRun, Scope::SkillsUse]);
+        client
+            .scopes
+            .extend([Scope::AgentRun, Scope::SkillsUse, Scope::WorkspaceRead]);
+        if request.run.configuration.permission_profile
+            != hachimi_protocol::PermissionProfile::ReadOnly
+        {
+            client
+                .scopes
+                .extend([Scope::WorkspaceWrite, Scope::WorkspaceExec]);
+        }
         if !mcp_runtimes.is_empty() {
             client.scopes.insert(Scope::ConnectorsInvoke);
+        }
+        client.scopes.insert(Scope::ConnectorsInvoke);
+        if request.capability_grants.browser.observe {
+            client.scopes.insert(Scope::BrowserObserve);
+        }
+        if browser_control_granted(&request.capability_grants.browser) {
+            client.scopes.insert(Scope::BrowserControl);
+        }
+        if request.capability_grants.computer.observe {
+            client.scopes.insert(Scope::ComputerObserve);
+        }
+        if request.capability_grants.computer.act {
+            client.scopes.insert(Scope::ComputerControl);
         }
         let authorization = authorization_context(
             &request,
             client,
-            "extension-host",
-            SandboxStatus::from_report(&request.sandbox_snapshot),
+            "workspace-worker",
+            sandbox_status,
             &self.store,
             &self.approvals,
         );
-        let mut tool_executors = Vec::new();
+        let mut tool_executors = workspace_tool_executors(Arc::clone(&workspace_host))
+            .into_iter()
+            .map(|tool| authorized_tool(tool, authorization.clone()))
+            .collect::<Vec<_>>();
+        if is_git_workspace(&workspace_root) {
+            let remote_network_grant = crate::git_forge_host::project_remote_network_grant(
+                &workspace_host,
+                cancellation.child_token(),
+            )
+            .await
+            .unwrap_or_default();
+            let mut remote_authorization = authorization.clone();
+            remote_authorization.capability_host = "git-forge-host".into();
+            remote_authorization.capability_grants.network = remote_network_grant.clone();
+            for tool in crate::agent_git_forge_tools::agent_git_forge_tool_executors(
+                crate::agent_git_forge_tools::AgentGitForgeToolContext {
+                    workspace: Arc::clone(&workspace_host),
+                    store: self.store.clone(),
+                    session_id: request.session.id.clone(),
+                    run_id: request.run.id.clone(),
+                    network_grant: remote_network_grant,
+                    mutations_enabled: self.runtime_features.git_remote_mutations,
+                },
+            ) {
+                tool_executors.push(authorized_tool(tool, remote_authorization.clone()));
+            }
+        }
         self.register_shared_tools(
             &request,
             runtime_skills,
@@ -684,11 +986,12 @@ impl DesktopAgentRunPreparer {
             mcp_runtimes,
             &authorization,
             &mut tool_executors,
-            matches!(request.run.origin, RunOrigin::Interactive),
+            request.user_input_availability == UserInputAvailability::Available,
         )
         .await?;
         let mut messages = vec![system_message(format!(
-            "This General Run has no implicit Workspace. Profile, workload and Host/Sandbox readiness are injected authoritatively for every Step. Enabled Skill metadata:\n{}",
+            "This Run uses the persistent non-Project Workspace at {}. The same Agent, ToolPlan and policy chain are used for every source. Enabled Skill metadata:\n{}",
+            workspace_root.display(),
             skill_catalog_text(&enabled_skills),
         ))];
         messages.extend(model_view.messages);
@@ -698,24 +1001,34 @@ impl DesktopAgentRunPreparer {
             Arc::new(DesktopStepWorldStateRefresher {
                 store: self.store.clone(),
                 skills: self.skills.clone(),
-                skill_context: hachimi_skills::SkillCatalogContext::default(),
+                skill_context,
                 mcp: self.mcp.clone(),
-                workspace_host: None,
-                workspace_tool_names: Arc::from([]),
+                workspace_host: Some(workspace_host),
+                workspace_tool_names: Arc::from([
+                    "workspace_read_file".into(),
+                    "workspace_list_directory".into(),
+                    "workspace_search_text".into(),
+                    "workspace_write_file".into(),
+                    "workspace_replace_text".into(),
+                    "workspace_git_status".into(),
+                    "workspace_git_diff".into(),
+                    "workspace_exec".into(),
+                ]),
                 sandbox_backend: self.sandbox_backend.clone(),
                 initial_sandbox: request.sandbox_snapshot.clone(),
                 initial_mcp_bindings: mcp_bindings.into(),
                 session_id: request.session.id.clone(),
                 run_id: request.run.id.clone(),
-                origin: request.run.origin.clone(),
+                unattended: request.authority.mode == hachimi_protocol::AuthorityMode::Unattended,
                 drift_reported: Arc::new(AtomicBool::new(false)),
             });
         Ok(PreparedAgentRun {
             initial_messages: messages,
             tool_executors,
-            host_context: Some("context=general".into()),
+            host_context: Some(format!("context=workspace;workspace_id={workspace_id}")),
             state,
             world_refresher: Some(world_refresher),
+            diff_tracker: None,
         })
     }
 
@@ -730,11 +1043,28 @@ impl DesktopAgentRunPreparer {
         tool_executors: &mut Vec<Arc<dyn ToolExecutor>>,
         allow_user_input: bool,
     ) -> Result<(), AgentExecutionError> {
+        if self.runtime_features.multi_agent {
+            tool_executors.extend(self.multi_agent.tools_for_parent(request.clone()));
+        }
         if allow_user_input {
             tool_executors.push(request_user_input_tool(
                 Arc::new(self.user_input.clone()),
                 request.session.id.clone(),
                 request.run.id.clone(),
+            ));
+        }
+        if let Some(plan_id) = request.run.configuration.accepted_plan_id.clone() {
+            let session_id = request.session.id.clone();
+            let environment_change_sink = self.environment_change_sink(vec![
+                hachimi_protocol::WorkbenchEnvironmentChangeReason::Plan,
+            ]);
+            tool_executors.push(hachimi_agent::update_plan_tool(
+                self.store.clone(),
+                plan_id,
+                request.run.id.clone(),
+                Some(Arc::new(move || {
+                    environment_change_sink(session_id.clone());
+                })),
             ));
         }
         if !runtime_skills.is_empty() {
@@ -781,6 +1111,9 @@ impl DesktopAgentRunPreparer {
                     session_id: request.session.id.clone(),
                     run_id: request.run.id.clone(),
                     request_handler: Arc::clone(&elicitation),
+                    environment_change_sink: Some(self.environment_change_sink(vec![
+                        hachimi_protocol::WorkbenchEnvironmentChangeReason::Sources,
+                    ])),
                 },
             ) {
                 tool_executors.push(authorized_tool(tool, mcp_authorization.clone()));
@@ -792,6 +1125,36 @@ impl DesktopAgentRunPreparer {
             for tool in mcp_resource_tool_executors(resource_runtimes) {
                 tool_executors.push(authorized_tool(tool, resource_authorization.clone()));
             }
+        }
+        let mut local_host_authorization = authorization.clone();
+        local_host_authorization.capability_host = "local-host-broker".into();
+        for tool in crate::agent_host_tools::local_host_tool_executors(
+            crate::agent_host_tools::LocalHostToolContext {
+                browser: Arc::clone(&self.browser),
+                embedded_browser: Arc::clone(&self.embedded_browser),
+                computer: Arc::clone(&self.computer),
+                plugins: self.plugins.clone(),
+                store: self.store.clone(),
+                session_id: request.session.id.clone(),
+                run_id: request.run.id.clone(),
+                grants: request.capability_grants.clone(),
+                authority_mode: request.authority.mode,
+                sandbox: request.sandbox_snapshot.clone(),
+                host_revision_snapshot: request.host_revision_snapshot.clone(),
+                browser_enabled: self.browser_control,
+                computer_observe_enabled: self.computer_observe,
+                computer_control_enabled: self.computer_control,
+                enterprise_integrations_enabled: self.runtime_features.enterprise_integrations,
+                browser_environment_change_sink: self.environment_change_sink(vec![
+                    hachimi_protocol::WorkbenchEnvironmentChangeReason::Browser,
+                    hachimi_protocol::WorkbenchEnvironmentChangeReason::Sources,
+                ]),
+                source_environment_change_sink: self.environment_change_sink(vec![
+                    hachimi_protocol::WorkbenchEnvironmentChangeReason::Sources,
+                ]),
+            },
+        ) {
+            tool_executors.push(authorized_tool(tool, local_host_authorization.clone()));
         }
         Ok(())
     }
@@ -805,23 +1168,18 @@ fn authorization_context(
     store: &AgentStore,
     approvals: &hachimi_approvals::PersistentApprovalBroker,
 ) -> AuthorizedToolContext {
-    let schedule_grant_hash = request
-        .capability_grants
-        .source
-        .strip_prefix("schedule_grant:")
-        .map(str::to_owned);
     AuthorizedToolContext {
         client,
         principal: request.principal.clone(),
         session_id: request.session.id.clone(),
         run_id: request.run.id.clone(),
         run_generation: request.run.generation,
+        authority: request.authority.clone(),
         approval_policy: request.run.configuration.approval_policy,
         permission_profile: request.run.configuration.permission_profile,
         capability_grants: request.capability_grants.clone(),
         capability_host: capability_host.into(),
         run_tool_allowlist: request.run_tool_allowlist.clone(),
-        schedule_grant_hash,
         sandbox_status,
         run_store: Some(store.clone()),
         policy: Arc::new(DefaultPolicy),
@@ -837,20 +1195,9 @@ fn authorization_context(
 }
 
 fn runtime_skill_catalog(
-    request: &AgentRunRequest,
     enabled: &[hachimi_protocol::SkillRecord],
 ) -> Vec<hachimi_protocol::SkillRecord> {
-    enabled
-        .iter()
-        .filter(|record| {
-            !matches!(request.run.origin, RunOrigin::Scheduled { .. })
-                || request
-                    .skill_allowlist
-                    .iter()
-                    .any(|skill_id| skill_id == &record.id)
-        })
-        .cloned()
-        .collect()
+    enabled.to_vec()
 }
 
 async fn persist_initial_skill_activations(
@@ -927,12 +1274,15 @@ fn filter_mcp_runtimes(
     runtimes: &mut Vec<hachimi_control_plane::McpReadyRuntime>,
     allowlist: &[McpToolSelection],
     allow_unpinned: bool,
+    unrestricted: bool,
 ) {
-    if allowlist.is_empty() {
-        if !allow_unpinned {
+    match mcp_runtime_filter_mode(allowlist.is_empty(), allow_unpinned, unrestricted) {
+        McpRuntimeFilterMode::Unrestricted => return,
+        McpRuntimeFilterMode::Disabled => {
             runtimes.clear();
+            return;
         }
-        return;
+        McpRuntimeFilterMode::Pinned => {}
     }
     runtimes.retain_mut(|runtime| {
         let host_identity_hash =
@@ -949,9 +1299,31 @@ fn filter_mcp_runtimes(
     });
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum McpRuntimeFilterMode {
+    Unrestricted,
+    Disabled,
+    Pinned,
+}
+
+const fn mcp_runtime_filter_mode(
+    allowlist_empty: bool,
+    allow_unpinned: bool,
+    unrestricted: bool,
+) -> McpRuntimeFilterMode {
+    if unrestricted || (allowlist_empty && allow_unpinned) {
+        McpRuntimeFilterMode::Unrestricted
+    } else if allowlist_empty {
+        McpRuntimeFilterMode::Disabled
+    } else {
+        McpRuntimeFilterMode::Pinned
+    }
+}
+
 fn allow_unpinned_mcp(request: &AgentRunRequest) -> bool {
-    request.priority == hachimi_agent::AgentRunPriority::Interactive
-        && request.run.purpose != RunPurpose::Review
+    request.run.configuration.permission_profile == hachimi_protocol::PermissionProfile::FullAccess
+        || (request.authority.mode == hachimi_protocol::AuthorityMode::Interactive
+            && request.run.purpose != RunPurpose::Review)
 }
 
 fn mcp_runtime_bindings(
@@ -1015,6 +1387,10 @@ fn service_client(principal: &str) -> ClientContext {
     }
 }
 
+fn browser_control_granted(grant: &hachimi_protocol::BrowserGrant) -> bool {
+    grant.act || grant.upload || grant.download || grant.cookie_storage || grant.cdp
+}
+
 fn system_message(content: String) -> ModelMessage {
     ModelMessage {
         role: ModelRole::System,
@@ -1022,6 +1398,7 @@ fn system_message(content: String) -> ModelMessage {
         name: None,
         tool_call_id: None,
         tool_calls: Vec::new(),
+        input_images: Vec::new(),
     }
 }
 
@@ -1171,7 +1548,7 @@ impl WorkspaceLaunchGuard for StoreWorkspaceLaunchGuard {
                     "workspace launch no longer belongs to the active Run",
                 ));
             }
-            let session = store
+            let _session = store
                 .get_session(&check.session_id)
                 .await
                 .map_err(|error| {
@@ -1186,15 +1563,84 @@ impl WorkspaceLaunchGuard for StoreWorkspaceLaunchGuard {
                         "Session no longer exists",
                     )
                 })?;
-            if session.context.checkout_id() != Some(&check.checkout_id)
-                || check.effect == hachimi_protocol::ToolEffect::ReadOnly
+            let authority = store
+                .authority_snapshot(&check.run_id)
+                .await
+                .map_err(|error| {
+                    hachimi_workspace::WorkspaceError::new(
+                        hachimi_workspace::WorkspaceErrorCode::Unauthorized,
+                        error.to_string(),
+                    )
+                })?
+                .ok_or_else(|| {
+                    hachimi_workspace::WorkspaceError::new(
+                        hachimi_workspace::WorkspaceErrorCode::Unauthorized,
+                        "Run authority snapshot is missing",
+                    )
+                })?;
+            let grants = hachimi_policy::expand_permission_policy(
+                &authority.policy,
+                authority.mode,
+                run.configuration.behavior_mode,
+                check.session_id.clone(),
+                check.run_id.clone(),
+                authority.workspace_root,
+            );
+            let required_access = match check.effect {
+                hachimi_protocol::ToolEffect::WorkspaceWrite
+                | hachimi_protocol::ToolEffect::Process => {
+                    hachimi_protocol::FileSystemAccess::Write
+                }
+                _ => hachimi_protocol::FileSystemAccess::Read,
+            };
+            if !hachimi_policy::file_system_grants_allow(
+                &grants.file_system,
+                required_access,
+                &check.workspace_root,
+            ) && !(check.interactive_extension
+                && authority.mode == hachimi_protocol::AuthorityMode::Interactive)
             {
                 return Err(hachimi_workspace::WorkspaceError::new(
                     hachimi_workspace::WorkspaceErrorCode::Unauthorized,
-                    "workspace launch Checkout/effect binding is invalid",
+                    "workspace launch root is outside the immutable Run authority",
                 ));
             }
             Ok(())
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn full_access_never_uses_the_restricted_workspace_backend() {
+        assert!(!should_restrict_workspace(
+            SandboxStatus::Enforced,
+            "windows-appcontainer",
+            PermissionProfile::FullAccess,
+        ));
+        assert!(should_restrict_workspace(
+            SandboxStatus::Enforced,
+            "windows-appcontainer",
+            PermissionProfile::Writable,
+        ));
+    }
+
+    #[test]
+    fn full_access_ignores_non_empty_mcp_allowlists() {
+        assert_eq!(
+            mcp_runtime_filter_mode(false, false, true),
+            McpRuntimeFilterMode::Unrestricted
+        );
+        assert_eq!(
+            mcp_runtime_filter_mode(false, true, false),
+            McpRuntimeFilterMode::Pinned
+        );
+        assert_eq!(
+            mcp_runtime_filter_mode(true, false, false),
+            McpRuntimeFilterMode::Disabled
+        );
     }
 }

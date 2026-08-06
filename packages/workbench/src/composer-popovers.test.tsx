@@ -7,11 +7,13 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   ComposerContextControls,
   ComposerOptionsPopover,
+  PermissionProfilePopover,
+  PlanModeChip,
   SkillReferenceList,
 } from "./composer-popovers";
 
 vi.mock("@hachimi/ui", () => {
-  const Icon = () => <span aria-hidden="true" />;
+  const Icon = (props: { class?: string }) => <span class={props.class} aria-hidden="true" />;
   const Button = (props: JSX.ButtonHTMLAttributes<HTMLButtonElement>) => (
     <button {...props}>{props.children}</button>
   );
@@ -20,13 +22,17 @@ vi.mock("@hachimi/ui", () => {
     trigger: JSX.Element;
     children: JSX.Element;
     triggerTestId?: string;
+    triggerClass?: string;
   }) => (
     <div>
-      <button type="button" data-testid={props.triggerTestId}>
+      <button type="button" class={props.triggerClass} data-testid={props.triggerTestId}>
         {props.trigger}
       </button>
       <Show when={props.open}>{props.children}</Show>
     </div>
+  );
+  const Tooltip = (props: { label: string; children: JSX.Element }) => (
+    <span data-tooltip-label={props.label}>{props.children}</span>
   );
   return {
     AlertTriangle: Icon,
@@ -42,13 +48,109 @@ vi.mock("@hachimi/ui", () => {
     Laptop: Icon,
     Lightbulb: Icon,
     Paperclip: Icon,
+    Pencil: Icon,
     Plus: Icon,
     RefreshCw: Icon,
     ShieldAlert: Icon,
     ShieldCheck: Icon,
     ShieldOff: Icon,
     Sparkles: Icon,
+    Trash2: Icon,
+    Tooltip,
+    X: Icon,
   };
+});
+
+describe("composer plan mode chip", () => {
+  it("exposes a stable icon slot and disables plan mode from the whole chip", async () => {
+    const host = document.createElement("div");
+    document.body.append(host);
+    const disable = vi.fn();
+    const dispose = render(
+      () => (
+        <I18nProvider initialLocale="zh-CN">
+          <PlanModeChip onDisable={disable} />
+        </I18nProvider>
+      ),
+      host,
+    );
+    await Promise.resolve();
+
+    const chip = host.querySelector<HTMLButtonElement>('[data-testid="workbench-plan-mode-chip"]')!;
+    expect(chip.textContent).toContain("计划");
+    expect(chip.getAttribute("aria-label")).toBe("关闭计划模式");
+    expect(chip.querySelector(".composer-plan-mode-default-icon")).not.toBeNull();
+    expect(chip.querySelector(".composer-plan-mode-remove-icon")).not.toBeNull();
+    expect(host.querySelector("[data-tooltip-label='关闭计划模式']")).not.toBeNull();
+
+    chip.click();
+    expect(disable).toHaveBeenCalledOnce();
+    dispose();
+  });
+});
+
+describe("composer permission profiles", () => {
+  it("distinguishes permission risk and updates the trigger treatment", async () => {
+    const host = document.createElement("div");
+    document.body.append(host);
+    const change = vi.fn();
+
+    function Harness() {
+      const [profile, setProfile] = createSignal<"read_only" | "writable" | "full_access">(
+        "writable",
+      );
+      return (
+        <I18nProvider initialLocale="zh-CN">
+          <PermissionProfilePopover
+            activePopover="approval"
+            onOpenChange={() => undefined}
+            value={profile()}
+            onChange={(value) => {
+              change(value);
+              setProfile(value);
+            }}
+          />
+        </I18nProvider>
+      );
+    }
+
+    const dispose = render(() => <Harness />, host);
+    await Promise.resolve();
+
+    const trigger = host.querySelector<HTMLButtonElement>(
+      '[data-testid="workbench-permission-profile"]',
+    )!;
+    const ask = host.querySelector<HTMLButtonElement>(
+      '[data-testid="workbench-permission-read_only"]',
+    )!;
+    const recommended = host.querySelector<HTMLButtonElement>(
+      '[data-testid="workbench-permission-writable"]',
+    )!;
+    const fullAccess = host.querySelector<HTMLButtonElement>(
+      '[data-testid="workbench-permission-full_access"]',
+    )!;
+
+    expect(ask.dataset.tone).toBe("neutral");
+    expect(recommended.dataset.tone).toBe("recommended");
+    expect(recommended.getAttribute("aria-pressed")).toBe("true");
+    expect(fullAccess.dataset.tone).toBe("danger");
+    expect(trigger.classList.contains("policy-recommended")).toBe(true);
+
+    ask.click();
+    await Promise.resolve();
+    expect(change).toHaveBeenLastCalledWith("read_only");
+    expect(ask.getAttribute("aria-pressed")).toBe("true");
+    expect(trigger.classList.contains("policy-neutral")).toBe(true);
+
+    fullAccess.click();
+    await Promise.resolve();
+    expect(change).toHaveBeenLastCalledWith("full_access");
+    expect(fullAccess.getAttribute("aria-pressed")).toBe("true");
+    expect(trigger.classList.contains("policy-danger")).toBe(true);
+    expect(host.textContent).toContain("可访问整机及全部已配置服务");
+
+    dispose();
+  });
 });
 
 const skill: SkillRecord = {
@@ -171,6 +273,54 @@ describe("composer project Git state", () => {
     ).toBe(true);
     host.querySelector<HTMLButtonElement>('[data-testid="project-git-create-initial"]')!.click();
     expect(createInitial).toHaveBeenCalledOnce();
+    dispose();
+  });
+
+  it("shows only the base branch control for a Managed Worktree", async () => {
+    const host = document.createElement("div");
+    document.body.append(host);
+    const refresh = vi.fn();
+    const dispose = render(
+      () => (
+        <I18nProvider initialLocale="zh-CN">
+          <ComposerContextControls
+            activePopover="branch"
+            onOpenChange={() => undefined}
+            projects={[project]}
+            selectedProject={project}
+            executionKind="managed_worktree"
+            gitRefs={[
+              {
+                name: "main",
+                revision: "1234567890abcdef",
+                current: true,
+                remote: false,
+              },
+            ]}
+            baseRevision="main"
+            gitSnapshot={{
+              projectId: project.id,
+              gitRoot: project.rootPath,
+              state: { kind: "ready", branch: "main", head: "1234567890abcdef" },
+              observedAtMs: 1,
+            }}
+            gitLoading={false}
+            onSelectProject={() => undefined}
+            onSelectExecution={() => undefined}
+            onSelectBranch={() => undefined}
+            onRefreshGit={refresh}
+            onCreateInitialCommit={() => undefined}
+          />
+        </I18nProvider>
+      ),
+      host,
+    );
+    await Promise.resolve();
+    expect(host.querySelector('[data-testid="workbench-project-git-state"]')).toBeNull();
+    expect(host.querySelector('[data-testid="workbench-base-branch"]')).not.toBeNull();
+    expect(host.textContent).toContain("刷新分支");
+    host.querySelector<HTMLButtonElement>(".composer-branch-refresh")!.click();
+    expect(refresh).toHaveBeenCalledOnce();
     dispose();
   });
 });

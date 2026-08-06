@@ -10,6 +10,11 @@ export const WORKBENCH_ROUTES: readonly WorkbenchRoute[] = [
   "settings/voice",
   "settings/skills",
   "settings/mcp",
+  "settings/integrations",
+  "settings/browser",
+  "settings/computer-use",
+  "settings/runtime-security",
+  "settings/diagnostics",
   "developer/motion-lab",
 ];
 

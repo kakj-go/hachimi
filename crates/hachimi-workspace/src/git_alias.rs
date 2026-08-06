@@ -120,11 +120,14 @@ impl SubstDrive {
             if Path::new(&format!("{drive}\\")).exists() {
                 continue;
             }
-            let output = std::process::Command::new("subst.exe")
-                .arg(&drive)
-                .arg(target)
-                .output()
-                .map_err(io_error)?;
+            let output = hachimi_process_policy::std_command(
+                "subst.exe",
+                hachimi_process_policy::ProcessPolicy::HiddenCaptured,
+            )
+            .arg(&drive)
+            .arg(target)
+            .output()
+            .map_err(io_error)?;
             if output.status.success() {
                 return Ok(Self { drive });
             }
@@ -152,26 +155,32 @@ impl Drop for SubstDrive {
     fn drop(&mut self) {
         #[cfg(windows)]
         {
-            let _ = std::process::Command::new("subst.exe")
-                .args([self.drive.as_str(), "/D"])
-                .stdin(std::process::Stdio::null())
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .status();
+            let _ = hachimi_process_policy::std_command(
+                "subst.exe",
+                hachimi_process_policy::ProcessPolicy::HiddenCaptured,
+            )
+            .args([self.drive.as_str(), "/D"])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
         }
     }
 }
 
 #[cfg(windows)]
 fn git_stdout(git: &Path, checkout: &Path, arguments: &[&str]) -> Result<String, WorkspaceError> {
-    let output = std::process::Command::new(git)
-        .arg("-C")
-        .arg(checkout)
-        .args(arguments)
-        .env("GIT_OPTIONAL_LOCKS", "0")
-        .stdin(std::process::Stdio::null())
-        .output()
-        .map_err(io_error)?;
+    let output = hachimi_process_policy::std_command(
+        git,
+        hachimi_process_policy::ProcessPolicy::HiddenCaptured,
+    )
+    .arg("-C")
+    .arg(checkout)
+    .args(arguments)
+    .env("GIT_OPTIONAL_LOCKS", "0")
+    .stdin(std::process::Stdio::null())
+    .output()
+    .map_err(io_error)?;
     if !output.status.success() {
         return Err(WorkspaceError::new(
             WorkspaceErrorCode::ProcessFailed,

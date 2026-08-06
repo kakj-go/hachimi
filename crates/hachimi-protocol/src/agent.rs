@@ -4,25 +4,51 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use specta::Type;
 
-use crate::{ClientId, LlmSettings, RequestId};
+use crate::{ClientId, LlmSettings, ProviderProtocolKind, RequestId};
 
+mod agent_tasks;
+mod enterprise;
+mod gateway;
+mod git_forge;
+mod hosts;
 mod ids;
+mod lifecycle;
+mod local_hosts;
 mod mcp;
+mod permissions;
+mod plugins;
 mod process;
 mod project_git;
+mod recovery;
 mod review;
+mod runtime;
 mod sandbox_runtime;
 mod schedule;
 mod skills;
+mod workbench;
+mod workspace;
 
+pub use agent_tasks::*;
+pub use enterprise::*;
+pub use gateway::*;
+pub use git_forge::*;
+pub use hosts::*;
 pub use ids::*;
+pub use lifecycle::*;
+pub use local_hosts::*;
 pub use mcp::*;
+pub use permissions::*;
+pub use plugins::*;
 pub use process::*;
 pub use project_git::*;
+pub use recovery::*;
 pub use review::*;
+pub use runtime::*;
 pub use sandbox_runtime::*;
 pub use schedule::*;
 pub use skills::*;
+pub use workbench::*;
+pub use workspace::*;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -68,7 +94,6 @@ pub enum EntryProfile {
     #[default]
     Workbench,
     PetConversation,
-    DesktopControl,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type, Default)]
@@ -122,8 +147,42 @@ pub enum ApprovalPolicy {
 pub enum PermissionProfile {
     ReadOnly,
     #[default]
-    WorkspaceWrite,
-    ExternalSandbox,
+    Writable,
+    FullAccess,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionPermissionConfig {
+    pub policy: AgentPermissionPolicy,
+    #[serde(default)]
+    pub extra_authorizations: Vec<SessionExtraAuthorizationSummary>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionExtraAuthorizationSummary {
+    pub id: ApprovalId,
+    pub action: String,
+    pub resource: String,
+    pub target_host: String,
+    #[specta(type = specta_typescript::Number)]
+    pub granted_at_ms: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionPermissionConfigRequest {
+    pub session_id: Option<SessionId>,
+    pub entry_profile: EntryProfile,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionPermissionConfigUpdate {
+    pub session_id: Option<SessionId>,
+    pub entry_profile: EntryProfile,
+    pub config: SessionPermissionConfig,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
@@ -195,6 +254,8 @@ pub enum RunStatus {
     Running,
     WaitingApproval,
     WaitingUserInput,
+    Recovering,
+    WaitingRecoveryDecision,
     Cancelling,
     Succeeded,
     Failed,
@@ -221,8 +282,9 @@ impl RunStatus {
     #[must_use]
     pub const fn can_transition_to(self, next: Self) -> bool {
         use RunStatus::{
-            Cancelled, Cancelling, Failed, Interrupted, Lost, Preparing, Queued, Running,
-            Succeeded, TimedOut, WaitingApproval, WaitingUserInput,
+            Cancelled, Cancelling, Failed, Interrupted, Lost, Preparing, Queued, Recovering,
+            Running, Succeeded, TimedOut, WaitingApproval, WaitingRecoveryDecision,
+            WaitingUserInput,
         };
         matches!(
             (self, next),
@@ -247,6 +309,24 @@ impl RunStatus {
                     WaitingUserInput,
                     Running | Cancelling | Failed | Interrupted | Lost
                 )
+                | (
+                    Interrupted | Lost,
+                    Recovering | WaitingRecoveryDecision | Cancelled
+                )
+                | (
+                    Recovering,
+                    Queued
+                        | Preparing
+                        | Running
+                        | WaitingRecoveryDecision
+                        | Failed
+                        | Cancelled
+                        | Lost
+                )
+                | (
+                    WaitingRecoveryDecision,
+                    Queued | Recovering | Preparing | Running | Failed | Cancelled | Lost
+                )
                 | (Cancelling, Cancelled | Failed | Interrupted | Lost)
         )
     }
@@ -259,6 +339,8 @@ impl RunStatus {
             Self::Running => "running",
             Self::WaitingApproval => "waiting_approval",
             Self::WaitingUserInput => "waiting_user_input",
+            Self::Recovering => "recovering",
+            Self::WaitingRecoveryDecision => "waiting_recovery_decision",
             Self::Cancelling => "cancelling",
             Self::Succeeded => "succeeded",
             Self::Failed => "failed",
@@ -277,6 +359,8 @@ impl RunStatus {
             "running" => Self::Running,
             "waiting_approval" => Self::WaitingApproval,
             "waiting_user_input" => Self::WaitingUserInput,
+            "recovering" => Self::Recovering,
+            "waiting_recovery_decision" => Self::WaitingRecoveryDecision,
             "cancelling" => Self::Cancelling,
             "succeeded" => Self::Succeeded,
             "failed" => Self::Failed,
@@ -355,6 +439,14 @@ pub struct UserInputAnswer {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
+pub struct UserInputDisplayAnswer {
+    pub question_id: String,
+    pub value: Option<String>,
+    pub secret_provided: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
 pub struct UserInputRequestRecord {
     pub id: UserInputRequestId,
     pub session_id: SessionId,
@@ -363,6 +455,8 @@ pub struct UserInputRequestRecord {
     pub run_generation: u64,
     pub item_id: ItemId,
     pub questions: Vec<UserInputQuestion>,
+    #[serde(default)]
+    pub display_answers: Vec<UserInputDisplayAnswer>,
     pub status: UserInputStatus,
     #[specta(type = Option<specta_typescript::Number>)]
     pub expires_at_ms: Option<i64>,
@@ -454,6 +548,7 @@ pub struct PlanStep {
 #[serde(default, rename_all = "camelCase")]
 pub struct ItemRelations {
     pub tool_call_id: Option<ToolCallId>,
+    pub agent_task_id: Option<AgentTaskId>,
     pub approval_id: Option<ApprovalId>,
     pub user_input_request_id: Option<UserInputRequestId>,
     pub process_session_id: Option<ProcessSessionId>,
@@ -475,9 +570,19 @@ pub enum TranscriptItemKind {
     FileChange,
     McpCall,
     DynamicToolCall,
+    CollabToolCall,
     ContextCompaction,
     Review,
     SystemContext,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentMessagePhase {
+    Commentary,
+    FinalAnswer,
+    #[default]
+    Unknown,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Type)]
@@ -489,9 +594,16 @@ pub enum ItemPayload {
     },
     Assistant {
         text: String,
+        #[serde(default)]
+        phase: AgentMessagePhase,
     },
     Reasoning {
         summary: String,
+        source: ReasoningSummarySource,
+        provider_endpoint_id: Option<ProviderEndpointId>,
+        provider_account_id: Option<ProviderAccountId>,
+        protocol: ProviderProtocolKind,
+        capability_revision: String,
     },
     Plan {
         plan_id: PlanId,
@@ -518,11 +630,20 @@ pub enum ItemPayload {
     UserInputRequest {
         request_id: UserInputRequestId,
         questions: Vec<UserInputQuestion>,
+        #[serde(default)]
+        display_answers: Vec<UserInputDisplayAnswer>,
     },
     CommandExecution {
         process_session_id: ProcessSessionId,
         command_summary: String,
+        command: String,
+        cwd: Option<String>,
         status: String,
+        aggregated_output: String,
+        exit_code: Option<i32>,
+        #[specta(type = Option<specta_typescript::Number>)]
+        duration_ms: Option<u64>,
+        output_artifact_id: Option<ArtifactId>,
     },
     FileChange {
         path: String,
@@ -533,11 +654,31 @@ pub enum ItemPayload {
         server_id: McpServerId,
         tool_name: String,
         status: String,
+        #[specta(type = specta_typescript::Unknown)]
+        arguments: Value,
+        #[specta(type = Option<specta_typescript::Unknown>)]
+        result: Option<Value>,
+        error: Option<String>,
     },
     DynamicToolCall {
         namespace: String,
         name: String,
         status: String,
+        #[specta(type = specta_typescript::Unknown)]
+        arguments: Value,
+        #[specta(type = Option<specta_typescript::Unknown>)]
+        result: Option<Value>,
+        error: Option<String>,
+    },
+    CollabToolCall {
+        tool_name: String,
+        agent_task_id: Option<AgentTaskId>,
+        parent_run_id: RunId,
+        child_run_id: Option<RunId>,
+        title: String,
+        status: String,
+        summary: Option<String>,
+        usage: TokenUsage,
     },
     ContextCompaction {
         checkpoint_id: Option<CompactionCheckpointId>,
@@ -549,6 +690,11 @@ pub enum ItemPayload {
         trimmed_history_groups: u32,
         warnings: Vec<String>,
         error_code: Option<String>,
+        summary_source: CompactionSummarySource,
+        provider_endpoint_id: Option<ProviderEndpointId>,
+        provider_account_id: Option<ProviderAccountId>,
+        capability_revision: Option<String>,
+        fallback_reason: Option<String>,
     },
     Review {
         review_id: ReviewId,
@@ -590,6 +736,13 @@ pub struct TranscriptItem {
     pub created_at_ms: i64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(tag = "type", content = "data", rename_all = "snake_case")]
+pub enum ItemDeltaPayload {
+    Text { text: String },
+    CommandOutput { stream: String, text: String },
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum CompactionReason {
@@ -627,6 +780,22 @@ pub enum CompactionImplementation {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type, Default)]
 #[serde(rename_all = "snake_case")]
+pub enum CompactionSummarySource {
+    #[default]
+    Local,
+    ProviderRemote,
+    LocalFallback,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ReasoningSummarySource {
+    #[default]
+    ProviderPublic,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type, Default)]
+#[serde(rename_all = "snake_case")]
 pub enum TokenCountSource {
     Provider,
     Tokenizer,
@@ -655,6 +824,11 @@ pub struct CompactionLifecycle {
     pub implementation: CompactionImplementation,
     pub token_snapshot: Option<CompactionTokenSnapshot>,
     pub trimmed_history_groups: u32,
+    pub summary_source: CompactionSummarySource,
+    pub provider_endpoint_id: Option<ProviderEndpointId>,
+    pub provider_account_id: Option<ProviderAccountId>,
+    pub capability_revision: Option<String>,
+    pub fallback_reason: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
@@ -751,24 +925,25 @@ pub struct SideEffectExecutionRecord {
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
 pub enum RunEventPayload {
     ItemStarted {
-        item_id: ItemId,
-        kind: TranscriptItemKind,
+        item: Box<TranscriptItem>,
     },
     ItemDelta {
         item_id: ItemId,
-        delta: String,
+        delta: ItemDeltaPayload,
     },
     ItemCompleted {
-        item_id: ItemId,
-        status: ItemStatus,
-        payload: Box<ItemPayload>,
+        item: Box<TranscriptItem>,
     },
     PlanUpdated {
         plan_id: PlanId,
+        explanation: Option<String>,
         steps: Vec<PlanStep>,
     },
     DiffUpdated {
-        artifact_id: ArtifactId,
+        artifact_id: Option<ArtifactId>,
+        changed_files: u32,
+        additions: u32,
+        deletions: u32,
     },
     UserInputRequested {
         request_id: UserInputRequestId,
@@ -1066,6 +1241,9 @@ pub struct McpServerHealthRecord {
     pub tool_count: u32,
     /// Stable, non-sensitive error category. Transport payloads and stderr are never persisted.
     pub error_code: Option<String>,
+    pub failure_count: u32,
+    #[specta(type = Option<specta_typescript::Number>)]
+    pub next_retry_at_ms: Option<i64>,
     #[specta(type = specta_typescript::Number)]
     pub checked_at_ms: i64,
 }
@@ -1124,6 +1302,7 @@ pub struct McpConnectionTestResult {
 pub enum ArtifactKind {
     DiffEvidence,
     CommandEvidence,
+    EnterpriseAttachment,
 }
 
 impl ArtifactKind {
@@ -1132,6 +1311,7 @@ impl ArtifactKind {
         match self {
             Self::DiffEvidence => "diff_evidence",
             Self::CommandEvidence => "command_evidence",
+            Self::EnterpriseAttachment => "enterprise_attachment",
         }
     }
 
@@ -1140,6 +1320,7 @@ impl ArtifactKind {
         Some(match value {
             "diff_evidence" => Self::DiffEvidence,
             "command_evidence" => Self::CommandEvidence,
+            "enterprise_attachment" => Self::EnterpriseAttachment,
             _ => return None,
         })
     }
@@ -1252,6 +1433,8 @@ pub enum ToolEffect {
     WorkspaceWrite,
     Process,
     ExternalSideEffect,
+    BrowserObserve,
+    BrowserAct,
     ComputerObserve,
     ComputerAct,
 }
@@ -1307,6 +1490,14 @@ pub struct ModelToolCall {
     pub arguments: Value,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelInputImage {
+    pub media_type: String,
+    pub data_base64: String,
+    pub source_label: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelMessage {
@@ -1315,6 +1506,8 @@ pub struct ModelMessage {
     pub name: Option<String>,
     pub tool_call_id: Option<ToolCallId>,
     pub tool_calls: Vec<ModelToolCall>,
+    #[serde(default)]
+    pub input_images: Vec<ModelInputImage>,
 }
 
 impl ModelMessage {
@@ -1326,6 +1519,22 @@ impl ModelMessage {
             name: None,
             tool_call_id: None,
             tool_calls: Vec::new(),
+            input_images: Vec::new(),
+        }
+    }
+
+    #[must_use]
+    pub fn user_with_images(
+        content: impl Into<String>,
+        input_images: Vec<ModelInputImage>,
+    ) -> Self {
+        Self {
+            role: ModelRole::User,
+            content: content.into(),
+            name: None,
+            tool_call_id: None,
+            tool_calls: Vec::new(),
+            input_images,
         }
     }
 
@@ -1337,6 +1546,7 @@ impl ModelMessage {
             name: None,
             tool_call_id: None,
             tool_calls,
+            input_images: Vec::new(),
         }
     }
 
@@ -1348,6 +1558,7 @@ impl ModelMessage {
             name: Some(call.name.clone()),
             tool_call_id: Some(call.id.clone()),
             tool_calls: Vec::new(),
+            input_images: Vec::new(),
         }
     }
 }
@@ -1397,6 +1608,20 @@ pub enum ModelFinishReason {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Type)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ModelEvent {
+    AgentMessageStarted {
+        message_id: String,
+        phase: AgentMessagePhase,
+    },
+    AgentMessageDelta {
+        message_id: String,
+        delta: String,
+    },
+    AgentMessageCompleted {
+        message_id: String,
+    },
+    /// Compatibility input for providers and fixtures that do not expose
+    /// message Item boundaries. The Agent runtime normalizes it to one
+    /// request-scoped message with an inferred phase.
     TextDelta {
         delta: String,
     },
@@ -1440,6 +1665,7 @@ pub struct ProviderCapabilities {
     pub http_transport: bool,
     pub websocket_transport: bool,
     pub remote_compaction: bool,
+    pub embeddings: bool,
     #[specta(type = Option<specta_typescript::Number>)]
     pub context_window: Option<u64>,
     #[specta(type = Option<specta_typescript::Number>)]
@@ -1515,8 +1741,20 @@ pub struct ComputerGrant {
     pub max_actions: Option<u32>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type, Default)]
+#[serde(default, rename_all = "camelCase")]
+pub struct BrowserGrant {
+    pub observe: bool,
+    pub act: bool,
+    pub upload: bool,
+    pub download: bool,
+    pub cookie_storage: bool,
+    pub cdp: bool,
+    pub origins: Vec<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
-#[serde(rename_all = "camelCase")]
+#[serde(default, rename_all = "camelCase")]
 pub struct CapabilityGrantSet {
     pub profile: PermissionProfile,
     pub scope: PermissionGrantScope,
@@ -1526,10 +1764,30 @@ pub struct CapabilityGrantSet {
     pub file_system: Vec<FileSystemGrant>,
     pub network: NetworkGrant,
     pub process: ProcessGrant,
+    pub browser: BrowserGrant,
     pub computer: ComputerGrant,
     pub review_each_command: bool,
     #[specta(type = Option<specta_typescript::Number>)]
     pub expires_at_ms: Option<i64>,
+}
+
+impl Default for CapabilityGrantSet {
+    fn default() -> Self {
+        Self {
+            profile: PermissionProfile::ReadOnly,
+            scope: PermissionGrantScope::Run,
+            session_id: SessionId::new("unbound"),
+            run_id: None,
+            source: "default".into(),
+            file_system: Vec::new(),
+            network: NetworkGrant::default(),
+            process: ProcessGrant::default(),
+            browser: BrowserGrant::default(),
+            computer: ComputerGrant::default(),
+            review_each_command: true,
+            expires_at_ms: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type, Default)]
@@ -1676,225 +1934,6 @@ pub struct ReviewFinding {
     pub message: String,
     pub evidence: String,
     pub status: ReviewFindingStatus,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
-#[serde(rename_all = "camelCase")]
-pub struct ControlInitializeRequest {
-    pub client_version: String,
-    pub protocol_version: u32,
-    pub supported_features: Vec<String>,
-    pub experimental_features: Vec<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
-#[serde(rename_all = "camelCase")]
-pub struct ControlInitializeResponse {
-    pub protocol_version: u32,
-    pub enabled_features: Vec<String>,
-    pub experimental_features: Vec<String>,
-    pub warnings: Vec<String>,
-    pub sandbox: SandboxCapabilityReport,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
-#[serde(rename_all = "camelCase")]
-pub struct SessionCursor {
-    #[specta(type = specta_typescript::Number)]
-    pub updated_at_ms: i64,
-    pub id: SessionId,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
-#[serde(rename_all = "camelCase")]
-pub struct SessionSearchRequest {
-    pub project_id: Option<ProjectId>,
-    pub query: Option<String>,
-    pub archived: Option<bool>,
-    pub before: Option<SessionCursor>,
-    pub limit: u32,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
-#[serde(rename_all = "camelCase")]
-pub struct SessionPage {
-    pub items: Vec<SessionRecord>,
-    pub next_cursor: Option<SessionCursor>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type)]
-#[serde(rename_all = "snake_case")]
-pub enum RunSteerStatus {
-    Pending,
-    Consumed,
-    Interrupted,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
-#[serde(rename_all = "camelCase")]
-pub struct RunSteerRecord {
-    pub id: ItemId,
-    pub session_id: SessionId,
-    pub run_id: RunId,
-    #[specta(type = specta_typescript::Number)]
-    pub run_generation: u64,
-    pub input: String,
-    pub status: RunSteerStatus,
-    #[specta(type = specta_typescript::Number)]
-    pub created_at_ms: i64,
-    #[specta(type = Option<specta_typescript::Number>)]
-    pub consumed_at_ms: Option<i64>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
-#[serde(rename_all = "camelCase")]
-pub struct SessionResumeRequest {
-    pub session_id: SessionId,
-    pub metadata_only: bool,
-    #[specta(type = Option<specta_typescript::Number>)]
-    pub transcript_before_sequence: Option<u64>,
-    pub transcript_limit: u32,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Type)]
-#[serde(rename_all = "camelCase")]
-pub struct SessionResumeSnapshot {
-    pub session: SessionRecord,
-    pub active_run: Option<RunRecord>,
-    pub transcript: Vec<TranscriptItem>,
-    pub pending_approvals: Vec<ApprovalRequestRecord>,
-    pub pending_user_inputs: Vec<UserInputRequestRecord>,
-    pub usage_snapshot: Option<RunUsageSnapshot>,
-    /// Process-local, non-authoritative deltas for an active Run. These are
-    /// never persisted and are discarded once the authoritative Item completes.
-    #[serde(default)]
-    pub active_event_replay: Vec<RunEventEnvelope>,
-    #[specta(type = specta_typescript::Number)]
-    pub snapshot_sequence: u64,
-    #[specta(type = Option<specta_typescript::Number>)]
-    pub previous_transcript_cursor: Option<u64>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
-#[serde(rename_all = "camelCase")]
-pub struct EventSubscriptionRequest {
-    pub session_id: SessionId,
-    #[specta(type = specta_typescript::Number)]
-    pub after_sequence: u64,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
-#[serde(rename_all = "camelCase")]
-pub struct EventSubscriptionRecord {
-    pub id: EventSubscriptionId,
-    pub session_id: SessionId,
-    pub client_id: ClientId,
-    #[specta(type = specta_typescript::Number)]
-    pub after_sequence: u64,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Type)]
-#[serde(rename_all = "camelCase")]
-pub struct EventSubscriptionSnapshot {
-    pub subscription: EventSubscriptionRecord,
-    pub catch_up: Vec<RunEventEnvelope>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
-#[serde(rename_all = "camelCase")]
-pub struct SessionForkRequest {
-    pub context: MutationContext,
-    pub source_session_id: SessionId,
-    pub source_run_id: Option<RunId>,
-    pub title: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
-#[serde(rename_all = "camelCase")]
-pub struct SessionMetadataUpdateRequest {
-    pub context: MutationContext,
-    pub session_id: SessionId,
-    pub title: Option<String>,
-    pub archived: Option<bool>,
-    pub pinned: Option<bool>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
-#[serde(rename_all = "camelCase")]
-pub struct RunControlRequest {
-    pub context: MutationContext,
-    pub run_id: RunId,
-    pub input: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
-#[serde(rename_all = "camelCase")]
-pub struct GitRefRecord {
-    pub name: String,
-    pub revision: String,
-    pub remote: bool,
-    pub current: bool,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
-#[serde(rename_all = "camelCase")]
-pub struct WorkbenchTaskStartRequest {
-    pub idempotency_key: String,
-    pub project_id: ProjectId,
-    pub prompt: String,
-    pub execution_target: ExecutionTarget,
-    pub behavior_mode: BehaviorMode,
-    pub approval_policy: ApprovalPolicy,
-    pub attachment_ids: Vec<AttachmentId>,
-    /// Explicit Skill identities selected by the user. This is authoritative
-    /// when names collide; `$name` remains only an unambiguous text shortcut.
-    #[serde(default)]
-    pub skill_ids: Vec<SkillId>,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Type)]
-#[serde(rename_all = "camelCase")]
-pub struct WorkbenchTaskSnapshot {
-    pub project: ProjectRecord,
-    pub checkout: CheckoutRecord,
-    pub session: SessionRecord,
-    pub run: RunRecord,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Type)]
-#[serde(rename_all = "camelCase")]
-pub struct WorkbenchSessionSnapshot {
-    pub session: SessionRecord,
-    pub runs: Vec<RunRecord>,
-    pub events: Vec<RunEventEnvelope>,
-    pub transcript: Vec<TranscriptItem>,
-    pub pending_approvals: Vec<ApprovalRequestRecord>,
-    pub proposed_plans: Vec<ProposedPlan>,
-    pub artifacts: Vec<ArtifactRecord>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
-#[serde(rename_all = "camelCase")]
-pub struct ApprovalDecisionRequest {
-    pub approval_id: ApprovalId,
-    pub decision: ApprovalStatus,
-    pub expected_run_id: RunId,
-    #[specta(type = specta_typescript::Number)]
-    pub expected_generation: u64,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
-#[serde(rename_all = "camelCase")]
-pub struct PlanAcceptanceRequest {
-    pub idempotency_key: String,
-    pub plan_id: PlanId,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Type)]
-#[serde(rename_all = "camelCase")]
-pub struct WorkbenchPlanAcceptanceSnapshot {
-    pub plan: ProposedPlan,
-    pub task: WorkbenchTaskSnapshot,
 }
 
 #[cfg(test)]
