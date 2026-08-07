@@ -213,7 +213,10 @@ pub(super) fn get_runtime_health(
     window: WebviewWindow,
     state: State<'_, DesktopState>,
 ) -> Result<RuntimeHealthSnapshot, CommandError> {
-    state.authorize(&window, ControlMethod::WindowInteract)?;
+    // Runtime health is a Workbench diagnostic surface. WindowInteract is
+    // reserved for the Pet window and would incorrectly produce missing_scope
+    // for every Workbench settings page.
+    state.authorize(&window, ControlMethod::WorkbenchWindow)?;
     require_window(&window, "workbench")?;
     Ok(state.runtime_supervisor.snapshot())
 }
@@ -224,7 +227,7 @@ pub(super) fn retry_runtime_component(
     state: State<'_, DesktopState>,
     component: RuntimeComponentId,
 ) -> Result<RuntimeHealthSnapshot, CommandError> {
-    state.authorize(&window, ControlMethod::WindowInteract)?;
+    state.authorize(&window, ControlMethod::WorkbenchWindow)?;
     require_window(&window, "workbench")?;
     state.runtime_supervisor.request_retry(component)?;
     Ok(state.runtime_supervisor.snapshot())

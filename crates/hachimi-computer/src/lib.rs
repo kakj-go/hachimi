@@ -138,6 +138,14 @@ pub trait ComputerBroker: Send + Sync {
         })
     }
 
+    fn foreground_window<'a>(&'a self) -> ComputerBrokerFuture<'a, ComputerWindowIdentity> {
+        Box::pin(async {
+            Err(ComputerHostError::Broker(
+                "the Computer broker cannot read the foreground window".into(),
+            ))
+        })
+    }
+
     fn capture<'a>(&'a self, window_handle: &'a str) -> ComputerBrokerFuture<'a, CapturedWindow>;
 
     fn app_icon_png<'a>(
@@ -249,6 +257,12 @@ impl ComputerHost {
         Ok(windows)
     }
 
+    pub async fn foreground_window(&self) -> Result<ComputerWindowIdentity, ComputerHostError> {
+        let target = self.broker.foreground_window().await?;
+        validate_target(&target)?;
+        Ok(target)
+    }
+
     pub async fn app_icon_png(
         &self,
         app: &ComputerAppDescriptor,
@@ -288,13 +302,13 @@ impl ComputerHost {
             self.broker.release_frame(&captured.image_token);
             return Err(ComputerHostError::AppNotAllowed);
         };
-        if !grants.computer.target_windows.is_empty()
-            && !grants
+        let target_allowed = grants.computer.unrestricted_targets
+            || grants
                 .computer
-                .target_windows
+                .allowed_applications
                 .iter()
-                .any(|target| target == &captured.target.app_id)
-        {
+                .any(|target| target.eq_ignore_ascii_case(&captured.target.app.identity_hash));
+        if !target_allowed {
             drop(state);
             self.broker.release_frame(&captured.image_token);
             return Err(ComputerHostError::AppNotAllowed);
@@ -395,10 +409,10 @@ impl ComputerHost {
                 .rules
                 .get(&(frame_state.frame.session_id.clone(), app_id.clone()))
                 .is_some_and(|rule| rule.act)
-                && (grants.computer.target_windows.is_empty()
+                && (grants.computer.unrestricted_targets
                     || grants
                         .computer
-                        .target_windows
+                        .allowed_applications
                         .iter()
                         .any(|value| value == app_id));
             if !launch_allowed {
@@ -919,6 +933,7 @@ mod tests {
                 access: FileSystemAccess::Read,
                 roots: vec!["C:\\workspace".into()],
                 globs: Vec::new(),
+                files: Vec::new(),
                 special_roots: Vec::new(),
             }],
             network: NetworkGrant::default(),
@@ -927,7 +942,8 @@ mod tests {
             computer: ComputerGrant {
                 observe: true,
                 act: true,
-                target_windows: vec!["notepad.exe".into()],
+                allowed_applications: vec!["identity:notepad.exe".into()],
+                unrestricted_targets: false,
                 max_actions: Some(2),
             },
             review_each_command: true,

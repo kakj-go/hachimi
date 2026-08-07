@@ -1055,6 +1055,7 @@ impl WorkspaceHostClient {
                 },
                 roots: vec![self.checkout_root.to_string_lossy().into_owned()],
                 globs: Vec::new(),
+                files: Vec::new(),
                 special_roots: Vec::new(),
             });
         }

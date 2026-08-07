@@ -136,7 +136,7 @@ export type BrowserDownloadSnapshot = { id: string, workspaceId: BrowserWorkspac
 
 export type BrowserDownloadStatus = "pending" | "in_progress" | "completed" | "cancelled" | "failed";
 
-export type BrowserGrant = { observe?: boolean, act?: boolean, upload?: boolean, download?: boolean, cookieStorage?: boolean, cdp?: boolean, origins?: string[], };
+export type BrowserGrant = { observe?: boolean, act?: boolean, upload?: boolean, download?: boolean, cookieStorage?: boolean, cdp?: boolean, unrestrictedOrigins?: boolean, origins?: string[], };
 
 export type BrowserHistoryEntry = { url: string, title: string, visitCount: number, lastVisitedAtMs: number, };
 
@@ -336,7 +336,7 @@ export type ComputerActionRequest = { frameId: ComputerFrameId, runGeneration?: 
 
 export type ComputerActionResult = { frameId: ComputerFrameId, accepted: boolean, resultCode: string, nextInputEpoch: number, };
 
-export type ComputerAppCandidate = { app: ComputerAppDescriptor, /** A bounded PNG included only in this response. It must never be persisted. */ iconPngBase64: string | null, };
+export type ComputerAppCandidate = { app: ComputerAppDescriptor, windowCount?: number, /** A bounded PNG included only in this response. It must never be persisted. */ iconPngBase64: string | null, };
 
 export type ComputerAppDescriptor = { appId: string, displayName: string, executableName: string, executablePath: string | null, publisher: string | null, publisherVerified: boolean, packageFamilyName: string | null, appUserModelId: string | null, fileIdentity: string | null, identityHash: string, };
 
@@ -358,7 +358,7 @@ export type ComputerFrameId = string;
 
 export type ComputerFramePreview = { frameId: ComputerFrameId, mediaType: string, dataBase64: string, sha256: string, expiresAtMs: number, };
 
-export type ComputerGrant = { observe: boolean, act: boolean, targetWindows: string[], maxActions: number | null, };
+export type ComputerGrant = { observe: boolean, act: boolean, unrestrictedTargets?: boolean, allowedApplications: string[], maxActions: number | null, };
 
 export type ComputerHostSettings = { automationEnabled: boolean, runtimeHealth: ComputerRuntimeHealth, };
 
@@ -480,7 +480,7 @@ export type FileDiffSummary = { path: string, previousPath: string | null, statu
 
 export type FileSystemAccess = "read" | "write" | "deny";
 
-export type FileSystemGrant = { access: FileSystemAccess, roots: string[], globs: string[], specialRoots: string[], };
+export type FileSystemGrant = { access: FileSystemAccess, roots: string[], globs: string[], /** Exact paths relative to one of the grant roots. */ files?: string[], specialRoots: string[], };
 
 export type ForgeChangeMutation = { kind: "create"; title: string; body: string; source_ref: string; target_ref: string } | { kind: "update"; number: number; title: string; body: string; source_ref: string; target_ref: string } | { kind: "close"; number: number } | { kind: "merge"; number: number; merge_title: string | null; merge_message: string | null };
 
@@ -774,7 +774,9 @@ export type MotionSource = "builtin" | "user";
 
 export type MutationContext = { requestId: RequestId, clientId: ClientId, protocolVersion: number, idempotencyKey: string, expectedRunId: RunId | null, expectedGeneration: number | null, };
 
-export type NetworkGrant = { enabled: boolean, hosts: string[], protocols: string[], };
+export type NetworkGrant = { enabled: boolean, unrestrictedHosts?: boolean, hosts: string[], protocols: string[], };
+
+export type PermissionCommandCandidate = { name: string, executablePath: string, source: string, };
 
 export type PermissionGrantScope = "session" | "run";
 
@@ -848,7 +850,7 @@ export type PluginUiContext = { pluginId: PluginId, contributionId: string, runt
 
 export type ProcessEvent = { kind: "output"; process_session_id: ProcessSessionId; chunk: ProcessOutputChunk } | { kind: "exited"; process_session_id: ProcessSessionId; sequence: number; exit_code: number } | { kind: "closed"; process_session_id: ProcessSessionId; sequence: number };
 
-export type ProcessGrant = { spawn: boolean, interactive: boolean, allowedCommands: string[], };
+export type ProcessGrant = { spawn: boolean, interactive: boolean, unrestrictedCommands?: boolean, allowedCommands: string[], };
 
 export type ProcessListRequest = { sessionId: SessionId | null, runId: RunId | null, includeTerminal: boolean, };
 
@@ -1092,7 +1094,7 @@ export type ScheduleWorkspaceSpec = { kind: "managed" } | { kind: "selected_dire
 
 export type Scope = "pet.interact" | "agent.run" | "settings.read" | "settings.write" | "llm.read" | "llm.write" | "llm.test" | "llm.chat" | "avatar.read" | "avatar.manage" | "avatar.runtime" | "motion.read" | "motion.manage" | "motion.runtime" | "voice.read" | "voice.manage" | "voice.playback" | "voice.capture" | "workbench.open" | "workbench.window" | "workspace.read" | "workspace.write" | "workspace.exec" | "browser.observe" | "browser.control" | "computer.observe" | "computer.control" | "connectors.invoke" | "connectors.manage" | "channels.manage" | "gateway.manage" | "skills.manage" | "skills.use" | "devices.pair" | "admin.policy";
 
-export type ScopedPermissionRules = { fileSystem: FileSystemGrant[], network: NetworkGrant, process: ProcessGrant, browser: BrowserGrant, computer: ComputerGrant, mcp: McpPermissionRule[], connectors: ConnectorPermissionRule[], };
+export type ScopedPermissionRules = { fileSystem: FileSystemGrant[], fileSystemUnrestrictedRead?: boolean, fileSystemUnrestrictedWrite?: boolean, network: NetworkGrant, process: ProcessGrant, browser: BrowserGrant, computer: ComputerGrant, mcp: McpPermissionRule[], connectors: ConnectorPermissionRule[], };
 
 export type SessionContextBinding = { kind: "workspace"; workspace_id: WorkspaceId } | { kind: "project"; project_id: ProjectId; checkout_id: CheckoutId };
 
@@ -1112,7 +1114,7 @@ export type SessionPermissionConfig = { policy: AgentPermissionPolicy, extraAuth
 
 export type SessionPermissionConfigRequest = { sessionId: SessionId | null, entryProfile: EntryProfile, };
 
-export type SessionPermissionConfigUpdate = { sessionId: SessionId | null, entryProfile: EntryProfile, config: SessionPermissionConfig, };
+export type SessionPermissionConfigUpdate = { sessionId: SessionId | null, entryProfile: EntryProfile, expectedRevision: number, config: SessionPermissionConfig, };
 
 export type SessionRecord = { id: SessionId, context: SessionContextBinding, entryProfile: EntryProfile, title: string, archived: boolean, pinned: boolean, parentSessionId: SessionId | null, sourceRunId: RunId | null, createdAtMs: number, updatedAtMs: number, };
 

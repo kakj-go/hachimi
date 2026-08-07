@@ -922,13 +922,17 @@ pub(super) async fn update_session_permission_config(
         .permission_policy(&scope_key)
         .await
         .map_err(|error| CommandError::operation("session_permission_lookup_failed", error))?;
+    let expected_revision = previous.as_ref().map_or(0, |policy| policy.revision);
+    crate::permission_runtime::validate_permission_revision(
+        request.expected_revision,
+        expected_revision,
+    )?;
+    hachimi_policy::normalize_permission_policy(&mut policy)
+        .map_err(|error| CommandError::new(error.code, error.message))?;
     let level_changed = previous
         .as_ref()
         .is_some_and(|previous| previous.level != policy.level);
-    policy.revision = previous.as_ref().map_or_else(
-        || policy.revision.saturating_add(1),
-        |previous| previous.revision.max(policy.revision).saturating_add(1),
-    );
+    policy.revision = expected_revision.saturating_add(1);
     let timestamp_ms = i64::try_from(epoch_millis()).unwrap_or(i64::MAX);
     crate::permission_runtime::persist_policy_and_cancel_revoked(
         &state,

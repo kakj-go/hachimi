@@ -26,6 +26,38 @@ use tokio_util::sync::CancellationToken;
 use super::*;
 use crate::{ToolCall, ToolExecutionError};
 
+#[test]
+fn command_rules_match_resolved_executable_paths() {
+    let executable = std::env::current_exe().expect("current test executable");
+    let executable_text = executable.to_string_lossy().into_owned();
+    assert!(super::command_rule_matches(
+        &executable_text,
+        &executable_text
+    ));
+    assert!(!super::command_rule_matches(
+        "C:\\definitely-not-the-current-test.exe",
+        &executable_text
+    ));
+}
+
+#[test]
+fn same_named_program_at_a_different_path_is_not_authorized() {
+    let sandbox = tempfile::tempdir().expect("temporary commands");
+    let allowed_root = sandbox.path().join("allowed");
+    let replaced_root = sandbox.path().join("replaced");
+    std::fs::create_dir_all(&allowed_root).expect("allowed root");
+    std::fs::create_dir_all(&replaced_root).expect("replacement root");
+    let name = if cfg!(windows) { "tool.exe" } else { "tool" };
+    let allowed = allowed_root.join(name);
+    let replaced = replaced_root.join(name);
+    std::fs::write(&allowed, b"allowed").expect("allowed command");
+    std::fs::write(&replaced, b"replaced").expect("replacement command");
+    assert!(!super::command_rule_matches(
+        &allowed.to_string_lossy(),
+        &replaced.to_string_lossy(),
+    ));
+}
+
 #[derive(Debug, Default)]
 struct RecordingAudit(Mutex<Vec<AuditEvent>>);
 

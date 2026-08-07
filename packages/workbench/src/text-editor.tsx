@@ -16,6 +16,7 @@ export function TextEditor(props: {
   path: string;
   kind: SkillEditorKind;
   value: string;
+  contentAvailable?: boolean;
   dirty: boolean;
   saving: boolean;
   readOnly?: boolean;
@@ -90,7 +91,7 @@ export function TextEditor(props: {
         </div>
       </Show>
       <Show
-        when={props.kind !== "unsupported"}
+        when={props.kind !== "unsupported" || props.contentAvailable !== false}
         fallback={
           <div class="skill-editor-unsupported">
             {copy(

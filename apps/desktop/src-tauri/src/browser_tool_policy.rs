@@ -10,6 +10,9 @@ pub(super) fn unattended_browser_target_access(
     if grants.profile == PermissionProfile::FullAccess {
         return Ok(true);
     }
+    if grants.browser.unrestricted_origins {
+        return Ok(true);
+    }
     grants
         .browser
         .origins
@@ -111,7 +114,8 @@ pub(super) fn embedded_origin_policy<'a>(
     authority_mode: AuthorityMode,
 ) -> crate::embedded_browser_agent::EmbeddedBrowserOriginPolicy<'a> {
     if authority_mode == AuthorityMode::Unattended {
-        let full_access = grants.profile == PermissionProfile::FullAccess;
+        let full_access =
+            grants.profile == PermissionProfile::FullAccess || grants.browser.unrestricted_origins;
         crate::embedded_browser_agent::EmbeddedBrowserOriginPolicy {
             allowed_origins: &grants.browser.origins,
             allow_unlisted_origin: full_access,

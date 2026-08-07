@@ -428,7 +428,7 @@ beforeEach(() => {
             cdp: false,
             origins: [],
           },
-          computer: { observe: false, act: false, targetWindows: [], maxActions: null },
+          computer: { observe: false, act: false, allowedApplications: [], maxActions: null },
           mcp: [],
           connectors: [],
         },

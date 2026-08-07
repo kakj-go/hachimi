@@ -1,5 +1,27 @@
 use super::*;
 
+#[test]
+fn channel_grant_save_normalizes_permission_scopes() {
+    let mut grant = hachimi_protocol::ChannelGrant::default();
+    grant.permission_policy.level = hachimi_protocol::PermissionProfile::Writable;
+    grant.permission_policy.rules.network.hosts = vec!["Example.COM".into(), "example.com".into()];
+    grant.permission_policy.rules.browser.origins = vec!["https://example.com/".into()];
+    grant.permission_policy.rules.computer.allowed_applications =
+        vec!["APP-HASH".into(), "app-hash".into()];
+    grant.skill_ids = vec![" skill-b ".into(), "skill-a".into(), "skill-a".into()];
+    normalize_channel_grant(&mut grant).expect("normalize channel grant");
+    assert_eq!(grant.permission_policy.rules.network.hosts, ["example.com"]);
+    assert_eq!(
+        grant.permission_policy.rules.browser.origins,
+        ["https://example.com"]
+    );
+    assert_eq!(
+        grant.permission_policy.rules.computer.allowed_applications,
+        ["APP-HASH"]
+    );
+    assert_eq!(grant.skill_ids, ["skill-a", "skill-b"]);
+}
+
 fn test_dimension(ok: bool, code: &str) -> IntegrationProbeDimension {
     IntegrationProbeDimension {
         ok,

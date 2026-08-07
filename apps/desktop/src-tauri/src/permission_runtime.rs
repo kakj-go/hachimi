@@ -4,6 +4,21 @@ use hachimi_user_input::UserInputBroker;
 
 use crate::{CommandError, DesktopState};
 
+pub(super) fn validate_permission_revision(
+    expected: u64,
+    current: u64,
+) -> Result<(), CommandError> {
+    if expected == current {
+        return Ok(());
+    }
+    Err(CommandError::new(
+        "permission_revision_conflict",
+        format!(
+            "Permission policy changed; expected revision {expected}, current revision {current}"
+        ),
+    ))
+}
+
 pub(super) async fn persist_policy_and_cancel_revoked(
     state: &DesktopState,
     owner_key: &str,

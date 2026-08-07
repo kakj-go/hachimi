@@ -438,14 +438,37 @@ pub(super) fn install_browser_extension(
         .ok_or_else(|| {
             CommandError::new("system_browser_not_found", "未检测到受支持的系统浏览器。")
         })?;
-    let url = installation.extension_store_url.ok_or_else(|| {
-        CommandError::new(
-            "browser_extension_store_unavailable",
-            "当前构建未配置正式扩展商店地址。",
-        )
-    })?;
-    open_store_url(&url)
-        .map_err(|error| CommandError::operation("browser_extension_store_open_failed", error))
+    if let Some(url) = installation.extension_store_url {
+        open_store_url(&url)
+            .map_err(|error| CommandError::operation("browser_extension_store_open_failed", error))
+    } else {
+        // Development and portable builds ship the unpacked extension instead
+        // of a store listing. Open that directory so the browser's
+        // "Load unpacked" flow remains available and the button is actionable.
+        let resource_dir = window
+            .app_handle()
+            .path()
+            .resource_dir()
+            .map_err(|error| CommandError::operation("browser_extension_path_failed", error))?;
+        let extension_dir = [
+            resource_dir.join("browser-extension"),
+            std::env::current_exe()
+                .ok()
+                .and_then(|path| path.parent().map(|parent| parent.join("browser-extension")))
+                .unwrap_or_default(),
+        ]
+        .into_iter()
+        .find(|path| path.is_dir())
+        .ok_or_else(|| {
+            CommandError::new(
+                "browser_extension_bundle_missing",
+                "当前构建未包含浏览器扩展目录。",
+            )
+        })?;
+        open_extension_directory(&extension_dir).map_err(|error| {
+            CommandError::operation("browser_extension_directory_open_failed", error)
+        })
+    }
 }
 
 #[cfg(windows)]
@@ -457,6 +480,24 @@ fn open_store_url(url: &str) -> std::io::Result<()> {
         .creation_flags(0x0800_0000)
         .spawn()
         .map(|_| ())
+}
+
+#[cfg(windows)]
+fn open_extension_directory(path: &std::path::Path) -> std::io::Result<()> {
+    use std::os::windows::process::CommandExt;
+    std::process::Command::new("explorer.exe")
+        .arg(path)
+        .creation_flags(0x0800_0000)
+        .spawn()
+        .map(|_| ())
+}
+
+#[cfg(not(windows))]
+fn open_extension_directory(_path: &std::path::Path) -> std::io::Result<()> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "unsupported OS",
+    ))
 }
 
 #[cfg(not(windows))]

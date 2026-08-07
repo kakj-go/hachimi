@@ -138,7 +138,8 @@ impl ToolExecutor for BrowserStartTool {
                 ) {
                     return Ok(ToolResult::failed(&invocation.call, error));
                 }
-            } else if !grants.browser.origins.is_empty()
+            } else if !grants.browser.unrestricted_origins
+                && !grants.browser.origins.is_empty()
                 && !grants
                     .browser
                     .origins
@@ -239,6 +240,7 @@ impl ToolExecutor for BrowserStartTool {
             }
             let network_origins = if authority_mode == AuthorityMode::Unattended
                 && grants.profile != hachimi_protocol::PermissionProfile::FullAccess
+                && !grants.browser.unrestricted_origins
             {
                 grants.browser.origins.clone()
             } else {

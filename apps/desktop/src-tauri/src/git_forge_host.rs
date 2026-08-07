@@ -141,6 +141,7 @@ fn network_grant_for_remotes(remotes: &[GitRemoteRecord]) -> NetworkGrant {
     protocols.dedup();
     NetworkGrant {
         enabled: !protocols.is_empty(),
+        unrestricted_hosts: false,
         hosts,
         protocols,
     }
@@ -278,12 +279,14 @@ pub(super) fn network_grant_allows_remote(grant: &NetworkGrant, remote_url: &str
         }
         ("ssh".into(), host.to_ascii_lowercase())
     };
-    let protocol_allowed = grant.protocols.is_empty()
+    let protocol_allowed = grant.unrestricted_hosts
+        || grant.protocols.is_empty()
         || grant
             .protocols
             .iter()
             .any(|allowed| allowed.eq_ignore_ascii_case(&protocol));
-    let host_allowed = grant.hosts.is_empty()
+    let host_allowed = grant.unrestricted_hosts
+        || grant.hosts.is_empty()
         || grant.hosts.iter().any(|allowed| {
             let allowed = allowed.to_ascii_lowercase();
             allowed == host
@@ -751,6 +754,7 @@ mod tests {
     fn remote_network_grant_is_exact_and_supports_explicit_wildcards() {
         let grant = NetworkGrant {
             enabled: true,
+            unrestricted_hosts: false,
             hosts: vec!["github.com".into(), "*.example.test".into()],
             protocols: vec!["https".into(), "ssh".into()],
         };
@@ -773,6 +777,7 @@ mod tests {
 
         let local_grant = NetworkGrant {
             enabled: true,
+            unrestricted_hosts: false,
             hosts: Vec::new(),
             protocols: vec!["file".into()],
         };

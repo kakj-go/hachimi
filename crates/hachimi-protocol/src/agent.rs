@@ -182,6 +182,8 @@ pub struct SessionPermissionConfigRequest {
 pub struct SessionPermissionConfigUpdate {
     pub session_id: Option<SessionId>,
     pub entry_profile: EntryProfile,
+    #[specta(type = specta_typescript::Number)]
+    pub expected_revision: u64,
     pub config: SessionPermissionConfig,
 }
 
@@ -1713,6 +1715,9 @@ pub struct FileSystemGrant {
     pub access: FileSystemAccess,
     pub roots: Vec<String>,
     pub globs: Vec<String>,
+    /// Exact paths relative to one of the grant roots.
+    #[serde(default)]
+    pub files: Vec<String>,
     pub special_roots: Vec<String>,
 }
 
@@ -1720,6 +1725,8 @@ pub struct FileSystemGrant {
 #[serde(rename_all = "camelCase")]
 pub struct NetworkGrant {
     pub enabled: bool,
+    #[serde(default)]
+    pub unrestricted_hosts: bool,
     pub hosts: Vec<String>,
     pub protocols: Vec<String>,
 }
@@ -1729,6 +1736,8 @@ pub struct NetworkGrant {
 pub struct ProcessGrant {
     pub spawn: bool,
     pub interactive: bool,
+    #[serde(default)]
+    pub unrestricted_commands: bool,
     pub allowed_commands: Vec<String>,
 }
 
@@ -1737,7 +1746,9 @@ pub struct ProcessGrant {
 pub struct ComputerGrant {
     pub observe: bool,
     pub act: bool,
-    pub target_windows: Vec<String>,
+    #[serde(default)]
+    pub unrestricted_targets: bool,
+    pub allowed_applications: Vec<String>,
     pub max_actions: Option<u32>,
 }
 
@@ -1750,6 +1761,8 @@ pub struct BrowserGrant {
     pub download: bool,
     pub cookie_storage: bool,
     pub cdp: bool,
+    #[serde(default)]
+    pub unrestricted_origins: bool,
     pub origins: Vec<String>,
 }
 

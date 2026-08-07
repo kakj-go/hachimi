@@ -33,7 +33,7 @@ export function McpAuthPanel(props: {
           "This server does not publish usable OAuth metadata; use no authentication or a manual header.",
         );
       default:
-        return props.copy("正在检查认证能力…", "Checking authentication capabilities…");
+        return "";
     }
   };
 
@@ -41,7 +41,9 @@ export function McpAuthPanel(props: {
     <section class="mcp-auth-panel" data-testid="mcp-auth-panel">
       <div class="mcp-auth-copy">
         <strong>{props.copy("认证", "Authentication")}</strong>
-        <span>{description()}</span>
+        <Show when={description()}>
+          <span>{description()}</span>
+        </Show>
         <Show when={(props.status?.scopesSupported.length ?? 0) > 0}>
           <small>
             {props.copy("请求范围", "Requested scopes")}：{props.status?.scopesSupported.join(", ")}
@@ -72,7 +74,7 @@ export function McpAuthPanel(props: {
         </Button>
       </Show>
       <Show when={!props.status && !props.loading}>
-        <StatusBanner tone="warning">
+        <StatusBanner tone="danger">
           {props.copy("无法确认此服务的认证状态。", "Authentication status is unavailable.")}
         </StatusBanner>
       </Show>

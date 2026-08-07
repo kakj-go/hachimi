@@ -198,6 +198,7 @@ async fn stale_generation_guard_fails_before_restricted_worker_dispatch() {
             access: FileSystemAccess::Write,
             roots: vec![root],
             globs: Vec::new(),
+            files: Vec::new(),
             special_roots: Vec::new(),
         }],
         network: NetworkGrant::default(),

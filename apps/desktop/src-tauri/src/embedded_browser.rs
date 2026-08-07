@@ -25,7 +25,7 @@ use tauri::{AppHandle, Emitter, Manager, Runtime, WebviewWindow};
 use thiserror::Error;
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
-    process::{ChildStdin, Command},
+    process::ChildStdin,
     sync::{Mutex as AsyncMutex, oneshot, watch},
 };
 
@@ -375,22 +375,25 @@ impl<R: Runtime> EmbeddedBrowserService<R> {
                 .map_err(|error| EmbeddedBrowserError::StartFailed(error.to_string()))?;
         }
         let parent_hwnd = native_window_handle(window)?;
-        let mut child = Command::new(&self.runtime.host_executable)
-            .arg(format!("--hachimi-parent-hwnd={parent_hwnd}"))
-            .arg(format!(
-                "--hachimi-profile-dir={}",
-                self.runtime.profile_dir.display()
-            ))
-            .arg(format!(
-                "--hachimi-log-file={}",
-                self.runtime.log_file.display()
-            ))
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .kill_on_drop(false)
-            .spawn()
-            .map_err(|error| EmbeddedBrowserError::StartFailed(error.to_string()))?;
+        let mut child = hachimi_process_policy::tokio_command(
+            &self.runtime.host_executable,
+            hachimi_process_policy::ProcessPolicy::HiddenBackground,
+        )
+        .arg(format!("--hachimi-parent-hwnd={parent_hwnd}"))
+        .arg(format!(
+            "--hachimi-profile-dir={}",
+            self.runtime.profile_dir.display()
+        ))
+        .arg(format!(
+            "--hachimi-log-file={}",
+            self.runtime.log_file.display()
+        ))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .kill_on_drop(false)
+        .spawn()
+        .map_err(|error| EmbeddedBrowserError::StartFailed(error.to_string()))?;
         let stdin = child
             .stdin
             .take()

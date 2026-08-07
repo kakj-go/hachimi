@@ -15,6 +15,8 @@ import { Show, createSignal, untrack } from "solid-js";
 
 import { ChannelGrantEditor } from "./platform-integration-grant-editor";
 import { createPermissionPolicy } from "./permission-policy-editor";
+import { PermissionScopeConfirmation } from "./permission-scope-confirmation";
+import { permissionScopeRisk } from "./permission-scope-risk";
 
 const EMPTY_GRANT: ChannelGrant = {
   permissionPolicy: createPermissionPolicy(),
@@ -52,16 +54,25 @@ export function AuthorizationEditor(props: {
   const [grant, setGrant] = createSignal(initial?.grant ?? EMPTY_GRANT);
   const [busy, setBusy] = createSignal(false);
   const [failure, setFailure] = createSignal<string>();
+  const [confirming, setConfirming] = createSignal(false);
   const supportsGroup = () => props.provider.capabilities.includes("group");
   const supportsTopic = () => props.provider.capabilities.includes("topic");
 
-  async function save(enabled = true) {
+  async function save(enabled = true, confirmed = false) {
     if (!chatId().trim() || (target() === "dm_identity" && !actorId().trim())) {
       setFailure(
         props.zh
           ? "请填写稳定会话 ID 和发送者 ID。"
           : "Stable conversation and sender IDs are required.",
       );
+      return;
+    }
+    if (
+      enabled &&
+      permissionScopeRisk(grant().permissionPolicy).hasUnrestrictedScope &&
+      !confirmed
+    ) {
+      setConfirming(true);
       return;
     }
     setBusy(true);
@@ -217,6 +228,16 @@ export function AuthorizationEditor(props: {
             {props.zh ? "保存" : "Save"}
           </Button>
         </div>
+        <PermissionScopeConfirmation
+          open={confirming()}
+          policy={grant().permissionPolicy}
+          zh={props.zh}
+          onCancel={() => setConfirming(false)}
+          onConfirm={() => {
+            setConfirming(false);
+            void save(true, true);
+          }}
+        />
       </div>
     </Dialog>
   );

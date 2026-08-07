@@ -171,6 +171,7 @@ impl DesktopAppDomainHandler {
                     .origins
                     .iter()
                     .any(|allowed| allowed == &normalized_origin)
+                    || grants.browser.unrestricted_origins
                     || (grants.profile == hachimi_protocol::PermissionProfile::FullAccess
                         && grants.browser.origins.is_empty());
                 if !exact_origin_allowed

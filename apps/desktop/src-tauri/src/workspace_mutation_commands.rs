@@ -284,6 +284,7 @@ fn interactive_grants(workspace: &ResolvedWorkspace, source: &str) -> Capability
     grants.process = hachimi_protocol::ProcessGrant {
         spawn: true,
         interactive: false,
+        unrestricted_commands: false,
         allowed_commands: vec!["hachimi-workspace-worker".into()],
     };
     grants.network = Default::default();

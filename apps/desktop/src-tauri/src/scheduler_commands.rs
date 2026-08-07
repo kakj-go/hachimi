@@ -1191,7 +1191,7 @@ fn validate_unattended_browser_policy(schedule: &ScheduleDefinition) -> Result<(
     {
         return Ok(());
     }
-    if browser.origins.is_empty() {
+    if browser.origins.is_empty() && !browser.unrestricted_origins {
         return Err(CommandError::new(
             "schedule_browser_grant_invalid",
             "an unattended Browser grant requires a document origin and capability",

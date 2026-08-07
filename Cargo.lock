@@ -2558,6 +2558,8 @@ version = "0.3.0-alpha.8"
 dependencies = [
  "hachimi-core",
  "hachimi-protocol",
+ "tempfile",
+ "url",
 ]
 
 [[package]]
@@ -2621,6 +2623,7 @@ version = "0.3.0-alpha.8"
 dependencies = [
  "chrono",
  "chrono-tz",
+ "hachimi-policy",
  "hachimi-protocol",
  "hachimi-storage",
  "parking_lot",

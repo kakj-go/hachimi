@@ -57,21 +57,11 @@ pub(super) fn unattended_computer_target_allowed(
     target: &ComputerWindowIdentity,
 ) -> bool {
     grants.profile == PermissionProfile::FullAccess
-        || grants.computer.target_windows.iter().any(|allowed| {
-            let allowed = allowed.trim();
-            !allowed.is_empty()
-                && [
-                    target.app_id.as_str(),
-                    target.app.app_id.as_str(),
-                    target.app.display_name.as_str(),
-                    target.app.executable_name.as_str(),
-                    target.app.identity_hash.as_str(),
-                    target.title.as_str(),
-                    target.fingerprint.as_str(),
-                ]
-                .into_iter()
-                .chain(target.app.executable_path.as_deref())
-                .any(|candidate| candidate.eq_ignore_ascii_case(allowed))
+        || grants.computer.unrestricted_targets
+        || grants.computer.allowed_applications.iter().any(|allowed| {
+            allowed
+                .trim()
+                .eq_ignore_ascii_case(&target.app.identity_hash)
         })
 }
 
@@ -185,10 +175,10 @@ mod tests {
     #[test]
     fn unattended_computer_scope_matches_stable_application_identifiers() {
         let mut grants = CapabilityGrantSet::default();
-        grants.computer.target_windows = vec!["NOTEPAD.EXE".into()];
+        grants.computer.allowed_applications = vec!["IDENTITY-1".into()];
 
         assert!(unattended_computer_target_allowed(&grants, &target()));
-        grants.computer.target_windows = vec!["calculator.exe".into()];
+        grants.computer.allowed_applications = vec!["identity-2".into()];
         assert!(!unattended_computer_target_allowed(&grants, &target()));
     }
 

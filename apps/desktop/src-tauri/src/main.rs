@@ -42,6 +42,7 @@ mod mcp_runtime;
 mod media_commands;
 mod optional_resource_runtime;
 mod permission_runtime;
+mod permission_settings_commands;
 mod plugin_content_protocol;
 mod process_commands;
 mod project_git_commands;
@@ -74,6 +75,7 @@ use integration_commands::*;
 use mcp_commands::*;
 use mcp_runtime::*;
 use media_commands::*;
+use permission_settings_commands::*;
 use process_commands::*;
 use project_git_commands::*;
 use project_tool_commands::*;
@@ -149,8 +151,8 @@ use hachimi_workbench::WorkbenchService;
 use parking_lot::{Mutex, RwLock};
 use serde::Serialize;
 use tauri::{
-    AppHandle, Emitter, LogicalPosition, Manager, PhysicalPosition, Runtime, State, WebviewUrl,
-    WebviewWindow, WebviewWindowBuilder, WindowEvent, Wry,
+    AppHandle, Emitter, LogicalPosition, Manager, PhysicalPosition, Runtime, State, WebviewWindow,
+    WebviewWindowBuilder, WindowEvent, Wry,
     menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
 };
@@ -676,7 +678,6 @@ fn copy_theme_profile(
         .and_then(|mut clipboard| clipboard.set_text(json))
         .map_err(|error| CommandError::operation("theme_copy_failed", error))
 }
-
 #[tauri::command]
 fn reset_theme_profile(
     window: WebviewWindow,
@@ -975,7 +976,6 @@ fn load_or_create_loopback_token(data_root: &Path) -> std::io::Result<String> {
     }
     Ok(token)
 }
-
 fn keyring_io_error(error: keyring::Error) -> std::io::Error {
     std::io::Error::other(format!("channel credential storage failed: {error}"))
 }
@@ -1298,6 +1298,10 @@ fn main() {
             list_computer_app_candidates,
             list_computer_app_policies,
             update_computer_app_policy,
+            choose_permission_directory,
+            choose_permission_files,
+            search_permission_commands,
+            choose_permission_foreground_application,
             take_over_computer_control,
             resume_computer_control,
             stop_computer_control,
@@ -1365,23 +1369,6 @@ fn main() {
             exit_app,
         ])
         .setup(move |app| {
-            let startup_window = WebviewWindowBuilder::new(
-                app,
-                "startup",
-                WebviewUrl::App("startup.html".into()),
-            )
-            .title("Hachimi")
-            .inner_size(390.0, 150.0)
-            .resizable(false)
-            .decorations(false)
-            .always_on_top(true)
-            .visible(true)
-            .build()
-            .map_err(|error| {
-                tracing::warn!(%error, "startup feedback window could not be created");
-                error
-            })
-            .ok();
             let data_dir = storage_layout.root.clone();
             std::fs::create_dir_all(&data_dir)?;
             std::fs::write(data_dir.join(DATA_ROOT_SENTINEL_FILE), APP_IDENTIFIER)?;
@@ -1973,9 +1960,6 @@ fn main() {
                 open_workbench_route(app.handle(), &managed, WorkbenchRoute::Home)
                     .map_err(|error| std::io::Error::other(error.message))?;
             }
-            if let Some(window) = startup_window {
-                let _ = window.close();
-            }
             Ok(())
         })
         .build(tauri::generate_context!());
@@ -1990,7 +1974,6 @@ fn main() {
         Err(error) => startup_error::show(&error, &startup_log_dir),
     }
 }
-
 #[cfg(test)]
 #[path = "main_tests.rs"]
 mod logging_tests;

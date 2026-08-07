@@ -1762,6 +1762,7 @@ async fn security_snapshot_is_recoverable_and_grants_can_be_invalidated_once() {
             access: FileSystemAccess::Write,
             roots: vec!["C:\\demo".into()],
             globs: Vec::new(),
+            files: Vec::new(),
             special_roots: Vec::new(),
         }],
         network: NetworkGrant::default(),

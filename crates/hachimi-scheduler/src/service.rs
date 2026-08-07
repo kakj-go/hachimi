@@ -15,10 +15,9 @@ use std::{
 };
 
 use hachimi_protocol::{
-    AgentPermissionPolicy, ArtifactId, DeliveryPolicy, DeliveryStatus, EntryProfile,
-    FileSystemAccess, MisfirePolicy, PermissionProfile, ScheduleDefinition, ScheduleHealth,
-    ScheduleId, SchedulePreview, ScheduleSnapshot, ScheduleSpec, TaskRunId, TaskRunRecord,
-    TaskRunStatus, TaskRunTrigger,
+    ArtifactId, DeliveryPolicy, DeliveryStatus, EntryProfile, MisfirePolicy, PermissionProfile,
+    ScheduleDefinition, ScheduleHealth, ScheduleId, SchedulePreview, ScheduleSnapshot,
+    ScheduleSpec, TaskRunId, TaskRunRecord, TaskRunStatus, TaskRunTrigger,
 };
 use hachimi_storage::{AgentStore, AgentStoreError, ScheduleInvocationClaim};
 use parking_lot::Mutex;
@@ -176,7 +175,7 @@ impl SchedulerService {
         mut definition: ScheduleDefinition,
     ) -> Result<ScheduleSnapshot, SchedulerError> {
         self.ensure_accepting()?;
-        normalize_definition(&mut definition);
+        normalize_definition(&mut definition)?;
         validate_definition(&definition)?;
         definition.config_revision = 1;
         definition.permission_revision = 1;
@@ -229,7 +228,7 @@ impl SchedulerService {
         if current.config_revision != expected_config_revision {
             return Err(AgentStoreError::ScheduleRevisionConflict.into());
         }
-        normalize_definition(&mut definition);
+        normalize_definition(&mut definition)?;
         validate_definition(&definition)?;
         let scope_changed = authority_configuration_changed(&current, &definition);
         definition.created_by = current.created_by;
@@ -740,7 +739,7 @@ pub(crate) fn scheduler_delay_ms(wake_at_ms: Option<i64>, now_ms: i64) -> u64 {
     }
 }
 
-fn normalize_definition(definition: &mut ScheduleDefinition) {
+fn normalize_definition(definition: &mut ScheduleDefinition) -> Result<(), SchedulerError> {
     definition.name = definition.name.trim().chars().take(200).collect();
     definition.prompt = definition.prompt.trim().to_owned();
     definition.skill_allowlist.sort();
@@ -815,97 +814,23 @@ fn normalize_definition(definition: &mut ScheduleDefinition) {
             && left.contribution_id == right.contribution_id
             && left.account_id == right.account_id
     });
-    normalize_permission_policy(&mut definition.permission_policy);
+    hachimi_policy::normalize_permission_policy(&mut definition.permission_policy)
+        .map_err(|error| SchedulerError::InvalidSchedule(error.message))?;
     if definition.permission_policy.level == PermissionProfile::FullAccess {
         definition.permission_policy.rules = Default::default();
         definition.mcp_tool_allowlist.clear();
         definition.contribution_revisions.clear();
         definition.host_revision_snapshot.connectors.clear();
     }
-}
-
-fn normalize_permission_policy(policy: &mut AgentPermissionPolicy) {
-    for grant in &mut policy.rules.file_system {
-        normalize_strings(&mut grant.roots);
-        normalize_strings(&mut grant.globs);
-        normalize_strings(&mut grant.special_roots);
-    }
-    policy.rules.file_system.sort_by(|left, right| {
-        file_system_access_rank(left.access)
-            .cmp(&file_system_access_rank(right.access))
-            .then_with(|| left.roots.cmp(&right.roots))
-            .then_with(|| left.globs.cmp(&right.globs))
-            .then_with(|| left.special_roots.cmp(&right.special_roots))
-    });
-    policy.rules.file_system.dedup();
-    normalize_strings(&mut policy.rules.network.hosts);
-    normalize_strings(&mut policy.rules.network.protocols);
-    normalize_strings(&mut policy.rules.process.allowed_commands);
-    normalize_strings(&mut policy.rules.browser.origins);
-    normalize_strings(&mut policy.rules.computer.target_windows);
-    for rule in &mut policy.rules.mcp {
-        rule.tool_name = rule.tool_name.trim().to_owned();
-        rule.schema_hash = rule.schema_hash.trim().to_owned();
-    }
-    policy.rules.mcp.sort_by(|left, right| {
-        (
-            &left.server_id,
-            &left.tool_name,
-            &left.schema_hash,
-            left.read_only,
-        )
-            .cmp(&(
-                &right.server_id,
-                &right.tool_name,
-                &right.schema_hash,
-                right.read_only,
-            ))
-    });
-    policy.rules.mcp.dedup();
-    for rule in &mut policy.rules.connectors {
-        normalize_strings(&mut rule.actions);
-        normalize_strings(&mut rule.read_only_actions);
-        rule.contribution_revision = rule.contribution_revision.trim().to_owned();
-    }
-    policy.rules.connectors.sort_by(|left, right| {
-        (
-            &left.account_id,
-            &left.contribution_revision,
-            &left.actions,
-            &left.read_only_actions,
-        )
-            .cmp(&(
-                &right.account_id,
-                &right.contribution_revision,
-                &right.actions,
-                &right.read_only_actions,
-            ))
-    });
-    policy.rules.connectors.dedup();
-}
-
-fn normalize_strings(values: &mut Vec<String>) {
-    *values = values
-        .iter()
-        .map(|value| value.trim().to_owned())
-        .filter(|value| !value.is_empty())
-        .collect();
-    values.sort();
-    values.dedup();
-}
-
-const fn file_system_access_rank(access: FileSystemAccess) -> u8 {
-    match access {
-        FileSystemAccess::Read => 0,
-        FileSystemAccess::Write => 1,
-        FileSystemAccess::Deny => 2,
-    }
+    Ok(())
 }
 
 /// Canonicalizes all persisted authority-bearing Schedule fields before an
 /// AppServer computes extension snapshots or mutation fingerprints.
-pub fn normalize_schedule_definition(definition: &mut ScheduleDefinition) {
-    normalize_definition(definition);
+pub fn normalize_schedule_definition(
+    definition: &mut ScheduleDefinition,
+) -> Result<(), SchedulerError> {
+    normalize_definition(definition)
 }
 
 fn validate_definition(definition: &ScheduleDefinition) -> Result<(), SchedulerError> {
@@ -1326,7 +1251,8 @@ mod tests {
         input.permission_policy.rules.computer = hachimi_protocol::ComputerGrant {
             observe: true,
             act: true,
-            target_windows: vec!["notepad.exe".into()],
+            unrestricted_targets: false,
+            allowed_applications: vec!["notepad.exe".into()],
             max_actions: Some(20),
         };
         let authorized = service
@@ -1341,7 +1267,7 @@ mod tests {
                 .permission_policy
                 .rules
                 .computer
-                .target_windows,
+                .allowed_applications,
             ["notepad.exe"]
         );
     }

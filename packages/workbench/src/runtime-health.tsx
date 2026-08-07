@@ -184,12 +184,19 @@ export function RuntimeHealthBanner(props: {
   let unlisten: UnlistenFn | undefined;
   let disposed = false;
 
-  const visible = createMemo(() => props.showReady || health()?.state !== "ready");
+  // Starting is an internal bootstrap state. Only expose a settled degraded or
+  // failed state so healthy components do not flash an error on first paint.
+  const visible = createMemo(
+    () =>
+      props.showReady ||
+      Boolean(failure()) ||
+      health()?.state === "degraded" ||
+      health()?.state === "failed",
+  );
   const tone = createMemo(() => {
     const state = health()?.state;
     if (state === "ready") return "success" as const;
-    if (state === "failed") return "danger" as const;
-    return "warning" as const;
+    return "danger" as const;
   });
 
   function select(snapshot: RuntimeHealthSnapshot) {

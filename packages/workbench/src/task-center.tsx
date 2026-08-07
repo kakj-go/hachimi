@@ -35,6 +35,8 @@ import { For, Show, createMemo, createSignal, onCleanup, onMount } from "solid-j
 import type { WorkbenchCommandPort } from "./workbench-command-port";
 import { directUserMutationContext } from "./mutation-context";
 import { PermissionPolicyEditor, createPermissionPolicy } from "./permission-policy-editor";
+import { PermissionScopeConfirmation } from "./permission-scope-confirmation";
+import { permissionScopeRisk } from "./permission-scope-risk";
 import { TaskCard } from "./task-card";
 import { TaskHistoryDialog } from "./task-history-dialog";
 import { TaskEventForm } from "./task-event-form";
@@ -72,6 +74,7 @@ export function TaskCenter(props: {
   const [editingScheduleId, setEditingScheduleId] = createSignal<string>();
   const [loading, setLoading] = createSignal(true);
   const [submitting, setSubmitting] = createSignal(false);
+  const [confirmingPermissions, setConfirmingPermissions] = createSignal(false);
   const [busyId, setBusyId] = createSignal<string>();
   const [failure, setFailure] = createSignal<string>();
   const [nameError, setNameError] = createSignal<string>();
@@ -239,7 +242,7 @@ export function TaskCenter(props: {
     setAdvancedOpen(false);
   }
 
-  async function submitSchedule() {
+  async function submitSchedule(confirmedPermissions = false) {
     if (!name().trim() || !prompt().trim()) {
       setNameError(!name().trim() ? (zh() ? "请输入任务名称。" : "Enter a task name.") : undefined);
       setPromptError(
@@ -299,6 +302,7 @@ export function TaskCenter(props: {
         browserPolicy.act ||
         browserPolicy.upload ||
         browserPolicy.download) &&
+      !browserPolicy.unrestrictedOrigins &&
       (browserPolicy.origins ?? []).length === 0
     ) {
       setFailure(
@@ -307,6 +311,10 @@ export function TaskCenter(props: {
           : "Unattended Browser requires at least one exact document origin.",
       );
       setAdvancedOpen(true);
+      return;
+    }
+    if (permissionScopeRisk(permissionPolicy()).hasUnrestrictedScope && !confirmedPermissions) {
+      setConfirmingPermissions(true);
       return;
     }
     setSubmitting(true);
@@ -1070,6 +1078,17 @@ export function TaskCenter(props: {
           </footer>
         </form>
       </Dialog>
+
+      <PermissionScopeConfirmation
+        open={confirmingPermissions()}
+        policy={permissionPolicy()}
+        zh={zh()}
+        onCancel={() => setConfirmingPermissions(false)}
+        onConfirm={() => {
+          setConfirmingPermissions(false);
+          void submitSchedule(true);
+        }}
+      />
 
       <Show
         when={schedules().length > 0}

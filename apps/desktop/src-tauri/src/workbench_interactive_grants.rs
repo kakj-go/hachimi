@@ -28,12 +28,14 @@ pub(super) fn for_workbench_run(
         download: true,
         cookie_storage: true,
         cdp: false,
+        unrestricted_origins: true,
         origins: Vec::new(),
     };
     grants.computer = hachimi_protocol::ComputerGrant {
         observe: true,
         act: true,
-        target_windows: Vec::new(),
+        unrestricted_targets: true,
+        allowed_applications: Vec::new(),
         max_actions: Some(100),
     };
     grants

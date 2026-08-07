@@ -43,6 +43,7 @@ import type {
   ComputerHostSettings,
   ComputerHostSettingsUpdate,
   ComputerControlSession,
+  PermissionCommandCandidate,
   ComputerFrameId,
   ComputerFramePreview,
   EmbeddedBrowserSettings,
@@ -395,6 +396,12 @@ export const commands = {
   listComputerAppPolicies: () => invoke<ComputerAppPolicy[]>("list_computer_app_policies"),
   updateComputerAppPolicy: (update: ComputerAppPolicyUpdate) =>
     invoke<ComputerAppPolicy>("update_computer_app_policy", { update }),
+  choosePermissionDirectory: () => invoke<string | null>("choose_permission_directory"),
+  choosePermissionFiles: (root: string) => invoke<string[]>("choose_permission_files", { root }),
+  searchPermissionCommands: (prefix: string) =>
+    invoke<PermissionCommandCandidate[]>("search_permission_commands", { prefix }),
+  choosePermissionForegroundApplication: () =>
+    invoke<ComputerAppCandidate | null>("choose_permission_foreground_application"),
   listIntegrationProviders: () =>
     invoke<IntegrationProviderDefinition[]>("list_integration_providers"),
   listEnterpriseIntegrations: () =>

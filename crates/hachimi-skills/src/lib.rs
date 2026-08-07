@@ -245,7 +245,10 @@ impl SkillHost {
         validate_skill_name(new_name)?;
         let stored = self.stored(skill_id).await?;
         let source = self.checked_directory_root(&stored)?;
-        let destination = self.root.join(new_name);
+        let destination = source
+            .parent()
+            .ok_or(SkillHostError::InvalidPath)?
+            .join(new_name);
         if destination.exists() {
             return Err(SkillHostError::AlreadyExists);
         }
@@ -269,9 +272,12 @@ impl SkillHost {
 
     pub async fn remove(&self, skill_id: &SkillId) -> Result<bool, SkillHostError> {
         let stored = self.stored(skill_id).await?;
-        let source = self.checked_directory_root(&stored)?;
+        let (source, owner_root) = self.checked_write_directory_root(&stored)?;
+        let trash = owner_root.join(TRASH_DIRECTORY);
+        fs::create_dir_all(&trash)?;
+        reject_reparse(&trash)?;
         let trash_name = format!("{}-{}", skill_id.as_str(), now_ms());
-        fs::rename(source, self.root.join(TRASH_DIRECTORY).join(trash_name))?;
+        fs::rename(source, trash.join(trash_name))?;
         Ok(self.store.remove_skill(skill_id).await?)
     }
 
@@ -327,11 +333,9 @@ impl SkillHost {
         }
         let bytes = fs::read(&path)?;
         let editor_kind = editor_kind(&path, &bytes);
-        let content = if editor_kind == SkillEditorKind::Unsupported {
-            None
-        } else {
-            String::from_utf8(bytes.clone()).ok()
-        };
+        // Unsupported extensions remain read-only, but UTF-8 content is still
+        // useful to inspect. Binary or invalid UTF-8 files stay unavailable.
+        let content = String::from_utf8(bytes.clone()).ok();
         let diagnostics = if editor_kind == SkillEditorKind::Markdown {
             validate_markdown(content.as_deref().unwrap_or_default(), &path, &root)
         } else {
@@ -712,13 +716,8 @@ impl SkillHost {
         &self,
         stored: &StoredSkillRecord,
     ) -> Result<PathBuf, SkillHostError> {
-        let path = PathBuf::from(&stored.stable_path);
-        reject_reparse(&path)?;
-        let canonical = fs::canonicalize(path)?;
-        if canonical.parent() != Some(self.root.as_path()) || !canonical.is_dir() {
-            return Err(SkillHostError::InvalidPath);
-        }
-        Ok(canonical)
+        self.checked_write_directory_root(stored)
+            .map(|(directory, _)| directory)
     }
 }
 
@@ -1656,7 +1655,7 @@ mod tests {
             .await
             .expect("unsupported metadata");
         assert_eq!(unsupported.editor_kind, SkillEditorKind::Unsupported);
-        assert!(unsupported.content.is_none());
+        assert_eq!(unsupported.content.as_deref(), Some("not exposed"));
     }
 
     #[tokio::test]

@@ -148,6 +148,14 @@ impl ComputerBroker for PlatformComputerBroker {
         })
     }
 
+    fn foreground_window<'a>(&'a self) -> ComputerBrokerFuture<'a, ComputerWindowIdentity> {
+        Box::pin(async move {
+            tokio::task::spawn_blocking(foreground_window)
+                .await
+                .map_err(|error| ComputerHostError::Broker(error.to_string()))?
+        })
+    }
+
     fn capture<'a>(&'a self, window_handle: &'a str) -> ComputerBrokerFuture<'a, CapturedWindow> {
         let window_handle = window_handle.to_owned();
         let frame_tokens = Arc::clone(&self.frame_tokens);
@@ -237,6 +245,18 @@ fn platform_user_input_marker() -> Option<u64> {
 #[cfg(windows)]
 fn list_windows() -> Result<Vec<ComputerWindowIdentity>, ComputerHostError> {
     windows::list_windows()
+}
+
+#[cfg(windows)]
+fn foreground_window() -> Result<ComputerWindowIdentity, ComputerHostError> {
+    windows::foreground_window()
+}
+
+#[cfg(not(windows))]
+fn foreground_window() -> Result<ComputerWindowIdentity, ComputerHostError> {
+    Err(ComputerHostError::Broker(
+        "the platform Computer broker is Windows-only".into(),
+    ))
 }
 
 #[cfg(windows)]

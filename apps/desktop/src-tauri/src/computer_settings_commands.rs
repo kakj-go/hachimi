@@ -1,6 +1,7 @@
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, sync::Arc};
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
+use futures_util::future::join_all;
 use hachimi_protocol::{
     ComputerAppCandidate, ComputerAppPolicy, ComputerAppPolicyUpdate, ComputerControlSession,
     ComputerFrameId, ComputerFramePreview, ComputerHostSettings, ComputerHostSettingsUpdate,
@@ -87,25 +88,37 @@ pub(super) async fn list_computer_app_candidates(
         .list_windows()
         .await
         .map_err(|error| CommandError::operation("computer_window_list_failed", error))?;
-    let mut apps = BTreeMap::new();
+    let mut apps = BTreeMap::<String, (hachimi_protocol::ComputerAppDescriptor, u32)>::new();
     for window in windows {
-        apps.entry(window.app.identity_hash.clone())
-            .or_insert(window.app);
+        let entry = apps
+            .entry(window.app.identity_hash.clone())
+            .or_insert((window.app, 0));
+        entry.1 = entry.1.saturating_add(1);
     }
-    let mut candidates = Vec::with_capacity(apps.len());
-    for app in apps.into_values() {
-        let icon_png_base64 = state
-            .computer_host
-            .app_icon_png(&app)
-            .await
-            .ok()
-            .flatten()
-            .map(|bytes| STANDARD.encode(bytes));
-        candidates.push(ComputerAppCandidate {
-            app,
-            icon_png_base64,
-        });
-    }
+    let host = Arc::clone(&state.computer_host);
+    let candidates = join_all(apps.into_values().map(|(app, window_count)| {
+        let host = Arc::clone(&host);
+        async move {
+            let icon_png_base64 = match host.app_icon_png(&app).await {
+                Ok(Some(bytes)) => Some(STANDARD.encode(bytes)),
+                Ok(None) => None,
+                Err(error) => {
+                    tracing::debug!(
+                        app = %app.display_name,
+                        error = %error,
+                        "Computer Use app icon unavailable"
+                    );
+                    None
+                }
+            };
+            ComputerAppCandidate {
+                app,
+                window_count,
+                icon_png_base64,
+            }
+        }
+    }))
+    .await;
     Ok(candidates)
 }
 

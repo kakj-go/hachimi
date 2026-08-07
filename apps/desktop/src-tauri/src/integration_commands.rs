@@ -31,7 +31,7 @@ use self::upsert_target::{
 use self::validation::{credential_shape_valid, validate_capabilities, validate_upsert};
 
 const KEYRING_SERVICE: &str = "com.hachimi.integration";
-const EMPTY_CHANNEL_GRANT_JSON: &str = r#"{"permissionPolicy":{"level":"read_only","rules":{"fileSystem":[],"process":{"spawn":false,"interactive":false,"allowedCommands":[]},"network":{"enabled":false,"hosts":[],"protocols":[]},"browser":{"observe":false,"act":false,"upload":false,"download":false,"cookieStorage":false,"cdp":false,"origins":[]},"computer":{"observe":false,"act":false,"targetWindows":[],"maxActions":null},"mcp":[],"connectors":[]},"revision":0},"skillIds":[],"mcpServerIds":[],"connectorSelections":[],"readOnlyWorkspaceRoots":[],"networkHosts":[]}"#;
+const EMPTY_CHANNEL_GRANT_JSON: &str = r#"{"permissionPolicy":{"level":"read_only","rules":{"fileSystem":[],"process":{"spawn":false,"interactive":false,"allowedCommands":[]},"network":{"enabled":false,"hosts":[],"protocols":[]},"browser":{"observe":false,"act":false,"upload":false,"download":false,"cookieStorage":false,"cdp":false,"origins":[]},"computer":{"observe":false,"act":false,"allowedApplications":[],"maxActions":null},"mcp":[],"connectors":[]},"revision":0},"skillIds":[],"mcpServerIds":[],"connectorSelections":[],"readOnlyWorkspaceRoots":[],"networkHosts":[]}"#;
 
 fn probe_dimension(ok: bool, success_code: &str, failure_code: &str) -> IntegrationProbeDimension {
     IntegrationProbeDimension {
@@ -1041,6 +1041,7 @@ pub(super) async fn upsert_channel_authorization(
     mut input: ChannelAuthorizationUpsert,
 ) -> Result<ChannelAuthorization, CommandError> {
     require_window(&window, "workbench")?;
+    normalize_channel_grant(&mut input.grant)?;
     let account = load_account(&state, &input.account_id).await?;
     input.address.account_id = account.id.clone();
     input.address.provider_id = account.provider_id.as_str().into();
@@ -1096,9 +1097,10 @@ pub(super) async fn upsert_channel_authorization(
 pub(super) async fn create_channel_pairing_code(
     window: WebviewWindow,
     state: State<'_, DesktopState>,
-    request: ChannelPairingCodeRequest,
+    mut request: ChannelPairingCodeRequest,
 ) -> Result<ChannelPairingCode, CommandError> {
     require_window(&window, "workbench")?;
+    normalize_channel_grant(&mut request.grant)?;
     state
         .gateway
         .create_pairing_code(request, now_ms())
@@ -1166,9 +1168,10 @@ pub(super) async fn get_channel_access_policy(
 pub(super) async fn update_channel_access_policy(
     window: WebviewWindow,
     state: State<'_, DesktopState>,
-    input: ChannelAccessPolicyUpsert,
+    mut input: ChannelAccessPolicyUpsert,
 ) -> Result<ChannelAccessPolicy, CommandError> {
     require_window(&window, "workbench")?;
+    normalize_channel_grant(&mut input.grant_ceiling)?;
     let previous = state
         .gateway
         .access_policy(&input.account_id)
@@ -1235,6 +1238,33 @@ fn channel_grant_covers(
                         .all(|action| candidate.allowed_actions.contains(action))
             })
         })
+}
+
+fn normalize_channel_grant(grant: &mut hachimi_protocol::ChannelGrant) -> Result<(), CommandError> {
+    hachimi_policy::normalize_permission_policy(&mut grant.permission_policy)
+        .map_err(|error| CommandError::new(error.code, error.message))?;
+    normalize_channel_strings(&mut grant.skill_ids);
+    normalize_channel_strings(&mut grant.mcp_server_ids);
+    normalize_channel_strings(&mut grant.read_only_workspace_roots);
+    grant.network_hosts = grant
+        .network_hosts
+        .iter()
+        .map(|value| value.trim().to_ascii_lowercase())
+        .filter(|value| !value.is_empty())
+        .collect();
+    grant.network_hosts.sort();
+    grant.network_hosts.dedup();
+    Ok(())
+}
+
+fn normalize_channel_strings(values: &mut Vec<String>) {
+    *values = values
+        .iter()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+        .collect();
+    values.sort();
+    values.dedup();
 }
 
 fn provider_definitions() -> Vec<IntegrationProviderDefinition> {

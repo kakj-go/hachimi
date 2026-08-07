@@ -159,6 +159,7 @@
 }
 
 .computer-app-icon {
+  position: relative;
   display: grid;
   width: 32px;
   height: 32px;
@@ -173,6 +174,8 @@
 }
 
 .computer-app-icon img {
+  position: absolute;
+  inset: 4px;
   width: 24px;
   height: 24px;
   object-fit: contain;

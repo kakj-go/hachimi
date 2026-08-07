@@ -591,7 +591,8 @@ impl DesktopAppDomainHandler {
             }
         }
         schedule.skill_revisions = skill_revisions;
-        hachimi_scheduler::normalize_schedule_definition(schedule);
+        hachimi_scheduler::normalize_schedule_definition(schedule)
+            .map_err(domain_error("scheduler_failed"))?;
         Ok(())
     }
 
@@ -604,7 +605,8 @@ impl DesktopAppDomainHandler {
         let response = match request {
             ScheduleAppRequest::Create(request) => {
                 let mut definition = request.definition;
-                hachimi_scheduler::normalize_schedule_definition(&mut definition);
+                hachimi_scheduler::normalize_schedule_definition(&mut definition)
+                    .map_err(domain_error("scheduler_failed"))?;
                 self.pin_schedule_runtime_revisions(&mut definition).await?;
                 let fingerprint = mutation_fingerprint(definition.id.as_str(), &definition)?;
                 ScheduleAppResponse::Created(
@@ -644,7 +646,8 @@ impl DesktopAppDomainHandler {
             }
             ScheduleAppRequest::Update(request) => {
                 let mut definition = request.definition;
-                hachimi_scheduler::normalize_schedule_definition(&mut definition);
+                hachimi_scheduler::normalize_schedule_definition(&mut definition)
+                    .map_err(domain_error("scheduler_failed"))?;
                 self.pin_schedule_runtime_revisions(&mut definition).await?;
                 let fingerprint = mutation_fingerprint(
                     definition.id.as_str(),

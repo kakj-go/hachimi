@@ -111,6 +111,7 @@ import { HostDomainSettingsPage } from "./host-domain-settings";
 import { PlatformIntegrationsSettings } from "./platform-integrations-settings";
 import { ResourceSettingsPage, VoiceSettingsPage } from "./resource-settings";
 import { SkillsSettingsPage } from "./skills-settings";
+import { PetPermissionSettings } from "./pet-permission-settings";
 import { normalizeWorkbenchRoute, SETTINGS_ROUTES } from "./routing";
 
 function initialRoute(): WorkbenchRoute {
@@ -693,6 +694,7 @@ function GeneralSettings(props: {
           </SettingsRow>
         </SettingsCard>
       </SettingsSection>
+      <PetPermissionSettings />
     </div>
   );
 }

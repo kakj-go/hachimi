@@ -1651,6 +1651,7 @@ pub fn registered_types() -> specta::Types {
         .register::<ComputerWindowIdentity>()
         .register::<ComputerAppDescriptor>()
         .register::<ComputerAppCandidate>()
+        .register::<PermissionCommandCandidate>()
         .register::<ComputerAppPolicy>()
         .register::<ComputerAppPolicyUpdate>()
         .register::<ComputerHostSettings>()

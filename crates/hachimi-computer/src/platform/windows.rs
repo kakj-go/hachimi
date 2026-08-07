@@ -9,7 +9,6 @@ use std::{
     time::UNIX_EPOCH,
 };
 
-use base64::{Engine as _, engine::general_purpose::STANDARD};
 use hachimi_process_policy::ProcessPolicy;
 use hachimi_protocol::{
     ComputerAction, ComputerAppDescriptor, ComputerRuntimeHealth, ComputerWindowIdentity,
@@ -35,6 +34,10 @@ use ::windows::{
     Graphics::Capture::GraphicsCaptureSession,
     Win32::{
         Foundation::{HANDLE, HWND, LPARAM, PROPERTYKEY, RECT, WPARAM},
+        Graphics::Gdi::{
+            BI_RGB, BITMAPINFO, BITMAPINFOHEADER, CreateCompatibleDC, CreateDIBSection,
+            DIB_RGB_COLORS, DeleteDC, DeleteObject, HGDIOBJ, SelectObject,
+        },
         Security::{
             GetSidSubAuthority, GetSidSubAuthorityCount, GetTokenInformation,
             TOKEN_MANDATORY_LABEL, TOKEN_QUERY, TokenIntegrityLevel,
@@ -63,11 +66,12 @@ use ::windows::{
                 VK_TAB, VK_UP,
             },
             Shell::PropertiesSystem::{IPropertyStore, SHGetPropertyStoreForWindow},
+            Shell::{SHFILEINFOW, SHGFI_ICON, SHGFI_LARGEICON, SHGetFileInfoW},
             WindowsAndMessaging::{
-                EnumWindows, GetClassNameW, GetForegroundWindow, GetWindowRect, GetWindowTextW,
-                GetWindowThreadProcessId, IsWindow, IsWindowVisible, MoveWindow, PostMessageW,
-                SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE, SetCursorPos, SetForegroundWindow,
-                ShowWindow, WM_CLOSE,
+                DI_NORMAL, DestroyIcon, DrawIconEx, EnumWindows, GetClassNameW,
+                GetForegroundWindow, GetWindowRect, GetWindowTextW, GetWindowThreadProcessId,
+                IsWindow, IsWindowVisible, MoveWindow, PostMessageW, SW_MAXIMIZE, SW_MINIMIZE,
+                SW_RESTORE, SetCursorPos, SetForegroundWindow, ShowWindow, WM_CLOSE,
             },
         },
     },
@@ -75,13 +79,13 @@ use ::windows::{
 };
 
 const MAX_CAPTURE_DIMENSION: u32 = 16_384;
-const MAX_APP_ICON_PNG_BYTES: usize = 256 * 1024;
 const PKEY_APP_USER_MODEL_ID: PROPERTYKEY = PROPERTYKEY {
     fmtid: GUID::from_u128(0x9f4c2855_9f79_4b39_a8d0_e1d42de1d5f3),
     pid: 5,
 };
 static APP_DESCRIPTOR_CACHE: OnceLock<Mutex<HashMap<String, CachedAppDescriptor>>> =
     OnceLock::new();
+static APP_ICON_CACHE: OnceLock<Mutex<HashMap<String, Vec<u8>>>> = OnceLock::new();
 
 pub(super) fn runtime_health() -> ComputerRuntimeHealth {
     let graphics_capture_available = GraphicsCaptureSession::IsSupported().unwrap_or(false);
@@ -141,6 +145,15 @@ pub(super) fn list_windows() -> Result<Vec<ComputerWindowIdentity>, ComputerHost
         .filter(|identity| !identity.title.trim().is_empty())
         .filter(|identity| is_user_application(&identity.app_id))
         .collect())
+}
+
+pub(super) fn foreground_window() -> Result<ComputerWindowIdentity, ComputerHostError> {
+    // SAFETY: GetForegroundWindow returns a borrowed handle or null.
+    let hwnd = unsafe { GetForegroundWindow() };
+    if hwnd.0.is_null() {
+        return Err(broker("foreground_window_missing"));
+    }
+    read_identity(&format!("0x{:x}", hwnd.0 as usize))
 }
 
 pub(super) fn read_identity(
@@ -591,29 +604,104 @@ fn app_descriptor(hwnd: HWND, path: &Path) -> Result<ComputerAppDescriptor, Comp
 pub(super) fn app_icon_png(
     app: &ComputerAppDescriptor,
 ) -> Result<Option<Vec<u8>>, ComputerHostError> {
-    if let (Some(package_family_name), Some(app_user_model_id)) = (
-        app.package_family_name.as_deref(),
-        app.app_user_model_id.as_deref(),
-    ) && let Some(bytes) = packaged_icon_png(package_family_name, app_user_model_id)?
-    {
-        return Ok(Some(bytes));
+    let cache = APP_ICON_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Some(cached) = cache.lock().get(&app.identity_hash) {
+        return Ok(Some(cached.clone()));
     }
     let Some(path) = app.executable_path.as_deref() else {
         return Ok(None);
     };
-    let script = r#"Add-Type -AssemblyName System.Drawing; $icon = [System.Drawing.Icon]::ExtractAssociatedIcon($args[0]); if ($null -eq $icon) { exit 0 }; $bitmap = $icon.ToBitmap(); $stream = New-Object System.IO.MemoryStream; try { $bitmap.Save($stream, [System.Drawing.Imaging.ImageFormat]::Png); [Console]::Out.Write([Convert]::ToBase64String($stream.ToArray())) } finally { $stream.Dispose(); $bitmap.Dispose(); $icon.Dispose() }"#;
-    let Some(output) = powershell_text(script, Path::new(path)) else {
-        return Ok(None);
-    };
-    let bytes = STANDARD
-        .decode(output.trim())
-        .map_err(|error| broker(format!("app_icon_decode:{error}")))?;
-    if bytes.len() > MAX_APP_ICON_PNG_BYTES
-        || !bytes.starts_with(&[137, 80, 78, 71, 13, 10, 26, 10])
-    {
-        return Err(broker("app_icon_invalid"));
+    let result = native_icon_png(Path::new(path))?;
+    if let Some(bytes) = result.as_ref() {
+        cache
+            .lock()
+            .insert(app.identity_hash.clone(), bytes.clone());
     }
-    Ok(Some(bytes))
+    Ok(result)
+}
+
+fn native_icon_png(path: &Path) -> Result<Option<Vec<u8>>, ComputerHostError> {
+    let path_wide = wide_null(path.as_os_str());
+    let mut file_info = SHFILEINFOW::default();
+    // SAFETY: `path_wide` is a valid, nul-terminated UTF-16 path and
+    // `file_info` points to writable storage of the exact Shell structure size.
+    let result = unsafe {
+        SHGetFileInfoW(
+            PCWSTR(path_wide.as_ptr()),
+            ::windows::Win32::Storage::FileSystem::FILE_FLAGS_AND_ATTRIBUTES(0),
+            Some(std::ptr::addr_of_mut!(file_info)),
+            std::mem::size_of::<SHFILEINFOW>() as u32,
+            SHGFI_ICON | SHGFI_LARGEICON,
+        )
+    };
+    if result == 0 || file_info.hIcon.0.is_null() {
+        return Ok(None);
+    }
+    let icon = file_info.hIcon;
+    let result = render_icon_png(icon);
+    // SAFETY: Shell returned an owned icon handle which must be destroyed once.
+    let _ = unsafe { DestroyIcon(icon) };
+    result
+        .map(Some)
+        .map_err(|error| broker(format!("app_icon_render:{error}")))
+}
+
+fn render_icon_png(
+    icon: ::windows::Win32::UI::WindowsAndMessaging::HICON,
+) -> Result<Vec<u8>, String> {
+    const SIZE: i32 = 32;
+    let info = BITMAPINFO {
+        bmiHeader: BITMAPINFOHEADER {
+            biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+            biWidth: SIZE,
+            biHeight: -SIZE,
+            biPlanes: 1,
+            biBitCount: 32,
+            biCompression: BI_RGB.0,
+            ..BITMAPINFOHEADER::default()
+        },
+        ..BITMAPINFO::default()
+    };
+    let hdc = unsafe { CreateCompatibleDC(None) };
+    if hdc.0.is_null() {
+        return Err("create_icon_dc".into());
+    }
+    let mut pixels = std::ptr::null_mut();
+    let bitmap =
+        unsafe { CreateDIBSection(Some(hdc), &info, DIB_RGB_COLORS, &mut pixels, None, 0) }
+            .map_err(|error| format!("create_icon_bitmap:{error}"));
+    let Ok(bitmap) = bitmap else {
+        let _ = unsafe { DeleteDC(hdc) };
+        return Err(bitmap.unwrap_err());
+    };
+    let previous = unsafe { SelectObject(hdc, HGDIOBJ(bitmap.0)) };
+    let draw_result = unsafe { DrawIconEx(hdc, 0, 0, icon, SIZE, SIZE, 0, None, DI_NORMAL) };
+    let output = if let Err(error) = draw_result {
+        Err(format!("draw_icon:{error}"))
+    } else if pixels.is_null() {
+        Err("icon_pixels_null".into())
+    } else {
+        let bgra =
+            unsafe { std::slice::from_raw_parts(pixels.cast::<u8>(), (SIZE * SIZE * 4) as usize) };
+        let mut rgba = vec![0_u8; bgra.len()];
+        for (source, target) in bgra.chunks_exact(4).zip(rgba.chunks_exact_mut(4)) {
+            target[0] = source[2];
+            target[1] = source[1];
+            target[2] = source[0];
+            target[3] = if source[3] == 0 { 255 } else { source[3] };
+        }
+        ImageEncoder::new(ImageFormat::Png, ImageEncoderPixelFormat::Rgba8)
+            .and_then(|encoder| encoder.encode(&rgba, SIZE as u32, SIZE as u32))
+            .map_err(|error| format!("encode_icon:{error}"))
+    };
+    if !previous.0.is_null() {
+        unsafe { SelectObject(hdc, previous) };
+    }
+    unsafe {
+        let _ = DeleteObject(HGDIOBJ(bitmap.0));
+        let _ = DeleteDC(hdc);
+    }
+    output
 }
 
 #[derive(Debug, Deserialize)]
@@ -647,14 +735,14 @@ fn packaged_app_metadata(app_user_model_id: &str) -> Option<PackagedAppMetadata>
     let package_family_name = package_family_from_aumid(app_user_model_id)?;
     let script = r#"
 $OutputEncoding = New-Object System.Text.UTF8Encoding($false)
-$package = Get-AppxPackage -PackageFamilyName $args[0] | Select-Object -First 1
+$package = Get-AppxPackage -PackageFamilyName $env:HACHIMI_POWERSHELL_ARG_0 | Select-Object -First 1
 if ($null -eq $package) { exit 0 }
 $manifest = Get-AppxPackageManifest -Package $package
-$applicationId = $args[1].Substring($args[1].IndexOf('!') + 1)
+$applicationId = $env:HACHIMI_POWERSHELL_ARG_1.Substring($env:HACHIMI_POWERSHELL_ARG_1.IndexOf('!') + 1)
 $application = @($manifest.Package.Applications.Application) | Where-Object { $_.Id -eq $applicationId } | Select-Object -First 1
-$startApp = @(Get-StartApps -ErrorAction SilentlyContinue) | Where-Object { $_.AppID -eq $args[1] } | Select-Object -First 1
+$startApp = @(Get-StartApps -ErrorAction SilentlyContinue) | Where-Object { $_.AppID -eq $env:HACHIMI_POWERSHELL_ARG_1 } | Select-Object -First 1
 $displayName = if ($null -ne $startApp) { $startApp.Name } elseif ($null -ne $application.VisualElements.DisplayName) { $application.VisualElements.DisplayName } else { $package.Name }
-[Console]::Out.Write(( [pscustomobject]@{ family = $package.PackageFamilyName; aumid = $args[1]; displayName = $displayName; publisher = $package.Publisher } | ConvertTo-Json -Compress ))
+[Console]::Out.Write(( [pscustomobject]@{ family = $package.PackageFamilyName; aumid = $env:HACHIMI_POWERSHELL_ARG_1; displayName = $displayName; publisher = $package.Publisher } | ConvertTo-Json -Compress ))
 "#;
     let output = powershell_args(
         script,
@@ -671,51 +759,6 @@ fn package_family_from_aumid(app_user_model_id: &str) -> Option<&str> {
     let package_family_name = package_family_name.trim();
     (!package_family_name.is_empty() && !application_id.trim().is_empty())
         .then_some(package_family_name)
-}
-
-fn packaged_icon_png(
-    package_family_name: &str,
-    app_user_model_id: &str,
-) -> Result<Option<Vec<u8>>, ComputerHostError> {
-    let script = r#"
-$OutputEncoding = New-Object System.Text.UTF8Encoding($false)
-Add-Type -AssemblyName System.Drawing
-$package = Get-AppxPackage -PackageFamilyName $args[0] | Select-Object -First 1
-if ($null -eq $package) { exit 0 }
-$manifest = Get-AppxPackageManifest -Package $package
-$applicationId = $args[1].Substring($args[1].IndexOf('!') + 1)
-$application = @($manifest.Package.Applications.Application) | Where-Object { $_.Id -eq $applicationId } | Select-Object -First 1
-$relative = if ($null -ne $application.VisualElements.Square44x44Logo) { $application.VisualElements.Square44x44Logo } else { $manifest.Package.Properties.Logo }
-if ([string]::IsNullOrWhiteSpace($relative) -or $relative.StartsWith('ms-resource:')) { exit 0 }
-$candidate = Join-Path $package.InstallLocation $relative
-if (-not (Test-Path -LiteralPath $candidate)) {
-  $base = [System.IO.Path]::GetFileNameWithoutExtension($candidate)
-  $directory = [System.IO.Path]::GetDirectoryName($candidate)
-  $candidate = Get-ChildItem -LiteralPath $directory -File -ErrorAction SilentlyContinue | Where-Object { $_.BaseName -like "$base*" } | Sort-Object Name | Select-Object -First 1 -ExpandProperty FullName
-}
-if ([string]::IsNullOrWhiteSpace($candidate) -or -not (Test-Path -LiteralPath $candidate)) { exit 0 }
-$image = [System.Drawing.Image]::FromFile($candidate)
-$stream = New-Object System.IO.MemoryStream
-try { $image.Save($stream, [System.Drawing.Imaging.ImageFormat]::Png); [Console]::Out.Write([Convert]::ToBase64String($stream.ToArray())) } finally { $stream.Dispose(); $image.Dispose() }
-"#;
-    let Some(output) = powershell_args(
-        script,
-        &[
-            std::ffi::OsStr::new(package_family_name),
-            std::ffi::OsStr::new(app_user_model_id),
-        ],
-    ) else {
-        return Ok(None);
-    };
-    let bytes = STANDARD
-        .decode(output.trim())
-        .map_err(|error| broker(format!("package_icon_decode:{error}")))?;
-    if bytes.len() > MAX_APP_ICON_PNG_BYTES
-        || !bytes.starts_with(&[137, 80, 78, 71, 13, 10, 26, 10])
-    {
-        return Err(broker("package_icon_invalid"));
-    }
-    Ok(Some(bytes))
 }
 
 fn packaged_identity_hash(
@@ -749,7 +792,7 @@ fn win32_identity_hash(
 }
 
 fn verified_publisher(path: &Path) -> Option<String> {
-    let script = r#"$signature = Get-AuthenticodeSignature -LiteralPath $args[0]; if ($signature.Status -eq 'Valid' -and $null -ne $signature.SignerCertificate) { [Console]::Out.Write($signature.SignerCertificate.GetNameInfo('SimpleName', $false)) }"#;
+    let script = r#"$signature = Get-AuthenticodeSignature -LiteralPath $env:HACHIMI_POWERSHELL_ARG_0; if ($signature.Status -eq 'Valid' -and $null -ne $signature.SignerCertificate) { [Console]::Out.Write($signature.SignerCertificate.GetNameInfo('SimpleName', $false)) }"#;
     powershell_text(script, path).filter(|value| !value.trim().is_empty())
 }
 
@@ -762,6 +805,12 @@ fn powershell_args(script: &str, args: &[&std::ffi::OsStr]) -> Option<String> {
         "powershell.exe",
         hachimi_process_policy::ProcessPolicy::HiddenBackground,
     );
+    // `-Command` treats trailing argv values as PowerShell source text. Pass
+    // paths through the child environment so spaces and non-ASCII characters
+    // remain intact instead of being parsed as code.
+    for (index, argument) in args.iter().enumerate() {
+        command.env(format!("HACHIMI_POWERSHELL_ARG_{index}"), argument);
+    }
     let output = command
         .args([
             "-NoLogo",
@@ -770,7 +819,6 @@ fn powershell_args(script: &str, args: &[&std::ffi::OsStr]) -> Option<String> {
             "-Command",
             script,
         ])
-        .args(args)
         .output()
         .ok()?;
     if !output.status.success() || output.stdout.len() > 512 * 1024 {
@@ -1262,6 +1310,19 @@ mod tests {
             identity,
             packaged_identity_hash(family, aumid, Some("CN=Other"))
         );
+    }
+
+    #[test]
+    fn extracts_a_png_from_a_real_windows_executable() {
+        let path = std::env::var_os("WINDIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(r"C:\Windows"))
+            .join("Explorer.exe");
+        let icon = native_icon_png(&path)
+            .expect("shell icon extraction")
+            .expect("Explorer icon");
+        assert!(icon.starts_with(&[137, 80, 78, 71, 13, 10, 26, 10]));
+        assert!(icon.len() <= 256 * 1024);
     }
 
     #[test]
