@@ -92,6 +92,7 @@ import {
 } from "solid-js";
 
 import { runtimeFeatureVisibility } from "./runtime-feature-visibility";
+import { normalizeRemoteContextFields } from "./llm-settings-normalization";
 import "./workbench.css";
 import "./appearance-workbench.css";
 import "./workspace-browser.css";
@@ -1469,7 +1470,7 @@ function LlmSettingsPage(props: {
   const [modelName, setModelName] = createSignal("");
   const [protocol, setProtocol] = createSignal<ProviderProtocolKind>("chat_completions");
   const [compatibilityProfileId, setCompatibilityProfileId] = createSignal("openai-strict");
-  const [reasoningSummary, setReasoningSummary] = createSignal<ReasoningSummaryMode>("auto");
+  const [reasoningSummary, setReasoningSummary] = createSignal<ReasoningSummaryMode>("none");
   const [remoteCompaction, setRemoteCompaction] = createSignal(false);
   const [maxInput, setMaxInput] = createSignal(0);
   const [maxOutput, setMaxOutput] = createSignal(0);
@@ -1487,16 +1488,14 @@ function LlmSettingsPage(props: {
     setModelName(next.modelName);
     setProtocol(props.providerExtensionsEnabled ? next.protocol : "chat_completions");
     setCompatibilityProfileId(next.compatibilityProfileId);
-    setReasoningSummary(
-      props.providerExtensionsEnabled && props.providerRemoteContextEnabled
-        ? next.reasoningSummary
-        : "none",
+    const remoteContext = normalizeRemoteContextFields(
+      next.protocol,
+      props.providerExtensionsEnabled && props.providerRemoteContextEnabled,
+      next.reasoningSummary,
+      next.remoteCompaction,
     );
-    setRemoteCompaction(
-      props.providerExtensionsEnabled && props.providerRemoteContextEnabled
-        ? next.remoteCompaction
-        : false,
-    );
+    setReasoningSummary(remoteContext.reasoningSummary);
+    setRemoteCompaction(remoteContext.remoteCompaction);
     setMaxInput(next.maxInputTokens);
     setMaxOutput(next.maxOutputTokens);
     setStructuredOutputMode(next.structuredOutputMode);
@@ -1504,6 +1503,12 @@ function LlmSettingsPage(props: {
     setClearKey(false);
   }
   function input(): LlmSettingsInput {
+    const remoteContext = normalizeRemoteContextFields(
+      protocol(),
+      props.providerExtensionsEnabled && props.providerRemoteContextEnabled,
+      reasoningSummary(),
+      remoteCompaction(),
+    );
     return {
       baseUrl: baseUrl(),
       modelName: modelName(),
@@ -1512,8 +1517,8 @@ function LlmSettingsPage(props: {
       providerEndpointId: view()?.providerEndpointId ?? null,
       providerAccountId: view()?.providerAccountId ?? null,
       embeddingModelName: "",
-      reasoningSummary: props.providerRemoteContextEnabled ? reasoningSummary() : "none",
-      remoteCompaction: props.providerRemoteContextEnabled ? remoteCompaction() : false,
+      reasoningSummary: remoteContext.reasoningSummary,
+      remoteCompaction: remoteContext.remoteCompaction,
       maxInputTokens: maxInput(),
       maxOutputTokens: maxOutput(),
       structuredOutputMode: structuredOutputMode(),

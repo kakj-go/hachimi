@@ -57,7 +57,6 @@ export function installSessionScrollVisualTest(installTauriMocks: InstallTauriMo
     expect(optionsBox!.x + optionsBox!.width).toBeLessThanOrEqual(sendBox!.x);
     await expect(page.locator("html")).toHaveJSProperty("scrollWidth", 720);
 
-    await page.getByRole("button", { name: "Sidebar" }).click();
     await expect(page.locator(".project-sidebar")).toBeHidden();
     await chip.click();
     await expect(chip).toHaveCount(0);

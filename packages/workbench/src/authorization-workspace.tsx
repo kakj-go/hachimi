@@ -37,6 +37,7 @@ export function AuthorizationWorkspace<T extends string>(props: {
               variant="ghost"
               class="authorization-workspace-nav-item"
               classList={{ selected: props.value === section.value }}
+              data-testid={`authorization-nav-${section.value}`}
               aria-current={props.value === section.value ? "page" : undefined}
               disabled={props.disabled}
               title={section.label}

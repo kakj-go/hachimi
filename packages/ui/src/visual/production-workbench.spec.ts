@@ -1013,7 +1013,6 @@ export async function installTauriMocks(
     },
   );
 }
-
 installSessionScrollVisualTest(installTauriMocks);
 installEnvironmentSummaryVisualTests(installTauriMocks);
 installSettingsLayoutVisualTests(installTauriMocks);
@@ -1485,7 +1484,7 @@ test("production navigation and theme mode remain interactive", async ({ page })
   await installTauriMocks(page);
   await page.goto("http://127.0.0.1:1420/workbench.html?route=home");
   await page.getByTestId("workbench-open-settings").click();
-  await page.getByRole("button", { name: "配置" }).click();
+  await page.getByTestId("settings-nav-llm").click();
   await expect(page.getByRole("heading", { name: "大语言模型" })).toBeVisible();
   await page.getByRole("button", { name: "外观" }).click();
   await page.getByRole("button", { name: "浅色" }).click();

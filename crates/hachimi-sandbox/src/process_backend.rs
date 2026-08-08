@@ -359,6 +359,7 @@ mod tests {
                     spawn: true,
                     interactive: false,
                     allowed_commands: Vec::new(),
+                    unrestricted_commands: false,
                 },
                 browser: Default::default(),
                 computer: ComputerGrant::default(),

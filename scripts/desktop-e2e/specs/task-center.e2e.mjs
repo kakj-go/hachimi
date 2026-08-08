@@ -271,10 +271,10 @@ async function checkOptionContaining(labelText) {
   await browser.waitUntil(
     async () =>
       browser.execute((text) => {
-        const label = [...document.querySelectorAll("label")].find((candidate) =>
-          candidate.textContent?.includes(text),
+        const candidate = [...document.querySelectorAll("label, .skill-permission-row")].find(
+          (element) => element.textContent?.includes(text),
         );
-        const input = label?.querySelector('input[type="checkbox"]');
+        const input = candidate?.querySelector('input[type="checkbox"]');
         if (!(input instanceof HTMLInputElement)) return false;
         input.scrollIntoView({ block: "center", inline: "nearest" });
         if (!input.checked) input.click();
@@ -550,7 +550,7 @@ describe("Hachimi scheduled Agent tasks", () => {
       '[data-testid="task-prompt"]',
       "[desktop-e2e:office-skills] use the document, spreadsheet, presentation, PDF and file organizer Skills to create and validate artifacts, then deliver the PDF",
     );
-    await clickWhenReady(".task-advanced-section > summary");
+    await clickWhenReady('[data-testid="authorization-nav-permissions"]');
     await clickWhenReady('[data-testid="task-permission-writable"]');
     await browser.waitUntil(
       async () =>
@@ -558,6 +558,7 @@ describe("Hachimi scheduled Agent tasks", () => {
         "true",
       { timeout: 10_000, timeoutMsg: "Scheduled Office permission did not become writable" },
     );
+    await clickWhenReady('[data-testid="authorization-nav-skills"]');
     for (const skill of [
       "office-documents",
       "office-spreadsheets",
@@ -567,6 +568,7 @@ describe("Hachimi scheduled Agent tasks", () => {
     ]) {
       await checkOptionContaining(skill);
     }
+    await clickWhenReady('[data-testid="authorization-nav-extensions"]');
     for (const tool of [
       "create_document",
       "create_spreadsheet",
@@ -787,8 +789,9 @@ describe("Hachimi scheduled Agent tasks", () => {
       '[data-testid="task-prompt"]',
       "[desktop-e2e:office-interruption] create one document and recover after MCP interruption",
     );
-    await clickWhenReady(".task-advanced-section > summary");
+    await clickWhenReady('[data-testid="authorization-nav-permissions"]');
     await clickWhenReady('[data-testid="task-permission-writable"]');
+    await clickWhenReady('[data-testid="authorization-nav-extensions"]');
     await checkOptionContaining(`${serverName} / create_document`);
     await clickWhenReady('[data-testid="task-save"]');
     await waitForSchedule(name);
@@ -821,6 +824,17 @@ describe("Hachimi scheduled Agent tasks", () => {
       `//*[contains(@class, "mcp-server-row") and contains(., "${serverName}")]//*[contains(@class, "mcp-server-select")]`,
     );
     await clickWhenReady('.mcp-detail-header [data-component="switch-root"]');
+    await browser.waitUntil(
+      async () =>
+        browser.execute(
+          () =>
+            document.querySelector('.mcp-detail-header input[type="checkbox"]')?.checked === true,
+        ),
+      {
+        timeout: 20_000,
+        timeoutMsg: "Interrupted Office MCP did not restart before recovery",
+      },
+    );
     await waitForDisplayed('[data-testid="mcp-tool-create_document"]');
     await clickWhenReady(".back-home");
     await openTaskCenter();
@@ -856,7 +870,7 @@ describe("Hachimi scheduled Agent tasks", () => {
     );
     await selectFieldOption('[data-testid="task-context"]', "现有对话续接");
     await selectFieldOption('[data-testid="task-session-continuation"]', "Connector Browser");
-    await clickWhenReady(".task-advanced-section > summary");
+    await clickWhenReady('[data-testid="authorization-nav-extensions"]');
     await waitForDisplayed('[data-testid="task-connectors"]');
     await checkOptionContaining("search");
     await checkOptionContaining("启用无人值守 Browser");

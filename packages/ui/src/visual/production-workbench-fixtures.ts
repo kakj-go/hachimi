@@ -159,12 +159,17 @@ export const workbenchEnvironmentFixture = {
     canHandoff: true,
     blockedReason: null,
   },
-  activity: {
-    kind: "browser",
-    browser_tab_id: "browser-tab-ui-unification",
-    run_id: "run-ui-unification",
-    domain: "learn.chatgpt.com",
-  },
+  activities: [
+    {
+      kind: "browser",
+      lease_id: "browser-lease-ui-unification",
+      surface: "embedded",
+      browser_tab_id: "browser-tab-ui-unification",
+      browser_session_id: "browser-ui-unification",
+      run_id: "run-ui-unification",
+      domain: "learn.chatgpt.com",
+    },
+  ],
   sources: [
     {
       id: "source-upload-visual",
@@ -650,6 +655,50 @@ export const hostSettingsMocks = {
   list_connector_accounts: [],
   list_integration_providers: integrationMocks.providers,
   list_enterprise_integrations: integrationMocks.accounts,
+  get_session_permission_config: {
+    policy: {
+      level: "read_only",
+      rules: {
+        fileSystem: [],
+        fileSystemUnrestrictedRead: false,
+        fileSystemUnrestrictedWrite: false,
+        network: {
+          enabled: false,
+          unrestrictedHosts: false,
+          hosts: [],
+          protocols: [],
+        },
+        process: {
+          spawn: false,
+          interactive: false,
+          unrestrictedCommands: false,
+          allowedCommands: [],
+        },
+        browser: {
+          observe: false,
+          act: false,
+          upload: false,
+          download: false,
+          cookieStorage: false,
+          cdp: false,
+          unrestrictedOrigins: false,
+          origins: [],
+        },
+        computer: {
+          observe: false,
+          act: false,
+          unrestrictedTargets: false,
+          allowedApplications: [],
+          maxActions: null,
+        },
+        mcp: [],
+        connectors: [],
+      },
+      revision: 0,
+    },
+    skillIds: [],
+    extraAuthorizations: [],
+  },
   get_gateway_health: integrationMocks.gatewayHealth,
   get_runtime_health: {
     components: [

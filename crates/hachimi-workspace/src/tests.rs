@@ -206,6 +206,7 @@ async fn stale_generation_guard_fails_before_restricted_worker_dispatch() {
             spawn: true,
             interactive: false,
             allowed_commands: Vec::new(),
+            unrestricted_commands: false,
         },
         browser: Default::default(),
         computer: ComputerGrant::default(),

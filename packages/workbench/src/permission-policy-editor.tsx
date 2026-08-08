@@ -87,6 +87,20 @@ export function PermissionPolicyEditor(props: {
     }));
   }
 
+  async function chooseForegroundApplication() {
+    const candidate = await commands.choosePermissionForegroundApplication();
+    return candidate
+      ? {
+          identityHash: candidate.app.identityHash,
+          displayName: candidate.app.displayName,
+          executableName: candidate.app.executableName,
+          executablePath: candidate.app.executablePath,
+          iconPngBase64: candidate.iconPngBase64,
+          windowCount: candidate.windowCount ?? 0,
+        }
+      : null;
+  }
+
   return (
     <SharedPermissionPolicyEditor
       value={props.value}
@@ -98,19 +112,7 @@ export function PermissionPolicyEditor(props: {
       chooseFiles={(root) => commands.choosePermissionFiles(root)}
       searchCommands={(prefix) => commands.searchPermissionCommands(prefix)}
       listApplications={listApplications}
-      chooseForegroundApplication={async () => {
-        const candidate = await commands.choosePermissionForegroundApplication();
-        return candidate
-          ? {
-              identityHash: candidate.app.identityHash,
-              displayName: candidate.app.displayName,
-              executableName: candidate.app.executableName,
-              executablePath: candidate.app.executablePath,
-              iconPngBase64: candidate.iconPngBase64,
-              windowCount: candidate.windowCount ?? 0,
-            }
-          : null;
-      }}
+      chooseForegroundApplication={chooseForegroundApplication}
     />
   );
 }

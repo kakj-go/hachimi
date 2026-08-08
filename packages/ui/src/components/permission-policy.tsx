@@ -1,4 +1,4 @@
-import { For, Show, createMemo, createSignal, type JSX } from "solid-js";
+import { For, Show, createEffect, createMemo, createSignal, type JSX } from "solid-js";
 import { Search, SlidersHorizontal, Trash2, X } from "lucide-solid";
 import { Button } from "./button";
 import { Dialog } from "./dialog";
@@ -893,8 +893,13 @@ function FileDetailDialog(props: {
   onClose: () => void;
   onSave: (patch: Partial<PermissionFileRule>) => void;
 }) {
-  const [globs, setGlobs] = createSignal(props.rule?.globs.join("\n") ?? "");
-  const [files, setFiles] = createSignal(props.rule?.files ?? []);
+  const [globs, setGlobs] = createSignal("");
+  const [files, setFiles] = createSignal<string[]>([]);
+  createEffect(() => {
+    const rule = props.rule;
+    setGlobs(rule?.globs.join("\n") ?? "");
+    setFiles(rule?.files ?? []);
+  });
   async function chooseFiles() {
     const root = props.rule?.roots[0];
     if (!root || !props.chooseFiles) return;

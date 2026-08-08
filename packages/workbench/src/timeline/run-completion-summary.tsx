@@ -40,6 +40,7 @@ export function TimelineRunCompletion(props: {
             <Button
               size="small"
               data-testid="workbench-review-run-changes"
+              data-run-id={summary().runId}
               onClick={() => props.onOpenDiff(summary().runId)}
             >
               {zh() ? "审核" : "Review"}
@@ -54,6 +55,9 @@ export function TimelineRunCompletion(props: {
                 <li>
                   <Button
                     type="button"
+                    data-testid="workbench-review-run-file"
+                    data-run-id={summary().runId}
+                    data-path={file.path}
                     onClick={() => props.onOpenDiff(summary().runId, file.path)}
                   >
                     <code>{file.path}</code>
@@ -80,6 +84,9 @@ export function TimelineRunCompletion(props: {
                     <li>
                       <Button
                         type="button"
+                        data-testid="workbench-review-run-file"
+                        data-run-id={summary().runId}
+                        data-path={file.path}
                         onClick={() => props.onOpenDiff(summary().runId, file.path)}
                       >
                         <code>{file.path}</code>

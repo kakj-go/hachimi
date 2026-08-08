@@ -95,7 +95,7 @@ impl Default for LlmSettings {
             provider_endpoint_id: None,
             provider_account_id: None,
             embedding_model_name: String::new(),
-            reasoning_summary: ReasoningSummaryMode::Auto,
+            reasoning_summary: ReasoningSummaryMode::None,
             remote_compaction: false,
             max_input_tokens: 1_050_000,
             max_output_tokens: 128_000,
@@ -195,4 +195,18 @@ pub struct LlmTestResult {
     pub latency_ms: u32,
     pub response_preview: String,
     pub capability_probe: ProviderCapabilityProbe,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_chat_completions_settings_disable_response_only_features() {
+        let settings = LlmSettings::default();
+
+        assert_eq!(settings.protocol, ProviderProtocolKind::ChatCompletions);
+        assert_eq!(settings.reasoning_summary, ReasoningSummaryMode::None);
+        assert!(!settings.remote_compaction);
+    }
 }

@@ -146,16 +146,20 @@ export function HostDomainSettingsPage(props: {
   }
 
   async function configureExtension(browser: SystemBrowserKind) {
+    const opensExtensionStore = Boolean(
+      browserSettings()?.detectedBrowsers.find((entry) => entry.kind === browser)
+        ?.extensionStoreUrl,
+    );
+    const useChinese = zh();
     await run("pairing", async () => {
       await commands.installBrowserExtension(browser);
       const browserName = browser === "chrome" ? "Chrome" : "Edge";
       setNotice(
-        browserSettings()?.detectedBrowsers.find((entry) => entry.kind === browser)
-          ?.extensionStoreUrl
-          ? zh()
+        opensExtensionStore
+          ? useChinese
             ? `已打开 ${browserName} 扩展商店。完成扩展安装后，Hachimi 会检测连接并请求一次授权。`
             : `The ${browserName} extension store is open. After installing the extension, Hachimi will detect the connection and request authorization once.`
-          : zh()
+          : useChinese
             ? `已打开扩展文件夹。请在 ${browserName} 的扩展管理页开启开发者模式，选择“加载已解压的扩展”，然后选择该文件夹。`
             : `The extension folder is open. In ${browserName}, open the extensions page, enable Developer mode, choose Load unpacked, and select this folder.`,
       );

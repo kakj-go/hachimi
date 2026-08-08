@@ -100,7 +100,9 @@ export function WorkspaceBrowser(props: {
     const run = props.initialDiffRunId
       ? props.snapshot.runs.find((candidate) => candidate.id === props.initialDiffRunId)
       : latestRun();
-    if (diffScope() === "run" && run) return { kind: "run", run_id: run.id };
+    if (diffScope() === "run" && (run || props.initialDiffRunId)) {
+      return { kind: "run", run_id: run?.id ?? props.initialDiffRunId! };
+    }
     const currentCheckoutId = checkoutId();
     if (diffScope() === "session" && currentCheckoutId) {
       return {

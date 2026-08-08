@@ -245,10 +245,7 @@ function TimelineEntry(props: {
       ? props.snapshot.planConfirmations.find((candidate) => candidate.planId === plan.id)
       : undefined;
     return (
-      <article
-        class="timeline-plan-card"
-        data-status={confirmation?.status ?? item.status}
-      >
+      <article class="timeline-plan-card" data-status={confirmation?.status ?? item.status}>
         <header>
           <span>
             <Lightbulb size={17} />

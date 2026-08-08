@@ -332,9 +332,7 @@ export function HomePage(props: {
         .toReversed()
         .find((candidate) => candidate.status === "pending");
       return confirmation
-        ? snapshot?.planDocuments.find(
-            (plan) => plan.id === confirmation.planId,
-          )
+        ? snapshot?.planDocuments.find((plan) => plan.id === confirmation.planId)
         : undefined;
     })(),
   );

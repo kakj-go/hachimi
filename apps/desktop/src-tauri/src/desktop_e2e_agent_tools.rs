@@ -688,7 +688,7 @@ fn tool_content<'a>(request: &'a ModelRequest, name: &str) -> Option<&'a str> {
 }
 
 fn tool_json(request: &ModelRequest, name: &str) -> Option<serde_json::Value> {
-    serde_json::from_str(tool_content(request, name)?).ok()
+    parse_tool_json(tool_content(request, name)?)
 }
 
 fn tool_contents<'a>(request: &'a ModelRequest, name: &str) -> Vec<&'a str> {
@@ -703,8 +703,15 @@ fn tool_contents<'a>(request: &'a ModelRequest, name: &str) -> Vec<&'a str> {
 fn tool_json_values(request: &ModelRequest, name: &str) -> Vec<serde_json::Value> {
     tool_contents(request, name)
         .into_iter()
-        .filter_map(|content| serde_json::from_str(content).ok())
+        .filter_map(parse_tool_json)
         .collect()
+}
+
+fn parse_tool_json(content: &str) -> Option<serde_json::Value> {
+    serde_json::from_str(content).ok().or_else(|| {
+        let (_, payload) = content.split_once('\n')?;
+        serde_json::from_str(payload).ok()
+    })
 }
 
 fn tool_call(id: &str, name: &str, arguments: serde_json::Value) -> Response {

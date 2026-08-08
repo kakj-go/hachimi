@@ -5,8 +5,10 @@ use super::*;
 #[tokio::test]
 async fn permission_config_persists_policy_and_skill_ids_together() {
     let (store, _) = seeded_store().await;
-    let mut policy = AgentPermissionPolicy::default();
-    policy.revision = 3;
+    let policy = AgentPermissionPolicy {
+        revision: 3,
+        ..AgentPermissionPolicy::default()
+    };
     let skills = vec![
         SkillId::from("office-documents"),
         SkillId::from("office-pdf"),
@@ -369,7 +371,7 @@ async fn fresh_database_applies_all_registered_kernel_migrations() {
         .fetch_one(store.pool())
         .await
         .expect("migration count");
-    assert_eq!(migration_count, 41);
+    assert_eq!(migration_count, 42);
 
     let hardened_outbox_columns: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM pragma_table_info('channel_outbox') WHERE name IN ('authorization_revision', 'account_config_revision', 'run_id', 'final_item_id', 'part_index', 'dispatched_at_ms')",

@@ -121,9 +121,6 @@ export function TaskCenter(props: {
   const [selectedConnectorActions, setSelectedConnectorActions] = createSignal<
     Record<string, string[]>
   >({});
-  const [selectedReadOnlyConnectorActions, setSelectedReadOnlyConnectorActions] = createSignal<
-    Record<string, string[]>
-  >({});
   const [maxOccurrences, setMaxOccurrences] = createSignal("");
   const [endAt, setEndAt] = createSignal("");
   const [stopAfterSuccess, setStopAfterSuccess] = createSignal(false);
@@ -241,7 +238,6 @@ export function TaskCenter(props: {
     setSelectedSkillIds([]);
     setSelectedMcpTools([]);
     setSelectedConnectorActions({});
-    setSelectedReadOnlyConnectorActions({});
     setMaxOccurrences("");
     setEndAt("");
     setStopAfterSuccess(false);
@@ -410,14 +406,6 @@ export function TaskCenter(props: {
         (schedule.hostRevisionSnapshot?.connectors ?? []).map((selection) => [
           selection.accountId,
           [...selection.allowedActions],
-        ]),
-      ),
-    );
-    setSelectedReadOnlyConnectorActions(
-      Object.fromEntries(
-        schedule.permissionPolicy.rules.connectors.map((rule) => [
-          rule.accountId,
-          [...rule.readOnlyActions],
         ]),
       ),
     );
@@ -1005,9 +993,6 @@ export function TaskCenter(props: {
                 zh={zh()}
                 onChange={(policy) => {
                   setPermissionPolicy(policy);
-                  if (policy.level === "read_only") {
-                    setSelectedReadOnlyConnectorActions({ ...selectedConnectorActions() });
-                  }
                 }}
               />
             </div>
@@ -1132,15 +1117,6 @@ export function TaskCenter(props: {
                                         setSelectedConnectorActions((current) => {
                                           const values = current[entry.account.id] ?? [];
                                           const next = checked
-                                            ? [...new Set([...values, action.name])]
-                                            : values.filter((value) => value !== action.name);
-                                          return { ...current, [entry.account.id]: next };
-                                        });
-                                        setSelectedReadOnlyConnectorActions((current) => {
-                                          const values = current[entry.account.id] ?? [];
-                                          const shouldReadOnly =
-                                            checked && action.effect === "read_only";
-                                          const next = shouldReadOnly
                                             ? [...new Set([...values, action.name])]
                                             : values.filter((value) => value !== action.name);
                                           return { ...current, [entry.account.id]: next };

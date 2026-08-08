@@ -106,6 +106,7 @@ pub(crate) fn deterministic_e2e_provider_enabled() -> bool {
     false
 }
 
+#[cfg(all(debug_assertions, feature = "desktop-e2e"))]
 pub(crate) const BLOCKING_EXTERNAL_EFFECT_TOOL: &str = "desktop_e2e.blocking_external_effect";
 
 #[cfg(all(debug_assertions, feature = "desktop-e2e"))]
@@ -150,10 +151,10 @@ pub(crate) fn blocking_external_effect_tool()
 -> Option<std::sync::Arc<dyn hachimi_agent::ToolExecutor>> {
     #[cfg(all(debug_assertions, feature = "desktop-e2e"))]
     {
-        return deterministic_e2e_provider_enabled().then(|| {
+        deterministic_e2e_provider_enabled().then(|| {
             std::sync::Arc::new(BlockingExternalEffectTool)
                 as std::sync::Arc<dyn hachimi_agent::ToolExecutor>
-        });
+        })
     }
     #[cfg(not(all(debug_assertions, feature = "desktop-e2e")))]
     None
