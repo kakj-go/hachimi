@@ -6,18 +6,16 @@ Local deterministic verification for this candidate includes Compaction retentio
 
 The opt-in `test:desktop:stress` path uses a real managed Chromium through the BrowserHost API and a dedicated Win32 Computer fixture, with a 900-second maximum and a 2.5 GiB resource fuse. It is intended for low-resource short runs; the 600-second release soak is deliberately not part of this stage.
 
-### Environment Blocked / Not Planned
+### External Verification Pending
 
-| Status                | Scope                                          | Disclosure                                                                                                                                                 |
-| --------------------- | ---------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `Environment Blocked` | Real Provider and Forge staging                | No staging credentials, test repositories, or external accounts were available; no real requests were run.                                                 |
-| `Environment Blocked` | Windows identity gates                         | Standard-user, elevated, security-desktop, and high-integrity environments were unavailable.                                                               |
-| `Environment Blocked` | Chrome/CEF and real Profile                    | No isolated real-user Chrome Profile or CEF/extension pairing was available.                                                                               |
-| `Environment Blocked` | Five-channel and enterprise organization gates | No real organizations, callback domains, credentials, or administrator grants were available.                                                              |
-| `Not Planned`         | Agent Heartbeat                                | No periodic wake, `HEARTBEAT_OK`, quiet-hours, or proactive notification feature is in scope.                                                              |
-| `Not Planned`         | Plugin Marketplace and third-party management  | No remote Catalog, Marketplace discovery, third-party installation, or plugin product management is in scope; built-in Bundle lifecycle remains available. |
+| Status                | Scope                                          | Disclosure                                                                                                 |
+| --------------------- | ---------------------------------------------- | ---------------------------------------------------------------------------------------------------------- |
+| `Environment Blocked` | Real Provider and Forge staging                | No staging credentials, test repositories, or external accounts were available; no real requests were run. |
+| `Environment Blocked` | Windows identity gates                         | Standard-user, elevated, security-desktop, and high-integrity environments were unavailable.               |
+| `Environment Blocked` | Chrome/CEF and real Profile                    | No isolated real-user Chrome Profile or CEF/extension pairing was available.                               |
+| `Environment Blocked` | Five-channel and enterprise organization gates | No real organizations, callback domains, credentials, or administrator grants were available.              |
 
-`Environment Blocked` means not run because the required environment was unavailable; it is not a test failure. `Not Planned` means intentionally outside the current product scope and is not a release blocker.
+`Environment Blocked` means not run because the required environment was unavailable; it is not a test failure.
 
 Official packages include the default VRM whose license prohibits personal and corporate commercial use, so these packages are non-commercial distributions. The Hachimi source code remains Apache-2.0; removing or replacing that asset does not change the source-code license.
 

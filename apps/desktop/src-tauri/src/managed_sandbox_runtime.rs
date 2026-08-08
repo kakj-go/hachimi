@@ -526,10 +526,10 @@ fn executable_name(name: &str) -> String {
 fn packaged_sidecar_path(resource_root: &Path, name: &str) -> Result<PathBuf, String> {
     let file_name = executable_name(name);
     let mut candidates = vec![resource_root.join("internal-runtime").join(&file_name)];
-    if let Ok(executable) = std::env::current_exe() {
-        if let Some(parent) = executable.parent() {
-            candidates.push(parent.join(&file_name));
-        }
+    if let Ok(executable) = std::env::current_exe()
+        && let Some(parent) = executable.parent()
+    {
+        candidates.push(parent.join(&file_name));
     }
     candidates
         .into_iter()

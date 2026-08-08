@@ -1,6 +1,8 @@
 # Workbench Windows 验收清单
 
-更新时间：2026-08-02
+更新时间：2026-08-08
+
+本文记录 Windows 发布环境仍需执行的验收项。产品功能状态统一见 [路线图](ROADMAP.md)。
 
 ## 普通 Desktop E2E
 
@@ -66,4 +68,4 @@ pnpm test:windows:release
 
 失败产物只保留脱敏截图、WebDriver 日志和运行状态；不得保存 Prompt、secret、完整 Tool 输出或用户路径。
 
-当前 portable 已构建到 `target/portable/Hachimi-portable.zip`，并包含 Desktop、Workspace Worker、setup/launcher/canary/attest 与五个 Built-in Office Skill。当前非管理员会话运行真实 setup 时在受信 Git runtime ACL 阶段以 Windows error 5 fail closed；该结果不视为管理员验收通过。
+便携候选必须从对应 clean commit 重新构建并记录 SHA-256；工作目录中的临时产物不作为发布证据。非管理员会话运行需要提升权限的 setup 而 fail closed，不视为管理员验收通过。

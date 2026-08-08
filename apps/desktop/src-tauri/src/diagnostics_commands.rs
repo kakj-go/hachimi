@@ -37,9 +37,9 @@ pub(super) fn open_logs_directory(
 ) -> Result<(), CommandError> {
     state.authorize(&window, ControlMethod::SettingsRead)?;
     let directory = &state.log_directory;
-    std::fs::create_dir_all(&directory)
+    std::fs::create_dir_all(directory)
         .map_err(|error| CommandError::operation("log_directory_create_failed", error))?;
-    open_directory(&directory)
+    open_directory(directory)
         .map_err(|error| CommandError::operation("log_directory_open_failed", error))
 }
 
