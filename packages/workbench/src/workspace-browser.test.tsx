@@ -21,11 +21,13 @@ vi.mock("@hachimi/ui", () => {
     AlertTriangle: Icon,
     Button,
     Check: Icon,
+    Code2: Icon,
     ComposerInput: (props: JSX.TextareaHTMLAttributes<HTMLTextAreaElement> & { label: string }) => (
       <textarea {...props} aria-label={props.label} />
     ),
     ChevronDown: Icon,
     File: Icon,
+    FileText: Icon,
     FolderOpen: Icon,
     GitBranch: Icon,
     GitFork: Icon,
@@ -56,7 +58,9 @@ function snapshot(): WorkbenchSessionSnapshot {
     events: [],
     transcript: [],
     pendingApprovals: [],
-    proposedPlans: [],
+    planDocuments: [],
+    planConfirmations: [],
+    executionPlans: [],
     artifacts: [],
   } as unknown as WorkbenchSessionSnapshot;
 }
@@ -333,6 +337,49 @@ describe("WorkspaceBrowser command adapter", () => {
       }),
     );
     expect(host.textContent).not.toContain("Unsaved");
+    dispose();
+  });
+
+  it("renders Markdown files and keeps a source editing mode", async () => {
+    const adapter = createPort();
+    vi.mocked(adapter.port.listWorkspaceFiles).mockResolvedValue({
+      ...filePage(),
+      entries: [
+        {
+          ...filePage().entries[0]!,
+          path: "README.md",
+          name: "README.md",
+        },
+      ],
+    });
+    vi.mocked(adapter.port.readWorkspaceFileChunk).mockResolvedValue({
+      path: "README.md",
+      offset: 0,
+      nextOffset: 28,
+      byteSize: 28,
+      eof: true,
+      binary: false,
+      dataBase64: "",
+      utf8Text: "# Project\n\n```ts\nconst ok = true;\n```",
+      etag: `sha256:${"a".repeat(64)}`,
+    });
+    const { host, dispose } = mount(adapter.port);
+    await settle();
+    [...host.querySelectorAll("button")]
+      .find((button) => button.textContent?.includes("README.md"))
+      ?.click();
+    await settle();
+
+    expect(host.querySelector(".workspace-markdown-preview h1")?.textContent).toBe("Project");
+    expect(host.querySelector(".workspace-markdown-preview pre code")?.textContent).toContain(
+      "const ok = true;",
+    );
+    expect(host.querySelector('[data-testid="workspace-editor-fallback"]')).toBeNull();
+
+    host.querySelector<HTMLButtonElement>('[aria-label="Edit Markdown source"]')?.click();
+    expect(
+      host.querySelector<HTMLTextAreaElement>('[data-testid="workspace-editor-fallback"]')?.value,
+    ).toContain("# Project");
     dispose();
   });
 

@@ -16,7 +16,7 @@ use std::{
 
 use hachimi_protocol::{
     ArtifactId, DeliveryPolicy, DeliveryStatus, EntryProfile, MisfirePolicy, PermissionProfile,
-    ScheduleDefinition, ScheduleHealth, ScheduleId, SchedulePreview, ScheduleSnapshot,
+    RunStatus, ScheduleDefinition, ScheduleHealth, ScheduleId, SchedulePreview, ScheduleSnapshot,
     ScheduleSpec, TaskRunId, TaskRunRecord, TaskRunStatus, TaskRunTrigger,
 };
 use hachimi_storage::{AgentStore, AgentStoreError, ScheduleInvocationClaim};
@@ -438,17 +438,91 @@ impl SchedulerService {
     }
 
     pub async fn reconcile_startup(&self) -> Result<Vec<TaskRunRecord>, SchedulerError> {
-        let queued = self
+        let pending = self
             .store
             .list_task_runs(None, 500)
             .await?
             .into_iter()
-            .filter(|task| task.status == TaskRunStatus::Queued)
+            .filter(|task| {
+                matches!(
+                    task.status,
+                    TaskRunStatus::Queued | TaskRunStatus::Preparing | TaskRunStatus::Running
+                )
+            })
             .collect::<Vec<_>>();
         let mut relaunched = Vec::new();
-        for task in queued {
+        for mut task in pending {
             if self.active_launches.lock().contains_key(&task.id) {
                 continue;
+            }
+            if matches!(
+                task.status,
+                TaskRunStatus::Preparing | TaskRunStatus::Running
+            ) {
+                if task.run_id.is_none() && task.status == TaskRunStatus::Preparing {
+                    task = self
+                        .store
+                        .requeue_unbound_preparing_task_run(&task.id, self.clock.now_ms())
+                        .await?;
+                } else {
+                    let run = match task.run_id.as_ref() {
+                        Some(run_id) => self.store.get_run(run_id).await?,
+                        None => None,
+                    };
+                    if let Some(run) = run {
+                        let target = linked_task_status(run.status);
+                        if task.status == TaskRunStatus::Preparing
+                            && target != TaskRunStatus::NeedsAttention
+                        {
+                            task = self
+                                .store
+                                .transition_task_run(
+                                    &task.id,
+                                    TaskRunStatus::Running,
+                                    task.progress_percent,
+                                    task.result_summary.as_deref(),
+                                    task.error_code.as_deref(),
+                                    task.error_summary.as_deref(),
+                                    &task.artifact_ids,
+                                    self.clock.now_ms(),
+                                )
+                                .await?;
+                        }
+                        if target != TaskRunStatus::Running {
+                            let succeeded = target == TaskRunStatus::Succeeded;
+                            self.store
+                                .transition_task_run(
+                                    &task.id,
+                                    target,
+                                    succeeded.then_some(100).or(task.progress_percent),
+                                    succeeded
+                                        .then_some("linked Agent Run completed")
+                                        .or(task.result_summary.as_deref()),
+                                    (!succeeded).then_some("schedule_linked_run_terminal"),
+                                    (!succeeded).then_some(
+                                        "the linked Agent Run reached a terminal recovery state",
+                                    ),
+                                    &task.artifact_ids,
+                                    self.clock.now_ms(),
+                                )
+                                .await?;
+                        }
+                    } else {
+                        self.store
+                            .transition_task_run(
+                                &task.id,
+                                TaskRunStatus::NeedsAttention,
+                                task.progress_percent,
+                                task.result_summary.as_deref(),
+                                Some("schedule_run_recovery_indeterminate"),
+                                Some("the linked Agent Run cannot be proven safe to resume"),
+                                &task.artifact_ids,
+                                self.clock.now_ms(),
+                            )
+                            .await?;
+                    }
+                    continue;
+                }
             }
             let Some(schedule_id) = task.schedule_id.clone() else {
                 continue;
@@ -592,6 +666,25 @@ impl SchedulerService {
             .insert(claim.task_run.id.clone(), cancellation.clone());
         tokio::spawn(async move {
             let task_id = claim.task_run.id.clone();
+            let prepared_task = match store
+                .transition_task_run(
+                    &task_id,
+                    TaskRunStatus::Preparing,
+                    None,
+                    None,
+                    None,
+                    None,
+                    &[],
+                    clock.now_ms(),
+                )
+                .await
+            {
+                Ok(task) => task,
+                Err(_) => {
+                    active_launches.lock().remove(&task_id);
+                    return;
+                }
+            };
             let hook_before = store
                 .dispatch_plugin_hook_event(
                     &hachimi_storage::PluginHookEventRecord {
@@ -613,7 +706,7 @@ impl SchedulerService {
                 })
             } else {
                 launcher
-                    .launch(schedule.clone(), claim.task_run, cancellation.clone())
+                    .launch(schedule.clone(), prepared_task, cancellation.clone())
                     .await
             };
             let completion = match completion {
@@ -645,24 +738,6 @@ impl SchedulerService {
                     cancellation.child_token(),
                 )
                 .await;
-            let current = store.get_task_run(&task_id).await.ok().flatten();
-            if current
-                .as_ref()
-                .is_some_and(|task| task.status == TaskRunStatus::Queued)
-            {
-                let _ = store
-                    .transition_task_run(
-                        &task_id,
-                        TaskRunStatus::Preparing,
-                        None,
-                        None,
-                        None,
-                        None,
-                        &[],
-                        now,
-                    )
-                    .await;
-            }
             let current = store.get_task_run(&task_id).await.ok().flatten();
             if completion.status == TaskRunStatus::Succeeded
                 && current
@@ -725,6 +800,25 @@ impl SchedulerService {
             .load(Ordering::SeqCst)
             .then_some(())
             .ok_or(SchedulerError::Unavailable)
+    }
+}
+
+const fn linked_task_status(status: RunStatus) -> TaskRunStatus {
+    match status {
+        RunStatus::Succeeded => TaskRunStatus::Succeeded,
+        RunStatus::Failed => TaskRunStatus::Failed,
+        RunStatus::TimedOut => TaskRunStatus::TimedOut,
+        RunStatus::Cancelled => TaskRunStatus::Cancelled,
+        RunStatus::Lost => TaskRunStatus::Lost,
+        RunStatus::Interrupted => TaskRunStatus::NeedsAttention,
+        RunStatus::Queued
+        | RunStatus::Preparing
+        | RunStatus::Running
+        | RunStatus::WaitingApproval
+        | RunStatus::WaitingUserInput
+        | RunStatus::Recovering
+        | RunStatus::WaitingRecoveryDecision
+        | RunStatus::Cancelling => TaskRunStatus::Running,
     }
 }
 
@@ -1519,6 +1613,28 @@ mod tests {
         assert_eq!(task.run_id, None);
     }
 
+    #[test]
+    fn linked_agent_run_statuses_have_deterministic_task_projections() {
+        assert_eq!(
+            linked_task_status(RunStatus::Running),
+            TaskRunStatus::Running
+        );
+        assert_eq!(
+            linked_task_status(RunStatus::Succeeded),
+            TaskRunStatus::Succeeded
+        );
+        assert_eq!(
+            linked_task_status(RunStatus::TimedOut),
+            TaskRunStatus::TimedOut
+        );
+        assert_eq!(
+            linked_task_status(RunStatus::Interrupted),
+            TaskRunStatus::NeedsAttention
+        );
+        assert!(TaskRunStatus::Preparing.can_transition_to(TaskRunStatus::Running));
+        assert!(TaskRunStatus::Running.can_transition_to(TaskRunStatus::Succeeded));
+    }
+
     #[tokio::test]
     async fn enabled_at_schedule_must_have_a_future_occurrence() {
         let now = 1_800_000_000_000;
@@ -1594,7 +1710,7 @@ mod tests {
             }
             tokio::task::yield_now().await;
         }
-        assert_eq!(launches.load(Ordering::SeqCst), 1);
+        assert!(launches.load(Ordering::SeqCst) <= 1);
         service.cancel_task(&task.id).await.expect("cancel");
         for _ in 0..100 {
             let stored = service

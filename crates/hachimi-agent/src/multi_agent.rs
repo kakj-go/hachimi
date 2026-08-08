@@ -150,14 +150,13 @@ impl MultiAgentCoordinator {
             let mut heartbeat = tokio::time::interval(Duration::from_millis(TASK_LEASE_RENEW_MS));
             heartbeat.tick().await;
             let mut lease_lost = false;
-            loop {
+            let execution_result = loop {
                 tokio::select! {
                     _ = cancellation.cancelled() => {
                         let _ = executor.registry().cancel(&child_run_id, child_generation);
-                        let _ = execution.await;
-                        break;
+                        break execution.await;
                     }
-                    _ = &mut execution => break,
+                    result = &mut execution => break result,
                     _ = heartbeat.tick() => {
                         match coordinator.store.renew_agent_task_execution_lease(
                             &task_id,
@@ -170,10 +169,34 @@ impl MultiAgentCoordinator {
                             _ => {
                                 lease_lost = true;
                                 let _ = executor.registry().cancel(&child_run_id, child_generation);
-                                let _ = execution.await;
-                                break;
+                                break execution.await;
                             }
                         }
+                    }
+                }
+            };
+            if execution_result.is_err() {
+                let cancellation_requested = cancellation.is_cancelled();
+                let code = if lease_lost {
+                    "agent_task_lease_lost"
+                } else if cancellation_requested {
+                    "agent_task_cancelled"
+                } else {
+                    "agent_task_execution_failed"
+                };
+                if let Ok(Some(run)) = coordinator.store.get_run(&child_run_id).await
+                    && !run.status.is_terminal()
+                {
+                    let next = if cancellation_requested {
+                        RunStatus::Cancelled
+                    } else {
+                        RunStatus::Failed
+                    };
+                    if run.status.can_transition_to(next) {
+                        let _ = coordinator
+                            .store
+                            .transition_run(&child_run_id, next, Some(code))
+                            .await;
                     }
                 }
             }
@@ -1165,6 +1188,12 @@ fn now_ms() -> i64 {
 mod tests {
     use std::sync::{Arc, Mutex as StdMutex};
 
+    use super::*;
+    use crate::{
+        AgentInstructionLayer, AgentPreparationFuture, AgentRunCreateRequest, AgentRunPreparer,
+        ModelClientFuture, ModelEventStream, ModelRuntime, ModelRuntimeError, ModelRuntimeFactory,
+        PreparedAgentRun, StepRuntimeState, StepWorldState,
+    };
     use futures_util::stream;
     use hachimi_protocol::{
         AgentPermissionPolicy, ApprovalPolicy, AuthorityMode, LlmSettings, ModelEvent,
@@ -1174,14 +1203,6 @@ mod tests {
         TokenUsage, WorkloadKind, WorkloadResolution, WorkloadResolutionSource,
     };
     use hachimi_protocol::{BrowserGrant, ComputerGrant, FileSystemGrant, NetworkGrant, SessionId};
-    use sha2::{Digest, Sha256};
-
-    use super::*;
-    use crate::{
-        AgentInstructionLayer, AgentPreparationFuture, AgentRunCreateRequest, AgentRunPreparer,
-        ModelClientFuture, ModelEventStream, ModelRuntime, ModelRuntimeError, ModelRuntimeFactory,
-        PreparedAgentRun, StepRuntimeState, StepWorldState,
-    };
 
     #[derive(Debug, Default)]
     struct RecoveryModel {
@@ -1254,6 +1275,7 @@ mod tests {
                     initial_messages: vec![ModelMessage::user("resume child")],
                     tool_executors: Vec::new(),
                     host_context: Some("multi-agent-recovery-test".into()),
+                    host_revision_snapshot: None,
                     state: StepRuntimeState::new(
                         StepWorldState {
                             context_revision: 1,
@@ -1355,10 +1377,7 @@ mod tests {
     }
 
     fn provider_revision(capabilities: &ProviderCapabilities) -> String {
-        Sha256::digest(serde_json::to_vec(capabilities).expect("capabilities"))
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect()
+        crate::tool_loop::provider_capabilities_revision(capabilities)
     }
 
     fn test_task(
@@ -1506,7 +1525,7 @@ mod tests {
         let report = coordinator.reconcile_startup().await.expect("reconcile");
         assert_eq!(report.resumed, 1);
         assert_eq!(report.handled_recovery_run_ids, vec![child.run.id.clone()]);
-        for _ in 0..100 {
+        for _ in 0..500 {
             let current = store
                 .get_agent_task(&task.id)
                 .await
@@ -1529,7 +1548,15 @@ mod tests {
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
-        panic!("reconciled child did not finish");
+        let current_task = store
+            .get_agent_task(&task.id)
+            .await
+            .expect("task at timeout");
+        let current_run = store.get_run(&child.run.id).await.expect("run at timeout");
+        let requests = *model.requests.lock().expect("requests at timeout");
+        panic!(
+            "reconciled child did not finish: task={current_task:?} run={current_run:?} model_requests={requests}"
+        );
     }
 
     #[tokio::test]

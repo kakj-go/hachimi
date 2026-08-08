@@ -17,11 +17,25 @@ impl WorkbenchService {
     ) -> Result<WorkbenchPlanAcceptanceSnapshot, WorkbenchError> {
         let plan = self
             .store
-            .get_proposed_plan(&request.plan_id)
+            .get_plan_document(&request.plan_id)
             .await?
             .ok_or_else(|| AgentStoreError::ProposedPlanNotFound(request.plan_id.clone()))?;
         if plan.revision != request.expected_revision {
             return Err(WorkbenchError::StalePlanRevision);
+        }
+        let confirmation = self
+            .store
+            .get_plan_confirmation(&request.plan_id)
+            .await?
+            .ok_or_else(|| AgentStoreError::ProposedPlanNotFound(request.plan_id.clone()))?;
+        if !matches!(
+            confirmation.status,
+            hachimi_protocol::PlanConfirmationStatus::Pending
+                | hachimi_protocol::PlanConfirmationStatus::Accepted
+        ) {
+            return Err(WorkbenchError::Store(
+                AgentStoreError::ProposedPlanNotAcceptable(plan.id),
+            ));
         }
         let user_message = request.user_message.trim();
         if user_message.is_empty() || user_message.chars().count() > 200 {
@@ -29,9 +43,9 @@ impl WorkbenchService {
         }
         let source_run = self
             .store
-            .get_run(&plan.run_id)
+            .get_run(&plan.source_run_id)
             .await?
-            .ok_or_else(|| AgentStoreError::RunNotFound(plan.run_id.clone()))?;
+            .ok_or_else(|| AgentStoreError::RunNotFound(plan.source_run_id.clone()))?;
         if source_run.status != RunStatus::Succeeded
             || source_run.configuration.behavior_mode != hachimi_protocol::BehaviorMode::Plan
         {
@@ -112,7 +126,7 @@ impl WorkbenchService {
             created_at_ms: now,
             updated_at_ms: now,
         };
-        let (accepted_plan, run) = self
+        let (accepted_plan, accepted_confirmation, run) = self
             .store
             .accept_proposed_plan_authorized_idempotent(
                 principal,
@@ -127,6 +141,7 @@ impl WorkbenchService {
                     effective_policy: &policy,
                     authority_mode: AuthorityMode::Interactive,
                     workspace_root: &workspace_root,
+                    task_run_id: None,
                 },
             )
             .await?;
@@ -150,6 +165,7 @@ impl WorkbenchService {
         }
         Ok(WorkbenchPlanAcceptanceSnapshot {
             plan: accepted_plan,
+            confirmation: accepted_confirmation,
             task: WorkbenchTaskSnapshot {
                 project,
                 checkout,

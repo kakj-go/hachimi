@@ -33,6 +33,7 @@ fn permission_update_round_trips_revision_and_resource_scopes() {
         "entryProfile": "pet_conversation",
         "expectedRevision": 7,
         "config": {
+            "skillIds": ["office-documents", "office-pdf"],
             "policy": {
                 "level": "writable",
                 "rules": {
@@ -61,6 +62,13 @@ fn permission_update_round_trips_revision_and_resource_scopes() {
         serde_json::from_value(value).expect("deserialize permission update");
     assert_eq!(update.expected_revision, 7);
     assert_eq!(
+        update.config.skill_ids,
+        [
+            SkillId::from("office-documents"),
+            SkillId::from("office-pdf")
+        ]
+    );
+    assert_eq!(
         update.config.policy.rules.file_system[0].files,
         ["Cargo.toml"]
     );
@@ -70,6 +78,7 @@ fn permission_update_round_trips_revision_and_resource_scopes() {
     );
     let encoded = serde_json::to_value(update).expect("serialize permission update");
     assert_eq!(encoded["expectedRevision"], 7);
+    assert_eq!(encoded["config"]["skillIds"][0], "office-documents");
     assert_eq!(
         encoded["config"]["policy"]["rules"]["computer"]["allowedApplications"][0],
         "sha256:app"
@@ -78,10 +87,11 @@ fn permission_update_round_trips_revision_and_resource_scopes() {
 
 #[test]
 fn default_settings_are_versioned() {
-    assert_eq!(
-        AppSettings::default().schema_version,
-        SETTINGS_SCHEMA_VERSION
-    );
+    let settings = AppSettings::default();
+    assert_eq!(settings.schema_version, SETTINGS_SCHEMA_VERSION);
+    assert_eq!(settings.llm.model_name, "gpt-5.6-sol");
+    assert_eq!(settings.llm.max_input_tokens, 1_050_000);
+    assert_eq!(settings.llm.max_output_tokens, 128_000);
 }
 
 #[test]

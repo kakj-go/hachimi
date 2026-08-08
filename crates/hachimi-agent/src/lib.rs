@@ -3,6 +3,7 @@
 mod agents_md;
 mod apply_patch;
 mod compaction;
+mod context_budget;
 mod dynamic_tools;
 mod mcp_elicitation;
 mod mcp_progress;
@@ -20,6 +21,7 @@ mod run_projection;
 mod run_runtime;
 #[cfg(test)]
 mod run_runtime_tests;
+mod runtime_continuity;
 mod security_tools;
 mod session_lane;
 mod skill_runtime;
@@ -94,6 +96,7 @@ pub use workspace_tools::{
 
 pub type ToolFuture = Pin<Box<dyn Future<Output = Result<ToolResult, ToolExecutionError>> + Send>>;
 pub use compaction::{CompactionError, CompactionPolicy, SemanticCompactor};
+pub use context_budget::{ContextBudget, MicrocompactStats, context_budget, microcompact_request};
 pub use dynamic_tools::{
     DynamicToolValidation, negotiate_provider_capabilities, validate_dynamic_tools,
 };

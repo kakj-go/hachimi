@@ -49,6 +49,20 @@ pub enum ModelRuntimeError {
     Provider(String),
     #[error("model provider rejected the request because its context window was exceeded")]
     ContextOverflow,
+    #[error(
+        "active context ({active_context_tokens} tokens) exceeded the predictive compaction threshold ({threshold_tokens} tokens)"
+    )]
+    ContextCompactionRequired {
+        active_context_tokens: u64,
+        threshold_tokens: u64,
+    },
+    #[error(
+        "prompt remains too long after bounded compaction (active={active_context_tokens}, context_window={context_window})"
+    )]
+    PromptTooLong {
+        active_context_tokens: u64,
+        context_window: u64,
+    },
     #[error("model provider returned an invalid stream: {0}")]
     InvalidStream(String),
     #[error("agent run requires attention: {0}")]

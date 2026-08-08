@@ -94,35 +94,51 @@ pub(super) fn attachment_from_row(
     })
 }
 
-pub(super) fn proposed_plan_from_row(
+pub(super) fn plan_document_from_row(
     row: &sqlx::sqlite::SqliteRow,
-) -> Result<ProposedPlan, AgentStoreError> {
+) -> Result<PlanDocument, AgentStoreError> {
+    Ok(PlanDocument {
+        id: PlanId::new(row.get::<String, _>("id")),
+        session_id: SessionId::new(row.get::<String, _>("session_id")),
+        source_run_id: RunId::new(row.get::<String, _>("run_id")),
+        source_item_id: hachimi_protocol::ItemId::new(row.get::<String, _>("source_item_id")),
+        revision: u32::try_from(row.get::<i64, _>("revision")).unwrap_or_default(),
+        title: row.get("title"),
+        goal: row.get("goal"),
+        content_markdown: row.get("content_markdown"),
+        created_at_ms: row.get("created_at_ms"),
+    })
+}
+
+pub(super) fn plan_confirmation_from_row(
+    row: &sqlx::sqlite::SqliteRow,
+) -> Result<PlanConfirmation, AgentStoreError> {
     let status_value: String = row.get("status");
-    let status = ProposedPlanStatus::parse(&status_value).ok_or_else(|| {
+    let status = PlanConfirmationStatus::parse(&status_value).ok_or_else(|| {
         AgentStoreError::InvalidPersistedValue {
-            kind: "proposed plan status",
+            kind: "plan confirmation status",
             value: status_value,
         }
     })?;
-    Ok(ProposedPlan {
-        id: PlanId::new(row.get::<String, _>("id")),
-        session_id: SessionId::new(row.get::<String, _>("session_id")),
-        run_id: RunId::new(row.get::<String, _>("run_id")),
-        revision: u32::try_from(row.get::<i64, _>("revision")).unwrap_or_default(),
-        goal: row.get("goal"),
-        assumptions: serde_json::from_str(row.get("assumptions_json"))?,
-        steps: serde_json::from_str(row.get("steps_json"))?,
-        affected_resources: serde_json::from_str(row.get("affected_resources_json"))?,
-        verification: serde_json::from_str(row.get("verification_json"))?,
-        risks: serde_json::from_str(row.get("risks_json"))?,
-        open_questions: serde_json::from_str(row.get("open_questions_json"))?,
-        content_markdown: row.get("content_markdown"),
+    Ok(PlanConfirmation {
+        plan_id: PlanId::new(row.get::<String, _>("plan_id")),
         status,
         accepted_run_id: row
             .get::<Option<String>, _>("accepted_run_id")
             .map(RunId::new),
-        created_at_ms: row.get("created_at_ms"),
-        accepted_at_ms: row.get("accepted_at_ms"),
+        resolved_at_ms: row.get("resolved_at_ms"),
+    })
+}
+
+pub(super) fn execution_plan_from_row(
+    row: &sqlx::sqlite::SqliteRow,
+) -> Result<ExecutionPlanState, AgentStoreError> {
+    Ok(ExecutionPlanState {
+        session_id: SessionId::new(row.get::<String, _>("session_id")),
+        run_id: RunId::new(row.get::<String, _>("run_id")),
+        explanation: row.get("explanation"),
+        steps: serde_json::from_str(row.get("steps_json"))?,
+        updated_at_ms: row.get("updated_at_ms"),
     })
 }
 

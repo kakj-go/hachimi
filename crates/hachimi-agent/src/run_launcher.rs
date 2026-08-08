@@ -1,7 +1,7 @@
 use hachimi_protocol::{
     AgentPermissionPolicy, AgentWorkspaceStatus, ApprovalPolicy, AuthorityMode,
-    AuthoritySnapshotId, BehaviorMode, CapabilityGrantSet, PermissionProfile, RunAuthoritySnapshot,
-    RunRecord, SessionContextBinding, SessionRecord,
+    AuthoritySnapshotId, BehaviorMode, CapabilityGrantSet, PermissionProfile, PlanId,
+    RunAuthoritySnapshot, RunRecord, SessionContextBinding, SessionRecord,
 };
 use hachimi_storage::{ChannelRunBindingInput, CreatedAgentRun};
 
@@ -116,6 +116,32 @@ impl AgentRunLauncher {
     ) -> Result<LaunchedAgentRun, AgentRunFactoryError> {
         self.launch_in_session_with_owner(request, session, Some(StoredPolicyOwner::Session))
             .await
+    }
+
+    pub async fn launch_plan_revision_in_session(
+        &self,
+        request: AgentRunLaunchRequest,
+        session: SessionRecord,
+        plan_id: &PlanId,
+        expected_revision: u32,
+    ) -> Result<LaunchedAgentRun, AgentRunFactoryError> {
+        let (create, stored_policy, effective_policy, authority_mode) = normalize(request);
+        let (created, authority) = self
+            .factory
+            .create_plan_revision_in_session_authorized(
+                create,
+                session,
+                AgentRunAuthorization {
+                    effective_policy,
+                    stored_policy: Some(stored_policy),
+                    stored_policy_owner: Some(StoredPolicyOwner::Session),
+                    authority_mode,
+                },
+                plan_id,
+                expected_revision,
+            )
+            .await?;
+        Ok(launched(created, authority))
     }
 
     pub async fn launch_in_session_with_policy_owner(
@@ -307,8 +333,9 @@ fn normalize(
 mod tests {
     use hachimi_protocol::{
         AgentPermissionPolicy, AgentWorkspaceOwner, ApprovalPolicy, AuthorityMode, BehaviorMode,
-        EntryProfile, LlmSettings, PermissionProfile, ProviderCapabilities, RunBudget, RunOrigin,
-        RunPurpose, RunStatus, ScheduleId, ScopedPermissionRules, SessionContextBinding, TaskRunId,
+        DeliveryStatus, EntryProfile, LlmSettings, PermissionProfile, ProviderCapabilities,
+        RunBudget, RunOrigin, RunPurpose, RunStatus, ScheduleId, ScopedPermissionRules,
+        SessionContextBinding, TaskRunId, TaskRunRecord, TaskRunStatus, TaskRunTrigger,
         WorkspaceId,
     };
 
@@ -349,6 +376,36 @@ mod tests {
         }
     }
 
+    async fn seed_preparing_task(store: &hachimi_storage::AgentStore, id: TaskRunId, now: i64) {
+        store
+            .create_task_run(&TaskRunRecord {
+                id: id.clone(),
+                schedule_id: None,
+                schedule_revision: None,
+                trigger: TaskRunTrigger::Scheduled,
+                scheduled_for_ms: Some(now),
+                event_context: None,
+                invocation_key: format!("test:{id}"),
+                requester_session_id: None,
+                execution_session_id: None,
+                run_id: None,
+                status: TaskRunStatus::Preparing,
+                progress_percent: None,
+                result_summary: None,
+                error_code: None,
+                error_summary: None,
+                artifact_ids: Vec::new(),
+                delivery_status: DeliveryStatus::NotRequested,
+                delivery_error_code: None,
+                created_at_ms: now,
+                started_at_ms: None,
+                finished_at_ms: None,
+                updated_at_ms: now,
+            })
+            .await
+            .expect("preparing TaskRun");
+    }
+
     #[tokio::test]
     async fn persists_source_owner_policies_without_creating_session_copies() {
         let store = hachimi_storage::AgentStore::connect_in_memory()
@@ -370,6 +427,7 @@ mod tests {
             1
         );
 
+        seed_preparing_task(&store, TaskRunId::from("task-1"), 1).await;
         let scheduled = launcher
             .launch_new_with_policy_owner(
                 request(
@@ -494,6 +552,7 @@ mod tests {
             scheduled_for_ms: 2,
             event_context: None,
         };
+        seed_preparing_task(&store, TaskRunId::from("task-per-run"), 2).await;
         let mut per_run_request = request("schedule-per-run", scheduled_origin, 1);
         per_run_request.create.context = SessionContextBinding::Workspace {
             workspace_id: workspace_id.clone(),

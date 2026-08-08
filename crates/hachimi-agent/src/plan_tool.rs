@@ -2,9 +2,7 @@
 
 use std::sync::Arc;
 
-use hachimi_protocol::{
-    PlanId, PlanStep, PlanStepId, PlanStepStatus, RunId, ToolDescriptor, ToolEffect,
-};
+use hachimi_protocol::{PlanStep, PlanStepId, PlanStepStatus, RunId, ToolDescriptor, ToolEffect};
 use hachimi_storage::AgentStore;
 use serde::Deserialize;
 use serde_json::json;
@@ -27,7 +25,6 @@ struct UpdatePlanStep {
 
 struct UpdatePlanTool {
     store: AgentStore,
-    plan_id: PlanId,
     run_id: RunId,
     update_sink: Option<Arc<dyn Fn() + Send + Sync>>,
 }
@@ -35,13 +32,11 @@ struct UpdatePlanTool {
 #[must_use]
 pub fn update_plan_tool(
     store: AgentStore,
-    plan_id: PlanId,
     run_id: RunId,
     update_sink: Option<Arc<dyn Fn() + Send + Sync>>,
 ) -> Arc<dyn ToolExecutor> {
     Arc::new(UpdatePlanTool {
         store,
-        plan_id,
         run_id,
         update_sink,
     })
@@ -84,7 +79,6 @@ impl ToolExecutor for UpdatePlanTool {
         let arguments =
             serde_json::from_value::<UpdatePlanArguments>(invocation.call.arguments.clone());
         let store = self.store.clone();
-        let plan_id = self.plan_id.clone();
         let run_id = self.run_id.clone();
         let update_sink = self.update_sink.clone();
         Box::pin(async move {
@@ -113,7 +107,7 @@ impl ToolExecutor for UpdatePlanTool {
                 })
                 .collect::<Vec<_>>();
             store
-                .update_execution_plan(&plan_id, &run_id, arguments.explanation.as_deref(), &steps)
+                .update_execution_plan(&run_id, arguments.explanation.as_deref(), &steps)
                 .await
                 .map_err(|error| ToolExecutionError::Failed(error.to_string()))?;
             if let Some(update_sink) = update_sink {
@@ -122,7 +116,7 @@ impl ToolExecutor for UpdatePlanTool {
             Ok(ToolResult::succeeded(
                 &invocation.call,
                 format!("Updated plan with {} steps.", steps.len()),
-                json!({ "planId": plan_id, "steps": steps }),
+                json!({ "steps": steps }),
             ))
         })
     }

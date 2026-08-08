@@ -1,0 +1,53 @@
+.user-input-card-title {
+  min-width: 0;
+  display: grid;
+  flex: 1;
+  gap: 3px;
+}
+
+.user-input-card-title > strong {
+  overflow-wrap: anywhere;
+}
+
+.user-input-choices {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.user-input-other-row {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: 26px minmax(0, 1fr);
+  align-items: center;
+  gap: 9px;
+  padding: 7px 10px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-md);
+}
+
+.user-input-other-row.selected,
+.user-input-other-row:focus-within {
+  border-color: var(--color-border-base);
+  background: var(--color-bg-control-hover);
+}
+
+.user-input-other-row .field-stack {
+  min-width: 0;
+}
+
+.user-input-other-row input {
+  height: 30px;
+  padding: 0;
+  border: 0;
+  outline: 0;
+  background: transparent;
+}
+
+.user-input-other-row input:focus {
+  border: 0;
+  box-shadow: none;
+}
+
+.user-input-other-row .choice-index svg {
+  width: 14px;
+  height: 14px;
+}

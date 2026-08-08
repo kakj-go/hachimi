@@ -59,6 +59,45 @@
   flex: 1;
 }
 
+.workspace-markdown-toolbar {
+  min-height: 36px;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 2px;
+  padding: 3px 8px;
+  border-bottom: 1px solid var(--color-border-muted);
+}
+
+.workspace-markdown-toolbar button {
+  width: 28px;
+  min-width: 28px;
+  height: 28px;
+  min-height: 28px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border-color: transparent;
+  background: transparent;
+  color: var(--color-text-muted);
+}
+
+.workspace-markdown-toolbar button:hover,
+.workspace-markdown-toolbar button.active {
+  background: var(--color-overlay-hover);
+  color: var(--color-text-base);
+}
+
+.workspace-markdown-preview {
+  min-height: 174px;
+  flex: 1;
+  padding: 18px 20px;
+  overflow: auto;
+  color: var(--color-text-muted);
+  font-size: var(--font-size-sm);
+  line-height: 1.65;
+}
+
 .workspace-monaco-editor,
 .workspace-editor-fallback,
 .workspace-editor-readonly {

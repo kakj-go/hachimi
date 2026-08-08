@@ -106,6 +106,59 @@ pub(crate) fn deterministic_e2e_provider_enabled() -> bool {
     false
 }
 
+pub(crate) const BLOCKING_EXTERNAL_EFFECT_TOOL: &str = "desktop_e2e.blocking_external_effect";
+
+#[cfg(all(debug_assertions, feature = "desktop-e2e"))]
+#[derive(Debug)]
+struct BlockingExternalEffectTool;
+
+#[cfg(all(debug_assertions, feature = "desktop-e2e"))]
+impl hachimi_agent::ToolExecutor for BlockingExternalEffectTool {
+    fn descriptor(&self) -> hachimi_protocol::ToolDescriptor {
+        hachimi_protocol::ToolDescriptor {
+            name: BLOCKING_EXTERNAL_EFFECT_TOOL.into(),
+            description: "Debug-only process-restart fixture that blocks after durable dispatch."
+                .into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": { "operationId": { "type": "string" } },
+                "required": ["operationId"],
+                "additionalProperties": false
+            }),
+            effect: hachimi_protocol::ToolEffect::WorkspaceWrite,
+            parallel_safe: false,
+            required_scopes: vec!["workspace.write".into()],
+        }
+    }
+
+    fn execute(&self, invocation: hachimi_agent::ToolInvocation) -> hachimi_agent::ToolFuture {
+        Box::pin(async move {
+            invocation.cancellation.cancelled().await;
+            Ok(hachimi_agent::ToolResult::aborted(
+                &invocation.call,
+                "desktop process stopped after dispatch",
+            ))
+        })
+    }
+
+    fn waits_for_cancellation(&self) -> bool {
+        true
+    }
+}
+
+pub(crate) fn blocking_external_effect_tool()
+-> Option<std::sync::Arc<dyn hachimi_agent::ToolExecutor>> {
+    #[cfg(all(debug_assertions, feature = "desktop-e2e"))]
+    {
+        return deterministic_e2e_provider_enabled().then(|| {
+            std::sync::Arc::new(BlockingExternalEffectTool)
+                as std::sync::Arc<dyn hachimi_agent::ToolExecutor>
+        });
+    }
+    #[cfg(not(all(debug_assertions, feature = "desktop-e2e")))]
+    None
+}
+
 #[cfg(not(all(debug_assertions, feature = "desktop-e2e")))]
 pub(crate) fn deterministic_e2e_sandbox_report() -> Option<hachimi_protocol::SandboxCapabilityReport>
 {

@@ -338,6 +338,10 @@ fn now_ms() -> i64 {
 }
 
 #[cfg(test)]
+#[path = "agent_lifecycle_resume_tests.rs"]
+mod resume_tests;
+
+#[cfg(test)]
 mod tests {
     use hachimi_protocol::{
         ApprovalPolicy, BehaviorMode, CheckoutId, CheckoutKind, CheckoutRecord, CheckoutStatus,
@@ -364,7 +368,7 @@ mod tests {
         }
     }
 
-    async fn seed_running_run() -> (AgentStore, SessionRecord, RunRecord) {
+    pub(super) async fn seed_running_run() -> (AgentStore, SessionRecord, RunRecord) {
         let store = AgentStore::connect_in_memory().await.expect("store");
         let now = 1_700_000_000_000_i64;
         let project = ProjectRecord {

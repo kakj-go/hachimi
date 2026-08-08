@@ -2,7 +2,7 @@
 
 产品/API 行为固定参考：[ref:OAI-PRODUCT-BROWSER-20260730] [ref:OAI-PRODUCT-CHROME-20260730] [ref:OAI-PRODUCT-COMPUTER-20260730] [ref:OAI-PRODUCT-PLUGINS-20260730] [ref:OAI-PRODUCT-SCHEDULED-20260730] [ref:OAI-PRODUCT-RESPONSES-20260730] [ref:GITHUB-API-20260730] [ref:GITLAB-API-20260730] [ref:GITEE-API-20260730] [ref:GITEA-FORGEJO-API-20260730] [ref:WECOM-API-20260730] [ref:DINGTALK-STREAM-SDK-GO-20260731] [ref:FEISHU-SDK-GO-20260731]。
 
-更新时间：2026-08-06
+更新时间：2026-08-07
 
 实现状态只以 `docs/ROADMAP.md` 为准；本文描述代码结构、实施顺序和验收映射，不单独定义发布状态。
 
@@ -20,7 +20,7 @@
 
 ## 2. Fresh 数据库基线
 
-当前基线使用四十一个增量 migration，不提供 typed/untyped 双读，也不迁移旧 Agent 数据：
+当前基线使用四十二个增量 migration，不提供 typed/untyped 双读，也不迁移旧 Agent 数据：
 
 | Migration                                       | 内容                                                                                                                     |
 | ----------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------ |
@@ -86,7 +86,7 @@ V2 初始化先写入 reset journal，清理 Hachimi 管理的 Credential Manage
 
 ### Compaction
 
-CompactionService 保留 Claude Code Best clean-room 行为并接入 Responses-only Remote Compaction [ref:OAI-PRODUCT-RESPONSES-20260730]。旧 checkpoint 只在新结果完整验证后替换；远程失败、超时、越界或 drift 回退本地。公开 summary 只来自 Provider 明确可展示字段，不从隐藏 reasoning 推断。
+CompactionService 保留 Claude Code Best clean-room 行为并接入 Responses-only Remote Compaction [ref:OAI-PRODUCT-RESPONSES-20260730]。`context_budget.rs` 使用 Provider capability 和 `count_tokens` 计算预测阈值，并在每次采样前只压缩临时工具结果；未知 context window 才使用字符 fallback。旧 checkpoint 只在新结果完整验证、Hook 完成且覆盖序号推进后替换；远程失败、超时、越界或 drift 回退本地。Auto/Reactive 失败三次熔断，Run supervisor 最多重建三次且 Provider overflow 只重试一次。Workbench `/compact` 复用 Session lane、当前 LLM 设置和 mutation idempotency ledger，不创建 Run/User Item。公开 summary 只来自 Provider 明确可展示字段，不从隐藏 reasoning 推断。
 
 ### Workspace/Sandbox
 
@@ -100,9 +100,9 @@ Browser Host 已实现 managed Chromium 与 Chrome extension、history/input/wai
 
 ### Plugin/Connector、Channel/Gateway
 
-Plugin Bundle 已实现统一 lifecycle journal：stage/validate/permission review/activate/health/commit，以及 install/enable/disable/update/rollback/uninstall、known-good revision、崩溃 reconciliation、账号撤销和跨产品清理。所有 contribution 继续通过 Sandbox/唯一 Runtime。企业微信官方 GET `echostr`/POST 加密 callback、钉钉 Stream、飞书 WebSocket/protobuf、结构化 mention、受控附件下载和 durable ledger 已接入 [ref:WECOM-API-20260730] [ref:DINGTALK-STREAM-SDK-GO-20260731] [ref:FEISHU-SDK-GO-20260731]；三个外部企业组织 Gate 真实环境待验证。
+Plugin Bundle 已实现统一 lifecycle journal：stage/validate/permission review/activate/health/commit，以及 install/enable/disable/update/rollback/uninstall、known-good revision、崩溃 reconciliation、账号撤销和跨产品清理。所有 contribution 继续通过 Sandbox/唯一 Runtime。企业微信官方 GET `echostr`/POST 加密 callback、钉钉 Stream、飞书 WebSocket/protobuf、结构化 mention、受控附件下载和 durable ledger 已接入 [ref:WECOM-API-20260730] [ref:DINGTALK-STREAM-SDK-GO-20260731] [ref:FEISHU-SDK-GO-20260731]；三个外部企业组织 Gate 为 `Environment Blocked`。
 
-Workbench 设置只暴露“平台集成”：由正式 manifest 生成企业微信、钉钉、飞书 Tab，并通过类型化凭据表单编排同一逻辑账户下的 Connector/API 与 Channel/消息能力。Gateway 的登录启动和进程需求由消息账户数量自动 reconcile；底层 Connector、Channel、Gateway domain 仅供 Runtime、诊断与测试。Plugins 用户入口在所有版本置灰，P6 Runtime/lifecycle 的完成结论不变，第三方 Bundle 用户管理界面后续开放。
+Workbench 设置只暴露“平台集成”：由正式 manifest 生成企业微信、钉钉、飞书 Tab，并通过类型化凭据表单编排同一逻辑账户下的 Connector/API 与 Channel/消息能力。Gateway 的登录启动和进程需求由消息账户数量自动 reconcile；底层 Connector、Channel、Gateway domain 仅供 Runtime、诊断与测试。Plugins 用户入口在所有版本置灰并显示“暂不开放 / Not available”；Marketplace、远程 Catalog 和第三方 Bundle 安装管理均为 `Not Planned`，仅保留内置 Bundle lifecycle。
 
 ## 4. 收口实施顺序
 
@@ -122,7 +122,7 @@ Workbench 设置只暴露“平台集成”：由正式 manifest 生成企业微
 12. **已完成：Computer Host 原语**：WGC、鼠标/键盘/窗口/受控启动、Frame/input epoch fencing、接管与高权限拒绝已实现；真实记事本 smoke 环境阻塞。
 13. **已完成：Plugin lifecycle**：完整 contribution transaction、revision/known-good、升级/回滚/卸载与重启 reconciliation 已实现。
 14. **代码与本地测试完成：企业 Channel/Gateway**：本地 Gateway、三个企业 REST/事件安全层、WeCom URL 验证与加密 XML callback、DingTalk Stream、Feishu 长连接、mention/附件和 Bundle 已实现；三个外部组织 Gate 后置。
-15. **已完成：Session-bound Scheduled continuation**：既有 Session lane 的 fresh Run、压缩上下文续接、fresh RunAuthoritySnapshot/Host snapshot、Task Center Connector selection、isolated Browser unattended policy、Plugin/Connector 漂移、停止条件和 heartbeat 已实现；Computer unattended 稳定返回 `computer_unattended_unsupported`。
+15. **已完成：Session-bound Scheduled continuation**：既有 Session lane 的 fresh Run、压缩上下文续接、fresh RunAuthoritySnapshot/Host snapshot、Task Center Connector selection、isolated Browser unattended policy、Plugin/Connector 漂移、停止条件和 `schedule.activity_marker` 已实现；Computer unattended 稳定返回 `computer_unattended_unsupported`。Agent Heartbeat 为 `Not Planned`。
 16. **已完成：Thread/Workbench 延续**：终态 Run 边界 Fork 只复制可安全重建的完成历史并生成新 Item/sequence；General/Project Session 均可继续，活动 Run 走 generation-fenced Steer，列表支持 rename/pin/archive/search 和 lineage。
 17. **已完成：Computer 内存截图**：WGC Frame 使用 `Frame::buffer()` 与 PNG encoder 直接写入受 TTL/容量限制的内存仓库；read/release/expiry/takeover/错误路径均不创建新临时截图文件，启动只清理旧版明确匹配的 UUID PNG。
 18. **已完成：Event Schedule**：Control protocol v20、`0010` migration、事务 fan-out/claim、去重/conflict、重启 reconciliation、五类 AppServer adapter、Plugin EventSource、Task Center Event 表单/receipt 和 Desktop E2E 已接通。
@@ -165,7 +165,7 @@ channel.*   gateway.*
 - Computer：App allowlist、Frame 过期、用户接管、自身审批/管理员/安全桌面拒绝，以及截图不持久化。
 - Plugin/Connector：安装与账号授权分层、Action 权限、Schema/Host identity/account 漂移、Webhook/Poll、撤销、重试/幂等和 metadata-only Audit。
 - Channel/Gateway：Account/Peer/Thread 路由、DM/group/thread 隔离、auth、bot-loop protection、入站去重、投递回执/重试和重启 reconciliation。
-- Session-bound continuation：同 Session lane 的 fresh Run、压缩上下文续接、权限重新固定、停止条件、heartbeat 和无临时授权恢复。
+- Session-bound continuation：同 Session lane 的 fresh Run、压缩上下文续接、权限重新固定、停止条件、activity marker 和无临时授权恢复；Agent Heartbeat 不在建设范围内。
 
 P1–P8 新增验收矩阵：
 
@@ -196,4 +196,4 @@ P1–P8 新增验收矩阵：
 
 `publish-alpha-prerelease.yml` 只允许使用 `Windows Release Gate` 的成功候选构建产物发布 alpha，并在发布说明中固定披露真实外部 Gate 和两类 Windows 身份 Gate 尚未形成通过结论。`publish-release.yml` 只处理 RC/GA；六类真实证据不齐、commit/hash 漂移或存在 skip 时不得创建对应 tag 或发布。任何已存在 tag 都不得覆盖，失败后递增 alpha/RC 序号。
 
-固定门槛见 `docs/ROADMAP.md`，Gate 配置见 `docs/RELEASE_GATES.md`。fixture、mock、loopback transport 和确定性 Host 只证明本地实现；真实标准用户 Runner、elevated Runner、真实 0.2.0 基线、外部服务凭据或组织环境不可用时必须保持“真实环境待验证”，不能补造或伪造 Gate 证据。企业组织标识不引入 Hachimi 登录或租户体系。
+固定门槛见 `docs/ROADMAP.md`，Gate 配置见 `docs/RELEASE_GATES.md`。fixture、mock、loopback transport 和确定性 Host 只证明本地实现；真实标准用户 Runner、elevated Runner、真实 0.2.0 基线、外部服务凭据或组织环境不可用时必须保持 `Environment Blocked / Not Run`，并在发布说明披露，但不计为测试失败。企业组织标识不引入 Hachimi 登录或租户体系。

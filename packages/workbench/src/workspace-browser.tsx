@@ -583,6 +583,7 @@ export function WorkspaceBrowser(props: {
                     saving={saving()}
                     conflict={saveConflict()}
                     showHeader={false}
+                    workspaceRoot={props.snapshot.checkout?.path}
                     locale={i18n.locale()}
                     readOnlyMessage={
                       firstChunk()?.binary
@@ -604,6 +605,7 @@ export function WorkspaceBrowser(props: {
                     onReload={() => void openFile(path())}
                     onKeepLocal={() => void openFile(path(), true)}
                     onClose={closeFile}
+                    onOpenPath={(target) => void openFile(target)}
                   />
                   <Show when={chunks().length > 0 && lastChunk()?.eof === false}>
                     <Button

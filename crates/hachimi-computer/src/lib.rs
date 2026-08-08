@@ -1186,4 +1186,81 @@ mod tests {
             );
         }
     }
+
+    #[tokio::test]
+    #[ignore = "opt-in local Computer stress"]
+    async fn short_stress_releases_frames_and_fences_stale_epochs() {
+        let seconds = std::env::var("HACHIMI_STRESS_PHASE_SECONDS")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(300)
+            .clamp(1, 450);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(seconds);
+        let mut iterations = 0_u64;
+        while std::time::Instant::now() < deadline {
+            let released = Arc::new(Mutex::new(Vec::new()));
+            let host = ComputerHost::new(
+                Arc::new(TestBroker {
+                    target: target(),
+                    released: Some(Arc::clone(&released)),
+                }),
+                Arc::new(SystemComputerClock),
+            );
+            let session_id = SessionId::new(format!("stress-session-{iterations}"));
+            let run_id = RunId::new(format!("stress-run-{iterations}"));
+            host.set_app_rule(
+                &session_id,
+                ComputerAppRule {
+                    app_id: "notepad.exe".into(),
+                    observe: true,
+                    act: true,
+                    always_allowed: false,
+                    granted_by: "stress:test".into(),
+                    updated_at_ms: 1,
+                },
+            );
+            let active_grants = grants(&session_id, &run_id);
+            let frame = host
+                .observe(
+                    session_id.clone(),
+                    run_id,
+                    1,
+                    "0x1234",
+                    &active_grants,
+                    &sandbox(),
+                )
+                .await
+                .expect("observe");
+            let request = ComputerActionRequest {
+                frame_id: frame.id,
+                run_generation: 1,
+                target_fingerprint: frame.target.fingerprint,
+                expected_input_epoch: frame.input_epoch,
+                action: match iterations % 3 {
+                    0 => ComputerAction::TypeText {
+                        text: "stress".into(),
+                    },
+                    1 => ComputerAction::Scroll {
+                        delta_x: 0,
+                        delta_y: 120,
+                    },
+                    _ => ComputerAction::WindowResize {
+                        width: 800,
+                        height: 600,
+                    },
+                },
+            };
+            host.act(&request, &active_grants).await.expect("act");
+            assert_eq!(
+                host.act(&request, &active_grants).await,
+                Err(ComputerHostError::FrameNotFound)
+            );
+            assert_eq!(released.lock().len(), 1);
+            host.take_over(&session_id);
+            iterations = iterations.saturating_add(1);
+            tokio::task::yield_now().await;
+        }
+        assert!(iterations > 0);
+        eprintln!("computer_stress_iterations={iterations}");
+    }
 }

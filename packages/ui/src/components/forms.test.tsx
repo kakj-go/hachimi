@@ -10,6 +10,7 @@ import {
   RangeField,
   SegmentedControl,
   SelectField,
+  TextField,
   Toast,
 } from "./forms";
 
@@ -45,6 +46,28 @@ describe("NativeSelect", () => {
 });
 
 describe("custom form controls", () => {
+  it("supports a trailing action inside a text field", async () => {
+    const host = document.createElement("div");
+    document.body.append(host);
+    const submit = vi.fn();
+    const dispose = render(
+      () => (
+        <TextField
+          label="Revision"
+          hideLabel
+          value="Adjust the plan"
+          action={<button aria-label="Submit revision" onClick={submit} />}
+        />
+      ),
+      host,
+    );
+    expect(host.querySelector('[data-component="field-input-action"]')).not.toBeNull();
+    await userEvent.click(host.querySelector('button[aria-label="Submit revision"]')!);
+    expect(submit).toHaveBeenCalledTimes(1);
+    dispose();
+    host.remove();
+  });
+
   it("lets the Kobalte select choose an option with the keyboard", async () => {
     const host = document.createElement("div");
     document.body.append(host);

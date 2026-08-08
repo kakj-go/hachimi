@@ -526,6 +526,17 @@ pub(super) async fn accept_workbench_plan(
         .accept_plan(&request, model_snapshot, &client.client_id.0)
         .await
         .map_err(|error| CommandError::operation("workbench_plan_accept_failed", error))?;
+    if let Ok(environment) = state
+        .workbench
+        .environment_snapshot(&accepted.task.session.id)
+        .await
+    {
+        crate::environment_commands::emit_workbench_environment(
+            &app,
+            &environment,
+            vec![hachimi_protocol::WorkbenchEnvironmentChangeReason::Plan],
+        );
+    }
     if accepted.task.run.status == hachimi_protocol::RunStatus::Queued {
         spawn_workbench_run(app, client, accepted.task.clone(), Vec::new());
     }
@@ -640,6 +651,136 @@ pub(super) async fn start_workbench_task(
     Ok(snapshot)
 }
 
+#[tauri::command]
+pub(super) async fn compact_workbench_session(
+    window: WebviewWindow,
+    state: State<'_, DesktopState>,
+    request: hachimi_protocol::ManualCompactionRequest,
+) -> Result<hachimi_protocol::ManualCompactionResult, CommandError> {
+    let client = state.authorize(&window, ControlMethod::WorkbenchWindow)?;
+    require_window(&window, "workbench")?;
+    if request.idempotency_key.trim().is_empty() || request.idempotency_key.len() > 128 {
+        return Err(CommandError::new(
+            "invalid_idempotency_key",
+            "idempotency key must contain 1-128 bytes",
+        ));
+    }
+    let snapshot = state
+        .workbench
+        .session_snapshot(&request.session_id)
+        .await
+        .map_err(|error| CommandError::operation("manual_compaction_session_not_found", error))?;
+    if state
+        .agent_executor
+        .registry()
+        .has_active_session(&request.session_id)
+        || snapshot.runs.iter().any(|run| !run.status.is_terminal())
+    {
+        return Err(CommandError::new(
+            "manual_compaction_active_run",
+            "manual compaction requires an idle Session",
+        ));
+    }
+    let resource_id = request.session_id.as_str();
+    match state
+        .agent_store
+        .claim_idempotent_mutation::<hachimi_protocol::ManualCompactionResult>(
+            &client.client_id.0,
+            "workbench.session.compact",
+            &request.idempotency_key,
+            resource_id,
+            now_ms(),
+        )
+        .await
+        .map_err(|error| CommandError::operation("manual_compaction_claim_failed", error))?
+    {
+        hachimi_storage::IdempotentMutationClaim::Completed(result) => return Ok(result),
+        hachimi_storage::IdempotentMutationClaim::Indeterminate => {
+            return Err(CommandError::new(
+                "manual_compaction_indeterminate",
+                "manual compaction with this idempotency key is still unresolved",
+            ));
+        }
+        hachimi_storage::IdempotentMutationClaim::Claimed => {}
+    }
+    let current_model = state.settings.read().llm.clone();
+    let mut configuration = snapshot
+        .runs
+        .iter()
+        .max_by_key(|run| run.created_at_ms)
+        .map(|run| run.configuration.clone())
+        .unwrap_or_else(|| hachimi_protocol::RunConfiguration {
+            model_snapshot: current_model.clone(),
+            driver: hachimi_protocol::RunDriverKind::ToolLoop,
+            entry_profile: snapshot.session.entry_profile,
+            workload_override: None,
+            behavior_mode: hachimi_protocol::BehaviorMode::Default,
+            execution_target: match &snapshot.session.context {
+                hachimi_protocol::SessionContextBinding::Project { project_id, .. } => {
+                    Some(hachimi_protocol::ExecutionTarget::Local {
+                        project_id: project_id.clone(),
+                    })
+                }
+                hachimi_protocol::SessionContextBinding::Workspace { .. } => None,
+            },
+            approval_policy: hachimi_protocol::ApprovalPolicy::OnlyWhenNeeded,
+            permission_profile: hachimi_protocol::PermissionProfile::Writable,
+            budget: hachimi_protocol::RunBudget::default(),
+            accepted_plan_id: None,
+            accepted_plan_revision: None,
+        });
+    configuration.model_snapshot = current_model;
+    let result = state
+        .agent_executor
+        .compact_session(
+            &configuration,
+            &request.session_id,
+            CancellationToken::new(),
+        )
+        .await
+        .map(|checkpoint| match checkpoint {
+            Some(checkpoint) => hachimi_protocol::ManualCompactionResult {
+                status: hachimi_protocol::ManualCompactionStatus::Compacted,
+                checkpoint_id: Some(checkpoint.id),
+                token_snapshot: checkpoint.lifecycle.token_snapshot,
+            },
+            None => hachimi_protocol::ManualCompactionResult {
+                status: hachimi_protocol::ManualCompactionStatus::NoEligibleHistory,
+                checkpoint_id: None,
+                token_snapshot: None,
+            },
+        })
+        .map_err(|error| CommandError::operation("manual_compaction_failed", error));
+    match result {
+        Ok(result) => {
+            state
+                .agent_store
+                .complete_idempotent_mutation(
+                    &client.client_id.0,
+                    "workbench.session.compact",
+                    &request.idempotency_key,
+                    &result,
+                )
+                .await
+                .map_err(|error| {
+                    CommandError::operation("manual_compaction_persist_failed", error)
+                })?;
+            Ok(result)
+        }
+        Err(error) => {
+            let _ = state
+                .agent_store
+                .abandon_idempotent_mutation(
+                    &client.client_id.0,
+                    "workbench.session.compact",
+                    &request.idempotency_key,
+                )
+                .await;
+            Err(error)
+        }
+    }
+}
+
 pub(super) fn spawn_workbench_run(
     app: AppHandle,
     client: ClientContext,
@@ -693,6 +834,7 @@ pub(super) fn spawn_workbench_run_with_recovery(
                     .await;
             }
             if let Ok(Some(run)) = store.get_run(&run_id).await {
+                emit_plan_environment_if_present(&app, &state, &run.session_id).await;
                 emit_workbench_run_completion(&app, run);
             }
             return;
@@ -762,6 +904,7 @@ pub(super) fn spawn_workbench_run_with_recovery(
             tracing::warn!(run_id = %run_id, %error, "failed to persist structured Review output");
         }
         if let Ok(Some(run)) = store.get_run(&run_id).await {
+            emit_plan_environment_if_present(&app, &state, &run.session_id).await;
             emit_workbench_run_completion(&app, run);
         }
     });
@@ -798,6 +941,12 @@ impl hachimi_agent::ModelRuntime for DesktopE2eModel {
         if cancellation.is_cancelled() {
             return Box::pin(stream::iter([Err(ModelRuntimeError::Cancelled)]));
         }
+        if crate::desktop_e2e_agent_tools::waits_for_process_restart(&request) {
+            return Box::pin(stream::once(async move {
+                cancellation.cancelled().await;
+                Err(ModelRuntimeError::Cancelled)
+            }));
+        }
         if let Some(response) = crate::desktop_e2e_agent_tools::response(&request) {
             return Box::pin(stream::iter(response));
         }
@@ -832,6 +981,12 @@ impl hachimi_agent::ModelRuntime for DesktopE2eModel {
             message.role == ModelRole::User
                 && message.content.contains("[desktop-e2e:office-skills]")
         });
+        let office_interruption = request.messages.iter().any(|message| {
+            message.role == ModelRole::User
+                && message
+                    .content
+                    .contains("[desktop-e2e:office-interruption]")
+        });
         let implicit_office_workflow = request.messages.iter().any(|message| {
             message.role == ModelRole::User
                 && message
@@ -848,23 +1003,7 @@ impl hachimi_agent::ModelRuntime for DesktopE2eModel {
                 Err(ModelRuntimeError::Cancelled)
             }));
         }
-        let response = if pet_cross_window && !completed_tools.contains(&"request_user_input") {
-            tool_call_events(ModelToolCall {
-                id: ToolCallId::from("desktop-e2e-pet-input"),
-                name: "request_user_input".into(),
-                arguments: serde_json::json!({
-                    "questions": [{
-                        "id": "pet_verification_secret",
-                        "header": "Pet verification",
-                        "prompt": "Enter the Pet cross-window ephemeral secret.",
-                        "options": [],
-                        "secret": true,
-                        "autoResolutionMs": null,
-                        "defaultAnswer": null
-                    }]
-                }),
-            })
-        } else if pet_cross_window && !completed_tools.contains(&"workspace_write_file") {
+        let response = if pet_cross_window && !completed_tools.contains(&"workspace_write_file") {
             tool_call_events(ModelToolCall {
                 id: ToolCallId::from("desktop-e2e-pet-workspace-write"),
                 name: "workspace_write_file".into(),
@@ -876,7 +1015,7 @@ impl hachimi_agent::ModelRuntime for DesktopE2eModel {
             })
         } else if pet_cross_window {
             desktop_e2e_text_response(
-                "Pet cross-window UserInput and writable Workspace action completed on one Agent Run.",
+                "Pet writable Workspace action completed on one Agent Run without interactive Plan tools.",
             )
         } else if implicit_office_workflow && !completed_tools.contains(&"skills.list") {
             tool_call_events(ModelToolCall {
@@ -1000,6 +1139,25 @@ impl hachimi_agent::ModelRuntime for DesktopE2eModel {
                     finish_reason: ModelFinishReason::Stop,
                 }),
             ]
+        } else if office_interruption {
+            match request
+                .tools
+                .iter()
+                .find(|tool| tool.name.contains("_create_document_"))
+                .filter(|tool| !completed_tools.contains(&tool.name.as_str()))
+            {
+                Some(tool) => tool_call_events(ModelToolCall {
+                    id: ToolCallId::from("desktop-e2e-office-interruption"),
+                    name: tool.name.clone(),
+                    arguments: serde_json::json!({
+                        "title": "Hachimi Office interruption recovery",
+                        "body": "interrupt-before-receipt"
+                    }),
+                }),
+                None => desktop_e2e_text_response(
+                    "Interrupted Office stdio MCP recovered without replaying an acknowledged result.",
+                ),
+            }
         } else if office_workflow {
             let next = [
                 "create_document",
@@ -1261,10 +1419,36 @@ impl hachimi_agent::ModelRuntime for DesktopE2eModel {
                     finish_reason: ModelFinishReason::Stop,
                 }),
             ]
+        } else if plan_mode && !completed_tools.contains(&"request_user_input") {
+            tool_call_events(ModelToolCall {
+                id: ToolCallId::from("desktop-e2e-plan-input"),
+                name: "request_user_input".into(),
+                arguments: serde_json::json!({
+                    "questions": [{
+                        "id": "verification_label",
+                        "header": "Verification",
+                        "question": "Choose the deterministic verification strategy.",
+                        "options": [
+                            {
+                                "label": "Git status",
+                                "description": "Verify the generated evidence file with Git status."
+                            },
+                            {
+                                "label": "File tree",
+                                "description": "Verify the generated evidence file in the workspace tree."
+                            }
+                        ]
+                    }]
+                }),
+            })
         } else if plan_mode {
             vec![
                 Ok(ModelEvent::TextDelta {
-                    delta: "## Goal\nCreate the deterministic E2E evidence file.\n\n## Steps\n1. Write the file.\n2. Ask for confirmation data.\n3. Run Git status to verify the change."
+                    delta: "I have the verification choice. I will now finalize the plan.\n\n<proposed_"
+                        .into(),
+                }),
+                Ok(ModelEvent::TextDelta {
+                    delta: "plan>\n# Create deterministic Desktop E2E evidence\n\n## Goal\nCreate the deterministic E2E evidence file.\n\n## Steps\n1. Write the file.\n2. Run Git status to verify the change.\n</proposed_plan>"
                         .into(),
                 }),
                 Ok(ModelEvent::Usage {
@@ -1285,22 +1469,6 @@ impl hachimi_agent::ModelRuntime for DesktopE2eModel {
                     "path": "desktop-e2e-evidence.txt",
                     "content": "Hachimi Desktop E2E evidence\n",
                     "expectedSha256": null
-                }),
-            })
-        } else if !completed_tools.contains(&"request_user_input") {
-            tool_call_events(ModelToolCall {
-                id: ToolCallId::from("desktop-e2e-input"),
-                name: "request_user_input".into(),
-                arguments: serde_json::json!({
-                    "questions": [{
-                        "id": "verification_label",
-                        "header": "Verification",
-                        "prompt": "Enter the deterministic ephemeral verification secret.",
-                        "options": [],
-                        "secret": true,
-                        "autoResolutionMs": null,
-                        "defaultAnswer": null
-                    }]
                 }),
             })
         } else if !completed_tools.contains(&"workspace_exec") {
@@ -1385,7 +1553,15 @@ fn desktop_e2e_tool_json(
             message.role == hachimi_protocol::ModelRole::Tool
                 && message.name.as_deref() == Some(tool_name)
         })
-        .and_then(|message| serde_json::from_str(&message.content).ok())
+        .and_then(|message| desktop_e2e_parse_tool_json(&message.content))
+}
+
+#[cfg(all(debug_assertions, feature = "desktop-e2e"))]
+fn desktop_e2e_parse_tool_json(content: &str) -> Option<serde_json::Value> {
+    serde_json::from_str(content).ok().or_else(|| {
+        let (_, payload) = content.split_once('\n')?;
+        serde_json::from_str(payload).ok()
+    })
 }
 
 #[cfg(all(debug_assertions, feature = "desktop-e2e"))]
@@ -1393,15 +1569,17 @@ fn desktop_e2e_skill_id(
     messages: &[hachimi_protocol::ModelMessage],
     qualified_name: &str,
 ) -> Option<String> {
-    messages
+    let value = messages
         .iter()
         .rev()
         .filter(|message| {
             message.role == hachimi_protocol::ModelRole::Tool
                 && message.name.as_deref() == Some("skills.list")
         })
-        .find_map(|message| serde_json::from_str::<serde_json::Value>(&message.content).ok())?
-        .as_array()?
+        .find_map(|message| desktop_e2e_parse_tool_json(&message.content))?;
+    value
+        .as_array()
+        .or_else(|| value.get("skills").and_then(serde_json::Value::as_array))?
         .iter()
         .find(|record| {
             record.get("name").and_then(serde_json::Value::as_str) == Some(qualified_name)
@@ -1439,10 +1617,10 @@ pub(super) fn provider_settings_for_runtime(
         settings.provider_endpoint_id = None;
         settings.provider_account_id = None;
         settings.embedding_model_name.clear();
-        settings.reasoning_summary = false;
+        settings.reasoning_summary = hachimi_protocol::ReasoningSummaryMode::None;
         settings.remote_compaction = false;
     } else if !features.provider_remote_context {
-        settings.reasoning_summary = false;
+        settings.reasoning_summary = hachimi_protocol::ReasoningSummaryMode::None;
         settings.remote_compaction = false;
     }
     settings

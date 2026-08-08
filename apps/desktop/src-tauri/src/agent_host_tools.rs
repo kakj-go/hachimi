@@ -1161,7 +1161,7 @@ impl ToolExecutor for ComputerObserveTool {
     fn descriptor(&self) -> ToolDescriptor {
         ToolDescriptor {
             name: "computer_observe".into(),
-            description: "Resolve an application by name and optional window title, then capture a fresh frame for the user-authorized, non-elevated window. Never ask the user for a PID or window handle. If application identity is ambiguous, use request_user_input to ask for the application name. The returned frame ID, fingerprint, and input epoch must be used by the next Computer action.".into(),
+            description: "Resolve an application by name and optional window title, then capture a fresh frame for the user-authorized, non-elevated window. Never ask the user for a PID or window handle. Ambiguous application or window identity returns structured NeedsAttention so the user can choose by semantic name. The returned frame ID, fingerprint, and input epoch must be used by the next Computer action.".into(),
             input_schema: object_schema(
                 json!({
                     "appName": { "type": "string", "minLength": 1, "maxLength": 256 },
@@ -1233,10 +1233,11 @@ impl ToolExecutor for ComputerObserveTool {
             ) {
                 Ok(target) => target,
                 Err(error) => {
-                    return Ok(ToolResult::failed(
-                        &invocation.call,
-                        crate::computer_targeting::resolution_message(&error),
-                    ));
+                    let message = crate::computer_targeting::resolution_message(&error);
+                    return Ok(match crate::computer_targeting::attention_code(&error) {
+                        Some(code) => ToolResult::needs_attention(&invocation.call, code, message),
+                        None => ToolResult::failed(&invocation.call, message),
+                    });
                 }
             };
             let app = target.app.clone();

@@ -5,8 +5,8 @@ use hachimi_llm::{ApiKeyStore, OpenAiCompatibleRuntime, SystemApiKeyStore, test_
 use hachimi_model_runtime::{ModelRuntime, ModelRuntimeError};
 use hachimi_protocol::{
     LlmSettings, ModelCompactionRequest, ModelEvent, ModelMessage, ModelRequest,
-    ProviderEmbeddingRequest, ProviderProtocolKind, StructuredOutputMode, ToolDescriptor,
-    ToolEffect,
+    ProviderEmbeddingRequest, ProviderProtocolKind, ReasoningSummaryMode, StructuredOutputMode,
+    ToolDescriptor, ToolEffect,
 };
 use serde::Deserialize;
 use serde_json::json;
@@ -47,8 +47,13 @@ fn settings(config: &StagingConfig, protocol: ProviderProtocolKind) -> LlmSettin
         } else {
             String::new()
         },
-        reasoning_summary: protocol == ProviderProtocolKind::Responses
-            && config.require_reasoning_summary,
+        reasoning_summary: if protocol == ProviderProtocolKind::Responses
+            && config.require_reasoning_summary
+        {
+            ReasoningSummaryMode::Auto
+        } else {
+            ReasoningSummaryMode::None
+        },
         remote_compaction: protocol == ProviderProtocolKind::Responses
             && config.require_remote_compaction,
         max_input_tokens: 128_000,

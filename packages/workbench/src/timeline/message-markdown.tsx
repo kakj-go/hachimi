@@ -60,15 +60,31 @@ export function TimelineMessageText(props: {
     }
   });
 
-  const html = createMemo(() => renderMarkdown(renderedText(), props.workspaceRoot));
+  return (
+    <MarkdownContent
+      text={renderedText()}
+      workspaceRoot={props.workspaceRoot}
+      onOpenPath={props.onOpenPath}
+      class="timeline-message-text"
+    />
+  );
+}
+
+export function MarkdownContent(props: {
+  text: string;
+  workspaceRoot: string | undefined;
+  onOpenPath: ((path: string) => void) | undefined;
+  class?: string;
+}) {
+  const html = createMemo(() => renderMarkdown(props.text, props.workspaceRoot));
   return (
     <div
-      class="timeline-message-text"
+      class={props.class ?? "markdown-content"}
       innerHTML={html()}
       onClick={(event) => {
         const target = event.target instanceof Element ? event.target.closest("a") : null;
         const path = target?.getAttribute("data-local-path");
-        if (!path || !event.currentTarget.contains(target)) return;
+        if (!path || !event.currentTarget.contains(target) || !props.onOpenPath) return;
         event.preventDefault();
         props.onOpenPath(path);
       }}

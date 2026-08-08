@@ -391,7 +391,7 @@ impl AgentStore {
         updated_at_ms: i64,
     ) -> Result<TaskRunRecord, AgentStoreError> {
         let result = sqlx::query(
-            "UPDATE task_runs SET execution_session_id = ?, run_id = ?, status = 'preparing', updated_at_ms = ? WHERE id = ? AND status = 'queued'",
+            "UPDATE task_runs SET execution_session_id = ?, run_id = ?, updated_at_ms = ? WHERE id = ? AND status = 'preparing' AND run_id IS NULL",
         )
         .bind(session_id.as_str())
         .bind(run_id.as_str())
@@ -399,6 +399,24 @@ impl AgentStore {
         .bind(task_run_id.as_str())
         .execute(&self.pool)
         .await?;
+        if result.rows_affected() != 1 {
+            return Err(AgentStoreError::InvalidTaskRunTransition);
+        }
+        self.get_task_run(task_run_id)
+            .await?
+            .ok_or_else(|| AgentStoreError::TaskRunNotFound(task_run_id.clone()))
+    }
+
+    pub async fn requeue_unbound_preparing_task_run(
+        &self,
+        task_run_id: &TaskRunId,
+        updated_at_ms: i64,
+    ) -> Result<TaskRunRecord, AgentStoreError> {
+        let result = sqlx::query("UPDATE task_runs SET status = 'queued', updated_at_ms = ? WHERE id = ? AND status = 'preparing' AND run_id IS NULL")
+            .bind(updated_at_ms)
+            .bind(task_run_id.as_str())
+            .execute(&self.pool)
+            .await?;
         if result.rows_affected() != 1 {
             return Err(AgentStoreError::InvalidTaskRunTransition);
         }

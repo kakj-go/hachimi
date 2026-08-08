@@ -6,9 +6,10 @@ use super::{
     AttachmentId, BehaviorMode, BrowserAutomationLease, BrowserAutomationLeaseId,
     BrowserAutomationSurfaceKind, BrowserSession, BrowserSessionId, BrowserTabId, CheckoutId,
     CheckoutKind, CheckoutRecord, ComputerControlSession, ComputerControlSessionId,
-    ExecutionTarget, ExternalBrowserLeaseObservation, GitRemoteRecord, HostAccessRequestRecord,
-    MutationContext, PlanId, PlanStepId, ProjectId, ProjectRecord, ProposedPlan, RunEventEnvelope,
-    RunId, RunRecord, RunStatus, SessionRecord, SessionSourceId, SkillId, TranscriptItem,
+    ExecutionPlanState, ExecutionTarget, ExternalBrowserLeaseObservation, GitRemoteRecord,
+    HostAccessRequestRecord, MutationContext, PlanConfirmation, PlanConfirmationStatus,
+    PlanDocument, PlanId, PlanStep, ProjectId, ProjectRecord, RunEventEnvelope, RunId, RunRecord,
+    RunStatus, SessionRecord, SessionSourceId, SkillId, TranscriptItem,
 };
 use crate::FileDiffStatus;
 
@@ -145,8 +146,12 @@ pub enum EnvironmentActivity {
     },
     Plan {
         plan_id: PlanId,
-        step_id: PlanStepId,
-        description: String,
+        revision: u32,
+        title: String,
+        confirmation_status: PlanConfirmationStatus,
+        execution_run_id: Option<RunId>,
+        execution_status: Option<RunStatus>,
+        current_step: Option<PlanStep>,
     },
 }
 
@@ -173,7 +178,7 @@ pub struct WorkbenchEnvironmentSnapshot {
     pub changes: EnvironmentChangeSummary,
     pub git: EnvironmentGitSummary,
     pub handoff: EnvironmentHandoffState,
-    pub activity: Option<EnvironmentActivity>,
+    pub activities: Vec<EnvironmentActivity>,
     pub sources: Vec<SessionSourceRecord>,
     #[specta(type = specta_typescript::Number)]
     pub revision: u64,
@@ -240,6 +245,28 @@ pub struct WorkbenchTaskStartRequest {
     /// when names collide; `$name` remains only an unambiguous text shortcut.
     #[serde(default)]
     pub skill_ids: Vec<SkillId>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ManualCompactionRequest {
+    pub idempotency_key: String,
+    pub session_id: super::SessionId,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum ManualCompactionStatus {
+    Compacted,
+    NoEligibleHistory,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ManualCompactionResult {
+    pub status: ManualCompactionStatus,
+    pub checkpoint_id: Option<super::CompactionCheckpointId>,
+    pub token_snapshot: Option<super::CompactionTokenSnapshot>,
 }
 
 fn default_interactive_permission() -> super::PermissionProfile {
@@ -317,7 +344,9 @@ pub struct WorkbenchSessionSnapshot {
     pub transcript: Vec<TranscriptItem>,
     pub attachments: Vec<super::AttachmentRecord>,
     pub pending_approvals: Vec<ApprovalRequestRecord>,
-    pub proposed_plans: Vec<ProposedPlan>,
+    pub plan_documents: Vec<PlanDocument>,
+    pub plan_confirmations: Vec<PlanConfirmation>,
+    pub execution_plans: Vec<ExecutionPlanState>,
     pub artifacts: Vec<ArtifactRecord>,
     pub agent_tasks: Vec<AgentTaskRecord>,
     pub run_summaries: Vec<RunSummaryRecord>,
@@ -358,9 +387,25 @@ pub struct PlanRevisionRequest {
     pub instructions: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct PlanSkipRequest {
+    pub idempotency_key: String,
+    pub plan_id: PlanId,
+    pub expected_revision: u32,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkbenchPlanAcceptanceSnapshot {
-    pub plan: ProposedPlan,
+    pub plan: PlanDocument,
+    pub confirmation: PlanConfirmation,
     pub task: WorkbenchTaskSnapshot,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkbenchPlanSkipSnapshot {
+    pub plan: PlanDocument,
+    pub confirmation: PlanConfirmation,
 }

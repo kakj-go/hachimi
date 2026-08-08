@@ -20,6 +20,7 @@ import {
 import { installEnvironmentSummaryVisualTests } from "./environment-summary-visual";
 import { assertPlatformIntegrationsVisualMatrix } from "./platform-integrations-visual";
 import { assertPermissionTones, installSessionScrollVisualTest } from "./session-scroll-visual";
+import { installSettingsLayoutVisualTests } from "./settings-layout-visual";
 export async function installTauriMocks(
   page: Page,
   withComposerData = false,
@@ -181,25 +182,19 @@ export async function installTauriMocks(
       const proposedPlan = {
         id: "plan-ui-unification",
         sessionId: session.id,
-        runId: run.id,
+        sourceRunId: run.id,
+        sourceItemId: "item-plan",
         revision: 2,
+        title: "Workbench Codex 对齐计划",
         goal: "统一 Workbench 消息、摘要、终端和右侧查看器",
-        assumptions: ["保留 Hachimi 品牌和共享 UI 组件"],
-        steps: [
-          { id: "step-1", description: "统一消息和运行步骤的信息层级", status: "completed" },
-          { id: "step-2", description: "实现置顶环境摘要和资源 Inspector", status: "pending" },
-          { id: "step-3", description: "重建计划、问题和审批阻塞层", status: "pending" },
-          { id: "step-4", description: "完成 Desktop E2E 与视觉验收", status: "pending" },
-        ],
-        affectedResources: ["packages/workbench/src"],
-        verification: ["visual", "desktop-e2e"],
-        risks: [],
-        openQuestions: [],
         contentMarkdown: "# Workbench Codex 对齐计划\n\n完整实施消息、摘要、终端和 Inspector。",
-        status: "proposed",
-        acceptedRunId: null,
         createdAtMs: 1_774_184_520_000,
-        acceptedAtMs: null,
+      };
+      const planConfirmation = {
+        planId: proposedPlan.id,
+        status: "pending",
+        acceptedRunId: null,
+        resolvedAtMs: null,
       };
       const userInput = {
         id: "input-ui-unification",
@@ -251,10 +246,7 @@ export async function installTauriMocks(
           payload: {
             type: "plan",
             data: {
-              plan_id: proposedPlan.id,
-              revision: proposedPlan.revision,
               text: proposedPlan.contentMarkdown,
-              steps: proposedPlan.steps,
             },
           },
           relations: {},
@@ -308,7 +300,9 @@ export async function installTauriMocks(
         transcript,
         attachments: [attachment],
         pendingApprovals: gateMode === "approval" ? [approval] : [],
-        proposedPlans: gateMode === "plan" ? [proposedPlan] : [],
+        planDocuments: gateMode === "plan" ? [proposedPlan] : [],
+        planConfirmations: gateMode === "plan" ? [planConfirmation] : [],
+        executionPlans: [],
         artifacts: [],
         agentTasks: [],
         runSummaries: [],
@@ -1022,6 +1016,7 @@ export async function installTauriMocks(
 
 installSessionScrollVisualTest(installTauriMocks);
 installEnvironmentSummaryVisualTests(installTauriMocks);
+installSettingsLayoutVisualTests(installTauriMocks);
 test("production task center uses cards and focused dialogs", async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 800 });
   await page.clock.setFixedTime(new Date("2026-07-26T15:00:00.000Z"));
@@ -1134,7 +1129,6 @@ test("production composer popovers dismiss outside and create visual Skill refer
       animations: "disabled",
     });
   }
-
   await page.getByTestId("workbench-permission-profile").click();
   const permissionPopover = page.getByTestId("workbench-permission-popover");
   await expect(permissionPopover).toBeVisible();
@@ -1145,7 +1139,6 @@ test("production composer popovers dismiss outside and create visual Skill refer
       animations: "disabled",
     });
   }
-
   await page.locator("html").evaluate((root) => {
     root.style.setProperty("--font-size-xs", "16px");
     root.style.setProperty("--font-size-sm", "17px");
@@ -1207,7 +1200,6 @@ for (const viewport of [
     });
   });
 }
-
 for (const systemScheme of ["light", "dark"] as const) {
   test(`production system appearance ${systemScheme}`, async ({ page }) => {
     await page.setViewportSize({ width: 1024, height: 768 });
@@ -1221,14 +1213,12 @@ for (const systemScheme of ["light", "dark"] as const) {
     });
   });
 }
-
 test("production title bar and project rows preserve their desktop alignment and actions", async ({
   page,
 }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
   await installTauriMocks(page, true, false, true);
   await page.goto("http://127.0.0.1:1420/workbench.html?route=home");
-
   const titleMenus = page.locator(".title-menus");
   await expect(titleMenus.getByRole("button")).toHaveCount(4);
   await expect(titleMenus.getByRole("button").first()).toHaveCSS("white-space", "nowrap");
@@ -1252,7 +1242,6 @@ test("production title bar and project rows preserve their desktop alignment and
   expect(titleBounds.menus.left).toBeGreaterThanOrEqual(titleBounds.history.right);
   expect(titleBounds.controls.left).toBeGreaterThanOrEqual(titleBounds.menus.right);
   expect(titleBounds.controls.right).toBeLessThanOrEqual(titleBounds.right);
-
   const projectNames = page.locator(".project-row-name");
   await expect(projectNames).toHaveCount(2);
   const nameBoxes = await projectNames.evaluateAll((elements) =>
@@ -1263,7 +1252,6 @@ test("production title bar and project rows preserve their desktop alignment and
   );
   expect(nameBoxes.map(({ text }) => text)).toEqual(["notes", "hachimi-code"]);
   expect(Math.abs(nameBoxes[0]!.x - nameBoxes[1]!.x)).toBeLessThan(1);
-
   const hachimiRow = page.locator(".project-row-shell", { hasText: "hachimi-code" });
   await hachimiRow.hover();
   await expect(page.getByTestId("project-new-task-project-hachimi")).toBeVisible();
@@ -1367,7 +1355,6 @@ test("project tools open before the first message and preserve the responsive in
     animations: "disabled",
   });
 });
-
 test("production plan confirmation replaces the composer with a compact revision gate", async ({
   page,
 }) => {
@@ -1386,9 +1373,15 @@ test("production plan confirmation replaces the composer with a compact revision
     animations: "disabled",
   });
   await page.setViewportSize({ width: 720, height: 640 });
+  await expect(page.locator(".project-sidebar")).toBeHidden();
+  await expect(page.locator("html")).toHaveJSProperty("scrollWidth", 720);
+  expect(
+    await page
+      .locator(".workbench-gate")
+      .evaluate((element) => element.scrollWidth <= element.clientWidth),
+  ).toBe(true);
   await expect(page).toHaveScreenshot("production-plan-gate-720x640.png");
 });
-
 test("production UserInput questions replace the composer with direct choices", async ({
   page,
 }) => {
@@ -1401,13 +1394,21 @@ test("production UserInput questions replace the composer with direct choices", 
 
   await expect(page.locator('[data-component="user-input-card"]')).toBeVisible();
   await expect(page.locator('[role="radiogroup"]')).toHaveCount(1);
-  await expect(page.locator(".user-input-pager")).toContainText("1 of 2");
-  await expect(page.getByTestId("workbench-submit-user-input")).toBeVisible();
+  await expect(page.locator(".user-input-pager")).toContainText("1/2");
+  await expect(page.getByTestId("workbench-submit-user-input")).toHaveCount(0);
+  await expect(page.locator(".user-input-other-row input")).toBeVisible();
   await expect(page.locator('[data-component="composer"]')).toBeHidden();
   await expect(page).toHaveScreenshot("production-user-input-gate-1440x900.png", {
     animations: "disabled",
   });
   await page.setViewportSize({ width: 720, height: 640 });
+  await expect(page.locator(".project-sidebar")).toBeHidden();
+  await expect(page.locator("html")).toHaveJSProperty("scrollWidth", 720);
+  expect(
+    await page
+      .locator(".workbench-gate")
+      .evaluate((element) => element.scrollWidth <= element.clientWidth),
+  ).toBe(true);
   await expect(page).toHaveScreenshot("production-user-input-gate-720x640.png");
 });
 

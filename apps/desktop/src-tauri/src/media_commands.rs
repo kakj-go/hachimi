@@ -4,15 +4,19 @@ use hachimi_agent::{
     AgentRunRequest, ModelRuntime,
 };
 use hachimi_protocol::{
-    ApprovalId, AuthorityMode, BehaviorMode, EntryProfile, ItemPayload, ItemStatus,
-    McpToolSelection, PermissionProfile, ProviderAccountId, ProviderAccountRecord,
-    ProviderCapabilities, ProviderCapabilityProbeId, ProviderEndpointId, ProviderEndpointRecord,
-    ProviderProbeReport, ProviderProbeStatus, ProviderProtocolKind, ProviderRegistrySnapshot,
+    AuthorityMode, BehaviorMode, EntryProfile, ItemPayload, ItemStatus, McpToolSelection,
+    PermissionProfile, ProviderAccountId, ProviderAccountRecord, ProviderCapabilities,
+    ProviderCapabilityProbeId, ProviderEndpointId, ProviderEndpointRecord, ProviderProbeReport,
+    ProviderProbeStatus, ProviderProtocolKind, ProviderRegistrySnapshot, ReasoningSummaryMode,
     RunBudget, RunOrigin, RunPurpose, RunStatus, SessionContextBinding, SessionPermissionConfig,
     SessionPermissionConfigRequest, SessionPermissionConfigUpdate, StructuredOutputMode,
     TranscriptItemKind, WorkloadKind,
 };
 use sha2::{Digest, Sha256};
+
+use crate::permission_runtime::{
+    entry_profile_key, read_session_permission_config, session_extra_authorizations,
+};
 
 pub(super) fn avatar_source_is_unchanged(
     previous: &InspectedAvatar,
@@ -58,7 +62,7 @@ pub(super) async fn save_llm(
         settings.provider_endpoint_id = None;
         settings.provider_account_id = None;
         settings.embedding_model_name.clear();
-        settings.reasoning_summary = false;
+        settings.reasoning_summary = ReasoningSummaryMode::None;
         settings.remote_compaction = false;
         {
             let mut app_settings = state.settings.write();
@@ -224,12 +228,14 @@ fn validate_provider_feature_input(
     if !features.provider_extensions
         && (input.protocol != ProviderProtocolKind::ChatCompletions
             || !input.embedding_model_name.trim().is_empty()
-            || input.reasoning_summary
+            || input.reasoning_summary.is_enabled()
             || input.remote_compaction)
     {
         return Err(CommandError::new("feature_disabled", "provider_extensions"));
     }
-    if !features.provider_remote_context && (input.reasoning_summary || input.remote_compaction) {
+    if !features.provider_remote_context
+        && (input.reasoning_summary.is_enabled() || input.remote_compaction)
+    {
         return Err(CommandError::new(
             "feature_disabled",
             "provider_remote_context",
@@ -755,101 +761,6 @@ pub(super) fn profile_supports_pet_voice(profile: &AvatarAdaptationProfile) -> b
     !matches!(profile.lip_sync, LipSyncCapability::None)
 }
 
-fn entry_profile_key(profile: EntryProfile) -> &'static str {
-    match profile {
-        EntryProfile::Workbench => "workbench",
-        EntryProfile::PetConversation => "pet_conversation",
-    }
-}
-
-async fn read_session_permission_config(
-    store: &AgentStore,
-    session_id: Option<&SessionId>,
-    entry_profile: EntryProfile,
-) -> Result<SessionPermissionConfig, CommandError> {
-    if let Some(session_id) = session_id.filter(|_| entry_profile != EntryProfile::PetConversation)
-    {
-        let session = store
-            .get_session(session_id)
-            .await
-            .map_err(|error| CommandError::operation("session_permission_lookup_failed", error))?
-            .ok_or_else(|| CommandError::new("session_not_found", "Session does not exist"))?;
-        if session.entry_profile != entry_profile {
-            return Err(CommandError::new(
-                "session_permission_profile_mismatch",
-                "Session entry profile does not match the permission request",
-            ));
-        }
-        let scope_key = format!("session:{}", session_id.as_str());
-        if let Some(policy) = store
-            .permission_policy(&scope_key)
-            .await
-            .map_err(|error| CommandError::operation("session_permission_lookup_failed", error))?
-        {
-            return Ok(SessionPermissionConfig {
-                policy,
-                extra_authorizations: session_extra_authorizations(store, session_id).await?,
-            });
-        }
-    }
-    let profile_key = entry_profile_key(entry_profile);
-    let scope_key = format!("profile:{profile_key}");
-    Ok(SessionPermissionConfig {
-        policy: store
-            .permission_policy(&scope_key)
-            .await
-            .map_err(|error| CommandError::operation("session_permission_lookup_failed", error))?
-            .unwrap_or_default(),
-        extra_authorizations: Vec::new(),
-    })
-}
-
-async fn session_extra_authorizations(
-    store: &AgentStore,
-    session_id: &SessionId,
-) -> Result<Vec<hachimi_protocol::SessionExtraAuthorizationSummary>, CommandError> {
-    let mut summaries = store
-        .list_session_tool_authorities(session_id)
-        .await
-        .map_err(|error| CommandError::operation("session_extra_authority_lookup_failed", error))?
-        .into_iter()
-        .map(
-            |approval| hachimi_protocol::SessionExtraAuthorizationSummary {
-                id: approval.id,
-                action: approval.action,
-                resource: approval.resource,
-                target_host: approval.target_host,
-                granted_at_ms: approval.resolved_at_ms.unwrap_or(approval.created_at_ms),
-            },
-        )
-        .collect::<Vec<_>>();
-    summaries.extend(
-        store
-            .list_session_host_authorities(session_id)
-            .await
-            .map_err(|error| {
-                CommandError::operation("session_host_authority_lookup_failed", error)
-            })?
-            .into_iter()
-            .map(
-                |authorization| hachimi_protocol::SessionExtraAuthorizationSummary {
-                    id: ApprovalId::new(authorization.id),
-                    action: authorization.action,
-                    resource: authorization.resource,
-                    target_host: authorization.target_host,
-                    granted_at_ms: authorization.granted_at_ms,
-                },
-            ),
-    );
-    summaries.sort_by(|left, right| {
-        right
-            .granted_at_ms
-            .cmp(&left.granted_at_ms)
-            .then_with(|| left.id.cmp(&right.id))
-    });
-    Ok(summaries)
-}
-
 fn authorize_session_permission(
     window: &WebviewWindow,
     state: &DesktopState,
@@ -917,6 +828,30 @@ pub(super) async fn update_session_permission_config(
         )
     };
     let mut policy = request.config.policy;
+    let mut skill_ids = request.config.skill_ids;
+    skill_ids.sort();
+    skill_ids.dedup();
+    if skill_ids.len() > 128 {
+        return Err(CommandError::new(
+            "permission_skill_limit_exceeded",
+            "Permission profiles can select at most 128 Skills",
+        ));
+    }
+    let available_skills = state
+        .skill_host
+        .list()
+        .await
+        .map_err(|error| CommandError::operation("permission_skill_lookup_failed", error))?;
+    if let Some(skill_id) = skill_ids.iter().find(|skill_id| {
+        !available_skills
+            .iter()
+            .any(|record| record.id.as_str() == skill_id.as_str() && record.enabled)
+    }) {
+        return Err(CommandError::new(
+            "permission_skill_unavailable",
+            format!("Skill is unavailable or disabled: {skill_id}"),
+        ));
+    }
     let previous = state
         .agent_store
         .permission_policy(&scope_key)
@@ -934,10 +869,11 @@ pub(super) async fn update_session_permission_config(
         .is_some_and(|previous| previous.level != policy.level);
     policy.revision = expected_revision.saturating_add(1);
     let timestamp_ms = i64::try_from(epoch_millis()).unwrap_or(i64::MAX);
-    crate::permission_runtime::persist_policy_and_cancel_revoked(
+    crate::permission_runtime::persist_config_and_cancel_revoked(
         &state,
         &scope_key,
         &policy,
+        &skill_ids,
         timestamp_ms,
     )
     .await?;
@@ -968,6 +904,7 @@ pub(super) async fn update_session_permission_config(
     };
     Ok(SessionPermissionConfig {
         policy,
+        skill_ids,
         extra_authorizations,
     })
 }
@@ -1155,7 +1092,7 @@ pub(super) async fn start_pet_turn(
         capability_grants: launched.capability_grants,
         sandbox_snapshot: state.sandbox_snapshot().report,
         attachment_ids: Vec::new(),
-        skill_allowlist: Vec::new(),
+        skill_allowlist: permission_config.skill_ids.clone(),
         mcp_tool_allowlist: policy_mcp_tool_selections,
         run_tool_allowlist: None,
         host_revision_snapshot,

@@ -19,7 +19,7 @@ fn provider_input(protocol: ProviderProtocolKind) -> LlmSettingsInput {
         provider_endpoint_id: None,
         provider_account_id: None,
         embedding_model_name: String::new(),
-        reasoning_summary: false,
+        reasoning_summary: ReasoningSummaryMode::None,
         remote_compaction: false,
         max_input_tokens: 0,
         max_output_tokens: 0,

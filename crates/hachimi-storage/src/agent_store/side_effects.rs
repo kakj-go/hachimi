@@ -338,7 +338,7 @@ async fn copy_side_effect_checkpoint_tx(
     created_at_ms: i64,
 ) -> Result<(), AgentStoreError> {
     let source = sqlx::query(
-        "SELECT step_index, tool_name, recovery_policy, parameter_hash, world_revision, provider_revision, revision_snapshot_json FROM run_step_checkpoints WHERE run_id = ? AND run_generation = ? AND tool_call_id = ? ORDER BY step_index DESC, created_at_ms DESC, rowid DESC LIMIT 1",
+        "SELECT step_index, tool_name, recovery_policy, parameter_hash, world_revision, provider_revision, revision_snapshot_json, created_at_ms FROM run_step_checkpoints WHERE run_id = ? AND run_generation = ? AND tool_call_id = ? ORDER BY step_index DESC, created_at_ms DESC, rowid DESC LIMIT 1",
     )
     .bind(record.run_id.as_str())
     .bind(i64::try_from(record.run_generation).unwrap_or(i64::MAX))
@@ -348,6 +348,7 @@ async fn copy_side_effect_checkpoint_tx(
     let Some(source) = source else {
         return Ok(());
     };
+    let created_at_ms = created_at_ms.max(source.get::<i64, _>("created_at_ms"));
     sqlx::query(
         "INSERT OR IGNORE INTO run_step_checkpoints (id, session_id, run_id, run_generation, step_index, phase, tool_call_id, tool_name, side_effect_execution_id, recovery_policy, parameter_hash, world_revision, provider_revision, revision_snapshot_json, created_at_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )

@@ -238,11 +238,17 @@ function TimelineEntry(props: {
   if (item.kind === "user_input_request") return <UserInputHistory item={item} />;
   if (item.kind === "plan" && item.payload.type === "plan") {
     const planData = item.payload.data;
-    const plan = props.snapshot.proposedPlans.find(
-      (candidate) => candidate.id === planData.plan_id,
+    const plan = props.snapshot.planDocuments.find(
+      (candidate) => candidate.sourceItemId === item.id,
     );
+    const confirmation = plan
+      ? props.snapshot.planConfirmations.find((candidate) => candidate.planId === plan.id)
+      : undefined;
     return (
-      <article class="timeline-plan-card" data-status={plan?.status ?? item.status}>
+      <article
+        class="timeline-plan-card"
+        data-status={confirmation?.status ?? item.status}
+      >
         <header>
           <span>
             <Lightbulb size={17} />
@@ -419,21 +425,34 @@ function UserInputHistory(props: { item: TranscriptItem }) {
 function CompactionLine(props: { item: TranscriptItem }) {
   const i18n = useI18n();
   const failed = () => props.item.status === "failed" || props.item.status === "interrupted";
+  const manual = () =>
+    props.item.payload.type === "context_compaction" &&
+    props.item.payload.data.trigger === "manual";
   return (
     <div class="context-compaction-line" data-status={props.item.status}>
       <Archive size={16} />
       <span>
         {i18n.locale() === "zh-CN"
           ? props.item.status === "in_progress"
-            ? "正在自动压缩上下文"
+            ? manual()
+              ? "正在手动压缩上下文"
+              : "正在自动压缩上下文"
             : failed()
-              ? "上下文自动压缩未完成"
-              : "上下文已自动压缩"
+              ? manual()
+                ? "上下文手动压缩未完成"
+                : "上下文自动压缩未完成"
+              : manual()
+                ? "上下文已手动压缩"
+                : "上下文已自动压缩"
           : props.item.status === "in_progress"
-            ? "Compacting context"
+            ? manual()
+              ? "Compacting context manually"
+              : "Compacting context"
             : failed()
               ? "Context compaction did not complete"
-              : "Context compacted automatically"}
+              : manual()
+                ? "Context compacted manually"
+                : "Context compacted automatically"}
       </span>
     </div>
   );

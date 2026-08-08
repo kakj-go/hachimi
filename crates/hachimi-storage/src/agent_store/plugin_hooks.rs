@@ -13,13 +13,15 @@ use tokio_util::sync::CancellationToken;
 
 use super::{AgentStore, AgentStoreError};
 
-const ALLOWED_HOOK_EVENTS: [&str; 6] = [
+const ALLOWED_HOOK_EVENTS: [&str; 8] = [
     "run.before",
     "run.after",
     "tool.before",
     "tool.after",
     "schedule.before",
     "schedule.after",
+    "context.compact.before",
+    "context.compact.after",
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -264,6 +266,8 @@ fn parse_hook_event(value: &str) -> Result<PluginHookEvent, AgentStoreError> {
         "tool.after" => PluginHookEvent::ToolAfter,
         "schedule.before" => PluginHookEvent::ScheduleBefore,
         "schedule.after" => PluginHookEvent::ScheduleAfter,
+        "context.compact.before" => PluginHookEvent::ContextCompactBefore,
+        "context.compact.after" => PluginHookEvent::ContextCompactAfter,
         _ => {
             return Err(AgentStoreError::InvalidPersistedValue {
                 kind: "plugin hook event",

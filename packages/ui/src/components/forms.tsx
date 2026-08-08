@@ -27,6 +27,9 @@ export type ControlTone = ComponentStateProps["tone"];
 
 export interface TextFieldProps {
   label: string;
+  class?: string;
+  hideLabel?: boolean;
+  action?: JSX.Element;
   testId?: string;
   value?: string;
   placeholder?: string;
@@ -50,9 +53,42 @@ export interface TextFieldProps {
 }
 
 export function TextField(props: TextFieldProps) {
+  const Input = () => (
+    <KTextField.Input
+      ref={props.ref}
+      class="ui-input"
+      data-component="text-field-input"
+      data-variant={props.variant ?? "default"}
+      data-size={props.size ?? "normal"}
+      data-tone={props.tone ?? "neutral"}
+      data-density={props.density}
+      data-state={
+        props.loading
+          ? "loading"
+          : props.disabled
+            ? "disabled"
+            : props.invalid || props.error
+              ? "invalid"
+              : "idle"
+      }
+      aria-busy={props.loading || undefined}
+      data-testid={props.testId}
+      classList={{ invalid: props.invalid || Boolean(props.error) }}
+      aria-invalid={props.invalid || Boolean(props.error)}
+      type={props.type ?? "text"}
+      maxLength={props.maxLength}
+      autofocus={props.autofocus}
+      placeholder={props.placeholder ?? ""}
+      onFocus={props.onFocus}
+      onBlur={props.onBlur}
+      onInput={props.onInput ?? (() => undefined)}
+      onKeyDown={props.onKeyDown}
+    />
+  );
+
   return (
     <KTextField.Root
-      class="field-stack"
+      class={props.class ? `field-stack ${props.class}` : "field-stack"}
       data-component="form-field"
       data-variant={props.variant ?? "default"}
       data-size={props.size ?? "normal"}
@@ -71,39 +107,19 @@ export function TextField(props: TextFieldProps) {
       disabled={Boolean(props.disabled || props.loading)}
       value={props.value ?? ""}
     >
-      <KTextField.Label class="field-label" data-component="form-label">
+      <KTextField.Label
+        class="field-label"
+        classList={{ "sr-only": props.hideLabel }}
+        data-component="form-label"
+      >
         {props.label}
       </KTextField.Label>
-      <KTextField.Input
-        ref={props.ref}
-        class="ui-input"
-        data-component="text-field-input"
-        data-variant={props.variant ?? "default"}
-        data-size={props.size ?? "normal"}
-        data-tone={props.tone ?? "neutral"}
-        data-density={props.density}
-        data-state={
-          props.loading
-            ? "loading"
-            : props.disabled
-              ? "disabled"
-              : props.invalid || props.error
-                ? "invalid"
-                : "idle"
-        }
-        aria-busy={props.loading || undefined}
-        data-testid={props.testId}
-        classList={{ invalid: props.invalid || Boolean(props.error) }}
-        aria-invalid={props.invalid || Boolean(props.error)}
-        type={props.type ?? "text"}
-        maxLength={props.maxLength}
-        autofocus={props.autofocus}
-        placeholder={props.placeholder ?? ""}
-        onFocus={props.onFocus}
-        onBlur={props.onBlur}
-        onInput={props.onInput ?? (() => undefined)}
-        onKeyDown={props.onKeyDown}
-      />
+      <Show when={props.action} fallback={<Input />}>
+        <div class="field-input-action" data-component="field-input-action">
+          <Input />
+          {props.action}
+        </div>
+      </Show>
       <Show when={props.description && !props.error}>
         <KTextField.Description data-component="field-description">
           {props.description}

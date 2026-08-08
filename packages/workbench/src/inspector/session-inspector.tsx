@@ -3,6 +3,7 @@ import { Badge } from "@hachimi/ui";
 import { Show, createMemo } from "solid-js";
 
 import { timelineItemText } from "../timeline/timeline-text";
+import { MarkdownContent } from "../timeline/message-markdown";
 import type { InspectorTab } from "../state/inspector-tabs";
 import type { InspectorResource } from "../state/workbench-layout";
 import type { WorkbenchCommandPort } from "../workbench-command-port";
@@ -45,7 +46,7 @@ export function SessionInspector(props: {
     (() => {
       const resource = props.resource;
       return resource?.kind === "plan"
-        ? props.snapshot.proposedPlans.find((item) => item.id === resource.planId)
+        ? props.snapshot.planDocuments.find((item) => item.id === resource.planId)
         : undefined;
     })(),
   );
@@ -142,9 +143,12 @@ export function SessionInspector(props: {
       </Show>
       <Show when={plan()}>
         {(item) => (
-          <div class="inspector-plan-view">
-            <pre>{item().contentMarkdown}</pre>
-          </div>
+          <MarkdownContent
+            class="inspector-plan-view timeline-message-text"
+            text={item().contentMarkdown}
+            workspaceRoot={props.snapshot.checkout?.path}
+            onOpenPath={(path) => props.onOpenInspector({ kind: "files", path })}
+          />
         )}
       </Show>
       <Show when={props.resource?.kind === "browser"}>

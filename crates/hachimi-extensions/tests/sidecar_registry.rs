@@ -5,9 +5,10 @@ use hachimi_extensions::{
     SandboxedStdioConnectorDriver,
 };
 use hachimi_protocol::{
-    ConnectorAccount, ConnectorAccountId, ConnectorAccountUpsert, ConnectorHealth,
-    ConnectorInvocationRequest, ConnectorRevision, ConnectorRuntimeKind, PluginContribution,
-    PluginContributionKind, PluginId, PluginManifest, SandboxCapabilityReport, SandboxReadiness,
+    ConnectorAccount, ConnectorAccountId, ConnectorAccountUpsert, ConnectorActionDescriptor,
+    ConnectorActionEffect, ConnectorHealth, ConnectorInvocationRequest, ConnectorRevision,
+    ConnectorRuntimeKind, PluginContribution, PluginContributionKind, PluginId, PluginManifest,
+    SandboxCapabilityReport, SandboxReadiness,
 };
 use hachimi_sandbox::{
     SandboxBackend, SandboxError, SandboxLaunchSpec, SandboxNetworkPolicy, SandboxSpawnFuture,
@@ -176,7 +177,7 @@ async fn stdio_connector_registers_generically_and_fails_closed_in_the_sandbox()
     std::fs::write(source.path().join("bin/fixture.exe"), b"fixture").expect("sidecar fixture");
     std::fs::write(
         source.path().join("connectors/fixture.json"),
-        br#"{"hostIdentity":"hachimi.plugin.sidecar-fixture.fixture.sidecar.v1","transport":"stdio_json_rpc","entrypoint":"bin/fixture.exe","args":[],"actions":["search"],"schema":{"query":"string"}}"#,
+        br#"{"hostIdentity":"hachimi.plugin.sidecar-fixture.fixture.sidecar.v1","transport":"stdio_json_rpc","entrypoint":"bin/fixture.exe","args":[],"actions":[{"name":"search","effect":"read_only"}],"schema":{"query":"string"}}"#,
     )
     .expect("connector descriptor");
     let manifest = PluginManifest {
@@ -253,7 +254,10 @@ async fn stdio_connector_executes_every_method_and_keeps_credentials_out_of_proc
         bundle.path().to_path_buf(),
         executable,
         Vec::new(),
-        vec!["search".into()],
+        vec![ConnectorActionDescriptor {
+            name: "search".into(),
+            effect: ConnectorActionEffect::ReadOnly,
+        }],
     )
     .expect("driver");
     let store = AgentStore::connect_in_memory().await.expect("store");

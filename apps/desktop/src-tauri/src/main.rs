@@ -55,6 +55,7 @@ mod scheduler_runtime;
 mod shutdown_coordinator;
 mod skill_drop;
 mod startup_error;
+mod startup_timeline;
 mod storage_layout;
 mod workbench_commands;
 mod workbench_plan_commands;
@@ -1191,6 +1192,7 @@ fn main() {
             resolve_workbench_approval,
             accept_workbench_plan,
             revise_workbench_plan,
+            skip_workbench_plan,
             execute_workbench_git,
             list_project_git_refs,
             inspect_project_git,
@@ -1209,6 +1211,7 @@ fn main() {
             pin_workbench_checkout,
             cleanup_workbench_checkout,
             start_workbench_task,
+            compact_workbench_session,
             cancel_workbench_run,
             list_workspace_files,
             read_workspace_file_chunk,
@@ -1369,6 +1372,7 @@ fn main() {
             exit_app,
         ])
         .setup(move |app| {
+            let mut startup_timeline = startup_timeline::StartupTimeline::new();
             let data_dir = storage_layout.root.clone();
             std::fs::create_dir_all(&data_dir)?;
             std::fs::write(data_dir.join(DATA_ROOT_SENTINEL_FILE), APP_IDENTIFIER)?;
@@ -1426,6 +1430,7 @@ fn main() {
             let approval_broker = PersistentApprovalBroker::new(agent_store.clone());
             let user_input_broker = PersistentUserInputBroker::new(agent_store.clone());
             let resource_dir = app.path().resource_dir()?;
+            startup_timeline.checkpoint("storage_and_recovery");
             tauri::async_runtime::block_on(agent_store.reconcile_browser_startup())?;
             let embedded_browser = Arc::new(embedded_browser::EmbeddedBrowserService::new(
                 app.handle().clone(),
@@ -1444,6 +1449,7 @@ fn main() {
             let managed_sandbox = managed_sandbox_runtime::stage_or_degrade(
                 &data_dir, &resource_dir, runtime_supervisor.clone(),
             );
+            startup_timeline.checkpoint("sandbox_resources");
             let sandbox_probe = Arc::new(
                 WindowsSandboxReadinessProbe::new(storage_layout.sandbox_setup_marker())
                     .with_runtime(
@@ -1469,6 +1475,7 @@ fn main() {
                 tracing::warn!(code = error.code, message = %error.message, "per-user Sandbox bootstrap/repair did not attest");
             }
             let sandbox_report = sandbox_runtime.snapshot().report;
+            startup_timeline.checkpoint("sandbox_attestation");
             let sandbox_backend: Option<Arc<dyn SandboxBackend>> =
                 deterministic_e2e_sandbox_backend().or_else(|| {
                     deterministic_report
@@ -1549,6 +1556,7 @@ fn main() {
                         AvatarCatalog::load(avatar_root)?
                     }
                 };
+            startup_timeline.checkpoint("skills_and_avatar");
             let optional_resources = optional_resource_runtime::stage_optional_resources(
                 app.handle(),
                 &data_dir,
@@ -1562,6 +1570,7 @@ fn main() {
             let sensevoice_dir = optional_resources.speech_model;
             let vits_dir = optional_resources.voice_model;
             let voice_catalog = VoiceCatalog::load(data_dir.join("voice-models"), &vits_dir)?;
+            startup_timeline.checkpoint("optional_resources");
             let current_voice_asset = voice_catalog.current_asset();
             let voice_model_available = current_voice_asset.is_some();
             let speech_recognizer = SpeechRecognizerRuntime::new(
@@ -1604,9 +1613,7 @@ fn main() {
             );
             feature_flags.runtime_features = runtime_features;
             feature_flags.plugin_runtime = feature_flags.runtime_features.plugin_runtime;
-            feature_flags.motion_lab = cfg!(debug_assertions)
-                || settings.developer_mode
-                || std::env::var("HACHIMI_ENABLE_MOTION_LAB").as_deref() == Ok("1");
+            feature_flags.motion_lab = cfg!(debug_assertions);
             let control_plane = Arc::new(ControlPlane::with_audit(
                 feature_flags,
                 Arc::new(PersistentControlAuditSink::new(agent_store.clone())),
@@ -1791,6 +1798,7 @@ fn main() {
                     |error| std::io::Error::other(format!("{}: {}", error.code, error.message)),
                 )?;
             }
+            startup_timeline.checkpoint("agent_services");
             let app_server = AppServer::new(Arc::clone(&control_plane), agent_lifecycle)
                 .with_brokers(
                     Arc::new(approval_broker.clone()),
@@ -1911,6 +1919,7 @@ fn main() {
             let managed = app.state::<DesktopState>();
             restore_pet_placement(&pet, &managed)
                 .map_err(|error| std::io::Error::other(error.message))?;
+            startup_timeline.checkpoint("pet_window");
             let moved_app = app.handle().clone();
             let previous_motion = Arc::new(StdMutex::new(None::<(i32, i32, Instant)>));
             let moved_motion = Arc::clone(&previous_motion);
@@ -1960,6 +1969,7 @@ fn main() {
                 open_workbench_route(app.handle(), &managed, WorkbenchRoute::Home)
                     .map_err(|error| std::io::Error::other(error.message))?;
             }
+            startup_timeline.checkpoint("ready");
             Ok(())
         })
         .build(tauri::generate_context!());

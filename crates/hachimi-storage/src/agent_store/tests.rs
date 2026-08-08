@@ -1060,13 +1060,15 @@ async fn six_run_checkpoint_crash_boundaries_reopen_without_duplicate_side_effec
             .await
             .expect("sampling checkpoint");
 
-        let effect = side_effect(
+        let mut effect = side_effect(
             &session,
             &run,
             "execution-six-phase",
             "sha256:six-phase",
             None,
         );
+        effect.created_at_ms = effect.created_at_ms.saturating_sub(1_000);
+        effect.updated_at_ms = effect.created_at_ms;
         if crash_phase != RunStepPhase::Sampling {
             store
                 .record_run_step_checkpoint(&checkpoint(RunStepPhase::ToolPrepared, true))

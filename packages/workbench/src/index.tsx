@@ -9,6 +9,7 @@ import {
   type LlmSettingsView,
   type LlmTestResult,
   type ProviderProtocolKind,
+  type ReasoningSummaryMode,
   type StructuredOutputMode,
   type Locale,
   type DiffMarkerMode,
@@ -121,6 +122,7 @@ function initialRoute(): WorkbenchRoute {
 function WindowChrome(props: {
   canGoBack: boolean;
   canGoForward: boolean;
+  motionLabEnabled: boolean;
   onBack: () => void;
   onForward: () => void;
   onToggleSidebar: () => void;
@@ -244,11 +246,15 @@ function WindowChrome(props: {
                 icon: <Palette size={15} />,
                 separatorBefore: true,
               },
-              {
-                id: "motion",
-                label: text("动作库实验室", "Motion Library Lab"),
-                icon: <Play size={15} />,
-              },
+              ...(props.motionLabEnabled
+                ? [
+                    {
+                      id: "motion",
+                      label: text("动作库实验室", "Motion Library Lab"),
+                      icon: <Play size={15} />,
+                    },
+                  ]
+                : []),
             ]}
             onSelect={(id) => {
               if (id === "toggle_sidebar") props.onToggleSidebar();
@@ -467,7 +473,7 @@ function SettingsShell(props: {
           item(null, "Plugins", <Puzzle size={17} />, {
             id: "plugins",
             disabled: true,
-            status: i18n.locale() === "zh-CN" ? "规划中" : "Planned",
+            status: i18n.locale() === "zh-CN" ? "暂不开放" : "Not available",
           }),
         ],
       },
@@ -1463,8 +1469,7 @@ function LlmSettingsPage(props: {
   const [modelName, setModelName] = createSignal("");
   const [protocol, setProtocol] = createSignal<ProviderProtocolKind>("chat_completions");
   const [compatibilityProfileId, setCompatibilityProfileId] = createSignal("openai-strict");
-  const [embeddingModelName, setEmbeddingModelName] = createSignal("");
-  const [reasoningSummary, setReasoningSummary] = createSignal(false);
+  const [reasoningSummary, setReasoningSummary] = createSignal<ReasoningSummaryMode>("auto");
   const [remoteCompaction, setRemoteCompaction] = createSignal(false);
   const [maxInput, setMaxInput] = createSignal(0);
   const [maxOutput, setMaxOutput] = createSignal(0);
@@ -1482,11 +1487,10 @@ function LlmSettingsPage(props: {
     setModelName(next.modelName);
     setProtocol(props.providerExtensionsEnabled ? next.protocol : "chat_completions");
     setCompatibilityProfileId(next.compatibilityProfileId);
-    setEmbeddingModelName(props.providerExtensionsEnabled ? next.embeddingModelName : "");
     setReasoningSummary(
       props.providerExtensionsEnabled && props.providerRemoteContextEnabled
         ? next.reasoningSummary
-        : false,
+        : "none",
     );
     setRemoteCompaction(
       props.providerExtensionsEnabled && props.providerRemoteContextEnabled
@@ -1507,8 +1511,8 @@ function LlmSettingsPage(props: {
       compatibilityProfileId: compatibilityProfileId(),
       providerEndpointId: view()?.providerEndpointId ?? null,
       providerAccountId: view()?.providerAccountId ?? null,
-      embeddingModelName: props.providerExtensionsEnabled ? embeddingModelName() : "",
-      reasoningSummary: props.providerRemoteContextEnabled ? reasoningSummary() : false,
+      embeddingModelName: "",
+      reasoningSummary: props.providerRemoteContextEnabled ? reasoningSummary() : "none",
       remoteCompaction: props.providerRemoteContextEnabled ? remoteCompaction() : false,
       maxInputTokens: maxInput(),
       maxOutputTokens: maxOutput(),
@@ -1574,7 +1578,7 @@ function LlmSettingsPage(props: {
                 const next = value as ProviderProtocolKind;
                 setProtocol(next);
                 if (next !== "responses") {
-                  setReasoningSummary(false);
+                  setReasoningSummary("none");
                   setRemoteCompaction(false);
                 }
               }}
@@ -1636,32 +1640,25 @@ function LlmSettingsPage(props: {
             <TextField
               label={i18n.t("settings.modelName")}
               value={modelName()}
-              placeholder="gemma4:e4b"
+              placeholder="gpt-5.6-sol"
               onInput={(event) => setModelName(event.currentTarget.value)}
             />
           </SettingsRow>
-          <Show when={props.providerExtensionsEnabled}>
-            <SettingsRow
-              label={i18n.t("settings.embeddingModel")}
-              description={i18n.t("settings.embeddingModel.description")}
-            >
-              <TextField
-                label={i18n.t("settings.embeddingModel")}
-                value={embeddingModelName()}
-                placeholder="text-embedding-3-small"
-                onInput={(event) => setEmbeddingModelName(event.currentTarget.value)}
-              />
-            </SettingsRow>
-          </Show>
           <Show when={protocol() === "responses" && props.providerRemoteContextEnabled}>
             <SettingsRow
               label={i18n.t("settings.reasoningSummary")}
               description={i18n.t("settings.reasoningSummary.description")}
             >
-              <Toggle
-                checked={reasoningSummary()}
+              <SelectField
+                value={reasoningSummary()}
                 label={i18n.t("settings.reasoningSummary")}
-                onChange={setReasoningSummary}
+                options={[
+                  { value: "auto", label: i18n.t("settings.reasoningSummary.auto") },
+                  { value: "concise", label: i18n.t("settings.reasoningSummary.concise") },
+                  { value: "detailed", label: i18n.t("settings.reasoningSummary.detailed") },
+                  { value: "none", label: i18n.t("settings.reasoningSummary.none") },
+                ]}
+                onChange={(value) => setReasoningSummary(value as ReasoningSummaryMode)}
               />
             </SettingsRow>
             <SettingsRow
@@ -1765,6 +1762,7 @@ function LoadedWorkbench(props: {
   const [historyIndex, setHistoryIndex] = createSignal(0);
   const [failure, setFailure] = createSignal<string>();
   const [sidebarCollapsed, setSidebarCollapsed] = createSignal(window.innerWidth <= 760);
+  let narrowViewport = window.innerWidth <= 760;
   const route = () => history()[historyIndex()] ?? "home";
   let stopNavigation: (() => void) | undefined;
   let stopSettings: (() => void) | undefined;
@@ -1790,8 +1788,16 @@ function LoadedWorkbench(props: {
       navigate("settings/general");
     }
   };
+  const handleResize = () => {
+    const nextNarrowViewport = window.innerWidth <= 760;
+    if (nextNarrowViewport !== narrowViewport) {
+      narrowViewport = nextNarrowViewport;
+      setSidebarCollapsed(nextNarrowViewport);
+    }
+  };
   onMount(() => {
     window.addEventListener("keydown", handleShortcut);
+    window.addEventListener("resize", handleResize);
     // eslint-disable-next-line solid/reactivity -- Tauri callbacks are live event handlers.
     void listen<WorkbenchRoute>("workbench:navigate", ({ payload }) => {
       // Tauri delivers this callback after mount; the router signals remain live.
@@ -1807,6 +1813,7 @@ function LoadedWorkbench(props: {
   });
   onCleanup(() => {
     window.removeEventListener("keydown", handleShortcut);
+    window.removeEventListener("resize", handleResize);
     stopNavigation?.();
     stopSettings?.();
   });
@@ -1826,6 +1833,7 @@ function LoadedWorkbench(props: {
           <WindowChrome
             canGoBack={historyIndex() > 0}
             canGoForward={historyIndex() < history().length - 1}
+            motionLabEnabled={motionLabEnabled}
             onBack={back}
             onForward={forward}
             onToggleSidebar={() => setSidebarCollapsed((value) => !value)}

@@ -5,20 +5,22 @@ use std::{
     os::windows::ffi::OsStrExt,
     path::{Path, PathBuf},
     process::Command,
-    sync::{Arc, OnceLock},
-    time::UNIX_EPOCH,
+    sync::{
+        Arc, OnceLock,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::{Duration, UNIX_EPOCH},
 };
 
 use hachimi_process_policy::ProcessPolicy;
 use hachimi_protocol::{
     ComputerAction, ComputerAppDescriptor, ComputerRuntimeHealth, ComputerWindowIdentity,
 };
-use parking_lot::Mutex;
+use parking_lot::{Condvar, Mutex};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use windows_capture::{
-    capture::{Context, GraphicsCaptureApiHandler},
-    encoder::{ImageEncoder, ImageEncoderPixelFormat, ImageFormat},
+    capture::{CaptureControl, Context, GraphicsCaptureApiHandler},
     frame::Frame,
     graphics_capture_api::InternalCaptureControl,
     settings::{
@@ -86,6 +88,7 @@ const PKEY_APP_USER_MODEL_ID: PROPERTYKEY = PROPERTYKEY {
 static APP_DESCRIPTOR_CACHE: OnceLock<Mutex<HashMap<String, CachedAppDescriptor>>> =
     OnceLock::new();
 static APP_ICON_CACHE: OnceLock<Mutex<HashMap<String, Vec<u8>>>> = OnceLock::new();
+static WINDOW_CAPTURE: OnceLock<Mutex<WindowCaptureCache>> = OnceLock::new();
 
 pub(super) fn runtime_health() -> ComputerRuntimeHealth {
     let graphics_capture_available = GraphicsCaptureSession::IsSupported().unwrap_or(false);
@@ -224,6 +227,39 @@ pub(super) struct CapturedImage {
     pub png_bytes: Vec<u8>,
 }
 
+#[derive(Default)]
+struct WindowCaptureCache {
+    active: Option<ActiveWindowCapture>,
+}
+
+struct ActiveWindowCapture {
+    window_handle: isize,
+    requested: Arc<AtomicBool>,
+    state: Arc<Mutex<FrameState>>,
+    wake: Arc<Condvar>,
+    last_generation: u64,
+    control: Option<CaptureControl<StreamingCapture, String>>,
+}
+
+impl ActiveWindowCapture {
+    fn finished(&self) -> bool {
+        self.control
+            .as_ref()
+            .is_none_or(CaptureControl::is_finished)
+    }
+
+    fn stop(mut self) {
+        let Some(control) = self.control.take() else {
+            return;
+        };
+        if control.is_finished() {
+            let _ = control.wait();
+        } else {
+            let _ = control.stop();
+        }
+    }
+}
+
 pub(super) fn capture_window(window_handle: &str) -> Result<CapturedImage, ComputerHostError> {
     let handle = parse_handle(window_handle)?;
     let hwnd = HWND(handle as *mut _);
@@ -237,10 +273,50 @@ pub(super) fn capture_window(window_handle: &str) -> Result<CapturedImage, Compu
         .map_err(|_| broker("window_height_invalid"))?;
     validate_dimensions(width, height)?;
 
-    let captured = Arc::new(Mutex::new(None));
-    let flags = CaptureFlags {
-        captured: Arc::clone(&captured),
-    };
+    let mut cache = WINDOW_CAPTURE
+        .get_or_init(|| Mutex::new(WindowCaptureCache::default()))
+        .lock();
+    let replace = cache
+        .active
+        .as_ref()
+        .is_none_or(|active| active.window_handle != handle || active.finished());
+    if replace {
+        if let Some(active) = cache.active.take() {
+            active.stop();
+        }
+        cache.active = Some(start_window_capture(handle, window)?);
+    }
+    let active = cache.active.as_mut().expect("capture initialized");
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let mut state = active.state.lock();
+    if state.generation <= active.last_generation {
+        active.requested.store(true, Ordering::Release);
+    }
+    while state.generation <= active.last_generation {
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            return Err(broker(
+                "windows_graphics_capture_no_frame:timed out waiting for frame",
+            ));
+        }
+        active.wake.wait_for(&mut state, remaining);
+    }
+    active.last_generation = state.generation;
+    let captured = state
+        .image
+        .take()
+        .ok_or_else(|| broker("windows_graphics_capture_no_frame:frame payload missing"))?;
+    validate_dimensions(captured.width, captured.height)?;
+    Ok(captured)
+}
+
+fn start_window_capture(
+    window_handle: isize,
+    window: Window,
+) -> Result<ActiveWindowCapture, ComputerHostError> {
+    let requested = Arc::new(AtomicBool::new(false));
+    let state = Arc::new(Mutex::new(FrameState::default()));
+    let wake = Arc::new(Condvar::new());
     let settings = Settings::new(
         window,
         CursorCaptureSettings::WithoutCursor,
@@ -249,16 +325,22 @@ pub(super) fn capture_window(window_handle: &str) -> Result<CapturedImage, Compu
         MinimumUpdateIntervalSettings::Default,
         DirtyRegionSettings::Default,
         ColorFormat::Rgba8,
-        flags,
+        CaptureFlags {
+            requested: Arc::clone(&requested),
+            state: Arc::clone(&state),
+            wake: Arc::clone(&wake),
+        },
     );
-    OneFrameCapture::start(settings)
+    let control = StreamingCapture::start_free_threaded(settings)
         .map_err(|error| broker(format!("windows_graphics_capture:{error}")))?;
-    let captured = captured
-        .lock()
-        .take()
-        .ok_or_else(|| broker("windows_graphics_capture_no_frame"))?;
-    validate_dimensions(captured.width, captured.height)?;
-    Ok(captured)
+    Ok(ActiveWindowCapture {
+        window_handle,
+        requested,
+        state,
+        wake,
+        last_generation: 0,
+        control: Some(control),
+    })
 }
 
 pub(super) fn perform_action(
@@ -283,6 +365,7 @@ pub(super) fn perform_action(
         return Err(ComputerHostError::UserTakeover);
     }
     let rect = window_rect(hwnd)?;
+    arm_next_window_frame(hwnd.0 as isize);
 
     match action {
         ComputerAction::MouseMove { x, y } => move_pointer(rect, *x, *y),
@@ -403,6 +486,19 @@ pub(super) fn perform_action(
     }
 }
 
+fn arm_next_window_frame(window_handle: isize) {
+    let Some(cache) = WINDOW_CAPTURE.get() else {
+        return;
+    };
+    let cache = cache.lock();
+    if let Some(active) = cache.active.as_ref()
+        && active.window_handle == window_handle
+        && !active.finished()
+    {
+        active.requested.store(true, Ordering::Release);
+    }
+}
+
 fn mouse_button_flags(
     button: &str,
 ) -> Result<
@@ -422,14 +518,22 @@ fn mouse_button_flags(
 
 #[derive(Clone)]
 struct CaptureFlags {
-    captured: Arc<Mutex<Option<CapturedImage>>>,
+    requested: Arc<AtomicBool>,
+    state: Arc<Mutex<FrameState>>,
+    wake: Arc<Condvar>,
 }
 
-struct OneFrameCapture {
+#[derive(Default)]
+struct FrameState {
+    generation: u64,
+    image: Option<CapturedImage>,
+}
+
+struct StreamingCapture {
     flags: CaptureFlags,
 }
 
-impl GraphicsCaptureApiHandler for OneFrameCapture {
+impl GraphicsCaptureApiHandler for StreamingCapture {
     type Flags = CaptureFlags;
     type Error = String;
 
@@ -442,33 +546,45 @@ impl GraphicsCaptureApiHandler for OneFrameCapture {
     fn on_frame_arrived(
         &mut self,
         frame: &mut Frame,
-        capture_control: InternalCaptureControl,
+        _capture_control: InternalCaptureControl,
     ) -> Result<(), Self::Error> {
+        if !self.flags.requested.swap(false, Ordering::AcqRel) {
+            return Ok(());
+        }
         let width = frame.width();
         let height = frame.height();
         validate_dimensions(width, height).map_err(|error| error.to_string())?;
         let buffer = frame.buffer().map_err(|error| error.to_string())?;
         let mut packed = Vec::new();
-        let png_bytes = ImageEncoder::new(ImageFormat::Png, ImageEncoderPixelFormat::Rgba8)
-            .and_then(|encoder| {
-                encoder.encode(buffer.as_nopadding_buffer(&mut packed), width, height)
-            })
-            .map_err(|error| error.to_string())?;
-        *self.flags.captured.lock() = Some(CapturedImage {
+        let png_bytes = encode_rgba_png(buffer.as_nopadding_buffer(&mut packed), width, height)?;
+        let mut state = self.flags.state.lock();
+        state.generation = state.generation.saturating_add(1);
+        state.image = Some(CapturedImage {
             width,
             height,
             png_bytes,
         });
-        capture_control.stop();
+        self.flags.wake.notify_all();
         Ok(())
     }
 
     fn on_closed(&mut self) -> Result<(), Self::Error> {
-        if self.flags.captured.lock().is_none() {
-            return Err("capture_target_closed_before_first_frame".into());
-        }
         Ok(())
     }
+}
+
+fn encode_rgba_png(buffer: &[u8], width: u32, height: u32) -> Result<Vec<u8>, String> {
+    let mut output = Vec::new();
+    {
+        let mut encoder = png::Encoder::new(&mut output, width, height);
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        let mut writer = encoder.write_header().map_err(|error| error.to_string())?;
+        writer
+            .write_image_data(buffer)
+            .map_err(|error| error.to_string())?;
+    }
+    Ok(output)
 }
 
 fn process_image_path(process: HANDLE) -> Result<PathBuf, ComputerHostError> {
@@ -690,8 +806,7 @@ fn render_icon_png(
             target[2] = source[0];
             target[3] = if source[3] == 0 { 255 } else { source[3] };
         }
-        ImageEncoder::new(ImageFormat::Png, ImageEncoderPixelFormat::Rgba8)
-            .and_then(|encoder| encoder.encode(&rgba, SIZE as u32, SIZE as u32))
+        encode_rgba_png(&rgba, SIZE as u32, SIZE as u32)
             .map_err(|error| format!("encode_icon:{error}"))
     };
     if !previous.0.is_null() {
@@ -1283,8 +1398,13 @@ mod tests {
     };
 
     use ::windows::Win32::{
-        System::Threading::{OpenProcess, PROCESS_TERMINATE, TerminateProcess},
-        UI::WindowsAndMessaging::SetForegroundWindow,
+        System::Threading::{
+            AttachThreadInput, GetCurrentProcess, GetCurrentThreadId, GetProcessHandleCount,
+            OpenProcess, PROCESS_TERMINATE, TerminateProcess,
+        },
+        UI::WindowsAndMessaging::{
+            BringWindowToTop, MSG, PM_NOREMOVE, PeekMessageW, SetForegroundWindow,
+        },
     };
 
     use super::*;
@@ -1365,7 +1485,7 @@ mod tests {
     impl Drop for TestProcessGuard {
         fn drop(&mut self) {
             if let Some(process_id) = self.window_process_id {
-                // SAFETY: the process ID belongs to the test-created Notepad
+                // SAFETY: the process ID belongs to the test-created fixture
                 // window and the returned handle is immediately owned.
                 if let Ok(process) = unsafe { OpenProcess(PROCESS_TERMINATE, false, process_id) } {
                     // SAFETY: OpenProcess returned a newly owned HANDLE.
@@ -1381,13 +1501,49 @@ mod tests {
 
     #[test]
     #[ignore = "requires an interactive default Windows desktop"]
-    fn captures_and_controls_a_real_notepad_window_with_wgc() {
+    fn captures_and_controls_the_win32_stress_fixture_with_wgc() {
+        let seconds = std::env::var("HACHIMI_STRESS_PHASE_SECONDS")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok());
+        let stress_deadline =
+            seconds.map(|seconds| Instant::now() + Duration::from_secs(seconds.clamp(1, 450)));
+        let mut iterations = 0_u64;
+        loop {
+            log_stress_handles(iterations, "before_iteration");
+            let fixture_deadline = stress_deadline
+                .map(|deadline| deadline.min(Instant::now() + Duration::from_secs(25)));
+            run_real_fixture_wgc_iteration(iterations, fixture_deadline);
+            log_stress_handles(iterations, "after_iteration");
+            iterations = iterations.saturating_add(1);
+            if stress_deadline.is_none_or(|deadline| Instant::now() >= deadline) {
+                break;
+            }
+        }
+        eprintln!("computer_real_stress_iterations={iterations}");
+    }
+
+    fn log_stress_handles(iteration: u64, stage: &str) {
+        if std::env::var_os("HACHIMI_COMPUTER_HANDLE_DIAGNOSTICS").is_none() {
+            return;
+        }
+        let mut count = 0_u32;
+        // SAFETY: GetCurrentProcess returns a valid pseudo-handle and count is writable.
+        if unsafe { GetProcessHandleCount(GetCurrentProcess(), &mut count) }.is_ok() {
+            eprintln!("computer_handle iteration={iteration} stage={stage} count={count}");
+        }
+    }
+
+    fn run_real_fixture_wgc_iteration(iteration: u64, fixture_deadline: Option<Instant>) {
         let existing = Window::enumerate()
             .expect("enumerate existing windows")
             .into_iter()
             .map(|window| window.as_raw_hwnd() as usize)
             .collect::<BTreeSet<_>>();
-        let child = Command::new("notepad.exe").spawn().expect("launch notepad");
+        let fixture = std::env::var("HACHIMI_COMPUTER_STRESS_FIXTURE")
+            .expect("HACHIMI_COMPUTER_STRESS_FIXTURE must name the built Win32 fixture");
+        let child = Command::new(&fixture)
+            .spawn()
+            .expect("launch Hachimi Computer stress fixture");
         let mut process_guard = TestProcessGuard {
             child,
             window_process_id: None,
@@ -1399,19 +1555,15 @@ mod tests {
                 .into_iter()
                 .find(|window| {
                     !existing.contains(&(window.as_raw_hwnd() as usize))
-                        && (window
-                            .process_name()
-                            .is_ok_and(|name| name.eq_ignore_ascii_case("notepad.exe"))
-                            || window.title().is_ok_and(|title| {
-                                title.to_ascii_lowercase().contains("notepad")
-                                    || title.contains("记事本")
-                            }))
+                        && window
+                            .title()
+                            .is_ok_and(|title| title == "Hachimi Computer Stress Fixture")
                 });
             if let Some(window) = candidate {
                 break window;
             }
             if Instant::now() >= deadline {
-                panic!("notepad did not expose a capturable window");
+                panic!("Hachimi Computer stress fixture did not expose a capturable window");
             }
             thread::sleep(Duration::from_millis(100));
         };
@@ -1422,16 +1574,86 @@ mod tests {
         assert!(!identity.protected_desktop);
         assert!(!identity.hachimi_owned);
 
-        let captured = capture_window(&handle).expect("WGC frame");
-        assert!(captured.width > 0 && captured.height > 0);
+        let mut previous_frame = capture_window(&handle).expect("WGC frame");
+        log_stress_handles(iteration, "after_capture_initial");
+        assert!(previous_frame.width > 0 && previous_frame.height > 0);
         assert!(
-            captured
+            previous_frame
                 .png_bytes
                 .starts_with(&[137, 80, 78, 71, 13, 10, 26, 10])
         );
 
         let hwnd = HWND(window.as_raw_hwnd());
-        let foreground_deadline = Instant::now() + Duration::from_secs(10);
+        let mut cycle = 0_u64;
+        loop {
+            select_stress_window(hwnd);
+            let actionable_identity = read_identity(&handle).expect("foreground window identity");
+            perform_action(
+                &actionable_identity,
+                &ComputerAction::TypeText {
+                    text: format!("Hachimi Computer Host stress {iteration}:{cycle} "),
+                },
+            )
+            .expect("fenced SendInput action");
+            let mutation_deadline = Instant::now() + Duration::from_secs(5);
+            let after_text_frame = loop {
+                let frame = capture_window(&handle).expect("WGC frame after text input");
+                if frame.png_bytes != previous_frame.png_bytes {
+                    break frame;
+                }
+                assert!(
+                    Instant::now() < mutation_deadline,
+                    "Computer fixture did not expose a changed WGC frame after controlled input"
+                );
+                thread::sleep(Duration::from_millis(100));
+            };
+            log_stress_handles(iteration, "after_capture_text");
+            select_stress_window(hwnd);
+            let after_text = read_identity(&handle).expect("identity after text input");
+            perform_action(
+                &after_text,
+                &ComputerAction::Scroll {
+                    delta_x: 0,
+                    delta_y: -120,
+                },
+            )
+            .expect("fenced scroll action");
+            select_stress_window(hwnd);
+            let before_resize = read_identity(&handle).expect("identity before resize");
+            perform_action(
+                &before_resize,
+                &ComputerAction::WindowResize {
+                    width: 720 + u32::try_from((iteration + cycle) % 2).unwrap_or_default() * 40,
+                    height: 520,
+                },
+            )
+            .expect("fenced resize action");
+            let resize_deadline = Instant::now() + Duration::from_secs(5);
+            let recaptured = loop {
+                let frame = capture_window(&handle).expect("WGC frame after controlled actions");
+                if frame.png_bytes != after_text_frame.png_bytes
+                    && frame.width >= 700
+                    && frame.height >= 500
+                {
+                    break frame;
+                }
+                assert!(
+                    Instant::now() < resize_deadline,
+                    "Computer fixture did not expose a changed WGC frame after resize"
+                );
+            };
+            log_stress_handles(iteration, "after_capture_resize");
+            previous_frame = recaptured;
+            cycle = cycle.saturating_add(1);
+            if fixture_deadline.is_none_or(|deadline| Instant::now() >= deadline) {
+                break;
+            }
+        }
+        assert!(previous_frame.width >= 700 && previous_frame.height >= 500);
+    }
+
+    fn select_stress_window(hwnd: HWND) {
+        let deadline = Instant::now() + Duration::from_secs(10);
         // SAFETY: GetForegroundWindow has no preconditions and returns a borrowed HWND value.
         while unsafe { GetForegroundWindow() } != hwnd {
             send_inputs(&[
@@ -1439,37 +1661,62 @@ mod tests {
                 keyboard_input(VK_MENU, true),
             ])
             .expect("test harness Alt activation");
-            // SAFETY: this test discovered and validated the HWND created by
-            // its own Notepad child. This harness-only focus step models the
-            // user's explicit selection; the production broker never changes
-            // the foreground window and rejects background targets.
-            let _ = unsafe { SetForegroundWindow(hwnd) };
-            assert!(
-                Instant::now() < foreground_deadline,
-                "Notepad did not remain the user-selected foreground window"
-            );
+            focus_owned_stress_window(hwnd);
+            if Instant::now() >= deadline {
+                let foreground = unsafe { GetForegroundWindow() };
+                let mut target_process = 0_u32;
+                let mut foreground_process = 0_u32;
+                let target_thread =
+                    unsafe { GetWindowThreadProcessId(hwnd, Some(&mut target_process)) };
+                let foreground_thread =
+                    unsafe { GetWindowThreadProcessId(foreground, Some(&mut foreground_process)) };
+                panic!(
+                    "computer_stress_foreground_contended: target={:?} pid={target_process} tid={target_thread}; foreground={:?} pid={foreground_process} tid={foreground_thread}",
+                    hwnd.0, foreground.0
+                );
+            }
             thread::sleep(Duration::from_millis(100));
         }
-        let actionable_identity = read_identity(&handle).expect("foreground window identity");
-        perform_action(
-            &actionable_identity,
-            &ComputerAction::TypeText {
-                text: "Hachimi Computer Host smoke".into(),
-            },
-        )
-        .expect("fenced SendInput action");
-        let mutation_deadline = Instant::now() + Duration::from_secs(5);
-        loop {
-            let changed = read_identity(&handle)
-                .is_ok_and(|current| current.title != actionable_identity.title);
-            if changed {
-                break;
-            }
-            assert!(
-                Instant::now() < mutation_deadline,
-                "Notepad did not reflect the controlled text input"
-            );
-            thread::sleep(Duration::from_millis(100));
+    }
+
+    fn focus_owned_stress_window(hwnd: HWND) {
+        // This ignored harness owns the fixture HWND. Temporarily sharing its
+        // input queues models explicit user selection without weakening the
+        // production broker's fail-closed foreground fencing.
+        let mut message = MSG::default();
+        // SAFETY: a no-remove peek initializes this test thread's USER32
+        // message queue without consuming application messages.
+        let _ = unsafe { PeekMessageW(&mut message, None, 0, 0, PM_NOREMOVE) };
+        let current_thread = unsafe { GetCurrentThreadId() };
+        let foreground = unsafe { GetForegroundWindow() };
+        let foreground_thread = if !foreground.0.is_null() {
+            unsafe { GetWindowThreadProcessId(foreground, None) }
+        } else {
+            0
+        };
+        let target_thread = unsafe { GetWindowThreadProcessId(hwnd, None) };
+        let foreground_attached = foreground_thread != 0
+            && foreground_thread != current_thread
+            && unsafe { AttachThreadInput(current_thread, foreground_thread, true) }.as_bool();
+        let target_attached = target_thread != 0
+            && target_thread != current_thread
+            && target_thread != foreground_thread
+            && unsafe { AttachThreadInput(current_thread, target_thread, true) }.as_bool();
+
+        // SAFETY: hwnd belongs to the live Computer fixture created by this test.
+        unsafe {
+            let _ = ShowWindow(hwnd, SW_RESTORE);
+            let _ = BringWindowToTop(hwnd);
+            let _ = SetForegroundWindow(hwnd);
+        }
+
+        if target_attached {
+            // SAFETY: this exactly balances the successful attachment above.
+            let _ = unsafe { AttachThreadInput(current_thread, target_thread, false) };
+        }
+        if foreground_attached {
+            // SAFETY: this exactly balances the successful attachment above.
+            let _ = unsafe { AttachThreadInput(current_thread, foreground_thread, false) };
         }
     }
 }

@@ -39,6 +39,21 @@ pub(super) fn response(request: &ModelRequest) -> Option<Response> {
     if has_marker(&request.messages, "[desktop-e2e:approval-recovery]") {
         return Some(approval_recovery_response(request));
     }
+    if has_marker(&request.messages, "[desktop-e2e:user-input-recovery]") {
+        return Some(user_input_recovery_response(request));
+    }
+    if has_marker(&request.messages, "[desktop-e2e:read-only-recovery]") {
+        return Some(read_only_recovery_response(request));
+    }
+    if has_marker(
+        &request.messages,
+        "[desktop-e2e:idempotent-receipt-recovery]",
+    ) {
+        return Some(idempotent_receipt_recovery_response(request));
+    }
+    if has_marker(&request.messages, "[desktop-e2e:indeterminate-recovery]") {
+        return Some(indeterminate_recovery_response(request));
+    }
     if has_marker(&request.messages, "[desktop-e2e:agent-forge-lifecycle]") {
         return Some(forge_lifecycle_response(request));
     }
@@ -61,6 +76,108 @@ pub(super) fn response(request: &ModelRequest) -> Option<Response> {
         return Some(enterprise_attachment_response(request));
     }
     None
+}
+
+pub(super) fn waits_for_process_restart(request: &ModelRequest) -> bool {
+    if run_generation(request) != Some(1) {
+        return false;
+    }
+    (has_marker(&request.messages, "[desktop-e2e:read-only-recovery]")
+        && completed(request, "workspace_read_file"))
+        || (has_marker(
+            &request.messages,
+            "[desktop-e2e:idempotent-receipt-recovery]",
+        ) && completed(request, "agent.spawn"))
+}
+
+fn user_input_recovery_response(request: &ModelRequest) -> Response {
+    if completed(request, "request_user_input") {
+        return text_response("Desktop E2E user input unexpectedly survived process restart.");
+    }
+    tool_call(
+        "desktop-e2e-restart-user-input",
+        "request_user_input",
+        serde_json::json!({
+            "questions": [{
+                "id": "restart_confirmation",
+                "header": "Restart recovery",
+                "question": "Choose how this Plan run should proceed after restart.",
+                "options": [
+                    {
+                        "label": "Resume",
+                        "description": "Continue planning after the process restart."
+                    },
+                    {
+                        "label": "Stop",
+                        "description": "Leave the interrupted Plan run unresolved."
+                    }
+                ]
+            }]
+        }),
+    )
+}
+
+fn read_only_recovery_response(request: &ModelRequest) -> Response {
+    if !completed(request, "workspace_read_file") {
+        return tool_call(
+            "desktop-e2e-restart-read",
+            "workspace_read_file",
+            serde_json::json!({ "path": "README.md" }),
+        );
+    }
+    text_response("Desktop E2E read-only checkpoint resumed on generation 2.")
+}
+
+fn idempotent_receipt_recovery_response(request: &ModelRequest) -> Response {
+    if !completed(request, "agent.spawn") {
+        return tool_call(
+            "desktop-e2e-restart-agent-spawn",
+            "agent.spawn",
+            serde_json::json!({
+                "title": "Restart receipt child",
+                "prompt": "[desktop-e2e:multi-agent-child] finish without tools",
+                "permissionProfile": "read_only",
+                "maxModelRequests": 2,
+                "maxToolCalls": 1
+            }),
+        );
+    }
+    let receipts = request
+        .messages
+        .iter()
+        .filter(|message| {
+            message.role == ModelRole::Tool && message.name.as_deref() == Some("agent.spawn")
+        })
+        .count();
+    if receipts != 1 {
+        return failure(format!(
+            "Expected one durable agent.spawn receipt, found {receipts}"
+        ));
+    }
+    text_response("Desktop E2E idempotent receipt resumed exactly once on generation 2.")
+}
+
+fn indeterminate_recovery_response(request: &ModelRequest) -> Response {
+    if completed(request, crate::desktop_e2e::BLOCKING_EXTERNAL_EFFECT_TOOL) {
+        return failure("Blocking external effect must never be replayed after restart".into());
+    }
+    tool_call(
+        "desktop-e2e-restart-indeterminate",
+        crate::desktop_e2e::BLOCKING_EXTERNAL_EFFECT_TOOL,
+        serde_json::json!({ "operationId": "dispatch-without-receipt" }),
+    )
+}
+
+fn run_generation(request: &ModelRequest) -> Option<u64> {
+    request.messages.iter().find_map(|message| {
+        let marker = "run_generation=";
+        let start = message.content.find(marker)? + marker.len();
+        let digits = message.content[start..]
+            .chars()
+            .take_while(char::is_ascii_digit)
+            .collect::<String>();
+        digits.parse().ok()
+    })
 }
 
 fn disabled_feature_response(request: &ModelRequest, expected_workload: &str) -> Response {

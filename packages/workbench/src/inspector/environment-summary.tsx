@@ -6,7 +6,7 @@ import type {
 } from "@hachimi/contracts";
 import { commandFailure } from "@hachimi/contracts";
 import { Box, Button, Plus } from "@hachimi/ui";
-import { Show, createSignal, untrack } from "solid-js";
+import { For, Show, createSignal, untrack } from "solid-js";
 
 import { WorkbenchGitControls } from "../git/workbench-git-controls";
 import {
@@ -156,16 +156,16 @@ export function EnvironmentSummary(props: {
         </Show>
       </section>
 
-      <Show when={props.environment.activity}>
+      <For each={props.environment.activities}>
         {(activity) => (
           <section class="environment-summary-section">
             <header>
               <strong>
-                {activity().kind === "browser"
+                {activity.kind === "browser"
                   ? zh()
                     ? "浏览器"
                     : "Browser"
-                  : activity().kind === "computer"
+                  : activity.kind === "computer"
                     ? "Computer Use"
                     : zh()
                       ? "计划"
@@ -173,7 +173,7 @@ export function EnvironmentSummary(props: {
               </strong>
             </header>
             <EnvironmentActivityRow
-              activity={activity()}
+              activity={activity}
               locale={props.locale}
               onOpenPlan={(planId) => props.onOpenInspector({ kind: "plan", planId })}
               onOpenBrowser={(browser) =>
@@ -196,7 +196,7 @@ export function EnvironmentSummary(props: {
             />
           </section>
         )}
-      </Show>
+      </For>
 
       <Show when={props.environment.sources.length > 0}>
         <EnvironmentSources

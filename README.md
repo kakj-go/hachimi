@@ -38,7 +38,7 @@ Run crash recovery、Multi-Agent、通用 Git push、GitHub/GitLab/Gitee/Gitea/F
 
 当前控制协议已统一为 v31，migration 已到 `0031_plugin_builtin_channel_binding.sql`，包含共享迁移锁/Online Backup、Multi-Agent 启动 reconciliation、统一企业账户编排、官方内置 Channel 绑定、持久 CEF Workspace/Tab/Lease 和统一 Browser/Computer Host policy。运行时能力提供本地停用开关；关闭时 UI 隐藏入口、相关工具不注册，命令稳定返回 `feature_disabled` 和 feature key。
 
-设置中的“平台集成”统一管理企业微信、钉钉和飞书的 API 与消息账户；正式 UI 不展示 `sample-crm`、`mock-poll` 或 `loopback-webhook`。Gateway 根据已启用消息账户自动启动和停止，不再提供用户总开关。Plugins Runtime 继续承载官方 Bundle，但用户管理入口当前统一置灰为“规划中”；第三方 Bundle 产品化与用户管理界面属于后续计划，Marketplace 仍不实现。
+设置中的“平台集成”统一管理企业微信、钉钉和飞书的 API 与消息账户；正式 UI 不展示 `sample-crm`、`mock-poll` 或 `loopback-webhook`。Gateway 根据已启用消息账户自动启动和停止，不再提供用户总开关。Plugins Runtime 继续承载官方内置 Bundle，但用户管理入口统一置灰为“暂不开放 / Not available”；Marketplace、远程 Catalog 和第三方安装管理均为 `Not Planned`。
 
 桌面 Host 按当前 Windows 用户保持单实例；重复启动只恢复并聚焦已有工作台或桌宠，不会重复初始化 Agent、调度器、托盘和本地状态。启用平台消息后允许独立的 `hachimi-desktop.exe --gateway` 后台进程继续承担登录启动和消息恢复。
 

@@ -3,6 +3,37 @@ use std::path::Path;
 use super::*;
 
 #[tokio::test]
+async fn permission_config_persists_policy_and_skill_ids_together() {
+    let (store, _) = seeded_store().await;
+    let mut policy = AgentPermissionPolicy::default();
+    policy.revision = 3;
+    let skills = vec![
+        SkillId::from("office-documents"),
+        SkillId::from("office-pdf"),
+    ];
+
+    store
+        .store_permission_config("profile:pet_conversation", &policy, &skills, now_ms())
+        .await
+        .expect("store permission config");
+
+    assert_eq!(
+        store
+            .permission_policy("profile:pet_conversation")
+            .await
+            .expect("policy"),
+        Some(policy)
+    );
+    assert_eq!(
+        store
+            .permission_skill_ids("profile:pet_conversation")
+            .await
+            .expect("skills"),
+        skills
+    );
+}
+
+#[tokio::test]
 async fn permission_owners_resolve_only_matching_active_runs() {
     let (store, session) = seeded_store().await;
     let mut scheduled = run(&session, "permission-owner-run");

@@ -2238,6 +2238,7 @@ dependencies = [
  "thiserror 2.0.19",
  "tokio",
  "tracing",
+ "tungstenite",
  "url",
  "uuid",
 ]
@@ -2311,6 +2312,7 @@ dependencies = [
  "hachimi-process-policy",
  "hachimi-protocol",
  "parking_lot",
+ "png 0.18.1",
  "serde",
  "serde_json",
  "sha2 0.11.0",

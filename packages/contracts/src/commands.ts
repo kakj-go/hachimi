@@ -151,6 +151,7 @@ import type {
   PetTurnRequest,
   PlanAcceptanceRequest,
   PlanRevisionRequest,
+  PlanSkipRequest,
   PluginContributionSurface,
   PluginLifecycleJournalRecord,
   PluginPermissionDiff,
@@ -223,6 +224,7 @@ import type {
   WorkbenchHandoffRequest,
   WorkbenchHandoffResponse,
   WorkbenchPlanAcceptanceSnapshot,
+  WorkbenchPlanSkipSnapshot,
   WorkbenchGitRequest,
   WorkbenchGitResponse,
   WorkbenchAttachmentPreview,
@@ -230,6 +232,8 @@ import type {
   WorkbenchSessionSnapshot,
   WorkbenchTaskSnapshot,
   WorkbenchTaskStartRequest,
+  ManualCompactionRequest,
+  ManualCompactionResult,
 } from "./generated";
 
 export interface CommandFailure {
@@ -473,6 +477,8 @@ export const commands = {
     invoke<WorkbenchPlanAcceptanceSnapshot>("accept_workbench_plan", { request }),
   reviseWorkbenchPlan: (request: PlanRevisionRequest) =>
     invoke<WorkbenchTaskSnapshot>("revise_workbench_plan", { request }),
+  skipWorkbenchPlan: (request: PlanSkipRequest) =>
+    invoke<WorkbenchPlanSkipSnapshot>("skip_workbench_plan", { request }),
   executeWorkbenchGit: (request: WorkbenchGitRequest) =>
     invoke<WorkbenchGitResponse>("execute_workbench_git", { request }),
   listProjectGitRefs: (projectId: ProjectId) =>
@@ -523,6 +529,8 @@ export const commands = {
     invoke<CheckoutRecord>("cleanup_workbench_checkout", { checkoutId }),
   startWorkbenchTask: (request: WorkbenchTaskStartRequest) =>
     invoke<WorkbenchTaskSnapshot>("start_workbench_task", { request }),
+  compactWorkbenchSession: (request: ManualCompactionRequest) =>
+    invoke<ManualCompactionResult>("compact_workbench_session", { request }),
   cancelWorkbenchRun: (runId: string, expectedGeneration: number) =>
     invoke<RunRecord>("cancel_workbench_run", { runId, expectedGeneration }),
   listWorkspaceFiles: (request: FsListRequest) =>

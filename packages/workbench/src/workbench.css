@@ -2,6 +2,33 @@
   --workbench-sidebar-width: var(--sidebar-width);
 }
 
+.workbench-window * {
+  scrollbar-color: color-mix(in srgb, var(--color-text-base) 28%, transparent) transparent;
+  scrollbar-width: thin;
+}
+
+.workbench-window *::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+.workbench-window *::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.workbench-window *::-webkit-scrollbar-thumb {
+  border: 1px solid transparent;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--color-text-base) 30%, transparent);
+  background-clip: padding-box;
+}
+
+.workbench-window *::-webkit-scrollbar-button {
+  display: none;
+  width: 0;
+  height: 0;
+}
+
 html,
 body,
 #root {
@@ -526,10 +553,6 @@ html[data-translucent-sidebar="on"] .settings-sidebar {
   white-space: nowrap;
 }
 
-.project-row .project-chevron {
-  margin-left: auto;
-}
-
 .project-row-actions {
   display: flex;
   align-items: center;
@@ -542,8 +565,7 @@ html[data-translucent-sidebar="on"] .settings-sidebar {
 }
 
 .project-row-shell:hover .project-row-actions,
-.project-row-shell:focus-within .project-row-actions,
-.project-row-shell:has([aria-expanded="true"]) .project-row-actions {
+.project-row-shell:focus-within .project-row-actions {
   opacity: 1;
   pointer-events: auto;
 }
@@ -568,20 +590,6 @@ html[data-translucent-sidebar="on"] .settings-sidebar {
   background: transparent;
   color: var(--color-text-base);
   box-shadow: none;
-}
-
-.project-row-shell:hover .project-chevron,
-.project-row-shell:focus-within .project-chevron {
-  opacity: 0;
-}
-
-.project-chevron {
-  flex: 0 0 auto;
-  transition: transform var(--duration-normal) var(--ease-standard);
-}
-
-.project-chevron.collapsed {
-  transform: rotate(-90deg);
 }
 
 .project-sessions {

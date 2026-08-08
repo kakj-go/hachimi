@@ -6,8 +6,9 @@ use std::{
 };
 
 use hachimi_protocol::{
-    ItemId, RunId, SessionId, ToolDescriptor, ToolEffect, UserInputAnswer, UserInputQuestion,
-    UserInputRequestId, UserInputRequestRecord, UserInputResolutionAction, UserInputStatus,
+    ItemId, RunId, SessionId, ToolDescriptor, ToolEffect, UserInputAnswer, UserInputOption,
+    UserInputQuestion, UserInputRequestId, UserInputRequestRecord, UserInputResolutionAction,
+    UserInputStatus,
 };
 use hachimi_user_input::UserInputBroker;
 use serde::Deserialize;
@@ -20,7 +21,24 @@ pub const REQUEST_USER_INPUT_TOOL: &str = "request_user_input";
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct UserInputArguments {
-    questions: Vec<UserInputQuestion>,
+    questions: Vec<CodexQuestion>,
+    auto_resolution_ms: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CodexQuestion {
+    id: String,
+    header: String,
+    question: String,
+    options: Vec<CodexQuestionOption>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CodexQuestionOption {
+    label: String,
+    description: String,
 }
 
 struct RequestUserInputTool {
@@ -69,31 +87,29 @@ impl ToolExecutor for RequestUserInputTool {
                         "items": {
                             "type": "object",
                             "additionalProperties": false,
-                            "required": ["id", "header", "prompt", "options", "secret"],
+                            "required": ["id", "header", "question", "options"],
                             "properties": {
                                 "id": { "type": "string", "minLength": 1, "maxLength": 64 },
                                 "header": { "type": "string", "minLength": 1, "maxLength": 64 },
-                                "prompt": { "type": "string", "minLength": 1, "maxLength": 1000 },
+                                "question": { "type": "string", "minLength": 1, "maxLength": 1000 },
                                 "options": {
                                     "type": "array",
+                                    "minItems": 2,
                                     "maxItems": 3,
                                     "items": {
                                         "type": "object",
                                         "additionalProperties": false,
-                                        "required": ["label", "value"],
+                                        "required": ["label", "description"],
                                         "properties": {
                                             "label": { "type": "string", "minLength": 1, "maxLength": 80 },
-                                            "value": { "type": "string", "maxLength": 4000 },
-                                            "description": { "type": ["string", "null"], "maxLength": 240 }
+                                            "description": { "type": "string", "minLength": 1, "maxLength": 240 }
                                         }
                                     }
                                 },
-                                "secret": { "type": "boolean" },
-                                "autoResolutionMs": { "type": ["integer", "null"], "minimum": 60000, "maximum": 240000 },
-                                "defaultAnswer": { "type": ["string", "null"], "maxLength": 4000 }
                             }
                         }
-                    }
+                    },
+                    "autoResolutionMs": { "type": ["integer", "null"], "minimum": 60000, "maximum": 240000 }
                 }
             }),
             effect: ToolEffect::ReadOnly,
@@ -118,10 +134,62 @@ impl ToolExecutor for RequestUserInputTool {
         let session_id = self.session_id.clone();
         let run_id = self.run_id.clone();
         Box::pin(async move {
-            validate_questions(&arguments.questions)?;
-            let created_at_ms = now_ms();
-            let expires_at_ms = arguments
+            if arguments.questions.is_empty() || arguments.questions.len() > 3 {
+                return Err(ToolExecutionError::Failed(
+                    "user input must contain one to three questions".into(),
+                ));
+            }
+            if arguments
+                .auto_resolution_ms
+                .is_some_and(|timeout| !(60_000..=240_000).contains(&timeout))
+            {
+                return Err(ToolExecutionError::Failed(
+                    "autoResolutionMs must be between 60000 and 240000".into(),
+                ));
+            }
+            if arguments.questions.iter().any(|question| {
+                question.id.trim().is_empty()
+                    || question.id.len() > 64
+                    || question.header.trim().is_empty()
+                    || question.header.len() > 64
+                    || question.question.trim().is_empty()
+                    || question.question.chars().count() > 1_000
+                    || question.options.len() < 2
+                    || question.options.len() > 3
+                    || question.options.iter().any(|option| {
+                        option.label.trim().is_empty()
+                            || option.label.chars().count() > 80
+                            || option.description.trim().is_empty()
+                            || option.description.chars().count() > 240
+                    })
+            }) {
+                return Err(ToolExecutionError::Failed(
+                    "request_user_input contains an invalid question or option".into(),
+                ));
+            }
+            let questions = arguments
                 .questions
+                .into_iter()
+                .map(|question| UserInputQuestion {
+                    id: question.id,
+                    header: question.header,
+                    prompt: question.question,
+                    options: question
+                        .options
+                        .into_iter()
+                        .map(|option| UserInputOption {
+                            value: option.label.clone(),
+                            label: option.label,
+                            description: Some(option.description),
+                        })
+                        .collect(),
+                    secret: false,
+                    auto_resolution_ms: arguments.auto_resolution_ms,
+                    default_answer: None,
+                })
+                .collect::<Vec<_>>();
+            let created_at_ms = now_ms();
+            let expires_at_ms = questions
                 .iter()
                 .filter_map(|question| question.auto_resolution_ms)
                 .min()
@@ -130,14 +198,14 @@ impl ToolExecutor for RequestUserInputTool {
                         .ok()
                         .and_then(|timeout| created_at_ms.checked_add(timeout))
                 });
-            let contains_secret = arguments.questions.iter().any(|question| question.secret);
+            let contains_secret = questions.iter().any(|question| question.secret);
             let request = UserInputRequestRecord {
                 id: UserInputRequestId::random(),
                 session_id,
                 run_id,
                 run_generation: invocation.run_generation,
                 item_id: ItemId::random(),
-                questions: arguments.questions,
+                questions,
                 display_answers: Vec::new(),
                 status: UserInputStatus::Pending,
                 expires_at_ms,
@@ -167,23 +235,6 @@ impl ToolExecutor for RequestUserInputTool {
     fn waits_for_cancellation(&self) -> bool {
         true
     }
-}
-
-fn validate_questions(questions: &[UserInputQuestion]) -> Result<(), ToolExecutionError> {
-    if questions.is_empty() || questions.len() > 3 {
-        return Err(ToolExecutionError::Failed(
-            "user input must contain one to three questions".into(),
-        ));
-    }
-    if questions
-        .iter()
-        .any(|question| question.secret && question.auto_resolution_ms.is_some())
-    {
-        return Err(ToolExecutionError::Failed(
-            "secret questions cannot be auto-resolved".into(),
-        ));
-    }
-    Ok(())
 }
 
 fn answer_content(action: UserInputResolutionAction, answers: &[UserInputAnswer]) -> String {
@@ -265,14 +316,15 @@ mod tests {
             id: hachimi_protocol::ToolCallId::from("call"),
             name: REQUEST_USER_INPUT_TOOL.into(),
             arguments: json!({
+                "autoResolutionMs": 60000,
                 "questions": [{
                     "id": "choice",
                     "header": "Choice",
-                    "prompt": "Continue?",
-                    "options": [{"label": "Continue", "value": "continue", "description": null}],
-                    "secret": true,
-                    "autoResolutionMs": null,
-                    "defaultAnswer": null
+                    "question": "Continue?",
+                    "options": [
+                        {"label": "continue", "description": "Continue with the task"},
+                        {"label": "stop", "description": "Stop the task"}
+                    ]
                 }]
             }),
             step_revision: 1,
@@ -297,5 +349,29 @@ mod tests {
         assert_eq!(result.structured_content["redactForPersistence"], true);
         let seen = broker.seen.lock().expect("seen").clone().expect("request");
         assert_eq!(seen.run_generation, 7);
+        assert_eq!(seen.expires_at_ms, Some(seen.created_at_ms + 60_000));
+        assert!(!seen.questions[0].secret);
+        assert!(seen.questions[0].default_answer.is_none());
+    }
+
+    #[test]
+    fn descriptor_matches_the_codex_question_shape() {
+        let tool = request_user_input_tool(
+            Arc::new(ImmediateBroker::default()),
+            SessionId::from("session"),
+            RunId::from("run"),
+        );
+        let schema = tool.descriptor().input_schema;
+        assert_eq!(schema["required"], json!(["questions"]));
+        assert!(schema["properties"].get("autoResolutionMs").is_some());
+        let question = &schema["properties"]["questions"]["items"];
+        assert_eq!(
+            question["required"],
+            json!(["id", "header", "question", "options"])
+        );
+        let properties = question["properties"].as_object().expect("properties");
+        for forbidden in ["value", "secret", "defaultAnswer", "autoResolutionMs"] {
+            assert!(!properties.contains_key(forbidden));
+        }
     }
 }

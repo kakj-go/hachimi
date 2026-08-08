@@ -296,7 +296,7 @@ fn write_plugin(root: &std::path::Path) {
     fs::create_dir_all(root.join("connectors")).expect("connector directory");
     fs::write(
         root.join("connectors/sample-crm.json"),
-        br#"{"hostIdentity":"hachimi.sample-crm.local.v1","transport":"local","actions":["get"],"webhook":false,"poll":false,"externalNetwork":false}"#,
+        br#"{"hostIdentity":"hachimi.sample-crm.local.v1","transport":"local","actions":[{"name":"get","effect":"read_only"}],"webhook":false,"poll":false,"externalNetwork":false}"#,
     )
     .expect("connector descriptor");
     let manifest = PluginManifest {

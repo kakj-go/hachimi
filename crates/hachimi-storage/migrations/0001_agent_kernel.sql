@@ -135,28 +135,42 @@ CREATE TABLE user_input_requests (
 CREATE INDEX user_input_pending_run_idx
 ON user_input_requests(run_id, status, created_at_ms ASC);
 
-CREATE TABLE proposed_plans (
+CREATE TABLE plan_documents (
     id TEXT PRIMARY KEY NOT NULL,
     session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
     run_id TEXT NOT NULL UNIQUE REFERENCES runs(id) ON DELETE CASCADE,
+    source_item_id TEXT NOT NULL REFERENCES transcript_items(id) ON DELETE CASCADE,
     revision INTEGER NOT NULL CHECK (revision > 0),
+    title TEXT NOT NULL,
     goal TEXT NOT NULL,
-    assumptions_json TEXT NOT NULL,
-    steps_json TEXT NOT NULL,
-    affected_resources_json TEXT NOT NULL,
-    verification_json TEXT NOT NULL,
-    risks_json TEXT NOT NULL,
-    open_questions_json TEXT NOT NULL,
     content_markdown TEXT NOT NULL,
-    status TEXT NOT NULL CHECK (status IN ('proposed', 'accepted', 'superseded')),
-    accepted_run_id TEXT REFERENCES runs(id) ON DELETE SET NULL,
     created_at_ms INTEGER NOT NULL,
-    accepted_at_ms INTEGER,
     UNIQUE(session_id, revision)
 );
 
-CREATE INDEX proposed_plans_session_revision_idx
-ON proposed_plans(session_id, revision DESC);
+CREATE INDEX plan_documents_session_revision_idx
+ON plan_documents(session_id, revision DESC);
+
+CREATE TABLE plan_confirmations (
+    plan_id TEXT PRIMARY KEY NOT NULL REFERENCES plan_documents(id) ON DELETE CASCADE,
+    status TEXT NOT NULL CHECK (status IN ('pending', 'accepted', 'skipped', 'superseded')),
+    accepted_run_id TEXT REFERENCES runs(id) ON DELETE SET NULL,
+    resolved_at_ms INTEGER
+);
+
+CREATE INDEX plan_confirmations_status_idx
+ON plan_confirmations(status);
+
+CREATE TABLE execution_plans (
+    run_id TEXT PRIMARY KEY NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+    session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+    explanation TEXT,
+    steps_json TEXT NOT NULL,
+    updated_at_ms INTEGER NOT NULL
+);
+
+CREATE INDEX execution_plans_session_updated_idx
+ON execution_plans(session_id, updated_at_ms DESC);
 
 CREATE TABLE compaction_checkpoints (
     id TEXT PRIMARY KEY NOT NULL,

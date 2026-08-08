@@ -19,24 +19,31 @@ import { useI18n } from "@hachimi/i18n";
 import {
   AlertTriangle,
   Button,
-  ChevronDown,
+  CalendarClock,
   Checkbox,
   Dialog,
   FolderOpen,
+  History,
   PageHeading,
+  Plug,
   Plus,
+  Settings,
   ShieldCheck,
   SelectField,
+  Sparkles,
   TextArea,
   TextField,
 } from "@hachimi/ui";
 import { For, Show, createMemo, createSignal, onCleanup, onMount } from "solid-js";
 
 import type { WorkbenchCommandPort } from "./workbench-command-port";
+import { AuthorizationWorkspace } from "./authorization-workspace";
 import { directUserMutationContext } from "./mutation-context";
 import { PermissionPolicyEditor, createPermissionPolicy } from "./permission-policy-editor";
 import { PermissionScopeConfirmation } from "./permission-scope-confirmation";
 import { permissionScopeRisk } from "./permission-scope-risk";
+import { skillDisplayName } from "./skill-display";
+import { SkillPermissionEditor } from "./skill-permission-editor";
 import { TaskCard } from "./task-card";
 import { TaskHistoryDialog } from "./task-history-dialog";
 import { TaskEventForm } from "./task-event-form";
@@ -44,6 +51,7 @@ import { RuntimeHealthBanner } from "./runtime-health";
 import "./task-center.css";
 
 type ScheduleFrequency = "once" | "daily" | "weekly" | "cron" | "event";
+type TaskEditorSection = "basics" | "run" | "permissions" | "skills" | "extensions" | "review";
 type TaskMcpTool = {
   server: McpServerView;
   tool: McpToolView;
@@ -79,7 +87,7 @@ export function TaskCenter(props: {
   const [failure, setFailure] = createSignal<string>();
   const [nameError, setNameError] = createSignal<string>();
   const [promptError, setPromptError] = createSignal<string>();
-  const [advancedOpen, setAdvancedOpen] = createSignal(false);
+  const [editorSection, setEditorSection] = createSignal<TaskEditorSection>("basics");
   const [name, setName] = createSignal(zh() ? "每日任务" : "Daily task");
   const [prompt, setPrompt] = createSignal("");
   const [frequency, setFrequency] = createSignal<ScheduleFrequency>("daily");
@@ -239,11 +247,12 @@ export function TaskCenter(props: {
     setStopAfterSuccess(false);
     setNameError(undefined);
     setPromptError(undefined);
-    setAdvancedOpen(false);
+    setEditorSection("basics");
   }
 
   async function submitSchedule(confirmedPermissions = false) {
     if (!name().trim() || !prompt().trim()) {
+      setEditorSection("basics");
       setNameError(!name().trim() ? (zh() ? "请输入任务名称。" : "Enter a task name.") : undefined);
       setPromptError(
         !prompt().trim() ? (zh() ? "请输入任务提示词。" : "Enter a task prompt.") : undefined,
@@ -255,11 +264,12 @@ export function TaskCenter(props: {
     setFailure(undefined);
     if (workspaceKind() === "selected_directory" && !workspacePath().trim()) {
       setFailure(zh() ? "请选择任务目录。" : "Choose a task directory.");
-      setAdvancedOpen(true);
+      setEditorSection("basics");
       return;
     }
     if (frequency() === "event") {
       if (!eventSourcePrincipal().trim() || !eventSourceId().trim() || !eventType().trim()) {
+        setEditorSection("basics");
         setFailure(
           zh()
             ? "Event 任务需要来源 Principal、来源 ID 和事件类型。"
@@ -268,6 +278,7 @@ export function TaskCenter(props: {
         return;
       }
       if (Boolean(eventResourceKind().trim()) !== Boolean(eventResourceId().trim())) {
+        setEditorSection("basics");
         setFailure(
           zh()
             ? "资源引用必须同时填写类型和 ID。"
@@ -278,6 +289,7 @@ export function TaskCenter(props: {
       try {
         parseEventLabels(eventLabels());
       } catch (error) {
+        setEditorSection("basics");
         setFailure(error instanceof Error ? error.message : String(error));
         return;
       }
@@ -287,12 +299,12 @@ export function TaskCenter(props: {
       setFailure(
         zh() ? "最大执行次数必须是正整数。" : "Maximum occurrences must be a positive integer.",
       );
-      setAdvancedOpen(true);
+      setEditorSection("run");
       return;
     }
     if (endAt() && new Date(endAt()).getTime() <= Date.now()) {
       setFailure(zh() ? "截止时间必须晚于当前时间。" : "End time must be in the future.");
-      setAdvancedOpen(true);
+      setEditorSection("run");
       return;
     }
     const browserPolicy = permissionPolicy().rules.browser;
@@ -310,7 +322,7 @@ export function TaskCenter(props: {
           ? "无人值守 Browser 至少需要一个精确的文档 Origin。"
           : "Unattended Browser requires at least one exact document origin.",
       );
-      setAdvancedOpen(true);
+      setEditorSection("permissions");
       return;
     }
     if (permissionScopeRisk(permissionPolicy()).hasUnrestrictedScope && !confirmedPermissions) {
@@ -504,9 +516,15 @@ export function TaskCenter(props: {
         connectors: connectorSelections.map((selection) => ({
           accountId: selection.accountId,
           actions: [...selection.allowedActions].sort(),
-          readOnlyActions: [...(selectedReadOnlyConnectorActions()[selection.accountId] ?? [])]
-            .filter((action) => selection.allowedActions.includes(action))
-            .sort(),
+          readOnlyActions:
+            connectors()
+              .find((entry) => entry.account.id === selection.accountId)
+              ?.descriptor.actions.filter(
+                (action) =>
+                  action.effect === "read_only" && selection.allowedActions.includes(action.name),
+              )
+              .map((action) => action.name)
+              .sort() ?? [],
           contributionRevision: selection.contributionRevision.actionHash ?? "",
         })),
       },
@@ -675,187 +693,276 @@ export function TaskCenter(props: {
               </div>
             )}
           </Show>
-          <div class="task-form-grid">
-            <TextField
-              label={zh() ? "名称" : "Name"}
-              testId="task-name"
-              value={name()}
-              {...(nameError() ? { error: nameError()! } : {})}
-              autofocus
-              onInput={(event) => {
-                setName(event.currentTarget.value);
-                if (event.currentTarget.value.trim()) setNameError(undefined);
-              }}
-            />
-            <SelectField
-              label={zh() ? "任务目录" : "Task workspace"}
-              testId="task-workspace-kind"
-              value={workspaceKind()}
-              options={[
-                { value: "managed", label: zh() ? "应用内置目录" : "Managed workspace" },
-                {
-                  value: "selected_directory",
-                  label: zh() ? "选择普通目录" : "Selected directory",
-                },
-              ]}
-              onChange={(value) => setWorkspaceKind(value as "managed" | "selected_directory")}
-            />
-            <SelectField
-              label={zh() ? "频率" : "Frequency"}
-              testId="task-frequency"
-              value={frequency()}
-              options={[
-                { value: "once", label: zh() ? "一次" : "Once" },
-                { value: "daily", label: zh() ? "每天" : "Daily" },
-                { value: "weekly", label: zh() ? "每周" : "Weekly" },
-                { value: "cron", label: "Cron" },
-                { value: "event", label: "Event" },
-              ]}
-              onChange={(value) => setFrequency(value as ScheduleFrequency)}
-            />
-            <Show when={frequency() !== "event"}>
-              <div>
-                <Show
-                  when={frequency() === "cron"}
-                  fallback={
-                    <TextField
-                      label={zh() ? "执行时间" : "Run at"}
-                      testId="task-run-at"
-                      type="datetime-local"
-                      value={runAt()}
-                      onInput={(event) => setRunAt(event.currentTarget.value)}
-                    />
-                  }
-                >
-                  <TextField
-                    label="Cron"
-                    testId="task-cron"
-                    value={cron()}
-                    onInput={(event) => setCron(event.currentTarget.value)}
-                  />
+          <AuthorizationWorkspace<TaskEditorSection>
+            class="task-authorization-workspace"
+            ariaLabel={zh() ? "任务配置" : "Task configuration"}
+            sections={[
+              {
+                value: "basics",
+                label: zh() ? "基本设置" : "Basics",
+                description: zh()
+                  ? "设置任务内容、触发方式、工作目录与会话模式。"
+                  : "Configure task content, triggers, workspace, and conversation mode.",
+                icon: <Settings size={16} />,
+              },
+              {
+                value: "run",
+                label: zh() ? "运行与通知" : "Run and notify",
+                description: zh()
+                  ? "设置完成通知、执行上限和自动停止条件。"
+                  : "Configure completion delivery, limits, and stop conditions.",
+                icon: <CalendarClock size={16} />,
+              },
+              {
+                value: "permissions",
+                label: zh() ? "Agent 权限" : "Agent permissions",
+                description: zh()
+                  ? "设置文件、进程、网络、浏览器和桌面资源边界。"
+                  : "Set file, process, network, browser, and desktop boundaries.",
+                icon: <ShieldCheck size={16} />,
+              },
+              {
+                value: "skills",
+                label: zh() ? "技能权限" : "Skills",
+                description: zh()
+                  ? "明确选择每次任务运行需要启用的技能。技能的底层操作仍受 Agent 权限限制。"
+                  : "Select Skills enabled for every run. Their operations remain permission-bound.",
+                icon: <Sparkles size={16} />,
+                count: selectedSkillIds().length,
+              },
+              {
+                value: "extensions",
+                label: zh() ? "MCP 与连接" : "MCP and connectors",
+                description: zh()
+                  ? "固定允许调用的工具、账户、Schema 与 Host revision。"
+                  : "Pin allowed tools, accounts, schemas, and Host revisions.",
+                icon: <Plug size={16} />,
+                count:
+                  selectedMcpTools().length +
+                  Object.values(selectedConnectorActions()).reduce(
+                    (total, actions) => total + actions.length,
+                    0,
+                  ),
+              },
+              {
+                value: "review",
+                label: zh() ? "配置摘要" : "Review",
+                description: zh()
+                  ? "保存前检查任务行为与授权范围。"
+                  : "Review task behavior and authorization before saving.",
+                icon: <History size={16} />,
+              },
+            ]}
+            value={editorSection()}
+            disabled={submitting()}
+            onChange={setEditorSection}
+            footer={
+              <>
+                <span class="authorization-workspace-footer-status">
+                  {permissionLevelLabel(permissionPolicy().level, zh())} ·{" "}
+                  {selectedSkillIds().length} {zh() ? "个技能" : "Skills"}
+                </span>
+                <div class="authorization-workspace-footer-actions">
+                  <Button
+                    variant="ghost"
+                    type="button"
+                    onClick={() => {
+                      setShowCreate(false);
+                      resetForm();
+                    }}
+                  >
+                    {zh() ? "取消" : "Cancel"}
+                  </Button>
+                  <Button
+                    variant="primary"
+                    type="submit"
+                    disabled={submitting()}
+                    data-testid="task-save"
+                  >
+                    <ShieldCheck size={16} />
+                    {editingScheduleId()
+                      ? zh()
+                        ? "保存更改"
+                        : "Save changes"
+                      : zh()
+                        ? "创建并授权"
+                        : "Create and authorize"}
+                  </Button>
+                </div>
+              </>
+            }
+          >
+            <div
+              class="authorization-workspace-panel task-basics-panel"
+              hidden={editorSection() !== "basics"}
+            >
+              <div class="task-form-grid">
+                <TextField
+                  label={zh() ? "名称" : "Name"}
+                  testId="task-name"
+                  value={name()}
+                  {...(nameError() ? { error: nameError()! } : {})}
+                  autofocus
+                  onInput={(event) => {
+                    setName(event.currentTarget.value);
+                    if (event.currentTarget.value.trim()) setNameError(undefined);
+                  }}
+                />
+                <SelectField
+                  label={zh() ? "任务目录" : "Task workspace"}
+                  testId="task-workspace-kind"
+                  value={workspaceKind()}
+                  options={[
+                    { value: "managed", label: zh() ? "应用内置目录" : "Managed workspace" },
+                    {
+                      value: "selected_directory",
+                      label: zh() ? "选择普通目录" : "Selected directory",
+                    },
+                  ]}
+                  onChange={(value) => setWorkspaceKind(value as "managed" | "selected_directory")}
+                />
+                <SelectField
+                  label={zh() ? "频率" : "Frequency"}
+                  testId="task-frequency"
+                  value={frequency()}
+                  options={[
+                    { value: "once", label: zh() ? "一次" : "Once" },
+                    { value: "daily", label: zh() ? "每天" : "Daily" },
+                    { value: "weekly", label: zh() ? "每周" : "Weekly" },
+                    { value: "cron", label: "Cron" },
+                    { value: "event", label: "Event" },
+                  ]}
+                  onChange={(value) => setFrequency(value as ScheduleFrequency)}
+                />
+                <Show when={frequency() !== "event"}>
+                  <div>
+                    <Show
+                      when={frequency() === "cron"}
+                      fallback={
+                        <TextField
+                          label={zh() ? "执行时间" : "Run at"}
+                          testId="task-run-at"
+                          type="datetime-local"
+                          value={runAt()}
+                          onInput={(event) => setRunAt(event.currentTarget.value)}
+                        />
+                      }
+                    >
+                      <TextField
+                        label="Cron"
+                        testId="task-cron"
+                        value={cron()}
+                        onInput={(event) => setCron(event.currentTarget.value)}
+                      />
+                    </Show>
+                  </div>
                 </Show>
               </div>
-            </Show>
-          </div>
-          <Show when={frequency() === "event"}>
-            <TaskEventForm
-              zh={zh()}
-              sourceKind={eventSourceKind()}
-              sourcePrincipal={eventSourcePrincipal()}
-              sourceId={eventSourceId()}
-              eventType={eventType()}
-              subjectPrefix={eventSubjectPrefix()}
-              labels={eventLabels()}
-              resourceKind={eventResourceKind()}
-              resourceId={eventResourceId()}
-              resourceRevision={eventResourceRevision()}
-              onSourceKind={setEventSourceKind}
-              onSourcePrincipal={setEventSourcePrincipal}
-              onSourceId={setEventSourceId}
-              onEventType={setEventType}
-              onSubjectPrefix={setEventSubjectPrefix}
-              onLabels={setEventLabels}
-              onResourceKind={setEventResourceKind}
-              onResourceId={setEventResourceId}
-              onResourceRevision={setEventResourceRevision}
-            />
-          </Show>
-          <div class="task-form-grid task-project-options">
-            <SelectField
-              label={zh() ? "会话模式" : "Conversation mode"}
-              testId="task-conversation-mode"
-              value={conversationMode()}
-              options={[
-                {
-                  value: "per_run_session",
-                  label: zh() ? "每次新建会话" : "New session per run",
-                },
-                {
-                  value: "shared_session",
-                  label: zh() ? "复用同一会话" : "Shared session",
-                },
-              ]}
-              onChange={(value) =>
-                setConversationMode(value as "shared_session" | "per_run_session")
-              }
-            />
-            <SelectField
-              label={zh() ? "工作负载" : "Workload"}
-              testId="task-profile"
-              value={profile()}
-              options={[
-                { value: "", label: zh() ? "自动判断" : "Automatic" },
-                { value: "coding", label: "Coding" },
-                { value: "office", label: "Office" },
-              ]}
-              onChange={(value) => setProfile(value as "" | "office" | "coding")}
-            />
-          </div>
-          <Show when={workspaceKind() === "selected_directory"}>
-            <div class="task-directory-picker">
-              <TextField
-                label={zh() ? "目录" : "Directory"}
-                testId="task-workspace-path"
-                value={workspacePath()}
-                disabled
-              />
-              <Button
-                type="button"
-                variant="default"
-                onClick={() => {
-                  void commandPort
-                    .chooseScheduleWorkspaceDirectory()
-                    .then((path) => path && setWorkspacePath(path))
-                    .catch((error) => setFailure(commandFailure(error).message));
+              <Show when={frequency() === "event"}>
+                <TaskEventForm
+                  zh={zh()}
+                  sourceKind={eventSourceKind()}
+                  sourcePrincipal={eventSourcePrincipal()}
+                  sourceId={eventSourceId()}
+                  eventType={eventType()}
+                  subjectPrefix={eventSubjectPrefix()}
+                  labels={eventLabels()}
+                  resourceKind={eventResourceKind()}
+                  resourceId={eventResourceId()}
+                  resourceRevision={eventResourceRevision()}
+                  onSourceKind={setEventSourceKind}
+                  onSourcePrincipal={setEventSourcePrincipal}
+                  onSourceId={setEventSourceId}
+                  onEventType={setEventType}
+                  onSubjectPrefix={setEventSubjectPrefix}
+                  onLabels={setEventLabels}
+                  onResourceKind={setEventResourceKind}
+                  onResourceId={setEventResourceId}
+                  onResourceRevision={setEventResourceRevision}
+                />
+              </Show>
+              <div class="task-form-grid task-project-options">
+                <SelectField
+                  label={zh() ? "会话模式" : "Conversation mode"}
+                  testId="task-conversation-mode"
+                  value={conversationMode()}
+                  options={[
+                    {
+                      value: "per_run_session",
+                      label: zh() ? "每次新建会话" : "New session per run",
+                    },
+                    {
+                      value: "shared_session",
+                      label: zh() ? "复用同一会话" : "Shared session",
+                    },
+                  ]}
+                  onChange={(value) =>
+                    setConversationMode(value as "shared_session" | "per_run_session")
+                  }
+                />
+                <SelectField
+                  label={zh() ? "工作负载" : "Workload"}
+                  testId="task-profile"
+                  value={profile()}
+                  options={[
+                    { value: "", label: zh() ? "自动判断" : "Automatic" },
+                    { value: "coding", label: "Coding" },
+                    { value: "office", label: "Office" },
+                  ]}
+                  onChange={(value) => setProfile(value as "" | "office" | "coding")}
+                />
+              </div>
+              <Show when={workspaceKind() === "selected_directory"}>
+                <div class="task-directory-picker">
+                  <TextField
+                    label={zh() ? "目录" : "Directory"}
+                    testId="task-workspace-path"
+                    value={workspacePath()}
+                    disabled
+                  />
+                  <Button
+                    type="button"
+                    variant="default"
+                    onClick={() => {
+                      void commandPort
+                        .chooseScheduleWorkspaceDirectory()
+                        .then((path) => path && setWorkspacePath(path))
+                        .catch((error) => setFailure(commandFailure(error).message));
+                    }}
+                  >
+                    <FolderOpen size={16} /> {zh() ? "选择" : "Choose"}
+                  </Button>
+                </div>
+              </Show>
+              <TextArea
+                class="task-prompt-field"
+                data-testid="task-prompt"
+                label={zh() ? "提示词" : "Prompt"}
+                value={prompt()}
+                invalid={Boolean(promptError())}
+                {...(promptError() ? { description: promptError()! } : {})}
+                onInput={(event) => {
+                  setPrompt(event.currentTarget.value);
+                  if (event.currentTarget.value.trim()) setPromptError(undefined);
                 }}
-              >
-                <FolderOpen size={16} /> {zh() ? "选择" : "Choose"}
-              </Button>
+                placeholder={
+                  zh()
+                    ? "例如：汇总今天的会议记录并列出待办"
+                    : "Example: summarize today's meeting notes and list action items"
+                }
+              />
             </div>
-          </Show>
-          <TextArea
-            class="task-prompt-field"
-            data-testid="task-prompt"
-            label={zh() ? "提示词" : "Prompt"}
-            value={prompt()}
-            invalid={Boolean(promptError())}
-            {...(promptError() ? { description: promptError()! } : {})}
-            onInput={(event) => {
-              setPrompt(event.currentTarget.value);
-              if (event.currentTarget.value.trim()) setPromptError(undefined);
-            }}
-            placeholder={
-              zh()
-                ? "例如：汇总今天的会议记录并列出待办"
-                : "Example: summarize today's meeting notes and list action items"
-            }
-          />
-          <details
-            class="task-advanced-section"
-            open={advancedOpen()}
-            onToggle={(event) => setAdvancedOpen(event.currentTarget.open)}
-          >
-            <summary>
-              <span>
-                <strong>{zh() ? "高级设置" : "Advanced settings"}</strong>
-                <small>
-                  {zh()
-                    ? `${selectedSkillIds().length + selectedMcpTools().length} 项扩展 · ${permissionPolicy().level}`
-                    : `${selectedSkillIds().length + selectedMcpTools().length} extensions · ${permissionPolicy().level}`}
-                </small>
-              </span>
-              <ChevronDown size={16} aria-hidden="true" />
-            </summary>
-            <div class="task-permission-section">
+
+            <div
+              class="authorization-workspace-panel task-run-panel"
+              hidden={editorSection() !== "run"}
+            >
               <SelectField
                 label={zh() ? "完成通知" : "Completion notification"}
                 testId="task-delivery-policy"
                 value={deliveryPolicy()}
                 options={[
-                  {
-                    value: "task_tab_only",
-                    label: zh() ? "仅任务中心" : "Task Center only",
-                  },
+                  { value: "task_tab_only", label: zh() ? "仅任务中心" : "Task Center only" },
                   {
                     value: "task_tab_and_system_notification",
                     label: zh() ? "任务中心 + 系统通知" : "Task Center + system notification",
@@ -889,6 +996,9 @@ export function TaskCenter(props: {
                 checked={stopAfterSuccess()}
                 onChange={(event) => setStopAfterSuccess(event.currentTarget.checked)}
               />
+            </div>
+
+            <div class="authorization-workspace-panel" hidden={editorSection() !== "permissions"}>
               <PermissionPolicyEditor
                 value={permissionPolicy()}
                 testId="task-permission"
@@ -900,182 +1010,200 @@ export function TaskCenter(props: {
                   }
                 }}
               />
-              <div class="task-skill-grid">
-                <For each={props.skills.filter((skill) => skill.enabled)}>
-                  {(skill) => (
-                    <Checkbox
-                      class="task-check"
-                      label={skill.qualifiedName}
-                      checked={selectedSkillIds().includes(skill.id)}
-                      onChange={(event) =>
-                        setSelectedSkillIds((current) =>
-                          event.currentTarget.checked
-                            ? [...current, skill.id]
-                            : current.filter((id) => id !== skill.id),
-                        )
-                      }
-                    />
-                  )}
-                </For>
-              </div>
-              <Show when={mcpTools().length > 0 && permissionPolicy().level !== "full_access"}>
-                <div class="task-extension-heading">
-                  <strong>{zh() ? "MCP 工具" : "MCP tools"}</strong>
-                  <small>
+            </div>
+
+            <div class="authorization-workspace-panel" hidden={editorSection() !== "skills"}>
+              <SkillPermissionEditor
+                skills={props.skills}
+                selectedIds={selectedSkillIds()}
+                zh={zh()}
+                onChange={setSelectedSkillIds}
+              />
+            </div>
+
+            <div
+              class="authorization-workspace-panel task-extensions-panel"
+              hidden={editorSection() !== "extensions"}
+            >
+              <Show
+                when={permissionPolicy().level !== "full_access"}
+                fallback={
+                  <p class="task-extension-empty">
                     {zh()
-                      ? "后台调用固定到 Server、Tool 和 Schema 版本；非只读工具会进入持久授权范围。"
-                      : "Background calls are pinned to the Server, Tool, and Schema revision. Non-read-only tools enter the persisted authorization scope."}
-                  </small>
-                </div>
-                <div class="task-skill-grid" data-testid="task-mcp-tools">
-                  <For each={mcpTools()}>
-                    {(entry) => {
-                      const selected = () =>
-                        selectedMcpTools().some(
-                          (selection) =>
-                            selection.serverId === entry.server.configuration.id &&
-                            selection.toolName === entry.tool.name &&
-                            selection.schemaHash === entry.tool.schemaHash &&
-                            selection.hostIdentityHash === entry.tool.hostIdentityHash,
-                        );
-                      return (
-                        <Checkbox
-                          class="task-check"
-                          label={`${entry.server.configuration.displayName} / ${entry.tool.name}${
-                            entry.readOnly ? (zh() ? "（只读）" : " (read only)") : ""
-                          }`}
-                          checked={selected()}
-                          disabled={!entry.readOnly && permissionPolicy().level === "read_only"}
-                          onChange={(event) => {
-                            const selection: McpToolSelection = {
-                              serverId: entry.server.configuration.id,
-                              toolName: entry.tool.name,
-                              schemaHash: entry.tool.schemaHash,
-                              hostIdentityHash: entry.tool.hostIdentityHash,
-                            };
-                            setSelectedMcpTools((current) =>
-                              event.currentTarget.checked
-                                ? [
-                                    ...current.filter((item) => !sameMcpTool(item, selection)),
-                                    selection,
-                                  ]
-                                : current.filter((item) => !sameMcpTool(item, selection)),
-                            );
-                          }}
-                        />
-                      );
-                    }}
-                  </For>
-                </div>
-              </Show>
-              <Show when={connectors().length > 0 && permissionPolicy().level !== "full_access"}>
-                <div class="task-extension-heading">
-                  <strong>{zh() ? "Connector" : "Connectors"}</strong>
-                  <small>
-                    {zh()
-                      ? "账户、贡献点内容和 Host/Schema/Action revision 会固定到本次授权。"
-                      : "Account, contribution content, and Host/Schema/Action revisions are pinned to this authorization."}
-                  </small>
-                </div>
-                <div class="task-connector-list" data-testid="task-connectors">
-                  <For each={connectors()}>
-                    {(entry) => (
-                      <div class="task-connector-card">
-                        <strong>{entry.account.displayName}</strong>
-                        <small>
-                          {entry.account.pluginId} / {entry.account.connectorId}
-                        </small>
-                        <div class="task-skill-grid">
-                          <For each={entry.descriptor.actions}>
-                            {(action) => {
-                              const selected = () =>
-                                (selectedConnectorActions()[entry.account.id] ?? []).includes(
-                                  action,
-                                );
-                              const readOnly = () =>
-                                (
-                                  selectedReadOnlyConnectorActions()[entry.account.id] ?? []
-                                ).includes(action);
-                              return (
-                                <div class="task-connector-action">
-                                  <Checkbox
-                                    class="task-check"
-                                    label={action}
-                                    checked={selected()}
-                                    onChange={(event) => {
-                                      const checked = event.currentTarget.checked;
-                                      setSelectedConnectorActions((current) => {
-                                        const values = current[entry.account.id] ?? [];
-                                        const next = checked
-                                          ? [...new Set([...values, action])]
-                                          : values.filter((value) => value !== action);
-                                        return { ...current, [entry.account.id]: next };
-                                      });
-                                      setSelectedReadOnlyConnectorActions((current) => {
-                                        const values = current[entry.account.id] ?? [];
-                                        const shouldReadOnly =
-                                          checked && permissionPolicy().level === "read_only";
-                                        const next = shouldReadOnly
-                                          ? [...new Set([...values, action])]
-                                          : checked
-                                            ? values
-                                            : values.filter((value) => value !== action);
-                                        return { ...current, [entry.account.id]: next };
-                                      });
-                                    }}
-                                  />
-                                  <Show
-                                    when={selected() && permissionPolicy().level === "writable"}
-                                  >
-                                    <Checkbox
-                                      class="task-check"
-                                      label={zh() ? "只读" : "Read only"}
-                                      checked={readOnly()}
-                                      onChange={(event) =>
-                                        setSelectedReadOnlyConnectorActions((current) => {
-                                          const values = current[entry.account.id] ?? [];
-                                          const next = event.currentTarget.checked
-                                            ? [...new Set([...values, action])]
-                                            : values.filter((value) => value !== action);
-                                          return { ...current, [entry.account.id]: next };
-                                        })
-                                      }
-                                    />
-                                  </Show>
-                                </div>
+                      ? "完全授权不需要固定 MCP 或 Connector 范围。"
+                      : "Full access does not require fixed MCP or Connector scopes."}
+                  </p>
+                }
+              >
+                <Show when={mcpTools().length > 0}>
+                  <div class="task-extension-heading">
+                    <strong>{zh() ? "MCP 工具" : "MCP tools"}</strong>
+                    <small>
+                      {zh()
+                        ? "后台调用固定到 Server、Tool 和 Schema 版本。"
+                        : "Background calls are pinned to the Server, Tool, and Schema revision."}
+                    </small>
+                  </div>
+                  <div class="task-skill-grid" data-testid="task-mcp-tools">
+                    <For each={mcpTools()}>
+                      {(entry) => {
+                        const selected = () =>
+                          selectedMcpTools().some(
+                            (selection) =>
+                              selection.serverId === entry.server.configuration.id &&
+                              selection.toolName === entry.tool.name &&
+                              selection.schemaHash === entry.tool.schemaHash &&
+                              selection.hostIdentityHash === entry.tool.hostIdentityHash,
+                          );
+                        return (
+                          <Checkbox
+                            class="task-check"
+                            label={`${entry.server.configuration.displayName} / ${entry.tool.name}${
+                              entry.readOnly ? (zh() ? "（只读）" : " (read only)") : ""
+                            }`}
+                            checked={selected()}
+                            disabled={!entry.readOnly && permissionPolicy().level === "read_only"}
+                            onChange={(event) => {
+                              const selection: McpToolSelection = {
+                                serverId: entry.server.configuration.id,
+                                toolName: entry.tool.name,
+                                schemaHash: entry.tool.schemaHash,
+                                hostIdentityHash: entry.tool.hostIdentityHash,
+                              };
+                              setSelectedMcpTools((current) =>
+                                event.currentTarget.checked
+                                  ? [
+                                      ...current.filter((item) => !sameMcpTool(item, selection)),
+                                      selection,
+                                    ]
+                                  : current.filter((item) => !sameMcpTool(item, selection)),
                               );
                             }}
-                          </For>
+                          />
+                        );
+                      }}
+                    </For>
+                  </div>
+                </Show>
+                <Show when={connectors().length > 0}>
+                  <div class="task-extension-heading">
+                    <strong>{zh() ? "Connector" : "Connectors"}</strong>
+                    <small>
+                      {zh()
+                        ? "账户、贡献点内容和 Host/Schema/Action revision 会固定到本次授权。"
+                        : "Account, contribution content, and Host/Schema/Action revisions are pinned to this authorization."}
+                    </small>
+                  </div>
+                  <div class="task-connector-list" data-testid="task-connectors">
+                    <For each={connectors()}>
+                      {(entry) => (
+                        <div class="task-connector-card">
+                          <strong>{entry.account.displayName}</strong>
+                          <small>
+                            {entry.account.pluginId} / {entry.account.connectorId}
+                          </small>
+                          <div class="task-skill-grid">
+                            <For each={entry.descriptor.actions}>
+                              {(action) => {
+                                const selected = () =>
+                                  (selectedConnectorActions()[entry.account.id] ?? []).includes(
+                                    action.name,
+                                  );
+                                return (
+                                  <div class="task-connector-action">
+                                    <Checkbox
+                                      class="task-check"
+                                      label={`${action.name} · ${
+                                        action.effect === "read_only"
+                                          ? zh()
+                                            ? "只读"
+                                            : "Read only"
+                                          : zh()
+                                            ? "外部操作"
+                                            : "External action"
+                                      }`}
+                                      checked={selected()}
+                                      disabled={
+                                        permissionPolicy().level === "read_only" &&
+                                        action.effect !== "read_only"
+                                      }
+                                      onChange={(event) => {
+                                        const checked = event.currentTarget.checked;
+                                        setSelectedConnectorActions((current) => {
+                                          const values = current[entry.account.id] ?? [];
+                                          const next = checked
+                                            ? [...new Set([...values, action.name])]
+                                            : values.filter((value) => value !== action.name);
+                                          return { ...current, [entry.account.id]: next };
+                                        });
+                                        setSelectedReadOnlyConnectorActions((current) => {
+                                          const values = current[entry.account.id] ?? [];
+                                          const shouldReadOnly =
+                                            checked && action.effect === "read_only";
+                                          const next = shouldReadOnly
+                                            ? [...new Set([...values, action.name])]
+                                            : values.filter((value) => value !== action.name);
+                                          return { ...current, [entry.account.id]: next };
+                                        });
+                                      }}
+                                    />
+                                  </div>
+                                );
+                              }}
+                            </For>
+                          </div>
                         </div>
-                      </div>
-                    )}
-                  </For>
-                </div>
+                      )}
+                    </For>
+                  </div>
+                </Show>
+                <Show when={mcpTools().length === 0 && connectors().length === 0}>
+                  <p class="task-extension-empty">
+                    {zh()
+                      ? "当前没有可用的 MCP 工具或 Connector。"
+                      : "No MCP tools or Connectors are available."}
+                  </p>
+                </Show>
               </Show>
             </div>
-          </details>
-          <footer class="task-form-actions">
-            <Button
-              variant="ghost"
-              type="button"
-              onClick={() => {
-                setShowCreate(false);
-                resetForm();
-              }}
-            >
-              {zh() ? "取消" : "Cancel"}
-            </Button>
-            <Button variant="primary" type="submit" disabled={submitting()} data-testid="task-save">
-              <ShieldCheck size={16} />
-              {editingScheduleId()
-                ? zh()
-                  ? "保存更改"
-                  : "Save changes"
-                : zh()
-                  ? "创建并授权"
-                  : "Create and authorize"}
-            </Button>
-          </footer>
+
+            <div class="authorization-workspace-panel" hidden={editorSection() !== "review"}>
+              <div class="authorization-review-list">
+                <div class="authorization-review-row">
+                  <span>{zh() ? "任务" : "Task"}</span>
+                  <strong>{name().trim() || (zh() ? "未命名任务" : "Untitled task")}</strong>
+                </div>
+                <div class="authorization-review-row">
+                  <span>{zh() ? "触发方式" : "Trigger"}</span>
+                  <strong>{scheduleFrequencyLabel(frequency(), zh())}</strong>
+                </div>
+                <div class="authorization-review-row">
+                  <span>{zh() ? "Agent 权限" : "Agent permissions"}</span>
+                  <strong>{permissionLevelLabel(permissionPolicy().level, zh())}</strong>
+                </div>
+                <div class="authorization-review-row">
+                  <span>{zh() ? "技能" : "Skills"}</span>
+                  <strong>
+                    {props.skills
+                      .filter((skill) => selectedSkillIds().includes(skill.id))
+                      .map((skill) => skillDisplayName(skill, zh()))
+                      .join(zh() ? "、" : ", ") || (zh() ? "未选择" : "None")}
+                  </strong>
+                </div>
+                <div class="authorization-review-row">
+                  <span>{zh() ? "扩展" : "Extensions"}</span>
+                  <strong>
+                    {selectedMcpTools().length} MCP ·{" "}
+                    {Object.values(selectedConnectorActions()).reduce(
+                      (total, actions) => total + actions.length,
+                      0,
+                    )}{" "}
+                    Connector
+                  </strong>
+                </div>
+              </div>
+            </div>
+          </AuthorizationWorkspace>
         </form>
       </Dialog>
 
@@ -1244,6 +1372,20 @@ function sameMcpTool(left: McpToolSelection, right: McpToolSelection): boolean {
     left.schemaHash === right.schemaHash &&
     left.hostIdentityHash === right.hostIdentityHash
   );
+}
+
+function permissionLevelLabel(level: AgentPermissionPolicy["level"], zh: boolean): string {
+  if (level === "full_access") return zh ? "完全授权" : "Full access";
+  if (level === "writable") return zh ? "可写" : "Writable";
+  return zh ? "只读" : "Read only";
+}
+
+function scheduleFrequencyLabel(frequency: ScheduleFrequency, zh: boolean): string {
+  if (frequency === "once") return zh ? "一次" : "Once";
+  if (frequency === "daily") return zh ? "每天" : "Daily";
+  if (frequency === "weekly") return zh ? "每周" : "Weekly";
+  if (frequency === "event") return "Event";
+  return "Cron";
 }
 
 function parseEventLabels(value: string): Record<string, string> {

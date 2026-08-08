@@ -4,8 +4,9 @@ use hachimi_enterprise::{
     EnterpriseApiClient, EnterpriseApiError, EnterpriseCredential, EnterpriseMessageTarget,
 };
 use hachimi_protocol::{
-    ConnectorDriverDescriptor, ConnectorHealth, ConnectorInvocationRequest, ConnectorRevision,
-    ConnectorRuntimeKind, IntegrationProviderId, PluginId,
+    ConnectorActionDescriptor, ConnectorActionEffect, ConnectorDriverDescriptor, ConnectorHealth,
+    ConnectorInvocationRequest, ConnectorRevision, ConnectorRuntimeKind, IntegrationProviderId,
+    PluginId,
 };
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -16,13 +17,22 @@ use crate::{
     ConnectorDriver, ConnectorDriverContext, ConnectorDriverFuture, ExtensionHostError, now_ms,
 };
 
-const ENTERPRISE_ACTIONS: &[&str] = &[
-    "account_identity",
-    "department_list",
-    "member_list",
-    "message_send",
-    "event_subscribe",
-];
+fn enterprise_actions() -> Vec<ConnectorActionDescriptor> {
+    use ConnectorActionEffect::{ExternalSideEffect, ReadOnly};
+    [
+        ("account_identity", ReadOnly),
+        ("department_list", ReadOnly),
+        ("member_list", ReadOnly),
+        ("message_send", ExternalSideEffect),
+        ("event_subscribe", ExternalSideEffect),
+    ]
+    .into_iter()
+    .map(|(name, effect)| ConnectorActionDescriptor {
+        name: name.into(),
+        effect,
+    })
+    .collect()
+}
 
 #[derive(Debug, Clone)]
 pub struct EnterpriseConnectorDriver {
@@ -224,10 +234,7 @@ impl ConnectorDriver for EnterpriseConnectorDriver {
             connector_id: connector_id.to_owned(),
             runtime_kind: ConnectorRuntimeKind::Builtin,
             revision,
-            actions: ENTERPRISE_ACTIONS
-                .iter()
-                .map(|action| (*action).to_owned())
-                .collect(),
+            actions: enterprise_actions(),
         }
     }
 

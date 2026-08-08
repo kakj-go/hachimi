@@ -49,7 +49,7 @@ replay is adopted. Any later source adaptation must first use the fixed commit a
     StepContext, ToolPlan, contribution revisions and Host readiness. It never
     restores Approval, UserInput secret, temporary Grant, Browser observation, Computer frame,
     process lease or MCP session. Maximum occurrences, end time, stop-after-success and user disable
-    are deterministic stop conditions; every trigger appends a thread heartbeat Item.
+    are deterministic stop conditions; every trigger appends a schedule activity marker Item.
 
 ## Consequences
 

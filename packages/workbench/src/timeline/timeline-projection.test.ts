@@ -92,6 +92,28 @@ describe("projectSessionTimeline", () => {
     expect(projected[1]?.kind === "tool_batch" && projected[1].items).toHaveLength(2);
   });
 
+  it("splits tool batches whenever commentary or a reasoning summary appears", () => {
+    const snapshot = {
+      transcript: [
+        item("commentary-before", 1, "assistant"),
+        item("command-one", 2, "command_execution"),
+        item("commentary-between", 3, "assistant"),
+        item("command-two", 4, "command_execution"),
+        item("plan", 5, "plan"),
+      ],
+      runs: [{ id: "run-1" }],
+      runSummaries: [],
+    } as unknown as Pick<WorkbenchSessionSnapshot, "runs" | "transcript" | "runSummaries">;
+
+    expect(projectSessionTimeline(snapshot).map((entry) => entry.kind)).toEqual([
+      "item",
+      "tool_batch",
+      "item",
+      "tool_batch",
+      "item",
+    ]);
+  });
+
   it("uses compact localized batch labels", () => {
     const commands = [item("one", 1, "command_execution"), item("two", 2, "command_execution")];
     expect(toolBatchLabel(commands, true)).toBe("运行了 2 个命令");

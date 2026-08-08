@@ -13,9 +13,9 @@ export const initialSettings = {
   petPlacement: null,
   llm: {
     baseUrl: "http://localhost:11434/v1",
-    modelName: "gemma4:e4b",
-    maxInputTokens: 0,
-    maxOutputTokens: 0,
+    modelName: "gpt-5.6-sol",
+    maxInputTokens: 1_050_000,
+    maxOutputTokens: 128_000,
   },
   voice: { muted: false, speedPercent: 100, computeMode: "auto" },
   appearance,

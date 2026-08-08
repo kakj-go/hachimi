@@ -92,26 +92,37 @@ pub(super) async fn get_run_connection(
     row.as_ref().map(run_from_row).transpose()
 }
 
-pub(super) async fn get_proposed_plan_tx(
+pub(super) async fn get_plan_document_tx(
     transaction: &mut Transaction<'_, Sqlite>,
     plan_id: &PlanId,
-) -> Result<Option<ProposedPlan>, AgentStoreError> {
-    let row = sqlx::query("SELECT * FROM proposed_plans WHERE id = ?")
+) -> Result<Option<PlanDocument>, AgentStoreError> {
+    let row = sqlx::query("SELECT * FROM plan_documents WHERE id = ?")
         .bind(plan_id.as_str())
         .fetch_optional(&mut **transaction)
         .await?;
-    row.as_ref().map(proposed_plan_from_row).transpose()
+    row.as_ref().map(plan_document_from_row).transpose()
 }
 
-pub(super) async fn get_proposed_plan_by_run_tx(
+pub(super) async fn get_plan_document_by_run_tx(
     transaction: &mut Transaction<'_, Sqlite>,
     run_id: &RunId,
-) -> Result<Option<ProposedPlan>, AgentStoreError> {
-    let row = sqlx::query("SELECT * FROM proposed_plans WHERE run_id = ?")
+) -> Result<Option<PlanDocument>, AgentStoreError> {
+    let row = sqlx::query("SELECT * FROM plan_documents WHERE run_id = ?")
         .bind(run_id.as_str())
         .fetch_optional(&mut **transaction)
         .await?;
-    row.as_ref().map(proposed_plan_from_row).transpose()
+    row.as_ref().map(plan_document_from_row).transpose()
+}
+
+pub(super) async fn get_plan_confirmation_tx(
+    transaction: &mut Transaction<'_, Sqlite>,
+    plan_id: &PlanId,
+) -> Result<Option<PlanConfirmation>, AgentStoreError> {
+    let row = sqlx::query("SELECT * FROM plan_confirmations WHERE plan_id = ?")
+        .bind(plan_id.as_str())
+        .fetch_optional(&mut **transaction)
+        .await?;
+    row.as_ref().map(plan_confirmation_from_row).transpose()
 }
 
 pub(super) async fn latest_compaction_checkpoint_tx(

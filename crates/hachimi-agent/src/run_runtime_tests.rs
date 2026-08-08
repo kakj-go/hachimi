@@ -2,11 +2,12 @@ use std::sync::{Arc, Mutex};
 
 use futures_util::stream;
 use hachimi_protocol::{
-    AgentPermissionPolicy, ApprovalPolicy, AuthorityMode, BehaviorMode, EntryProfile, LlmSettings,
-    ModelEvent, ModelFinishReason, ModelMessage, ModelRequest, PermissionProfile,
-    ProviderCapabilities, RunBudget, RunOrigin, RunPurpose, RunStatus, SandboxCapabilityReport,
-    SandboxReadiness, ScopedPermissionRules, SessionContextBinding, TokenUsage, WorkloadKind,
-    WorkloadResolution, WorkloadResolutionSource,
+    AgentPermissionPolicy, ApprovalPolicy, AuthorityMode, BehaviorMode, DeliveryStatus,
+    EntryProfile, LlmSettings, ModelEvent, ModelFinishReason, ModelMessage, ModelRequest,
+    PermissionProfile, ProviderCapabilities, RunBudget, RunOrigin, RunPurpose, RunStatus,
+    SandboxCapabilityReport, SandboxReadiness, ScopedPermissionRules, SessionContextBinding,
+    TaskRunRecord, TaskRunStatus, TaskRunTrigger, TokenUsage, WorkloadKind, WorkloadResolution,
+    WorkloadResolutionSource,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -90,6 +91,7 @@ impl AgentRunPreparer for WindowlessPreparer {
                 initial_messages: vec![ModelMessage::user("run the scheduled task")],
                 tool_executors: Vec::new(),
                 host_context: Some("service=scheduler;window=none".into()),
+                host_revision_snapshot: None,
                 state: StepRuntimeState::new(
                     StepWorldState {
                         context_revision: 1,
@@ -136,6 +138,34 @@ async fn service_principal_executes_a_background_run_without_a_window_transport(
     let store = hachimi_storage::AgentStore::connect_in_memory()
         .await
         .expect("store");
+    let task_run_id = hachimi_protocol::TaskRunId::from("task-windowless");
+    store
+        .create_task_run(&TaskRunRecord {
+            id: task_run_id.clone(),
+            schedule_id: None,
+            schedule_revision: None,
+            trigger: TaskRunTrigger::Scheduled,
+            scheduled_for_ms: Some(1_800_000_000_000),
+            event_context: None,
+            invocation_key: "test:task-windowless".into(),
+            requester_session_id: None,
+            execution_session_id: None,
+            run_id: None,
+            status: TaskRunStatus::Preparing,
+            progress_percent: None,
+            result_summary: None,
+            error_code: None,
+            error_summary: None,
+            artifact_ids: Vec::new(),
+            delivery_status: DeliveryStatus::NotRequested,
+            delivery_error_code: None,
+            created_at_ms: 1_800_000_000_000,
+            started_at_ms: None,
+            finished_at_ms: None,
+            updated_at_ms: 1_800_000_000_000,
+        })
+        .await
+        .expect("preparing TaskRun");
     let launched = AgentRunLauncher::new(store.clone())
         .launch_new(AgentRunLaunchRequest {
             create: AgentRunCreateRequest {
@@ -146,7 +176,7 @@ async fn service_principal_executes_a_background_run_without_a_window_transport(
                 },
                 origin: RunOrigin::Scheduled {
                     schedule_id: hachimi_protocol::ScheduleId::from("schedule-windowless"),
-                    task_run_id: hachimi_protocol::TaskRunId::from("task-windowless"),
+                    task_run_id,
                     scheduled_for_ms: 1_800_000_000_000,
                     event_context: None,
                 },

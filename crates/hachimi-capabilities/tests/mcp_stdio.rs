@@ -349,6 +349,37 @@ async fn supervisor_applies_health_checks_and_stops_persisted_definitions() {
 }
 
 #[tokio::test]
+async fn supervisor_stop_cancels_an_in_flight_stdio_call() {
+    let supervisor = McpSupervisor::allow_unrestricted_stdio_for_tests();
+    let enabled = persisted_config("stop-in-flight", true);
+    let ready = supervisor.apply(&enabled).await;
+    assert_eq!(ready.health.state, McpServerHealthState::Ready);
+    let (client, _) = supervisor
+        .client_and_tools(&enabled.id)
+        .await
+        .expect("ready client");
+    let call = tokio::spawn(async move {
+        client
+            .call_tool(
+                "wait",
+                json!({ "milliseconds": 5_000 }),
+                CancellationToken::new(),
+            )
+            .await
+    });
+    tokio::time::sleep(Duration::from_millis(30)).await;
+
+    let stopped = tokio::time::timeout(Duration::from_secs(1), supervisor.stop(&enabled.id))
+        .await
+        .expect("stop must not wait for the request timeout");
+    assert_eq!(stopped.health.state, McpServerHealthState::Stopped);
+    assert!(matches!(
+        call.await.expect("call task"),
+        Err(McpClientError::Cancelled)
+    ));
+}
+
+#[tokio::test]
 async fn repeated_resource_cursor_is_rejected_without_unbounded_paging() {
     let mut server = config("duplicate-cursor");
     server.args.push("--duplicate-resource-cursor".into());

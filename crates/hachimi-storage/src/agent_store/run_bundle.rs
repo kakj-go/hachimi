@@ -1,15 +1,16 @@
 use hachimi_protocol::{
     AgentPermissionPolicy, AgentWorkspace, AgentWorkspaceKind, AgentWorkspaceOwner, AttachmentId,
-    AuthorityMode, AuthoritySnapshotId, ChannelEventKey, RunAuthoritySnapshot, RunEventPayload,
-    RunId, RunRecord, SessionContextBinding, SessionId, SessionRecord, TranscriptItem,
+    AuthorityMode, AuthoritySnapshotId, ChannelEventKey, PlanConfirmationStatus, PlanId,
+    RunAuthoritySnapshot, RunEventPayload, RunId, RunRecord, SessionContextBinding, SessionId,
+    SessionRecord, TaskRunId, TranscriptItem,
 };
 use serde_json::json;
 use sqlx::{Sqlite, Transaction};
 
 use super::{
-    AgentStore, AgentStoreError, append_event_tx, append_event_typed_tx, enum_to_db, get_run_tx,
-    next_sequence_tx, session_context_kind, session_from_row, transcript_item_from_row,
-    transcript_kind_db,
+    AgentStore, AgentStoreError, append_event_tx, append_event_typed_tx, enum_to_db,
+    get_plan_confirmation_tx, get_plan_document_tx, get_run_tx, next_sequence_tx,
+    session_context_kind, session_from_row, transcript_item_from_row, transcript_kind_db,
 };
 
 #[derive(Debug, Clone, PartialEq)]
@@ -28,6 +29,7 @@ pub struct AtomicRunLaunchInput<'a> {
     pub effective_policy: &'a AgentPermissionPolicy,
     pub authority_mode: AuthorityMode,
     pub workspace_root: &'a str,
+    pub task_run_id: Option<&'a TaskRunId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -110,8 +112,15 @@ impl AgentStore {
             .fetch_one(&mut *transaction)
             .await?;
             let existing_item = transcript_item_from_row(&item_row, &existing_session.id)?;
-            if launch.is_some() {
+            if let Some(launch) = launch {
                 require_authority_snapshot_tx(&mut transaction, &existing_run.id).await?;
+                bind_scheduled_task_run_tx(
+                    &mut transaction,
+                    &existing_session,
+                    &existing_run,
+                    launch.task_run_id,
+                )
+                .await?;
             }
             let updated = sqlx::query("UPDATE channel_ingress SET status = 'run_created', session_id = ?, run_id = ?, result_code = 'run_created', updated_at_ms = ? WHERE provider_id = ? AND account_id = ? AND external_message_id = ? AND status IN ('claimed', 'run_created') AND (run_id IS NULL OR run_id = ?)")
                 .bind(existing_session.id.as_str())
@@ -364,6 +373,7 @@ impl AgentStore {
             user_item,
             attachment_ids,
             None,
+            None,
         )
         .await
     }
@@ -389,6 +399,33 @@ impl AgentStore {
             user_item,
             attachment_ids,
             Some(launch),
+            None,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn create_plan_revision_run_authorized_idempotent(
+        &self,
+        principal: &str,
+        idempotency_key: &str,
+        session: &SessionRecord,
+        run: &RunRecord,
+        user_item: &TranscriptItem,
+        attachment_ids: &[AttachmentId],
+        plan_id: &PlanId,
+        expected_revision: u32,
+        launch: AtomicRunLaunchInput<'_>,
+    ) -> Result<CreatedAgentRun, AgentStoreError> {
+        self.create_agent_run_in_session_inner(
+            principal,
+            idempotency_key,
+            session,
+            run,
+            user_item,
+            attachment_ids,
+            Some(launch),
+            Some((plan_id, expected_revision)),
         )
         .await
     }
@@ -403,12 +440,19 @@ impl AgentStore {
         user_item: &TranscriptItem,
         attachment_ids: &[AttachmentId],
         launch: Option<AtomicRunLaunchInput<'_>>,
+        revised_plan: Option<(&PlanId, u32)>,
     ) -> Result<CreatedAgentRun, AgentStoreError> {
         let mut transaction = self.pool.begin().await?;
-        if let Some(existing_id) = sqlx::query_scalar::<_, String>(
-            "SELECT resource_id FROM idempotency_records WHERE principal = ? AND method = 'run.start' AND idempotency_key = ?",
+        let idempotency_method = if revised_plan.is_some() {
+            "plan.revise"
+        } else {
+            "run.start"
+        };
+        if let Some((existing_id, response_json)) = sqlx::query_as::<_, (String, String)>(
+            "SELECT resource_id, response_json FROM idempotency_records WHERE principal = ? AND method = ? AND idempotency_key = ?",
         )
         .bind(principal)
+        .bind(idempotency_method)
         .bind(idempotency_key)
         .fetch_optional(&mut *transaction)
         .await?
@@ -423,8 +467,35 @@ impl AgentStore {
             .fetch_one(&mut *transaction)
             .await?;
             let existing_item = transcript_item_from_row(&item_row, &session.id)?;
-            if launch.is_some() {
+            if let Some((plan_id, expected_revision)) = revised_plan {
+                let response: serde_json::Value = serde_json::from_str(&response_json)?;
+                let plan = get_plan_document_tx(&mut transaction, plan_id)
+                    .await?
+                    .ok_or_else(|| AgentStoreError::ProposedPlanNotFound(plan_id.clone()))?;
+                let confirmation = get_plan_confirmation_tx(&mut transaction, plan_id)
+                    .await?
+                    .ok_or_else(|| AgentStoreError::ProposedPlanNotFound(plan_id.clone()))?;
+                if plan.session_id != session.id
+                    || plan.revision != expected_revision
+                    || existing_run.session_id != session.id
+                    || confirmation.status != PlanConfirmationStatus::Superseded
+                    || response.get("planId").and_then(serde_json::Value::as_str)
+                        != Some(plan_id.as_str())
+                    || response.get("revision").and_then(serde_json::Value::as_u64)
+                        != Some(u64::from(expected_revision))
+                {
+                    return Err(AgentStoreError::ProposedPlanNotAcceptable(plan_id.clone()));
+                }
+            }
+            if let Some(launch) = launch {
                 require_authority_snapshot_tx(&mut transaction, &existing_run.id).await?;
+                bind_scheduled_task_run_tx(
+                    &mut transaction,
+                    session,
+                    &existing_run,
+                    launch.task_run_id,
+                )
+                .await?;
             }
             transaction.commit().await?;
             return Ok(CreatedAgentRun {
@@ -448,6 +519,20 @@ impl AgentStore {
                 kind: "agent continuation bundle",
                 value: "persisted Session, Run and User Item lineage do not match".into(),
             });
+        }
+        if let Some((plan_id, expected_revision)) = revised_plan {
+            let plan = get_plan_document_tx(&mut transaction, plan_id)
+                .await?
+                .ok_or_else(|| AgentStoreError::ProposedPlanNotFound(plan_id.clone()))?;
+            let confirmation = get_plan_confirmation_tx(&mut transaction, plan_id)
+                .await?
+                .ok_or_else(|| AgentStoreError::ProposedPlanNotFound(plan_id.clone()))?;
+            if plan.session_id != session.id
+                || plan.revision != expected_revision
+                || confirmation.status != PlanConfirmationStatus::Pending
+            {
+                return Err(AgentStoreError::ProposedPlanNotAcceptable(plan_id.clone()));
+            }
         }
         let active_run_count = sqlx::query_scalar::<_, i64>(
             "SELECT COUNT(*) FROM runs WHERE session_id = ? AND status NOT IN ('succeeded', 'failed', 'timed_out', 'cancelled', 'interrupted', 'lost')",
@@ -533,12 +618,18 @@ impl AgentStore {
             persisted_item.created_at_ms,
         )
         .await?;
+        let idempotency_response = revised_plan.map_or_else(
+            || "{}".to_owned(),
+            |(plan_id, revision)| json!({ "planId": plan_id, "revision": revision }).to_string(),
+        );
         sqlx::query(
-            "INSERT INTO idempotency_records (principal, method, idempotency_key, resource_id, response_json, created_at_ms) VALUES (?, 'run.start', ?, ?, '{}', ?)",
+            "INSERT INTO idempotency_records (principal, method, idempotency_key, resource_id, response_json, created_at_ms) VALUES (?, ?, ?, ?, ?, ?)",
         )
         .bind(principal)
+        .bind(idempotency_method)
         .bind(idempotency_key)
         .bind(run.id.as_str())
+        .bind(idempotency_response)
         .bind(run.created_at_ms)
         .execute(&mut *transaction)
         .await?;
@@ -549,6 +640,40 @@ impl AgentStore {
             .await?;
         if let Some(launch) = launch {
             insert_atomic_launch_state_tx(&mut transaction, session, run, launch).await?;
+        }
+        if let Some((plan_id, expected_revision)) = revised_plan {
+            let updated = sqlx::query(
+                "UPDATE plan_confirmations SET status = 'superseded', resolved_at_ms = ? WHERE plan_id = ? AND status = 'pending' AND EXISTS (SELECT 1 FROM plan_documents WHERE id = ? AND session_id = ? AND revision = ?)",
+            )
+            .bind(run.created_at_ms)
+            .bind(plan_id.as_str())
+            .bind(plan_id.as_str())
+            .bind(session.id.as_str())
+            .bind(i64::from(expected_revision))
+            .execute(&mut *transaction)
+            .await?;
+            if updated.rows_affected() != 1 {
+                return Err(AgentStoreError::ProposedPlanNotAcceptable(plan_id.clone()));
+            }
+            append_event_tx(
+                &mut transaction,
+                &session.id,
+                Some(&run.id),
+                "plan.revision_requested",
+                json!({
+                    "planId": plan_id,
+                    "revision": expected_revision,
+                    "revisionRunId": run.id,
+                }),
+                run.created_at_ms,
+            )
+            .await?;
+            super::environment::bump_session_environment_revision_tx(
+                &mut transaction,
+                &session.id,
+                run.created_at_ms,
+            )
+            .await?;
         }
         transaction.commit().await?;
         Ok(CreatedAgentRun {
@@ -639,8 +764,15 @@ impl AgentStore {
             .fetch_one(&mut *transaction)
             .await?;
             let existing_item = transcript_item_from_row(&item_row, &existing_session.id)?;
-            if launch.is_some() {
+            if let Some(launch) = launch {
                 require_authority_snapshot_tx(&mut transaction, &existing_run.id).await?;
+                bind_scheduled_task_run_tx(
+                    &mut transaction,
+                    &existing_session,
+                    &existing_run,
+                    launch.task_run_id,
+                )
+                .await?;
             }
             transaction.commit().await?;
             return Ok(CreatedAgentRun {
@@ -918,6 +1050,44 @@ pub(super) async fn insert_atomic_launch_state_tx(
         .bind(authority.created_at_ms)
         .execute(&mut **transaction)
         .await?;
+    bind_scheduled_task_run_tx(transaction, session, run, launch.task_run_id).await?;
+    Ok(())
+}
+
+async fn bind_scheduled_task_run_tx(
+    transaction: &mut Transaction<'_, Sqlite>,
+    session: &SessionRecord,
+    run: &RunRecord,
+    task_run_id: Option<&TaskRunId>,
+) -> Result<(), AgentStoreError> {
+    if let Some(task_run_id) = task_run_id {
+        if !matches!(
+            &run.origin,
+            hachimi_protocol::RunOrigin::Scheduled { task_run_id: origin_task_run_id, .. }
+                if origin_task_run_id == task_run_id
+        ) {
+            return Err(AgentStoreError::RunPreconditionFailed);
+        }
+        let exists = sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM task_runs WHERE id = ?")
+            .bind(task_run_id.as_str())
+            .fetch_one(&mut **transaction)
+            .await?
+            > 0;
+        if !exists {
+            return Err(AgentStoreError::TaskRunNotFound(task_run_id.clone()));
+        }
+        let updated = sqlx::query("UPDATE task_runs SET execution_session_id = ?, run_id = ?, updated_at_ms = ? WHERE id = ? AND status = 'preparing' AND (run_id IS NULL OR run_id = ?)")
+            .bind(session.id.as_str())
+            .bind(run.id.as_str())
+            .bind(run.created_at_ms)
+            .bind(task_run_id.as_str())
+            .bind(run.id.as_str())
+            .execute(&mut **transaction)
+            .await?;
+        if updated.rows_affected() != 1 {
+            return Err(AgentStoreError::InvalidTaskRunTransition);
+        }
+    }
     Ok(())
 }
 
@@ -1140,6 +1310,7 @@ mod tests {
                     effective_policy: &policy,
                     authority_mode: AuthorityMode::Interactive,
                     workspace_root: &workspace_root,
+                    task_run_id: None,
                 },
             )
             .await
@@ -1210,6 +1381,7 @@ mod tests {
                         effective_policy: &AgentPermissionPolicy::default(),
                         authority_mode: AuthorityMode::Interactive,
                         workspace_root: "C:\\managed\\different",
+                        task_run_id: None,
                     },
                 )
                 .await

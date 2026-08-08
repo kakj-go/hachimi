@@ -931,7 +931,7 @@ function McpCreateForm(props: {
           when={props.draft.transport.kind === "streamable_http"}
           fallback={
             <TextField
-              data-testid="mcp-create-stdio-command"
+              testId="mcp-create-stdio-command"
               label="Command"
               value={stdioTransport()?.command ?? ""}
               placeholder="node.exe"
@@ -975,7 +975,7 @@ function McpCreateForm(props: {
             }}
           />
           <TextField
-            data-testid="mcp-create-stdio-cwd"
+            testId="mcp-create-stdio-cwd"
             label={props.copy("Working directory（可选）", "Working directory (optional)")}
             value={stdioTransport()?.cwd ?? ""}
             onInput={(event) => {

@@ -1,6 +1,6 @@
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
 import {
   clickWhenReady,
@@ -11,8 +11,6 @@ import {
 import { restartApplication, switchToPet, switchToWorkbench } from "../support/windows.mjs";
 
 /* global HTMLButtonElement, HTMLTextAreaElement, InputEvent, document */
-
-const EPHEMERAL_SECRET = "desktop-e2e-secret-value";
 
 function git(project, ...args) {
   const result = spawnSync("git", args, { cwd: project, encoding: "utf8" });
@@ -77,13 +75,12 @@ async function openInspectorToolLauncher() {
   await waitForDisplayed('[data-testid="workbench-resource-menu"]');
 }
 
-async function submitEphemeralUserInput() {
+async function submitPlanUserInput() {
   // A debug build starts a fresh checkout-bound Workspace Host and refreshes
   // AGENTS.md/readiness on both sides of the preceding write Tool boundary.
-  const selector = '.user-input-question input[type="password"]';
+  const selector = ".user-input-choices button";
   await waitForDisplayed(selector, 75_000);
-  await $(selector).setValue(EPHEMERAL_SECRET);
-  await clickWhenReady('[data-testid="workbench-submit-user-input"]');
+  await clickWhenReady(selector);
 }
 
 async function writeTerminal(command) {
@@ -216,11 +213,11 @@ describe("Hachimi Workbench core lifecycle", () => {
     const draft = await $(".composer textarea");
     await draft.setValue("Create and verify the deterministic Desktop E2E evidence file.");
     await clickWhenReady('[data-testid="workbench-start-task"]');
+    await submitPlanUserInput();
     await $('[data-testid="workbench-execute-plan"]').waitForDisplayed({ timeout: 30_000 });
     await expect($(".workspace-diff-file")).not.toBeDisplayed();
 
     await clickWhenReady('[data-testid="workbench-execute-plan"]');
-    await submitEphemeralUserInput();
     await waitForRun("succeeded", 45_000);
     await clickWhenReady('[data-testid="workbench-pin-summary"]');
     await clickWhenReady('[data-testid="workbench-summary-files"]');
@@ -287,7 +284,6 @@ describe("Hachimi Workbench core lifecycle", () => {
 
     await expect($('[data-testid="workspace-git-tab"]')).not.toExist();
     await expect($('[data-testid="workspace-diff-tab"]')).not.toExist();
-    assertSecretAbsent(process.env.HACHIMI_DATA_DIR, EPHEMERAL_SECRET);
   });
 
   it("recovers a Run interrupted while waiting for approval", async () => {
@@ -377,8 +373,9 @@ describe("Hachimi Workbench core lifecycle", () => {
     await expect($('[data-testid^="run-recovery-"]')).not.toBeDisplayed();
   });
 
-  it("continues one Pet Run across Workbench UserInput and writable Workspace", async () => {
-    const petSecret = "desktop-e2e-pet-cross-window-secret";
+  it("continues one Pet Run with a writable Workspace and no Plan-only input tool", async () => {
+    const project = process.env.HACHIMI_DESKTOP_E2E_PROJECT_PATH;
+    if (!project) throw new Error("HACHIMI_DESKTOP_E2E_PROJECT_PATH is missing");
     await switchToPet();
     await hoverWhenReady(".pet-avatar-hit-area");
     await waitForDisplayed('[data-testid="pet-permission-toggle"]', 10_000);
@@ -404,37 +401,6 @@ describe("Hachimi Workbench core lifecycle", () => {
       "[desktop-e2e:pet-cross-window] verify shared interaction ownership",
     );
     await clickWhenReady('[data-testid="pet-composer-submit"]');
-    await waitForDisplayed('[data-testid="pet-attention"]', 60_000);
-    await browser.waitUntil(
-      async () =>
-        browser.execute(
-          () =>
-            document
-              .querySelector('[data-testid="pet-attention"]')
-              ?.textContent?.includes("Enter the Pet cross-window") ?? false,
-        ),
-      { timeout: 60_000, timeoutMsg: "Pet UserInput prompt was not projected" },
-    );
-    const agentRunId = await browser.execute(() =>
-      document.querySelector('[data-testid="pet-stage"]')?.getAttribute("data-agent-run-id"),
-    );
-    expect(agentRunId).toBeTruthy();
-
-    await clickWhenReady('[data-testid="pet-open-workbench"]');
-    await switchToWorkbench();
-    await browser.refresh();
-    await waitForDisplayed(".general-sessions");
-    const petSessionSelector =
-      '//div[contains(@class, "general-sessions")]//button[contains(., "[desktop-e2e:pet-cross-window]")]';
-    await waitForDisplayed(petSessionSelector);
-    await clickWhenReady(petSessionSelector);
-    const workbenchInputSelector = '.user-input-question input[type="password"]';
-    await waitForDisplayed(workbenchInputSelector, 30_000);
-    await $(workbenchInputSelector).setValue(petSecret);
-    await clickWhenReady('[data-testid="workbench-submit-user-input"]');
-    await clickWhenReady(".window-close");
-
-    await switchToPet();
     await browser.waitUntil(
       async () => {
         return (
@@ -444,25 +410,7 @@ describe("Hachimi Workbench core lifecycle", () => {
       { timeout: 45_000, timeoutMsg: "Pet writable Workspace completion reply was not projected" },
     );
     await expect($('[data-testid="pet-approve-once"]')).not.toBeDisplayed();
-    assertSecretAbsent(process.env.HACHIMI_DATA_DIR, petSecret);
+    await expect($('[data-testid="pet-attention"]')).not.toBeDisplayed();
+    expect(existsSync(join(project, "pet-cross-window-evidence.txt"))).toBe(true);
   });
 });
-
-function assertSecretAbsent(root, secret) {
-  const pending = [root];
-  while (pending.length > 0) {
-    const directory = pending.pop();
-    for (const entry of readdirSync(directory, { withFileTypes: true })) {
-      const path = join(directory, entry.name);
-      if (entry.isDirectory()) {
-        if (path === join(root, "webview")) continue;
-        pending.push(path);
-      } else if (entry.isFile()) {
-        const bytes = readFileSync(path);
-        if (bytes.includes(Buffer.from(secret))) {
-          throw new Error(`ephemeral UserInput secret was persisted in ${entry.name}`);
-        }
-      }
-    }
-  }
-}

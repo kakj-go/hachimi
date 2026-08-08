@@ -9,11 +9,10 @@ use std::{
 use hachimi_protocol::{
     AgentMessagePhase, AgentTaskRecord, ArtifactId, ArtifactKind, ArtifactRecord, BehaviorMode,
     CapabilityGrantSet, ItemId, ItemPayload, ItemRelations, ItemStatus, McpServerId, ModelEvent,
-    ModelFinishReason, ModelMessage, ModelRole, PlanId, PlanStep, PlanStepId, PlanStepStatus,
-    ProcessSessionId, ProposedPlan, ProposedPlanStatus, RunRecord, RunStatus, RunStepCheckpoint,
-    RunStepCheckpointId, RunUsageSnapshot, SandboxCapabilityReport, SandboxReadiness,
-    ToolExecutionResult, TranscriptItem, TranscriptItemKind, WorkloadKind, WorkloadResolution,
-    WorkloadResolutionSource,
+    ModelFinishReason, ModelMessage, ModelRole, PlanDocument, PlanId, ProcessSessionId, RunRecord,
+    RunStatus, RunStepCheckpoint, RunStepCheckpointId, RunUsageSnapshot, SandboxCapabilityReport,
+    SandboxReadiness, ToolExecutionResult, TranscriptItem, TranscriptItemKind, WorkloadKind,
+    WorkloadResolution, WorkloadResolutionSource,
 };
 use hachimi_storage::{AgentStore, AgentStoreError};
 use serde_json::json;
@@ -26,6 +25,11 @@ use crate::{
     LoopEvent, ModelRuntimeError, RunCheckpointDraft, RunCheckpointFuture, RunCheckpointReporter,
     SteeringFuture, SteeringSource, StepRuntimeState, StepWorldState, ToolLoopDriver,
     ToolLoopOutcome, ToolLoopRunOptions, ToolResultStatus, negotiate_provider_capabilities,
+    runtime_continuity::{
+        ContinuityArtifact, ContinuityConnectorRevision, ContinuityContributionRevision,
+        ContinuityEnvironment, ContinuityPlan, ContinuitySessionSource, ContinuityWorkspace,
+        RuntimeContinuitySnapshot, bounded_label, bounded_plan, bounded_reference,
+    },
 };
 
 pub const AUTHORITY_NEEDS_ATTENTION_EVENT: &str = "agent.authority.needs_attention";
@@ -111,6 +115,7 @@ pub struct PersistedToolLoop {
 #[derive(Clone)]
 pub struct RunStepContext {
     pub host_context: Option<String>,
+    pub host_revision_snapshot: Option<hachimi_protocol::HostRevisionSnapshot>,
     pub state: StepRuntimeState,
     pub run_tool_allowlist: Option<Vec<String>>,
     pub capability_grants: Option<CapabilityGrantSet>,
@@ -123,6 +128,7 @@ impl std::fmt::Debug for RunStepContext {
         formatter
             .debug_struct("RunStepContext")
             .field("host_context", &self.host_context)
+            .field("host_revision_snapshot", &self.host_revision_snapshot)
             .field("state", &self.state)
             .field("run_tool_allowlist", &self.run_tool_allowlist)
             .field(
@@ -178,6 +184,7 @@ impl PersistedToolLoop {
             initial_messages,
             RunStepContext {
                 host_context: host_context.map(str::to_owned),
+                host_revision_snapshot: None,
                 state: StepRuntimeState::new(
                     unavailable_world_state(host_context),
                     WorkloadResolution {
@@ -215,9 +222,17 @@ impl PersistedToolLoop {
             .find(|message| message.role == ModelRole::User)
             .map(|message| message.content.clone())
             .unwrap_or_default();
-        self.store
-            .transition_run(&run.id, RunStatus::Preparing, None)
-            .await?;
+        let persisted = self
+            .store
+            .get_run(&run.id)
+            .await?
+            .ok_or_else(|| AgentStoreError::RunNotFound(run.id.clone()))?;
+        let resuming_after_compaction = persisted.status == RunStatus::Running;
+        if !resuming_after_compaction {
+            self.store
+                .transition_run(&run.id, RunStatus::Preparing, None)
+                .await?;
+        }
         let (negotiated, degradations) = negotiate_provider_capabilities(
             run.requested_capabilities,
             self.driver.provider_capabilities(),
@@ -251,28 +266,174 @@ impl PersistedToolLoop {
                 .await?;
             return Err(PersistedRunError::Runtime(ModelRuntimeError::Cancelled));
         }
-        self.store
-            .transition_run(&run.id, RunStatus::Running, None)
-            .await?;
+        if !resuming_after_compaction {
+            self.store
+                .transition_run(&run.id, RunStatus::Running, None)
+                .await?;
+        }
         let (event_sender, event_receiver) = mpsc::unbounded_channel();
         let projector_store = self.store.clone();
         let projector_run = run.clone();
         let projector = tokio::spawn(async move {
             project_loop_events(projector_store, projector_run, event_receiver).await
         });
-        let request_context = format!(
-            "run_id={}; execution_target={:?}; permission_profile={:?}; approval_policy={:?}; accepted_plan_id={:?}; accepted_plan_revision={:?}; host_context={}.",
-            run.id,
-            run.configuration.execution_target,
-            run.configuration.permission_profile,
-            run.configuration.approval_policy,
-            run.configuration.accepted_plan_id,
-            run.configuration.accepted_plan_revision,
-            step_context
-                .host_context
-                .as_deref()
-                .unwrap_or("not supplied"),
-        );
+        let accepted_plan = match run.configuration.accepted_plan_id.as_ref() {
+            Some(plan_id) => match self.store.get_plan_document(plan_id).await? {
+                Some(plan) => {
+                    let status = self
+                        .store
+                        .get_plan_confirmation(plan_id)
+                        .await?
+                        .map_or_else(
+                            || "missing".to_owned(),
+                            |value| value.status.as_str().to_owned(),
+                        );
+                    Some(ContinuityPlan {
+                        id: plan.id.as_str().to_owned(),
+                        revision: plan.revision,
+                        status,
+                        content_markdown: bounded_plan(&plan.content_markdown),
+                    })
+                }
+                None => Some(ContinuityPlan {
+                    id: plan_id.as_str().to_owned(),
+                    revision: 0,
+                    status: "missing".into(),
+                    content_markdown: String::new(),
+                }),
+            },
+            None => None,
+        };
+        let recent_sources = self
+            .store
+            .list_session_sources(&run.session_id)
+            .await?
+            .into_iter()
+            .take(8)
+            .map(|source| ContinuitySessionSource {
+                id: source.id.as_str().to_owned(),
+                origin: format!("{:?}", source.origin).to_ascii_lowercase(),
+                kind: format!("{:?}", source.kind).to_ascii_lowercase(),
+                title: source.title.as_deref().map(bounded_label),
+                url: source.url.as_deref().map(bounded_reference),
+                attachment_id: source.attachment_id.map(|id| id.as_str().to_owned()),
+                run_id: source.run_id.map(|id| id.as_str().to_owned()),
+            })
+            .collect::<Vec<_>>();
+        let artifacts = self
+            .store
+            .list_session_artifacts(&run.session_id)
+            .await?
+            .into_iter()
+            .rev()
+            .take(16)
+            .map(|artifact| artifact_continuity(&artifact))
+            .collect::<Vec<_>>();
+        let environment = self
+            .store
+            .get_session_environment_state(&run.session_id)
+            .await?
+            .map(|state| ContinuityEnvironment {
+                revision: state.revision,
+                binding_revision: state.binding_revision,
+                baseline_revision: state.baseline_revision,
+                inactive_head: state.inactive_head,
+                inactive_status_fingerprint: state.inactive_status_fingerprint,
+            });
+        let session = self
+            .store
+            .get_session(&run.session_id)
+            .await?
+            .ok_or_else(|| AgentStoreError::SessionNotFound(run.session_id.clone()))?;
+        let workspace = match &session.context {
+            hachimi_protocol::SessionContextBinding::Workspace { workspace_id } => {
+                Some(ContinuityWorkspace::Workspace {
+                    workspace_id: workspace_id.as_str().to_owned(),
+                })
+            }
+            hachimi_protocol::SessionContextBinding::Project {
+                project_id,
+                checkout_id,
+            } => {
+                let checkout = self.store.get_checkout(checkout_id).await?;
+                Some(ContinuityWorkspace::Project {
+                    project_id: project_id.as_str().to_owned(),
+                    checkout_id: checkout_id.as_str().to_owned(),
+                    checkout_kind: checkout
+                        .as_ref()
+                        .map(|value| format!("{:?}", value.kind).to_ascii_lowercase()),
+                    checkout_status: checkout
+                        .as_ref()
+                        .map(|value| format!("{:?}", value.status).to_ascii_lowercase()),
+                    base_revision: checkout
+                        .as_ref()
+                        .and_then(|value| value.base_revision.as_deref())
+                        .map(bounded_reference),
+                    head_revision: checkout
+                        .as_ref()
+                        .and_then(|value| value.head_revision.as_deref())
+                        .map(bounded_reference),
+                })
+            }
+        };
+        let connector_revisions = step_context
+            .host_revision_snapshot
+            .as_ref()
+            .map(|snapshot| {
+                snapshot
+                    .connectors
+                    .iter()
+                    .map(|connector| ContinuityConnectorRevision {
+                        account_id: connector.account_id.as_str().to_owned(),
+                        contribution_revision: ContinuityContributionRevision {
+                            plugin_id: connector
+                                .contribution_revision
+                                .plugin_id
+                                .as_str()
+                                .to_owned(),
+                            contribution_id: bounded_label(
+                                &connector.contribution_revision.contribution_id,
+                            ),
+                            content_hash: bounded_reference(
+                                &connector.contribution_revision.content_hash,
+                            ),
+                            host_identity_hash: connector
+                                .contribution_revision
+                                .host_identity_hash
+                                .as_deref()
+                                .map(bounded_reference),
+                            schema_hash: connector
+                                .contribution_revision
+                                .schema_hash
+                                .as_deref()
+                                .map(bounded_reference),
+                            action_hash: connector
+                                .contribution_revision
+                                .action_hash
+                                .as_deref()
+                                .map(bounded_reference),
+                        },
+                        allowed_actions: connector
+                            .allowed_actions
+                            .iter()
+                            .map(|action| bounded_label(action))
+                            .collect(),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let continuity = RuntimeContinuitySnapshot {
+            session_id: run.session_id.as_str().to_owned(),
+            run_id: run.id.as_str().to_owned(),
+            run_generation: run.generation,
+            host_context: step_context.host_context.as_deref().map(bounded_reference),
+            accepted_plan,
+            environment,
+            workspace,
+            recent_session_sources: recent_sources,
+            artifacts,
+            connector_revisions,
+        };
         let outcome = self
             .driver
             .run(
@@ -284,17 +445,12 @@ impl PersistedToolLoop {
                     state: step_context.state.clone(),
                     mode: run.configuration.behavior_mode,
                     origin: run.origin.clone(),
-                    context: self
-                        .store
-                        .get_session(&run.session_id)
-                        .await?
-                        .ok_or_else(|| AgentStoreError::SessionNotFound(run.session_id.clone()))?
-                        .context,
+                    context: session.context,
                     run_generation: run.generation,
                     budget: &run.configuration.budget,
                     run_tool_allowlist: step_context.run_tool_allowlist.clone(),
                     capability_grants: step_context.capability_grants.clone(),
-                    request_context: Some(&request_context),
+                    continuity: &continuity,
                     world_refresher: step_context.world_refresher.clone(),
                     steering: Some(Arc::new(StoreSteeringSource {
                         store: self.store.clone(),
@@ -356,89 +512,54 @@ impl PersistedToolLoop {
         match outcome {
             Ok(outcome) => {
                 let completed_at_ms = now_ms();
-                let (kind, payload) = if run.configuration.behavior_mode == BehaviorMode::Plan {
-                    let plan = self
-                        .store
-                        .create_proposed_plan(ProposedPlan {
-                            id: PlanId::random(),
-                            session_id: run.session_id.clone(),
-                            run_id: run.id.clone(),
-                            revision: 0,
-                            goal: proposed_goal,
-                            assumptions: Vec::new(),
-                            steps: plan_steps(&outcome.final_text),
-                            affected_resources: Vec::new(),
-                            verification: Vec::new(),
-                            risks: Vec::new(),
-                            open_questions: Vec::new(),
-                            content_markdown: outcome.final_text.clone(),
-                            status: ProposedPlanStatus::Proposed,
-                            accepted_run_id: None,
-                            created_at_ms: completed_at_ms,
-                            accepted_at_ms: None,
-                        })
-                        .await?;
-                    (
-                        TranscriptItemKind::Plan,
-                        ItemPayload::Plan {
-                            plan_id: plan.id,
-                            revision: plan.revision,
-                            text: plan.content_markdown,
-                            steps: plan.steps,
-                        },
-                    )
+                if run.configuration.behavior_mode == BehaviorMode::Plan {
+                    if let Some(completed_plan) = projection.completed_plan
+                        && !completed_plan.text.trim().is_empty()
+                    {
+                        let content_markdown = completed_plan.text.trim().to_owned();
+                        self.store
+                            .create_plan_document(PlanDocument {
+                                id: PlanId::random(),
+                                session_id: run.session_id.clone(),
+                                source_run_id: run.id.clone(),
+                                source_item_id: completed_plan.item_id,
+                                revision: 0,
+                                title: plan_title(&content_markdown, &proposed_goal),
+                                goal: proposed_goal,
+                                content_markdown,
+                                created_at_ms: completed_at_ms,
+                            })
+                            .await?;
+                    }
                 } else {
-                    (
-                        TranscriptItemKind::Assistant,
-                        ItemPayload::Assistant {
-                            text: outcome.final_text.clone(),
-                            phase: AgentMessagePhase::FinalAnswer,
-                        },
-                    )
-                };
-                let already_projected = kind == TranscriptItemKind::Assistant
-                    && projection.last_assistant.as_ref().is_some_and(|assistant| {
-                        assistant.text == outcome.final_text
-                            && assistant.phase == AgentMessagePhase::FinalAnswer
-                    });
-                if !already_projected {
-                    let item_id = ItemId::random();
-                    self.store
-                        .append_transcript_item(TranscriptItem {
-                            id: item_id.clone(),
-                            session_id: run.session_id.clone(),
-                            run_id: Some(run.id.clone()),
-                            sequence: 0,
-                            kind,
-                            status: ItemStatus::InProgress,
-                            payload: payload.clone(),
-                            relations: ItemRelations::default(),
-                            created_at_ms: completed_at_ms,
-                        })
-                        .await?;
-                    self.store
-                        .complete_transcript_item(&item_id, ItemStatus::Completed, payload)
-                        .await?;
-                }
-                if let Some(plan_id) = run.configuration.accepted_plan_id.as_ref()
-                    && let Some(plan) = self.store.get_proposed_plan(plan_id).await?
-                {
-                    let completed_steps = plan
-                        .steps
-                        .into_iter()
-                        .map(|mut step| {
-                            step.status = PlanStepStatus::Completed;
-                            step
-                        })
-                        .collect::<Vec<_>>();
-                    self.store
-                        .update_execution_plan(
-                            plan_id,
-                            &run.id,
-                            Some("Execution completed successfully."),
-                            &completed_steps,
-                        )
-                        .await?;
+                    let payload = ItemPayload::Assistant {
+                        text: outcome.final_text.clone(),
+                        phase: AgentMessagePhase::FinalAnswer,
+                    };
+                    let already_projected =
+                        projection.last_assistant.as_ref().is_some_and(|assistant| {
+                            assistant.text == outcome.final_text
+                                && assistant.phase == AgentMessagePhase::FinalAnswer
+                        });
+                    if !already_projected {
+                        let item_id = ItemId::random();
+                        self.store
+                            .append_transcript_item(TranscriptItem {
+                                id: item_id.clone(),
+                                session_id: run.session_id.clone(),
+                                run_id: Some(run.id.clone()),
+                                sequence: 0,
+                                kind: TranscriptItemKind::Assistant,
+                                status: ItemStatus::InProgress,
+                                payload: payload.clone(),
+                                relations: ItemRelations::default(),
+                                created_at_ms: completed_at_ms,
+                            })
+                            .await?;
+                        self.store
+                            .complete_transcript_item(&item_id, ItemStatus::Completed, payload)
+                            .await?;
+                    }
                 }
                 self.store
                     .transition_run(&run.id, RunStatus::Succeeded, None)
@@ -493,6 +614,18 @@ impl PersistedToolLoop {
                     ModelRuntimeError::NeedsAttention(code),
                 ))
             }
+            Err(error @ ModelRuntimeError::ContextCompactionRequired { .. })
+            | Err(error @ ModelRuntimeError::ContextOverflow) => {
+                self.store
+                    .append_event(
+                        &run.session_id,
+                        Some(&run.id),
+                        "context.compaction_restart_requested",
+                        json!({ "reason": error.to_string() }),
+                    )
+                    .await?;
+                Err(PersistedRunError::Runtime(error))
+            }
             Err(error) => {
                 self.store
                     .append_transcript_item(TranscriptItem {
@@ -519,6 +652,41 @@ impl PersistedToolLoop {
     }
 }
 
+fn artifact_continuity(artifact: &hachimi_protocol::ArtifactRecord) -> ContinuityArtifact {
+    let metadata = [
+        "mimeType",
+        "mime_type",
+        "revision",
+        "beforeRevision",
+        "afterRevision",
+        "changedParts",
+        "byteSize",
+    ]
+    .into_iter()
+    .filter_map(|key| {
+        artifact.metadata.get(key).and_then(|value| {
+            matches!(
+                value,
+                serde_json::Value::Null
+                    | serde_json::Value::Bool(_)
+                    | serde_json::Value::Number(_)
+                    | serde_json::Value::String(_)
+                    | serde_json::Value::Array(_)
+            )
+            .then(|| (key.to_owned(), bounded_label(&value.to_string())))
+        })
+    })
+    .collect();
+    ContinuityArtifact {
+        id: artifact.id.as_str().to_owned(),
+        run_id: artifact.run_id.as_ref().map(|id| id.as_str().to_owned()),
+        kind: format!("{:?}", artifact.kind).to_ascii_lowercase(),
+        display_name: bounded_label(&artifact.display_name),
+        content_hash: artifact.content_hash.as_deref().map(bounded_reference),
+        metadata,
+    }
+}
+
 #[derive(Debug)]
 struct AssistantProjection {
     item_id: ItemId,
@@ -539,6 +707,267 @@ struct LoopProjection {
     open_reasoning: Option<TextProjection>,
     last_assistant: Option<AssistantProjection>,
     saw_tool_call: bool,
+    plan_stream: Option<PlanStreamProjection>,
+    completed_plan: Option<CompletedPlanProjection>,
+}
+
+const PROPOSED_PLAN_OPEN: &str = "<proposed_plan>";
+const PROPOSED_PLAN_CLOSE: &str = "</proposed_plan>";
+
+#[derive(Debug)]
+struct PlanItemProjection {
+    item_id: ItemId,
+    text: String,
+}
+
+#[derive(Debug)]
+struct PlanStreamProjection {
+    message_id: String,
+    pending: String,
+    inside_plan: bool,
+    plan_leading: String,
+    plan_item: Option<PlanItemProjection>,
+}
+
+#[derive(Debug)]
+struct CompletedPlanProjection {
+    item_id: ItemId,
+    text: String,
+}
+
+fn partial_tag_prefix_len(value: &str, tag: &str) -> usize {
+    (1..tag.len())
+        .rev()
+        .find(|length| value.ends_with(&tag[..*length]))
+        .unwrap_or(0)
+}
+
+async fn append_commentary_segment(
+    store: &AgentStore,
+    run: &RunRecord,
+    projection: &mut LoopProjection,
+    message_id: &str,
+    text: &str,
+) -> Result<(), AgentStoreError> {
+    if text.is_empty() {
+        return Ok(());
+    }
+    start_assistant_projection(
+        store,
+        run,
+        projection,
+        message_id.to_owned(),
+        AgentMessagePhase::Commentary,
+    )
+    .await?;
+    let assistant = projection
+        .open_assistant
+        .as_mut()
+        .expect("commentary projection initialized");
+    assistant.text.push_str(text);
+    store
+        .append_live_item_delta(&run.session_id, &run.id, &assistant.item_id, text)
+        .await
+        .map(|_| ())
+}
+
+async fn start_plan_item(
+    store: &AgentStore,
+    run: &RunRecord,
+    stream: &mut PlanStreamProjection,
+) -> Result<(), AgentStoreError> {
+    if stream.plan_item.is_some() {
+        return Ok(());
+    }
+    let item_id = ItemId::random();
+    store
+        .append_transcript_item(TranscriptItem {
+            id: item_id.clone(),
+            session_id: run.session_id.clone(),
+            run_id: Some(run.id.clone()),
+            sequence: 0,
+            kind: TranscriptItemKind::Plan,
+            status: ItemStatus::InProgress,
+            payload: ItemPayload::Plan {
+                text: String::new(),
+            },
+            relations: ItemRelations::default(),
+            created_at_ms: now_ms(),
+        })
+        .await?;
+    stream.plan_item = Some(PlanItemProjection {
+        item_id,
+        text: String::new(),
+    });
+    Ok(())
+}
+
+async fn append_plan_segment(
+    store: &AgentStore,
+    run: &RunRecord,
+    stream: &mut PlanStreamProjection,
+    text: &str,
+) -> Result<(), AgentStoreError> {
+    if text.is_empty() {
+        return Ok(());
+    }
+    if stream.plan_item.is_none() && text.trim().is_empty() {
+        stream.plan_leading.push_str(text);
+        return Ok(());
+    }
+    start_plan_item(store, run, stream).await?;
+    let plan = stream.plan_item.as_mut().expect("plan item initialized");
+    if !stream.plan_leading.is_empty() {
+        plan.text.push_str(&stream.plan_leading);
+        store
+            .append_live_item_delta(
+                &run.session_id,
+                &run.id,
+                &plan.item_id,
+                &stream.plan_leading,
+            )
+            .await?;
+        stream.plan_leading.clear();
+    }
+    plan.text.push_str(text);
+    store
+        .append_live_item_delta(&run.session_id, &run.id, &plan.item_id, text)
+        .await
+        .map(|_| ())
+}
+
+async fn project_plan_delta(
+    store: &AgentStore,
+    run: &RunRecord,
+    projection: &mut LoopProjection,
+    message_id: &str,
+    delta: &str,
+) -> Result<(), AgentStoreError> {
+    let mut stream = projection
+        .plan_stream
+        .take()
+        .unwrap_or_else(|| PlanStreamProjection {
+            message_id: message_id.to_owned(),
+            pending: String::new(),
+            inside_plan: false,
+            plan_leading: String::new(),
+            plan_item: None,
+        });
+    stream.pending.push_str(delta);
+    loop {
+        if !stream.inside_plan {
+            if let Some(index) = stream.pending.find(PROPOSED_PLAN_OPEN) {
+                let before = stream.pending[..index].to_owned();
+                stream.pending.drain(..index + PROPOSED_PLAN_OPEN.len());
+                if !before.is_empty() {
+                    append_commentary_segment(store, run, projection, message_id, &before).await?;
+                }
+                if projection.open_assistant.is_some() {
+                    complete_assistant_projection(store, projection, AgentMessagePhase::Commentary)
+                        .await?;
+                }
+                stream.inside_plan = true;
+                continue;
+            }
+            let keep = partial_tag_prefix_len(&stream.pending, PROPOSED_PLAN_OPEN);
+            if stream.pending.len() > keep {
+                let end = stream.pending.len() - keep;
+                let text = stream.pending[..end].to_owned();
+                stream.pending.drain(..end);
+                append_commentary_segment(store, run, projection, message_id, &text).await?;
+            }
+            break;
+        }
+        if let Some(index) = stream.pending.find(PROPOSED_PLAN_CLOSE) {
+            let text = stream.pending[..index].to_owned();
+            stream.pending.drain(..index + PROPOSED_PLAN_CLOSE.len());
+            if projection.completed_plan.is_none() {
+                append_plan_segment(store, run, &mut stream, &text).await?;
+                if let Some(plan) = stream.plan_item.take()
+                    && !plan.text.trim().is_empty()
+                {
+                    store
+                        .complete_transcript_item(
+                            &plan.item_id,
+                            ItemStatus::Completed,
+                            ItemPayload::Plan {
+                                text: plan.text.clone(),
+                            },
+                        )
+                        .await?;
+                    projection.completed_plan = Some(CompletedPlanProjection {
+                        item_id: plan.item_id,
+                        text: plan.text,
+                    });
+                }
+            }
+            stream.inside_plan = false;
+            continue;
+        }
+        let keep = partial_tag_prefix_len(&stream.pending, PROPOSED_PLAN_CLOSE);
+        if stream.pending.len() > keep {
+            let end = stream.pending.len() - keep;
+            let text = stream.pending[..end].to_owned();
+            stream.pending.drain(..end);
+            if projection.completed_plan.is_none() {
+                append_plan_segment(store, run, &mut stream, &text).await?;
+            }
+        }
+        break;
+    }
+    projection.plan_stream = Some(stream);
+    Ok(())
+}
+
+async fn finish_plan_stream(
+    store: &AgentStore,
+    run: &RunRecord,
+    projection: &mut LoopProjection,
+) -> Result<(), AgentStoreError> {
+    let Some(mut stream) = projection.plan_stream.take() else {
+        return Ok(());
+    };
+    if stream.inside_plan {
+        if projection.completed_plan.is_none() {
+            let pending = std::mem::take(&mut stream.pending);
+            let keep = partial_tag_prefix_len(&pending, PROPOSED_PLAN_CLOSE);
+            if pending.len() > keep {
+                append_plan_segment(store, run, &mut stream, &pending[..pending.len() - keep])
+                    .await?;
+            }
+            if let Some(plan) = stream.plan_item.take() {
+                store
+                    .complete_transcript_item_as_kind(
+                        &plan.item_id,
+                        TranscriptItemKind::Assistant,
+                        ItemStatus::Completed,
+                        ItemPayload::Assistant {
+                            text: plan.text,
+                            phase: AgentMessagePhase::Commentary,
+                        },
+                    )
+                    .await?;
+            } else if !stream.plan_leading.is_empty() {
+                let commentary = std::mem::take(&mut stream.plan_leading);
+                append_commentary_segment(store, run, projection, &stream.message_id, &commentary)
+                    .await?;
+            }
+        }
+    } else {
+        let pending = std::mem::take(&mut stream.pending);
+        let keep = partial_tag_prefix_len(&pending, PROPOSED_PLAN_OPEN);
+        if pending.len() > keep {
+            append_commentary_segment(
+                store,
+                run,
+                projection,
+                &stream.message_id,
+                &pending[..pending.len() - keep],
+            )
+            .await?;
+        }
+    }
+    Ok(())
 }
 
 async fn start_assistant_projection(
@@ -758,67 +1187,102 @@ async fn project_loop_events(
             // transcript history. `UsageReconciled` below persists the
             // authoritative snapshot after active-context reconciliation.
             LoopEvent::Model(ModelEvent::Usage { .. }) => {}
-            LoopEvent::Model(ModelEvent::AgentMessageStarted { message_id, phase })
-                if run.configuration.behavior_mode != BehaviorMode::Plan =>
-            {
-                start_assistant_projection(&store, &run, &mut projection, message_id, phase)
-                    .await?;
+            LoopEvent::Model(ModelEvent::AgentMessageStarted { message_id, phase }) => {
+                if run.configuration.behavior_mode == BehaviorMode::Plan {
+                    if projection.plan_stream.is_some() {
+                        finish_plan_stream(&store, &run, &mut projection).await?;
+                    }
+                    projection.plan_stream = Some(PlanStreamProjection {
+                        message_id,
+                        pending: String::new(),
+                        inside_plan: false,
+                        plan_leading: String::new(),
+                        plan_item: None,
+                    });
+                } else {
+                    start_assistant_projection(&store, &run, &mut projection, message_id, phase)
+                        .await?;
+                }
             }
-            LoopEvent::Model(ModelEvent::AgentMessageDelta { message_id, delta })
-                if run.configuration.behavior_mode != BehaviorMode::Plan =>
-            {
-                start_assistant_projection(
-                    &store,
-                    &run,
-                    &mut projection,
-                    message_id,
-                    AgentMessagePhase::Unknown,
-                )
-                .await?;
-                let assistant = projection
-                    .open_assistant
-                    .as_mut()
-                    .expect("assistant projection initialized");
-                assistant.text.push_str(&delta);
-                store
-                    .append_live_item_delta(&run.session_id, &run.id, &assistant.item_id, &delta)
-                    .await?;
-            }
-            LoopEvent::Model(ModelEvent::AgentMessageCompleted { message_id })
-                if run.configuration.behavior_mode != BehaviorMode::Plan =>
-            {
-                let should_complete = projection.open_assistant.as_ref().is_some_and(|assistant| {
-                    assistant.message_id == message_id
-                        && assistant.phase != AgentMessagePhase::Unknown
-                });
-                if should_complete {
-                    complete_assistant_projection(
+            LoopEvent::Model(ModelEvent::AgentMessageDelta { message_id, delta }) => {
+                if run.configuration.behavior_mode == BehaviorMode::Plan {
+                    project_plan_delta(&store, &run, &mut projection, &message_id, &delta).await?;
+                } else {
+                    start_assistant_projection(
                         &store,
+                        &run,
                         &mut projection,
+                        message_id,
                         AgentMessagePhase::Unknown,
                     )
                     .await?;
+                    let assistant = projection
+                        .open_assistant
+                        .as_mut()
+                        .expect("assistant projection initialized");
+                    assistant.text.push_str(&delta);
+                    store
+                        .append_live_item_delta(
+                            &run.session_id,
+                            &run.id,
+                            &assistant.item_id,
+                            &delta,
+                        )
+                        .await?;
                 }
             }
-            LoopEvent::Model(ModelEvent::TextDelta { delta })
-                if run.configuration.behavior_mode != BehaviorMode::Plan =>
-            {
-                start_assistant_projection(
-                    &store,
-                    &run,
-                    &mut projection,
-                    "legacy-message-0".into(),
-                    AgentMessagePhase::Unknown,
-                )
-                .await?;
-                let assistant = projection
-                    .open_assistant
-                    .as_mut()
-                    .expect("assistant projection initialized");
-                assistant.text.push_str(&delta);
-                store
-                    .append_live_item_delta(&run.session_id, &run.id, &assistant.item_id, &delta)
+            LoopEvent::Model(ModelEvent::AgentMessageCompleted { message_id }) => {
+                if run.configuration.behavior_mode == BehaviorMode::Plan {
+                    finish_plan_stream(&store, &run, &mut projection).await?;
+                    complete_assistant_projection(
+                        &store,
+                        &mut projection,
+                        AgentMessagePhase::Commentary,
+                    )
                     .await?;
+                } else {
+                    let should_complete =
+                        projection.open_assistant.as_ref().is_some_and(|assistant| {
+                            assistant.message_id == message_id
+                                && assistant.phase != AgentMessagePhase::Unknown
+                        });
+                    if should_complete {
+                        complete_assistant_projection(
+                            &store,
+                            &mut projection,
+                            AgentMessagePhase::Unknown,
+                        )
+                        .await?;
+                    }
+                }
+            }
+            LoopEvent::Model(ModelEvent::TextDelta { delta }) => {
+                if run.configuration.behavior_mode == BehaviorMode::Plan {
+                    project_plan_delta(&store, &run, &mut projection, "legacy-message-0", &delta)
+                        .await?;
+                } else {
+                    start_assistant_projection(
+                        &store,
+                        &run,
+                        &mut projection,
+                        "legacy-message-0".into(),
+                        AgentMessagePhase::Unknown,
+                    )
+                    .await?;
+                    let assistant = projection
+                        .open_assistant
+                        .as_mut()
+                        .expect("assistant projection initialized");
+                    assistant.text.push_str(&delta);
+                    store
+                        .append_live_item_delta(
+                            &run.session_id,
+                            &run.id,
+                            &assistant.item_id,
+                            &delta,
+                        )
+                        .await?;
+                }
             }
             LoopEvent::Model(ModelEvent::ReasoningDelta { delta }) => {
                 if projection.open_reasoning.is_none() {
@@ -854,6 +1318,9 @@ async fn project_loop_events(
                 ModelEvent::ToolCallDelta { .. } | ModelEvent::ToolCallCompleted { .. },
             ) => projection.saw_tool_call = true,
             LoopEvent::Model(ModelEvent::Completed { finish_reason }) => {
+                if run.configuration.behavior_mode == BehaviorMode::Plan {
+                    finish_plan_stream(&store, &run, &mut projection).await?;
+                }
                 let inferred_phase =
                     if projection.saw_tool_call || finish_reason == ModelFinishReason::ToolCalls {
                         AgentMessagePhase::Commentary
@@ -872,20 +1339,21 @@ async fn project_loop_events(
                         .await?;
                 }
             }
-            LoopEvent::Model(_) => {}
             LoopEvent::ContextCompacted {
-                before_chars,
-                after_chars,
+                tokens_before,
+                tokens_after,
+                compacted_items,
                 reason,
             } => {
                 store
                     .append_event(
                         &run.session_id,
                         Some(&run.id),
-                        "context.reactive_compacted",
+                        "context.microcompacted",
                         json!({
-                            "beforeChars": before_chars,
-                            "afterChars": after_chars,
+                            "tokensBefore": tokens_before,
+                            "tokensAfter": tokens_after,
+                            "compactedItems": compacted_items,
                             "reason": reason,
                         }),
                     )
@@ -1298,25 +1766,15 @@ fn persisted_tool_result(result: &crate::ToolResult) -> (String, serde_json::Val
     )
 }
 
-fn plan_steps(markdown: &str) -> Vec<PlanStep> {
+fn plan_title(markdown: &str, fallback: &str) -> String {
     markdown
         .lines()
         .map(str::trim)
-        .filter(|line| !line.is_empty() && !line.starts_with('#'))
-        .map(|line| {
-            line.trim_start_matches(['-', '*'])
-                .trim_start_matches(|character: char| {
-                    character.is_ascii_digit() || matches!(character, '.' | ')' | ' ')
-                })
-                .trim()
-        })
-        .filter(|line| !line.is_empty())
-        .take(128)
-        .map(|line| PlanStep {
-            id: PlanStepId::random(),
-            description: line.chars().take(2_000).collect(),
-            status: PlanStepStatus::Pending,
-        })
+        .find_map(|line| line.strip_prefix("# ").map(str::trim))
+        .filter(|title| !title.is_empty())
+        .unwrap_or_else(|| fallback.trim())
+        .chars()
+        .take(200)
         .collect()
 }
 

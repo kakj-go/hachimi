@@ -256,6 +256,13 @@ html[data-diff-markers="signs"] .diff-preview-pane code {
   min-width: 0;
 }
 
+.theme-profile-toolbar .ui-select-control {
+  grid-template-columns: max-content minmax(0, 340px);
+  align-items: center;
+  justify-content: start;
+  column-gap: 18px;
+}
+
 .theme-profile-actions {
   display: flex;
   align-items: center;
@@ -305,8 +312,8 @@ html[data-diff-markers="signs"] .diff-preview-pane code {
   width: 230px;
 }
 
-.unified-settings-card [data-component="select-trigger"] {
-  width: 100%;
+.unified-settings-card [data-component="select"] {
+  width: min(100%, 340px);
 }
 
 @media (max-width: 900px) {

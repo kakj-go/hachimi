@@ -102,10 +102,25 @@ vi.mock("@hachimi/ui", () => {
     ),
     Play: Icon,
     Pencil: Icon,
+    Plug: Icon,
     Plus: Icon,
+    Puzzle: Icon,
     RefreshCw: Icon,
+    SearchField: (props: Record<string, unknown>) => (
+      <label>
+        {props.label as never}
+        <input
+          type="search"
+          value={props.value as string}
+          disabled={props.disabled as boolean | undefined}
+          placeholder={props.placeholder as string | undefined}
+          onInput={(event) => (props.onInput as ((event: InputEvent) => void) | undefined)?.(event)}
+        />
+      </label>
+    ),
     Settings: Icon,
     ShieldCheck: Icon,
+    Sparkles: Icon,
     SelectField: (props: Record<string, unknown>) => (
       <label>
         {props.label as never}
@@ -184,6 +199,7 @@ vi.mock("@hachimi/ui", () => {
         />
       </label>
     ),
+    X: Icon,
     Trash2: Icon,
     Tooltip: (props: { children: unknown }) => <>{props.children as never}</>,
   };
@@ -195,6 +211,58 @@ afterEach(() => {
 });
 
 describe("TaskCenter", () => {
+  it("shows the B-layout Skills section with friendly product names", async () => {
+    const port = {
+      listSchedules: vi.fn(async () => []),
+      listTaskRuns: vi.fn(async () => []),
+      searchAgentSessions: vi.fn(async () => ({ items: [], nextCursor: null })),
+      listProjectGitRefs: vi.fn(async () => []),
+      listMcpServers: vi.fn(async () => []),
+      listMcpTools: vi.fn(async () => []),
+    } as unknown as WorkbenchCommandPort;
+    const root = document.createElement("div");
+    document.body.append(root);
+    const dispose = render(
+      () => (
+        <I18nProvider initialLocale="zh-CN">
+          <TaskCenter
+            commandPort={port}
+            skills={[
+              {
+                id: "skill-word",
+                scope: "built_in",
+                namespace: null,
+                name: "office documents",
+                qualifiedName: "office-documents",
+                description: "编辑 Word 文档",
+                dependencies: [],
+                editable: false,
+                enabled: true,
+                contentHash: "word-content",
+                treeRevision: "word-tree",
+                diagnostics: [],
+                updatedAtMs: 1,
+              },
+            ]}
+            onOpenSession={() => undefined}
+          />
+        </I18nProvider>
+      ),
+      root,
+    );
+
+    await Promise.resolve();
+    (root.querySelector('[data-testid="task-create-toggle"]') as HTMLButtonElement).click();
+    const skillsNavigation = [...root.querySelectorAll<HTMLButtonElement>("button")].find(
+      (button) => button.textContent?.includes("技能权限"),
+    );
+    expect(skillsNavigation).toBeTruthy();
+    skillsNavigation!.click();
+    expect(root.querySelector(".skill-permission-copy strong")?.textContent).toBe("Word");
+    expect(root.querySelector(".skill-permission-copy code")?.textContent).toBe("office-documents");
+    dispose();
+  });
+
   it("creates an Event schedule with an exact typed matcher and no future timestamp", async () => {
     const createSchedule = vi.fn(async (request) => ({
       definition: request.definition,

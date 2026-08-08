@@ -1671,6 +1671,78 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    #[ignore = "opt-in local Browser stress"]
+    async fn short_stress_releases_observations_permissions_and_takeover_state() {
+        let seconds = std::env::var("HACHIMI_STRESS_PHASE_SECONDS")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(300)
+            .clamp(1, 450);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(seconds);
+        let mut iterations = 0_u64;
+        while std::time::Instant::now() < deadline {
+            let host = host();
+            let session_id = SessionId::new(format!("stress-session-{iterations}"));
+            let run_id = RunId::new(format!("stress-run-{iterations}"));
+            let session = host
+                .start_session(
+                    BrowserProfileKind::Isolated,
+                    session_id.clone(),
+                    run_id.clone(),
+                    1,
+                    Some("https://example.com/page"),
+                    &sandbox(),
+                    None,
+                )
+                .await
+                .expect("start");
+            host.grant_site_permission(
+                &session.id,
+                &session_id,
+                &run_id,
+                session.revision,
+                "https://example.com/page",
+                vec![BrowserCapability::Observe, BrowserCapability::Act],
+                BrowserPermissionDecision::AllowSession,
+                BrowserNetworkRuleKind::Document,
+                false,
+                "stress:test",
+                None,
+            )
+            .await
+            .expect("permission");
+            let observation = host
+                .observe(&session.id, &run_id, 1)
+                .await
+                .expect("observe");
+            let request = BrowserActionRequest {
+                browser_session_id: session.id.clone(),
+                observation_id: observation.id,
+                run_generation: 1,
+                expected_revision: observation.browser_revision,
+                action: BrowserAction::Click {
+                    selector: "#stress".into(),
+                },
+            };
+            host.authorize_action(&run_id, &request).await.expect("act");
+            assert_eq!(
+                host.authorize_action(&run_id, &request).await,
+                Err(BrowserHostError::StaleObservation)
+            );
+            host.take_over(&session.id, &run_id)
+                .await
+                .expect("takeover");
+            host.resume(&session.id, &run_id).await.expect("resume");
+            let stopped = host.stop(&session.id, &run_id).await.expect("stop");
+            assert_eq!(stopped.status, BrowserSessionStatus::Stopped);
+            iterations = iterations.saturating_add(1);
+            tokio::task::yield_now().await;
+        }
+        assert!(iterations > 0);
+        eprintln!("browser_stress_iterations={iterations}");
+    }
+
     #[test]
     fn browser_action_validation_enforces_the_controlled_cdp_matrix() {
         for action in [

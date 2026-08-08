@@ -130,7 +130,7 @@ pub fn profile_runtime_context(
     let spec = workload_profile_spec(entry_profile, workload);
     let mode_rule = match mode {
         BehaviorMode::Plan => {
-            "Plan mode is enforced as read-only: do not write files, execute processes, send external data, or perform desktop actions."
+            "Plan mode is enforced as read-only: do not write files, execute processes, send external data, or perform desktop actions. When the plan is decision-complete, emit exactly one final <proposed_plan>...</proposed_plan> block. Its first non-empty line must be a Markdown H1 title. Keep progress commentary and questions outside that block."
         }
         BehaviorMode::Default => {
             "Every side effect requires current Tool, Policy, Approval, Sandbox, Host, and grant checks."

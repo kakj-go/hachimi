@@ -2,13 +2,13 @@
 
 更新时间：2026-07-31
 
-本规格与 `HARNESS_AGENT_ARCHITECTURE_AND_IMPLEMENTATION.md`、`HARNESS_AGENT_CODE_IMPLEMENTATION_PLAN.md` 和唯一状态源 `ROADMAP.md` 一致。当前实现包含活动 Run 安全续跑、三类公开 OpenAI Provider、Remote Compaction/公开 reasoning summary、Multi-Agent、Git/Forge、完整 Plugin contribution 生命周期、企业微信/钉钉/飞书 transport/mention/附件，以及统一 Workbench 会话中的 Browser/Computer Host 原语。P1–P8 的代码与本地测试完成度和真实环境验证采用双状态；fixture 不能作为真实 Provider、Forge、外部企业组织或 Windows 发布证据。Memory 属于远期，Hachimi 不增加登录或租户体系。
+本规格与 `HARNESS_AGENT_ARCHITECTURE_AND_IMPLEMENTATION.md`、`HARNESS_AGENT_CODE_IMPLEMENTATION_PLAN.md` 和唯一状态源 `ROADMAP.md` 一致。当前实现包含活动 Run 安全续跑、三类公开 OpenAI Provider、Remote Compaction/公开 reasoning summary、Multi-Agent、Git/Forge、内置 Plugin contribution 生命周期、企业微信/钉钉/飞书 transport/mention/附件，以及统一 Workbench 会话中的 Browser/Computer Host 原语。实现与外部 Gate 采用 `Implemented`、`Local Verified`、`Environment Blocked`、`Not Planned` 四态；fixture 不能作为真实 Provider、Forge、外部企业组织或 Windows 发布证据。Memory 与 Agent Heartbeat 为 `Not Planned`，Hachimi 不增加登录或租户体系。
 
 ## 1. 产品边界
 
 Hachimi 支持 General、Coding、Office、Scheduled Task 和父子 Agent Task；桌面控制能力属于 Workbench Session，不再是独立入口。所有入口都调用同一个 `AgentRunExecutor`；办公知识来自用户选择或模型渐进激活的 Skill，第三方 API 来自受控 MCP/Connector。Kernel 不硬编码在线 Office 服务或应用 SOP。
 
-总体参考原则：Codex 是 Agent Runtime、编程/办公、Skills、MCP、Plugins/Connectors、Session/Thread 恢复、Browser/Computer 和 Scheduled Tasks 产品语义的主基线；OpenClaw 只用于常驻 Gateway、Channels/消息路由、Cron/Heartbeat/事件触发、Task ledger、投递和后台任务重启 reconciliation；Claude Code Best 只影响 Compaction 的 clean-room 行为验收。
+总体参考原则：Codex 是 Agent Runtime、编程/办公、Skills、MCP、Plugins/Connectors、Session/Thread 恢复、Browser/Computer 和 Scheduled Tasks 产品语义的主基线；OpenClaw 只用于常驻 Gateway、Channels/消息路由、Cron/事件触发、Task ledger、投递和后台任务重启 reconciliation；Claude Code Best 只影响 Compaction 的 clean-room 行为验收。
 
 首批内置 Skill：
 
@@ -107,10 +107,10 @@ Event 入口只接受 source/type/subject/最多 16 个 exact labels 和可选 t
 - Computer Use：App-scoped Observe/Act、用户接管、Always-allow App 与系统权限边界只以 Codex 为主 [ref:OAI-PRODUCT-COMPUTER-20260730]，Windows Host 使用 Hachimi typed contract 独立实现，截图只保存在受 TTL/容量限制的内存 PNG 仓库。
 - Plugins/Connectors：采用 Codex Plugin bundle、Skills/Hooks/EventSource、Connectors/MCP、Browser extension、Scheduled task template、custom UI 和权限分层 [ref:OAI-PRODUCT-PLUGINS-20260730]；统一 lifecycle journal 覆盖 install/enable/disable/update/rollback/uninstall 和崩溃 reconciliation。企业微信 GET `echostr`/POST 加密 XML callback、钉钉 Stream、飞书 WebSocket/protobuf、结构化 mention 和受控附件 Artifact 已用 Rust 实现并通过确定性 fixture [ref:WECOM-API-20260730] [ref:DINGTALK-STREAM-SDK-GO-20260731] [ref:FEISHU-SDK-GO-20260731]；三个真实外部组织仍待验证。
 - Channels/Gateway：仅外部消息入口深度参考 OpenClaw 的 Channel plugin、Account/Peer/Thread 路由、pairing/allowlist、durable ingress/delivery 和常驻 Gateway；Gateway 只提交 authenticated AppServer request。
-- 平台集成设置：企业微信、钉钉、飞书由生产 manifest 生成品牌 Tab；同一企业账户独立选择 API 与消息能力，凭据使用平台字段并只写入 Windows Credential Manager。Gateway 随消息账户需求自动托管；fixture Provider 不进入正式 UI。
-- Plugins 产品状态：P6 lifecycle 代码与本地测试完成，Runtime 继续供官方 Bundle 使用；所有版本的用户管理入口当前置灰，第三方 Bundle 产品化属于后续计划，Marketplace 继续不实现。
+- 平台集成设置：企业微信、钉钉、飞书由生产 manifest 生成品牌 Tab；同一企业账户独立选择 API 与消息能力，凭据使用平台字段并只写入 Windows Credential Manager。Gateway 随消息账户需求自动托管；fixture Provider 不进入正式 UI。Connector action manifest 使用 `{ name, effect }`，授权 UI 展示只读/外部副作用，服务端禁止把副作用 action 降级为只读。
+- Plugins 产品状态：P6 lifecycle 继续供内置 Bundle 使用；所有版本的用户管理入口置灰并显示“暂不开放 / Not available”。Marketplace、远程 Catalog、第三方 Bundle/Connector 安装管理为 `Not Planned`。
 - Computer Use：只枚举当前可控制的可见窗口与已有策略；Windows 描述符包含产品名、规范路径、发布者验证状态、文件身份和 Shell 图标。策略写入只接受后端候选的 `identityHash`，不扫描全部已安装应用。
-- Scheduler：Codex 定义 Scheduled Tasks 产品语义，OpenClaw 只提供 Cron/Heartbeat/事件触发、Task ledger、投递和后台任务重启 reconciliation。OpenClaw standing orders 不能从 Prompt 或 `AGENTS.md` 直接生成永久权限；权限只能来自 ScheduleDefinition 的统一 policy。
+- Scheduler：Codex 定义 Scheduled Tasks 产品语义，OpenClaw 只提供 Cron/事件触发、Task ledger、投递和后台任务重启 reconciliation。Gateway/Transport/Lease heartbeat 已实现；Agent Heartbeat 为 `Not Planned`，`schedule.activity_marker` 仅为内部 Run 启动标签。OpenClaw standing orders 不能从 Prompt 或 `AGENTS.md` 直接生成永久权限；权限只能来自 ScheduleDefinition 的统一 policy。
 - Restart：Codex 式 Session/Thread resume 与 rollout reconstruction 用于恢复历史；活动 Run 依据 durable checkpoint、可信 Host recovery policy、revision 和 side-effect receipt 安全续跑。不得照搬 OpenClaw 对有副作用 turn 的自动重放；dispatch 后结果未知的动作必须由用户确认或放弃。
 
 ## 11. 验收
@@ -130,3 +130,5 @@ Event 入口只接受 source/type/subject/最多 16 个 exact labels 和可选 t
 - Office 产品边界是本地 DOCX/XLSX/PPTX/PDF 与文件整理，不增加在线 Office 服务依赖或 Office 专用 Kernel 分支。
 
 Memory 不进入 P1–P8；Marketplace、Remote Workspace、远程多租户 Control Plane 和在线 Office 服务均不实现。实际完成/阻塞状态只看 `ROADMAP.md`。
+
+> 实现状态统一以 `docs/ROADMAP.md` 为准；本规格只描述当前 contract，不单独宣称发布或真实环境验证完成。

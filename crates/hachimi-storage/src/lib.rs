@@ -162,7 +162,8 @@ impl SettingsStore {
         match u32::try_from(schema_version).unwrap_or(u32::MAX) {
             SETTINGS_SCHEMA_VERSION => match serde_json::from_value::<AppSettings>(value) {
                 Ok(mut settings) if settings.appearance.validate().is_ok() => {
-                    if settings.appearance.merge_missing_builtin_profiles() {
+                    let defaults_upgraded = settings.llm.upgrade_legacy_defaults();
+                    if defaults_upgraded || settings.appearance.merge_missing_builtin_profiles() {
                         self.save(&settings)?;
                     }
                     Ok(settings)
@@ -597,5 +598,37 @@ mod tests {
             Err(StorageError::InvalidSettings(_))
         ));
         assert!(!store.path().exists());
+    }
+
+    #[test]
+    fn upgrades_legacy_llm_defaults_without_overwriting_custom_settings() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let path = directory.path().join("settings.json");
+        let mut old_defaults = AppSettings::default();
+        old_defaults.llm.model_name = "gemma4:e4b".into();
+        old_defaults.llm.max_input_tokens = 0;
+        old_defaults.llm.max_output_tokens = 0;
+        SettingsStore::new(&path)
+            .save(&old_defaults)
+            .expect("seed legacy defaults");
+
+        let settings = SettingsStore::new(&path).load().expect("upgrade defaults");
+        assert_eq!(settings.llm.model_name, "gpt-5.6-sol");
+        assert_eq!(settings.llm.max_input_tokens, 1_050_000);
+        assert_eq!(settings.llm.max_output_tokens, 128_000);
+
+        let mut custom = AppSettings::default();
+        custom.llm.model_name = "custom-model".into();
+        custom.llm.max_input_tokens = 4096;
+        custom.llm.max_output_tokens = 512;
+        SettingsStore::new(&path)
+            .save(&custom)
+            .expect("seed custom settings");
+        let settings = SettingsStore::new(&path)
+            .load()
+            .expect("load custom settings");
+        assert_eq!(settings.llm.model_name, "custom-model");
+        assert_eq!(settings.llm.max_input_tokens, 4096);
+        assert_eq!(settings.llm.max_output_tokens, 512);
     }
 }

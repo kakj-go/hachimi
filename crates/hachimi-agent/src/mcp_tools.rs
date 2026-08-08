@@ -205,6 +205,7 @@ impl ToolExecutor for McpTool {
         let gate = self.gate.clone();
         let handlers = self.handlers.clone();
         let media_host = self.media_host.clone();
+        let effect = self.descriptor.effect;
         Box::pin(async move {
             if let Some((store, server_id)) = &gate {
                 match store.mcp_tool_enabled(server_id, &original_name).await {
@@ -287,6 +288,18 @@ impl ToolExecutor for McpTool {
                     invocation.cancellation.clone(),
                 )
                 .await),
+                Err(error)
+                    if effect == ToolEffect::ExternalSideEffect
+                        && !invocation.cancellation.is_cancelled() =>
+                {
+                    Ok(ToolResult::needs_attention(
+                        &invocation.call,
+                        "mcp_external_side_effect_indeterminate",
+                        format!(
+                            "MCP external side effect lost its result receipt; automatic replay is forbidden: {error}"
+                        ),
+                    ))
+                }
                 Err(error) => Ok(ToolResult::failed(
                     &invocation.call,
                     format!("MCP host rejected or failed the tool call: {error}"),
