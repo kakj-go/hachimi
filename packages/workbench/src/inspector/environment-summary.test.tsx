@@ -9,7 +9,6 @@ import { EnvironmentSummary } from "./environment-summary";
 vi.mock("@hachimi/ui", () => {
   const Icon = () => <span aria-hidden="true" />;
   return {
-    Bot: Icon,
     Box: Icon,
     Check: Icon,
     File: Icon,
@@ -17,6 +16,7 @@ vi.mock("@hachimi/ui", () => {
     HardDrive: Icon,
     Laptop: Icon,
     Link2: Icon,
+    Lightbulb: Icon,
     Plus: Icon,
     Button: (props: JSX.ButtonHTMLAttributes<HTMLButtonElement>) => (
       <button {...props}>{props.children}</button>
@@ -46,7 +46,7 @@ vi.mock("../git/workbench-git-controls", () => ({
 }));
 
 function environment(
-  activity: WorkbenchEnvironmentSnapshot["activity"] = {
+  activity: WorkbenchEnvironmentSnapshot["activities"][number] = {
     kind: "browser",
     lease_id: "browser-lease-1",
     surface: "embedded",
@@ -93,7 +93,7 @@ function environment(
       canHandoff: true,
       blockedReason: null,
     },
-    activity,
+    activities: [activity],
     sources: [
       {
         id: "source-upload",
@@ -199,7 +199,7 @@ describe("EnvironmentSummary", () => {
     dispose();
   });
 
-  it("shows the exact active plan step when no browser activity exists", () => {
+  it("keeps the plan title stable while exposing the active step as context", () => {
     const openInspector = vi.fn();
     const host = document.createElement("div");
     document.body.append(host);
@@ -209,8 +209,16 @@ describe("EnvironmentSummary", () => {
           environment={environment({
             kind: "plan",
             plan_id: "plan-1",
-            step_id: "step-2",
-            description: "Verify the branch Diff",
+            revision: 1,
+            title: "Branch verification",
+            confirmation_status: "accepted",
+            execution_run_id: "run-1",
+            execution_status: "running",
+            current_step: {
+              id: "step-2",
+              description: "Verify the branch Diff",
+              status: "in_progress",
+            },
           })}
           controller={{} as WorkbenchEnvironmentController}
           locale="en-US"
@@ -227,7 +235,10 @@ describe("EnvironmentSummary", () => {
     host
       .querySelector<HTMLButtonElement>('[data-testid="workbench-summary-plan-activity"]')
       ?.click();
-    expect(host.textContent).toContain("Verify the branch Diff");
+    expect(host.textContent).toContain("Branch verification");
+    expect(
+      host.querySelector('[data-testid="workbench-summary-plan-activity"]')?.getAttribute("title"),
+    ).toBe("Verify the branch Diff");
     expect(openInspector).toHaveBeenCalledWith({ kind: "plan", planId: "plan-1" });
     dispose();
   });

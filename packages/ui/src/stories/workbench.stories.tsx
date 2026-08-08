@@ -178,10 +178,16 @@ function WorkbenchPreview(props: { route: PreviewRoute; locale: "zh-CN" | "en-US
                   label={zh() ? "接口地址" : "Endpoint URL"}
                   value="http://localhost:11434/v1"
                 />
-                <TextField label={zh() ? "模型名称" : "Model name"} value="gemma4:e4b" />
+                <TextField label={zh() ? "模型名称" : "Model name"} value="gpt-5.6-sol" />
                 <div style={{ display: "grid", "grid-template-columns": "1fr 1fr", gap: "16px" }}>
-                  <NumberField label={zh() ? "最大输入 Token" : "Max input tokens"} value={0} />
-                  <NumberField label={zh() ? "最大输出 Token" : "Max output tokens"} value={0} />
+                  <NumberField
+                    label={zh() ? "最大输入 Token" : "Max input tokens"}
+                    value={1_050_000}
+                  />
+                  <NumberField
+                    label={zh() ? "最大输出 Token" : "Max output tokens"}
+                    value={128_000}
+                  />
                 </div>
               </Show>
               <Show when={props.route === "voice"}>

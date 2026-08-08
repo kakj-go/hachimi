@@ -1,10 +1,10 @@
 use std::{ffi::OsString, path::PathBuf, sync::Arc, time::Duration};
 
 use hachimi_protocol::{
-    CapabilityGrantSet, CheckoutId, ComputerGrant, ConnectorDriverDescriptor, ConnectorHealth,
-    ConnectorInvocationRequest, ConnectorRevision, ConnectorRuntimeKind, FileSystemAccess,
-    FileSystemGrant, NetworkGrant, PermissionGrantScope, PermissionProfile, PluginId, ProcessGrant,
-    RunId, SessionId, ToolEffect,
+    CapabilityGrantSet, CheckoutId, ComputerGrant, ConnectorActionDescriptor,
+    ConnectorDriverDescriptor, ConnectorHealth, ConnectorInvocationRequest, ConnectorRevision,
+    ConnectorRuntimeKind, FileSystemAccess, FileSystemGrant, NetworkGrant, PermissionGrantScope,
+    PermissionProfile, PluginId, ProcessGrant, RunId, SessionId, ToolEffect,
 };
 use hachimi_sandbox::{
     SandboxBackend, SandboxLaunchSpec, SandboxNetworkPolicy, grant_restricted_code_access,
@@ -65,7 +65,7 @@ pub struct SandboxedStdioConnectorDriver {
     bundle_root: PathBuf,
     executable: PathBuf,
     args: Vec<OsString>,
-    actions: Vec<String>,
+    actions: Vec<ConnectorActionDescriptor>,
 }
 
 impl std::fmt::Debug for SandboxedStdioConnectorDriver {
@@ -85,7 +85,7 @@ impl SandboxedStdioConnectorDriver {
         bundle_root: PathBuf,
         executable: PathBuf,
         args: Vec<String>,
-        actions: Vec<String>,
+        actions: Vec<ConnectorActionDescriptor>,
     ) -> Result<Self, ExtensionHostError> {
         let bundle_root = bundle_root
             .canonicalize()
@@ -154,12 +154,14 @@ impl SandboxedStdioConnectorDriver {
                     access: FileSystemAccess::Read,
                     roots: vec![bundle_root, temporary_root.clone()],
                     globs: Vec::new(),
+                    files: Vec::new(),
                     special_roots: Vec::new(),
                 },
                 FileSystemGrant {
                     access: FileSystemAccess::Write,
                     roots: vec![temporary_root],
                     globs: Vec::new(),
+                    files: Vec::new(),
                     special_roots: Vec::new(),
                 },
             ],
@@ -168,6 +170,7 @@ impl SandboxedStdioConnectorDriver {
                 spawn: true,
                 interactive: false,
                 allowed_commands: vec![executable],
+                unrestricted_commands: false,
             },
             browser: Default::default(),
             computer: ComputerGrant::default(),

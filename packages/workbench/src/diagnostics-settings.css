@@ -1,0 +1,28 @@
+.settings-path-action {
+  width: 100%;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+}
+
+.settings-path-action code {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--color-text-muted);
+  font-family: var(--font-code);
+  font-size: var(--font-size-xs);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.settings-path-action [data-component="button"] {
+  flex: none;
+}
+
+@media (max-width: 900px) {
+  .settings-path-action {
+    justify-content: space-between;
+  }
+}

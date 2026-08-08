@@ -65,13 +65,15 @@ pub(super) fn agent_git_forge_tool_executors(
     context: AgentGitForgeToolContext,
 ) -> Vec<Arc<dyn ToolExecutor>> {
     let mut kinds = vec![AgentGitForgeToolKind::GitRemotes];
-    if !context.network_grant.hosts.is_empty() {
+    if context.network_grant.unrestricted_hosts || !context.network_grant.hosts.is_empty() {
         kinds.push(AgentGitForgeToolKind::ForgeQuery);
     }
     if context.mutations_enabled && context.network_grant.enabled {
         kinds.push(AgentGitForgeToolKind::GitPush);
     }
-    if context.mutations_enabled && !context.network_grant.hosts.is_empty() {
+    if context.mutations_enabled
+        && (context.network_grant.unrestricted_hosts || !context.network_grant.hosts.is_empty())
+    {
         kinds.push(AgentGitForgeToolKind::ForgeMutate);
     }
     kinds
@@ -481,6 +483,7 @@ mod tests {
             run_id: RunId::from("run"),
             network_grant: hachimi_protocol::NetworkGrant {
                 enabled: network_enabled,
+                unrestricted_hosts: false,
                 hosts: network_enabled
                     .then(|| "forge.example.test".into())
                     .into_iter()

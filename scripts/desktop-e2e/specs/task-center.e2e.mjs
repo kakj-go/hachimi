@@ -1,13 +1,12 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import { rmSync } from "node:fs";
 import { clickWhenReady, waitForDisplayed } from "../support/interactions.mjs";
 import { validateOfficeArtifact } from "../support/office-artifacts.mjs";
 import { restartApplication, switchToWorkbench } from "../support/windows.mjs";
 import { assertWindowsToast } from "../support/windows-toast.mjs";
 
 /* global HTMLButtonElement, HTMLElement, HTMLInputElement, HTMLTextAreaElement, XPathResult, document */
-
-const restrictedStdioOffice = process.env.HACHIMI_DESKTOP_E2E_REAL_SANDBOX === "1";
 
 async function readText(selector) {
   return browser.execute(
@@ -129,9 +128,7 @@ async function openTaskCenter() {
 }
 
 async function ensureOfficeMcp() {
-  const serverName = restrictedStdioOffice
-    ? "Desktop E2E Restricted Office MCP"
-    : "Desktop E2E MCP";
+  const serverName = "Desktop E2E MCP";
   await switchToWorkbench();
   const settingsVisible = await browser.execute(() => {
     const settings = document.querySelector(".settings-nav");
@@ -163,29 +160,10 @@ async function ensureOfficeMcp() {
   } else {
     await clickWhenReady('[data-testid="mcp-add-server"]');
     await setValueWhenReady('[data-testid="mcp-create-name"]', serverName);
-    if (restrictedStdioOffice) {
-      const stdio = await $('//button[contains(., "Local stdio") or contains(., "本地 stdio")]');
-      await stdio.waitForDisplayed({ timeout: 20_000 });
-      await stdio.waitForClickable({ timeout: 20_000 });
-      await stdio.click();
-      await setValueWhenReady(
-        '[data-testid="mcp-create-stdio-command"]',
-        process.env.HACHIMI_DESKTOP_E2E_MCP_STDIO_COMMAND,
-      );
-      await setValueWhenReady(
-        '[data-testid="mcp-create-stdio-args"]',
-        process.env.HACHIMI_DESKTOP_E2E_MCP_STDIO_ARGS,
-      );
-      await setValueWhenReady(
-        '[data-testid="mcp-create-stdio-cwd"]',
-        process.env.HACHIMI_DESKTOP_E2E_MCP_STDIO_CWD,
-      );
-    } else {
-      await setValueWhenReady(
-        '[placeholder="https://example.com/mcp"]',
-        process.env.HACHIMI_DESKTOP_E2E_MCP_URL,
-      );
-    }
+    await setValueWhenReady(
+      '[placeholder="https://example.com/mcp"]',
+      process.env.HACHIMI_DESKTOP_E2E_MCP_URL,
+    );
     await clickWhenReady('[data-testid="mcp-test-new-connection"]');
     await waitForDisplayed('[data-testid="mcp-tool-create_document"]');
     await clickWhenReady('[data-testid="mcp-save-new-server"]');
@@ -203,6 +181,54 @@ async function ensureOfficeMcp() {
   await waitForDisplayed('[data-testid="mcp-tool-create_document"]');
   await clickWhenReady(".back-home");
   await waitForDisplayed('[data-testid="workbench-task-tab"]');
+}
+
+async function ensureInterruptibleOfficeMcp() {
+  const serverName = "Desktop E2E Interruptible Office MCP";
+  await switchToWorkbench();
+  await clickWhenReady('[data-testid="workbench-open-settings"]');
+  await clickWhenReady('[data-testid="settings-nav-mcp"]');
+  await waitForDisplayed('[data-testid="mcp-settings-page"]');
+  const existing = await browser.execute(
+    (name) =>
+      [...document.querySelectorAll(".mcp-server-row")].some((row) =>
+        row.textContent?.includes(name),
+      ),
+    serverName,
+  );
+  if (existing) {
+    await clickWhenReady(
+      `//*[contains(@class, "mcp-server-row") and contains(., "${serverName}")]//*[contains(@class, "mcp-server-select")]`,
+    );
+  } else {
+    await clickWhenReady('[data-testid="mcp-add-server"]');
+    await setValueWhenReady('[data-testid="mcp-create-name"]', serverName);
+    const stdio = await $(
+      '//*[contains(@class, "mcp-create-dialog-form")]//div[@data-component="segmented-control"]//button[contains(., "Local stdio") or contains(., "本地 stdio")]',
+    );
+    await stdio.waitForDisplayed({ timeout: 20_000 });
+    await stdio.waitForClickable({ timeout: 20_000 });
+    await stdio.click();
+    await setValueWhenReady('[data-testid="mcp-create-stdio-command"]', process.execPath);
+    await setValueWhenReady(
+      '[data-testid="mcp-create-stdio-args"]',
+      process.env.HACHIMI_DESKTOP_E2E_MCP_STDIO_ARGS,
+    );
+    await setValueWhenReady(
+      '[data-testid="mcp-create-stdio-cwd"]',
+      process.env.HACHIMI_DESKTOP_E2E_MCP_STDIO_CWD,
+    );
+    await clickWhenReady('[data-testid="mcp-test-new-connection"]');
+    await waitForDisplayed('.mcp-create-dialog-form [data-testid="mcp-tool-create_document"]');
+    await clickWhenReady('[data-testid="mcp-save-new-server"]');
+  }
+  const enabled = await browser.execute(
+    () => document.querySelector('.mcp-detail-header input[type="checkbox"]')?.checked ?? false,
+  );
+  if (!enabled) await clickWhenReady('.mcp-detail-header [data-component="switch-root"]');
+  await waitForDisplayed('[data-testid="mcp-tool-create_document"]');
+  await clickWhenReady(".back-home");
+  return serverName;
 }
 
 async function createGeneralTask(name, prompt, { systemNotification = false } = {}) {
@@ -245,10 +271,10 @@ async function checkOptionContaining(labelText) {
   await browser.waitUntil(
     async () =>
       browser.execute((text) => {
-        const label = [...document.querySelectorAll("label")].find((candidate) =>
-          candidate.textContent?.includes(text),
+        const candidate = [...document.querySelectorAll("label, .skill-permission-row")].find(
+          (element) => element.textContent?.includes(text),
         );
-        const input = label?.querySelector('input[type="checkbox"]');
+        const input = candidate?.querySelector('input[type="checkbox"]');
         if (!(input instanceof HTMLInputElement)) return false;
         input.scrollIntoView({ block: "center", inline: "nearest" });
         if (!input.checked) input.click();
@@ -524,7 +550,7 @@ describe("Hachimi scheduled Agent tasks", () => {
       '[data-testid="task-prompt"]',
       "[desktop-e2e:office-skills] use the document, spreadsheet, presentation, PDF and file organizer Skills to create and validate artifacts, then deliver the PDF",
     );
-    await clickWhenReady(".task-advanced-section > summary");
+    await clickWhenReady('[data-testid="authorization-nav-permissions"]');
     await clickWhenReady('[data-testid="task-permission-writable"]');
     await browser.waitUntil(
       async () =>
@@ -532,6 +558,7 @@ describe("Hachimi scheduled Agent tasks", () => {
         "true",
       { timeout: 10_000, timeoutMsg: "Scheduled Office permission did not become writable" },
     );
+    await clickWhenReady('[data-testid="authorization-nav-skills"]');
     for (const skill of [
       "office-documents",
       "office-spreadsheets",
@@ -541,6 +568,7 @@ describe("Hachimi scheduled Agent tasks", () => {
     ]) {
       await checkOptionContaining(skill);
     }
+    await clickWhenReady('[data-testid="authorization-nav-extensions"]');
     for (const tool of [
       "create_document",
       "create_spreadsheet",
@@ -564,7 +592,7 @@ describe("Hachimi scheduled Agent tasks", () => {
       { timeout: 60_000, timeoutMsg: "Office extension Agent Run did not succeed" },
     );
 
-    for (const file of [
+    const expectedFiles = [
       "desktop-e2e-create_document.docx",
       "desktop-e2e-create_spreadsheet.xlsx",
       "desktop-e2e-create_presentation.pptx",
@@ -574,19 +602,57 @@ describe("Hachimi scheduled Agent tasks", () => {
       "desktop-e2e-file-plan.json",
       "desktop-e2e-file-rollback.json",
       "desktop-e2e-office-delivery.json",
-    ]) {
+    ];
+    for (const file of expectedFiles) {
       if (!existsSync(join(process.env.HACHIMI_DESKTOP_E2E_ARTIFACTS, file))) {
         throw new Error(`Expected Office E2E artifact ${file} was not created`);
       }
     }
-    for (const file of [
-      "desktop-e2e-create_document.docx",
-      "desktop-e2e-create_spreadsheet.xlsx",
-      "desktop-e2e-create_presentation.pptx",
-      "desktop-e2e-create_pdf.pdf",
-      "desktop-e2e-exported.pdf",
-    ]) {
-      validateOfficeArtifact(join(process.env.HACHIMI_DESKTOP_E2E_ARTIFACTS, file));
+    const officeSemantics = Object.fromEntries(
+      [
+        "desktop-e2e-create_document.docx",
+        "desktop-e2e-create_spreadsheet.xlsx",
+        "desktop-e2e-create_presentation.pptx",
+        "desktop-e2e-create_pdf.pdf",
+        "desktop-e2e-exported.pdf",
+      ].map((file) => [
+        file,
+        validateOfficeArtifact(join(process.env.HACHIMI_DESKTOP_E2E_ARTIFACTS, file)).semantics,
+      ]),
+    );
+    if (
+      officeSemantics["desktop-e2e-create_document.docx"].title !== "Hachimi Office E2E revised" ||
+      !officeSemantics["desktop-e2e-create_document.docx"].paragraphs?.includes(
+        "Revised and revalidated Office document",
+      ) ||
+      officeSemantics["desktop-e2e-create_spreadsheet.xlsx"].sheets[0]?.name !== "Summary" ||
+      officeSemantics["desktop-e2e-create_spreadsheet.xlsx"].sheets[0]?.cells?.A2 !==
+        "Validated create_spreadsheet artifact" ||
+      officeSemantics["desktop-e2e-create_presentation.pptx"].slides[0]?.texts?.[0] !==
+        "Hachimi Office E2E" ||
+      officeSemantics["desktop-e2e-create_presentation.pptx"].slides[0]?.texts?.[1] !==
+        "Validated create_presentation artifact" ||
+      officeSemantics["desktop-e2e-create_pdf.pdf"].pages[0]?.texts?.[1] !==
+        "Validated create_pdf artifact" ||
+      officeSemantics["desktop-e2e-exported.pdf"].pages[0]?.texts?.[0] !== "Hachimi Office E2E" ||
+      JSON.stringify(officeSemantics["desktop-e2e-exported.pdf"]) !==
+        JSON.stringify(officeSemantics["desktop-e2e-create_pdf.pdf"])
+    ) {
+      throw new Error("Office artifacts did not retain their structured semantic content");
+    }
+    const artifactDiff = JSON.parse(
+      readFileSync(
+        join(process.env.HACHIMI_DESKTOP_E2E_ARTIFACTS, "desktop-e2e-artifact-diff.json"),
+        "utf8",
+      ),
+    );
+    if (
+      artifactDiff.artifactId !== "desktop-e2e-create_document" ||
+      artifactDiff.beforeRevision !== "created" ||
+      artifactDiff.afterRevision !== "revalidated" ||
+      !artifactDiff.changedParts?.includes("word/document.xml")
+    ) {
+      throw new Error("Office artifact diff omitted revision, part, or Artifact ID evidence");
     }
     const filePlan = JSON.parse(
       readFileSync(
@@ -611,20 +677,37 @@ describe("Hachimi scheduled Agent tasks", () => {
       throw new Error("Office delivery did not retain the exact authorized fixture target");
     }
 
+    const durableOfficeOutputs = expectedFiles.map((file) => [
+      file,
+      readFileSync(join(process.env.HACHIMI_DESKTOP_E2E_ARTIFACTS, file)).toString("base64"),
+    ]);
+    await restartApplication();
+    await switchToWorkbench();
+    await openTaskCenter();
+    await selectSchedule(name);
+    await browser.waitUntil(
+      async () => (await readTaskRunStateFromSource()).status === "succeeded",
+      { timeout: 30_000, timeoutMsg: "Restarted Office Schedule lost its terminal projection" },
+    );
+    for (const [file, before] of durableOfficeOutputs) {
+      const after = readFileSync(join(process.env.HACHIMI_DESKTOP_E2E_ARTIFACTS, file)).toString(
+        "base64",
+      );
+      if (after !== before) {
+        throw new Error(`Restart reconciliation replayed or changed Office output ${file}`);
+      }
+    }
+
     await closeTaskHistory();
     await clickWhenReady('[data-testid="workbench-open-settings"]');
     await clickWhenReady('[data-testid="settings-nav-mcp"]');
-    const serverName = restrictedStdioOffice
-      ? "Desktop E2E Restricted Office MCP"
-      : "Desktop E2E MCP";
+    const serverName = "Desktop E2E MCP";
     await clickWhenReady(
       `//*[contains(@class, "mcp-server-row") and contains(., "${serverName}")]//*[contains(@class, "mcp-server-select")]`,
     );
-    if (!restrictedStdioOffice) {
-      const schemaEndpoint = new URL("/e2e/schema-v2", process.env.HACHIMI_DESKTOP_E2E_MCP_URL);
-      const schemaResponse = await fetch(schemaEndpoint, { method: "POST" });
-      if (!schemaResponse.ok) throw new Error("Failed to advance the MCP schema fixture");
-    }
+    const schemaEndpoint = new URL("/e2e/schema-v2", process.env.HACHIMI_DESKTOP_E2E_MCP_URL);
+    const schemaResponse = await fetch(schemaEndpoint, { method: "POST" });
+    if (!schemaResponse.ok) throw new Error("Failed to advance the MCP schema fixture");
     const serverEnabled = await browser.execute(
       () => document.querySelector('.mcp-detail-header input[type="checkbox"]')?.checked ?? false,
     );
@@ -642,20 +725,18 @@ describe("Hachimi scheduled Agent tasks", () => {
         timeoutMsg: "MCP server did not stop before failure validation",
       },
     );
-    if (!restrictedStdioOffice) {
-      await clickWhenReady('.mcp-detail-header [data-component="switch-root"]');
-      await browser.waitUntil(
-        async () =>
-          browser.execute(
-            () =>
-              document.querySelector('.mcp-detail-header input[type="checkbox"]')?.checked === true,
-          ),
-        {
-          timeout: 20_000,
-          timeoutMsg: "MCP server did not restart with the changed schema",
-        },
-      );
-    }
+    await clickWhenReady('.mcp-detail-header [data-component="switch-root"]');
+    await browser.waitUntil(
+      async () =>
+        browser.execute(
+          () =>
+            document.querySelector('.mcp-detail-header input[type="checkbox"]')?.checked === true,
+        ),
+      {
+        timeout: 20_000,
+        timeoutMsg: "MCP server did not restart with the changed schema",
+      },
+    );
     await clickWhenReady(".back-home");
     await openTaskCenter();
     await clickScheduleAction(name, "task-run-now");
@@ -664,32 +745,10 @@ describe("Hachimi scheduled Agent tasks", () => {
       async () => (await readTaskRunStateFromSource()).status === "needs_attention",
       {
         timeout: 45_000,
-        timeoutMsg: restrictedStdioOffice
-          ? "Interrupted stdio MCP did not enter NeedsAttention"
-          : "MCP schema drift did not enter NeedsAttention",
+        timeoutMsg: "MCP schema drift did not enter NeedsAttention",
       },
     );
-    if (restrictedStdioOffice) {
-      await closeTaskHistory();
-      await clickWhenReady('[data-testid="workbench-open-settings"]');
-      await clickWhenReady('[data-testid="settings-nav-mcp"]');
-      await clickWhenReady(
-        `//*[contains(@class, "mcp-server-row") and contains(., "${serverName}")]//*[contains(@class, "mcp-server-select")]`,
-      );
-      await clickWhenReady('.mcp-detail-header [data-component="switch-root"]');
-      await waitForDisplayed('[data-testid="mcp-tool-create_document"]');
-      await clickWhenReady(".back-home");
-      await openTaskCenter();
-      await clickScheduleAction(name, "task-run-now");
-      await selectSchedule(name);
-      await browser.waitUntil(
-        async () => (await readTaskRunStateFromSource()).status === "succeeded",
-        { timeout: 60_000, timeoutMsg: "Restarted restricted stdio MCP did not recover" },
-      );
-    }
-    await clickWhenReady(
-      restrictedStdioOffice ? '[data-testid="task-open-session"]' : '[data-testid="task-continue"]',
-    );
+    await clickWhenReady('[data-testid="task-continue"]');
     const continuationState = await browser.waitUntil(
       async () =>
         browser.execute(() => {
@@ -708,6 +767,86 @@ describe("Hachimi scheduled Agent tasks", () => {
       async () => (await readText('[data-testid="workbench-conversation-title"]')).includes(name),
       { timeout: 20_000, timeoutMsg: "Interactive Schedule Session title was not projected" },
     );
+  });
+
+  it("recovers a Scheduled Office Run after its stdio MCP is interrupted in flight", async () => {
+    const serverName = await ensureInterruptibleOfficeMcp();
+    const marker = join(
+      process.env.HACHIMI_DESKTOP_E2E_ARTIFACTS,
+      "desktop-e2e-office-interruption.marker",
+    );
+    const recoveredArtifact = join(
+      process.env.HACHIMI_DESKTOP_E2E_ARTIFACTS,
+      "desktop-e2e-interruption-document.docx",
+    );
+    rmSync(marker, { force: true });
+    rmSync(recoveredArtifact, { force: true });
+    await openTaskCenter();
+    const name = "Desktop E2E interrupted Office stdio";
+    await clickWhenReady('[data-testid="task-create-toggle"]');
+    await setValueWhenReady('[data-testid="task-name"]', name);
+    await setValueWhenReady(
+      '[data-testid="task-prompt"]',
+      "[desktop-e2e:office-interruption] create one document and recover after MCP interruption",
+    );
+    await clickWhenReady('[data-testid="authorization-nav-permissions"]');
+    await clickWhenReady('[data-testid="task-permission-writable"]');
+    await clickWhenReady('[data-testid="authorization-nav-extensions"]');
+    await checkOptionContaining(`${serverName} / create_document`);
+    await clickWhenReady('[data-testid="task-save"]');
+    await waitForSchedule(name);
+    await clickScheduleAction(name, "task-run-now");
+    await selectSchedule(name);
+
+    await browser.waitUntil(() => existsSync(marker), {
+      timeout: 30_000,
+      timeoutMsg: "Office stdio fixture did not reach the interruption boundary",
+    });
+    await closeTaskHistory();
+    await clickWhenReady('[data-testid="workbench-open-settings"]');
+    await clickWhenReady('[data-testid="settings-nav-mcp"]');
+    await clickWhenReady(
+      `//*[contains(@class, "mcp-server-row") and contains(., "${serverName}")]//*[contains(@class, "mcp-server-select")]`,
+    );
+    await clickWhenReady('.mcp-detail-header [data-component="switch-root"]');
+    await clickWhenReady(".back-home");
+    await openTaskCenter();
+    await selectSchedule(name);
+    await browser.waitUntil(
+      async () => (await readTaskRunStateFromSource()).status === "needs_attention",
+      { timeout: 45_000, timeoutMsg: "Interrupted Office stdio Run did not need attention" },
+    );
+
+    await closeTaskHistory();
+    await clickWhenReady('[data-testid="workbench-open-settings"]');
+    await clickWhenReady('[data-testid="settings-nav-mcp"]');
+    await clickWhenReady(
+      `//*[contains(@class, "mcp-server-row") and contains(., "${serverName}")]//*[contains(@class, "mcp-server-select")]`,
+    );
+    await clickWhenReady('.mcp-detail-header [data-component="switch-root"]');
+    await browser.waitUntil(
+      async () =>
+        browser.execute(
+          () =>
+            document.querySelector('.mcp-detail-header input[type="checkbox"]')?.checked === true,
+        ),
+      {
+        timeout: 20_000,
+        timeoutMsg: "Interrupted Office MCP did not restart before recovery",
+      },
+    );
+    await waitForDisplayed('[data-testid="mcp-tool-create_document"]');
+    await clickWhenReady(".back-home");
+    await openTaskCenter();
+    await clickScheduleAction(name, "task-run-now");
+    await selectSchedule(name);
+    await browser.waitUntil(
+      async () => (await readTaskRunStateFromSource()).status === "succeeded",
+      { timeout: 60_000, timeoutMsg: "Interrupted Office stdio Run did not recover" },
+    );
+    if (!existsSync(recoveredArtifact)) {
+      throw new Error("Recovered Office stdio Run did not create its durable artifact");
+    }
   });
 
   it.skip("pins third-party Connector and Browser grants after Bundle management is productized", async () => {
@@ -731,7 +870,7 @@ describe("Hachimi scheduled Agent tasks", () => {
     );
     await selectFieldOption('[data-testid="task-context"]', "现有对话续接");
     await selectFieldOption('[data-testid="task-session-continuation"]', "Connector Browser");
-    await clickWhenReady(".task-advanced-section > summary");
+    await clickWhenReady('[data-testid="authorization-nav-extensions"]');
     await waitForDisplayed('[data-testid="task-connectors"]');
     await checkOptionContaining("search");
     await checkOptionContaining("启用无人值守 Browser");

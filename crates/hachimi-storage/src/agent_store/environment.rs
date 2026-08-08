@@ -5,6 +5,7 @@ use hachimi_protocol::{
 };
 use serde_json::json;
 use sqlx::Row;
+use sqlx::{Sqlite, Transaction};
 
 use super::{AgentStore, AgentStoreError, append_event_tx, now_ms, session_from_row};
 
@@ -162,7 +163,7 @@ impl AgentStore {
         session_id: &SessionId,
     ) -> Result<u64, AgentStoreError> {
         let revision = sqlx::query_scalar::<_, i64>(
-            "UPDATE session_environment_state SET revision = revision + 1, updated_at_ms = ? WHERE session_id = ? RETURNING revision",
+            "INSERT INTO session_environment_state(session_id, baseline_revision, managed_checkout_id, binding_revision, revision, updated_at_ms) SELECT id, NULL, NULL, 1, 1, ? FROM sessions WHERE id = ? ON CONFLICT(session_id) DO UPDATE SET revision = session_environment_state.revision + 1, updated_at_ms = excluded.updated_at_ms RETURNING revision",
         )
         .bind(now_ms())
         .bind(session_id.as_str())
@@ -410,6 +411,22 @@ impl AgentStore {
         })
         .transpose()
     }
+}
+
+pub(super) async fn bump_session_environment_revision_tx(
+    transaction: &mut Transaction<'_, Sqlite>,
+    session_id: &SessionId,
+    updated_at_ms: i64,
+) -> Result<u64, AgentStoreError> {
+    let revision = sqlx::query_scalar::<_, i64>(
+        "INSERT INTO session_environment_state(session_id, baseline_revision, managed_checkout_id, binding_revision, revision, updated_at_ms) SELECT id, NULL, NULL, 1, 1, ? FROM sessions WHERE id = ? ON CONFLICT(session_id) DO UPDATE SET revision = session_environment_state.revision + 1, updated_at_ms = excluded.updated_at_ms RETURNING revision",
+    )
+    .bind(updated_at_ms)
+    .bind(session_id.as_str())
+    .fetch_optional(&mut **transaction)
+    .await?
+    .ok_or_else(|| AgentStoreError::SessionNotFound(session_id.clone()))?;
+    Ok(u64::try_from(revision).unwrap_or(u64::MAX))
 }
 
 #[must_use]

@@ -113,7 +113,9 @@ function sessionSnapshot(): WorkbenchSessionSnapshot {
     events: [],
     transcript: [],
     pendingApprovals: [],
-    proposedPlans: [],
+    planDocuments: [],
+    planConfirmations: [],
+    executionPlans: [],
     artifacts: [],
   } as unknown as WorkbenchSessionSnapshot;
 }

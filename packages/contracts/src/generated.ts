@@ -136,7 +136,7 @@ export type BrowserDownloadSnapshot = { id: string, workspaceId: BrowserWorkspac
 
 export type BrowserDownloadStatus = "pending" | "in_progress" | "completed" | "cancelled" | "failed";
 
-export type BrowserGrant = { observe?: boolean, act?: boolean, upload?: boolean, download?: boolean, cookieStorage?: boolean, cdp?: boolean, origins?: string[], };
+export type BrowserGrant = { observe?: boolean, act?: boolean, upload?: boolean, download?: boolean, cookieStorage?: boolean, cdp?: boolean, unrestrictedOrigins?: boolean, origins?: string[], };
 
 export type BrowserHistoryEntry = { url: string, title: string, visitCount: number, lastVisitedAtMs: number, };
 
@@ -336,7 +336,7 @@ export type ComputerActionRequest = { frameId: ComputerFrameId, runGeneration?: 
 
 export type ComputerActionResult = { frameId: ComputerFrameId, accepted: boolean, resultCode: string, nextInputEpoch: number, };
 
-export type ComputerAppCandidate = { app: ComputerAppDescriptor, /** A bounded PNG included only in this response. It must never be persisted. */ iconPngBase64: string | null, };
+export type ComputerAppCandidate = { app: ComputerAppDescriptor, windowCount?: number, /** A bounded PNG included only in this response. It must never be persisted. */ iconPngBase64: string | null, };
 
 export type ComputerAppDescriptor = { appId: string, displayName: string, executableName: string, executablePath: string | null, publisher: string | null, publisherVerified: boolean, packageFamilyName: string | null, appUserModelId: string | null, fileIdentity: string | null, identityHash: string, };
 
@@ -358,7 +358,7 @@ export type ComputerFrameId = string;
 
 export type ComputerFramePreview = { frameId: ComputerFrameId, mediaType: string, dataBase64: string, sha256: string, expiresAtMs: number, };
 
-export type ComputerGrant = { observe: boolean, act: boolean, targetWindows: string[], maxActions: number | null, };
+export type ComputerGrant = { observe: boolean, act: boolean, unrestrictedTargets?: boolean, allowedApplications: string[], maxActions: number | null, };
 
 export type ComputerHostSettings = { automationEnabled: boolean, runtimeHealth: ComputerRuntimeHealth, };
 
@@ -374,7 +374,11 @@ export type ConnectorAccountId = string;
 
 export type ConnectorAccountUpsert = { id: ConnectorAccountId, pluginId: PluginId, connectorId: string, displayName: string, secret: string | null, };
 
-export type ConnectorDriverDescriptor = { pluginId: PluginId, connectorId: string, runtimeKind: ConnectorRuntimeKind, revision: ConnectorRevision, actions: string[], };
+export type ConnectorActionDescriptor = { name: string, effect: ConnectorActionEffect, };
+
+export type ConnectorActionEffect = "read_only" | "external_side_effect";
+
+export type ConnectorDriverDescriptor = { pluginId: PluginId, connectorId: string, runtimeKind: ConnectorRuntimeKind, revision: ConnectorRevision, actions: ConnectorActionDescriptor[], };
 
 export type ConnectorHealth = "healthy" | "revoked" | "schema_drift" | "host_identity_drift" | "action_drift" | "rate_limited" | "failed";
 
@@ -452,7 +456,7 @@ export type EnterprisePluginIdentity = { pluginId: PluginId, providerId: Integra
 
 export type EntryProfile = "workbench" | "pet_conversation";
 
-export type EnvironmentActivity = { kind: "browser"; lease_id: BrowserAutomationLeaseId; surface: BrowserAutomationSurfaceKind; browser_tab_id: BrowserTabId | null; browser_session_id: BrowserSessionId | null; run_id: RunId; domain: string } | { kind: "computer"; control_session_id: ComputerControlSessionId; run_id: RunId | null; app_id: string; app_name: string } | { kind: "plan"; plan_id: PlanId; step_id: PlanStepId; description: string };
+export type EnvironmentActivity = { kind: "browser"; lease_id: BrowserAutomationLeaseId; surface: BrowserAutomationSurfaceKind; browser_tab_id: BrowserTabId | null; browser_session_id: BrowserSessionId | null; run_id: RunId; domain: string } | { kind: "computer"; control_session_id: ComputerControlSessionId; run_id: RunId | null; app_id: string; app_name: string } | { kind: "plan"; plan_id: PlanId; revision: number; title: string; confirmation_status: PlanConfirmationStatus; execution_run_id: RunId | null; execution_status: RunStatus | null; current_step: PlanStep | null };
 
 export type EnvironmentChangeSummary = { changedFiles: number, additions: number, deletions: number, truncated: boolean, };
 
@@ -468,6 +472,8 @@ export type EventSubscriptionRequest = { sessionId: SessionId, afterSequence: nu
 
 export type EventSubscriptionSnapshot = { subscription: EventSubscriptionRecord, catchUp: RunEventEnvelope[], };
 
+export type ExecutionPlanState = { sessionId: SessionId, runId: RunId, explanation: string | null, steps: PlanStep[], updatedAtMs: number, };
+
 export type ExecutionTarget = { kind: "local"; project_id: ProjectId } | { kind: "managed_worktree"; project_id: ProjectId; base_revision: string };
 
 export type ExternalBrowserLeaseObservation = { leaseId: BrowserAutomationLeaseId, observation: BrowserObservation, };
@@ -480,7 +486,7 @@ export type FileDiffSummary = { path: string, previousPath: string | null, statu
 
 export type FileSystemAccess = "read" | "write" | "deny";
 
-export type FileSystemGrant = { access: FileSystemAccess, roots: string[], globs: string[], specialRoots: string[], };
+export type FileSystemGrant = { access: FileSystemAccess, roots: string[], globs: string[], /** Exact paths relative to one of the grant roots. */ files?: string[], specialRoots: string[], };
 
 export type ForgeChangeMutation = { kind: "create"; title: string; body: string; source_ref: string; target_ref: string } | { kind: "update"; number: number; title: string; body: string; source_ref: string; target_ref: string } | { kind: "close"; number: number } | { kind: "merge"; number: number; merge_title: string | null; merge_message: string | null };
 
@@ -636,7 +642,7 @@ export type ItemDeltaPayload = { type: "text"; data: { text: string, } } | { typ
 
 export type ItemId = string;
 
-export type ItemPayload = { type: "user"; data: { text: string, attachment_ids: AttachmentId[], } } | { type: "assistant"; data: { text: string, phase?: AgentMessagePhase, } } | { type: "reasoning"; data: { summary: string, source: ReasoningSummarySource, provider_endpoint_id: ProviderEndpointId | null, provider_account_id: ProviderAccountId | null, protocol: ProviderProtocolKind, capability_revision: string, } } | { type: "plan"; data: { plan_id: PlanId, revision: number, text: string, steps: PlanStep[], } } | { type: "tool_execution"; data: { tool_call_id: ToolCallId, name: string, arguments: unknown, step_revision: number, tool_plan_hash: string, registry_revision: string, result: ToolExecutionResult | null, } } | { type: "approval"; data: { approval_id: ApprovalId, status: ApprovalStatus, summary: string, } } | { type: "user_input_request"; data: { request_id: UserInputRequestId, questions: UserInputQuestion[], display_answers?: UserInputDisplayAnswer[], } } | { type: "command_execution"; data: { process_session_id: ProcessSessionId, command_summary: string, command: string, cwd: string | null, status: string, aggregated_output: string, exit_code: number | null, duration_ms: number | null, output_artifact_id: ArtifactId | null, } } | { type: "file_change"; data: { path: string, change_kind: string, artifact_id: ArtifactId | null, } } | { type: "mcp_call"; data: { server_id: McpServerId, tool_name: string, status: string, arguments: unknown, result: unknown | null, error: string | null, } } | { type: "dynamic_tool_call"; data: { namespace: string, name: string, status: string, arguments: unknown, result: unknown | null, error: string | null, } } | { type: "collab_tool_call"; data: { tool_name: string, agent_task_id: AgentTaskId | null, parent_run_id: RunId, child_run_id: RunId | null, title: string, status: string, summary: string | null, usage: TokenUsage, } } | { type: "context_compaction"; data: { checkpoint_id: CompactionCheckpointId | null, trigger: CompactionTrigger, phase: CompactionPhase, implementation: CompactionImplementation, reason: CompactionReason, token_snapshot: CompactionTokenSnapshot | null, trimmed_history_groups: number, warnings: string[], error_code: string | null, summary_source: CompactionSummarySource, provider_endpoint_id: ProviderEndpointId | null, provider_account_id: ProviderAccountId | null, capability_revision: string | null, fallback_reason: string | null, } } | { type: "review"; data: { review_id: ReviewId, summary: string, overall_correctness: string, overall_confidence_score: number | null, finding_count: number, used_plain_text_fallback: boolean, } } | { type: "system_context"; data: { code: string, message: string, } };
+export type ItemPayload = { type: "user"; data: { text: string, attachment_ids: AttachmentId[], } } | { type: "assistant"; data: { text: string, phase?: AgentMessagePhase, } } | { type: "reasoning"; data: { summary: string, source: ReasoningSummarySource, provider_endpoint_id: ProviderEndpointId | null, provider_account_id: ProviderAccountId | null, protocol: ProviderProtocolKind, capability_revision: string, } } | { type: "plan"; data: { text: string, } } | { type: "tool_execution"; data: { tool_call_id: ToolCallId, name: string, arguments: unknown, step_revision: number, tool_plan_hash: string, registry_revision: string, result: ToolExecutionResult | null, } } | { type: "approval"; data: { approval_id: ApprovalId, status: ApprovalStatus, summary: string, } } | { type: "user_input_request"; data: { request_id: UserInputRequestId, questions: UserInputQuestion[], display_answers?: UserInputDisplayAnswer[], } } | { type: "command_execution"; data: { process_session_id: ProcessSessionId, command_summary: string, command: string, cwd: string | null, status: string, aggregated_output: string, exit_code: number | null, duration_ms: number | null, output_artifact_id: ArtifactId | null, } } | { type: "file_change"; data: { path: string, change_kind: string, artifact_id: ArtifactId | null, } } | { type: "mcp_call"; data: { server_id: McpServerId, tool_name: string, status: string, arguments: unknown, result: unknown | null, error: string | null, } } | { type: "dynamic_tool_call"; data: { namespace: string, name: string, status: string, arguments: unknown, result: unknown | null, error: string | null, } } | { type: "collab_tool_call"; data: { tool_name: string, agent_task_id: AgentTaskId | null, parent_run_id: RunId, child_run_id: RunId | null, title: string, status: string, summary: string | null, usage: TokenUsage, } } | { type: "context_compaction"; data: { checkpoint_id: CompactionCheckpointId | null, trigger: CompactionTrigger, phase: CompactionPhase, implementation: CompactionImplementation, reason: CompactionReason, token_snapshot: CompactionTokenSnapshot | null, trimmed_history_groups: number, warnings: string[], error_code: string | null, summary_source: CompactionSummarySource, provider_endpoint_id: ProviderEndpointId | null, provider_account_id: ProviderAccountId | null, capability_revision: string | null, fallback_reason: string | null, } } | { type: "review"; data: { review_id: ReviewId, summary: string, overall_correctness: string, overall_confidence_score: number | null, finding_count: number, used_plain_text_fallback: boolean, } } | { type: "system_context"; data: { code: string, message: string, } };
 
 export type ItemRelations = { toolCallId?: ToolCallId | null, agentTaskId?: AgentTaskId | null, approvalId?: ApprovalId | null, userInputRequestId?: UserInputRequestId | null, processSessionId?: ProcessSessionId | null, planStepId?: PlanStepId | null, artifactIds?: ArtifactId[], };
 
@@ -644,17 +650,23 @@ export type ItemStatus = "pending" | "in_progress" | "completed" | "failed" | "i
 
 export type LipSyncCapability = "none" | "jaw" | "five_viseme";
 
-export type LlmSettings = { baseUrl: string, modelName: string, protocol?: ProviderProtocolKind, compatibilityProfileId?: string, providerEndpointId?: ProviderEndpointId | null, providerAccountId?: ProviderAccountId | null, embeddingModelName?: string, reasoningSummary?: boolean, remoteCompaction?: boolean, maxInputTokens: number, maxOutputTokens: number, structuredOutputMode?: StructuredOutputMode, };
+export type LlmSettings = { baseUrl: string, modelName: string, protocol?: ProviderProtocolKind, compatibilityProfileId?: string, providerEndpointId?: ProviderEndpointId | null, providerAccountId?: ProviderAccountId | null, embeddingModelName?: string, reasoningSummary?: ReasoningSummaryMode, remoteCompaction?: boolean, maxInputTokens: number, maxOutputTokens: number, structuredOutputMode?: StructuredOutputMode, };
 
-export type LlmSettingsInput = { baseUrl: string, modelName: string, protocol: ProviderProtocolKind, compatibilityProfileId: string, providerEndpointId: ProviderEndpointId | null, providerAccountId: ProviderAccountId | null, embeddingModelName: string, reasoningSummary: boolean, remoteCompaction: boolean, maxInputTokens: number, maxOutputTokens: number, structuredOutputMode: StructuredOutputMode, /** Missing or blank keeps the existing secret. Secrets are never returned to the WebView. */ apiKey: string | null, clearApiKey: boolean, };
+export type LlmSettingsInput = { baseUrl: string, modelName: string, protocol: ProviderProtocolKind, compatibilityProfileId: string, providerEndpointId: ProviderEndpointId | null, providerAccountId: ProviderAccountId | null, embeddingModelName: string, reasoningSummary: ReasoningSummaryMode, remoteCompaction: boolean, maxInputTokens: number, maxOutputTokens: number, structuredOutputMode: StructuredOutputMode, /** Missing or blank keeps the existing secret. Secrets are never returned to the WebView. */ apiKey: string | null, clearApiKey: boolean, };
 
-export type LlmSettingsView = { baseUrl: string, modelName: string, protocol: ProviderProtocolKind, compatibilityProfileId: string, providerEndpointId: ProviderEndpointId | null, providerAccountId: ProviderAccountId | null, embeddingModelName: string, reasoningSummary: boolean, remoteCompaction: boolean, maxInputTokens: number, maxOutputTokens: number, structuredOutputMode: StructuredOutputMode, apiKeyConfigured: boolean, };
+export type LlmSettingsView = { baseUrl: string, modelName: string, protocol: ProviderProtocolKind, compatibilityProfileId: string, providerEndpointId: ProviderEndpointId | null, providerAccountId: ProviderAccountId | null, embeddingModelName: string, reasoningSummary: ReasoningSummaryMode, remoteCompaction: boolean, maxInputTokens: number, maxOutputTokens: number, structuredOutputMode: StructuredOutputMode, apiKeyConfigured: boolean, };
 
 export type LlmTestResult = { success: boolean, latencyMs: number, responsePreview: string, capabilityProbe: ProviderCapabilityProbe, };
 
 export type Locale = "zh-CN" | "en-US";
 
 export type LogicalRect = { x: number | null, y: number | null, width: number | null, height: number | null, };
+
+export type ManualCompactionRequest = { idempotencyKey: string, sessionId: SessionId, };
+
+export type ManualCompactionResult = { status: ManualCompactionStatus, checkpointId: CompactionCheckpointId | null, tokenSnapshot: CompactionTokenSnapshot | null, };
+
+export type ManualCompactionStatus = "compacted" | "no_eligible_history";
 
 export type McpAuthStatus = "unsupported" | "not_logged_in" | "bearer_token" | "oauth";
 
@@ -774,7 +786,9 @@ export type MotionSource = "builtin" | "user";
 
 export type MutationContext = { requestId: RequestId, clientId: ClientId, protocolVersion: number, idempotencyKey: string, expectedRunId: RunId | null, expectedGeneration: number | null, };
 
-export type NetworkGrant = { enabled: boolean, hosts: string[], protocols: string[], };
+export type NetworkGrant = { enabled: boolean, unrestrictedHosts?: boolean, hosts: string[], protocols: string[], };
+
+export type PermissionCommandCandidate = { name: string, executablePath: string, source: string, };
 
 export type PermissionGrantScope = "session" | "run";
 
@@ -788,9 +802,17 @@ export type PetTurnRequest = { runId: string, text: string, };
 
 export type PlanAcceptanceRequest = { idempotencyKey: string, planId: PlanId, expectedRevision: number, /** Locale-aware text shown as the user's confirmation in durable history. */ userMessage: string, };
 
+export type PlanConfirmation = { planId: PlanId, status: PlanConfirmationStatus, acceptedRunId: RunId | null, resolvedAtMs: number | null, };
+
+export type PlanConfirmationStatus = "pending" | "accepted" | "skipped" | "superseded";
+
+export type PlanDocument = { id: PlanId, sessionId: SessionId, sourceRunId: RunId, sourceItemId: ItemId, revision: number, title: string, goal: string, contentMarkdown: string, createdAtMs: number, };
+
 export type PlanId = string;
 
 export type PlanRevisionRequest = { idempotencyKey: string, planId: PlanId, expectedRevision: number, instructions: string, };
+
+export type PlanSkipRequest = { idempotencyKey: string, planId: PlanId, expectedRevision: number, };
 
 export type PlanStep = { id: PlanStepId, description: string, status: PlanStepStatus, };
 
@@ -806,7 +828,7 @@ export type PluginContributionSurface = { pluginId: PluginId, contributionId: st
 
 export type PluginHookDescriptor = { protocolVersion: number, runtime: PluginHookRuntimeKind, entrypoint: string, args?: string[], events: PluginHookEvent[], };
 
-export type PluginHookEvent = "run.before" | "run.after" | "tool.before" | "tool.after" | "schedule.before" | "schedule.after";
+export type PluginHookEvent = "run.before" | "run.after" | "tool.before" | "tool.after" | "schedule.before" | "schedule.after" | "context.compact.before" | "context.compact.after";
 
 export type PluginHookInvocation = { event: PluginHookEvent, sessionId: SessionId | null, runId: RunId | null, runGeneration: number | null, subjectHash: string, };
 
@@ -848,7 +870,7 @@ export type PluginUiContext = { pluginId: PluginId, contributionId: string, runt
 
 export type ProcessEvent = { kind: "output"; process_session_id: ProcessSessionId; chunk: ProcessOutputChunk } | { kind: "exited"; process_session_id: ProcessSessionId; sequence: number; exit_code: number } | { kind: "closed"; process_session_id: ProcessSessionId; sequence: number };
 
-export type ProcessGrant = { spawn: boolean, interactive: boolean, allowedCommands: string[], };
+export type ProcessGrant = { spawn: boolean, interactive: boolean, unrestrictedCommands?: boolean, allowedCommands: string[], };
 
 export type ProcessListRequest = { sessionId: SessionId | null, runId: RunId | null, includeTerminal: boolean, };
 
@@ -888,10 +910,6 @@ export type ProjectId = string;
 
 export type ProjectRecord = { id: ProjectId, displayName: string, rootPath: string, gitRoot: string | null, trusted: boolean, createdAtMs: number, updatedAtMs: number, };
 
-export type ProposedPlan = { id: PlanId, sessionId: SessionId, runId: RunId, revision: number, goal: string, assumptions: string[], steps: PlanStep[], affectedResources: string[], verification: string[], risks: string[], openQuestions: string[], contentMarkdown: string, status: ProposedPlanStatus, acceptedRunId: RunId | null, createdAtMs: number, acceptedAtMs: number | null, };
-
-export type ProposedPlanStatus = "proposed" | "accepted" | "superseded";
-
 export type ProviderAccountId = string;
 
 export type ProviderAccountRecord = { id: ProviderAccountId, endpointId: ProviderEndpointId, displayName: string, secretRef: string, enabled: boolean, configRevision: number, createdAtMs: number, updatedAtMs: number, };
@@ -929,6 +947,8 @@ export type ProviderProtocolKind = "chat_completions" | "responses" | "embedding
 export type ProviderRegistrySnapshot = { profiles: ProviderCompatibilityProfile[], endpoints: ProviderEndpointRecord[], accounts: ProviderAccountRecord[], latestProbes: ProviderProbeReport[], };
 
 export type RealtimeSessionId = string;
+
+export type ReasoningSummaryMode = "auto" | "concise" | "detailed" | "none";
 
 export type ReasoningSummarySource = "provider_public";
 
@@ -980,7 +1000,7 @@ export type RunDriverKind = "tool_loop" | "realtime";
 
 export type RunEventEnvelope = { protocolVersion: number, sequence: number, sessionId: SessionId, runId: RunId | null, payload: RunEventPayload, createdAtMs: number, };
 
-export type RunEventPayload = { type: "item_started"; data: { item: TranscriptItem, } } | { type: "item_delta"; data: { item_id: ItemId, delta: ItemDeltaPayload, } } | { type: "item_completed"; data: { item: TranscriptItem, } } | { type: "plan_updated"; data: { plan_id: PlanId, explanation: string | null, steps: PlanStep[], } } | { type: "diff_updated"; data: { artifact_id: ArtifactId | null, changed_files: number, additions: number, deletions: number, } } | { type: "user_input_requested"; data: { request_id: UserInputRequestId, } } | { type: "generic"; data: { event: string, data: unknown, } };
+export type RunEventPayload = { type: "item_started"; data: { item: TranscriptItem, } } | { type: "item_delta"; data: { item_id: ItemId, delta: ItemDeltaPayload, } } | { type: "item_completed"; data: { item: TranscriptItem, } } | { type: "plan_updated"; data: { explanation: string | null, plan: PlanStep[], } } | { type: "diff_updated"; data: { artifact_id: ArtifactId | null, changed_files: number, additions: number, deletions: number, } } | { type: "user_input_requested"; data: { request_id: UserInputRequestId, } } | { type: "generic"; data: { event: string, data: unknown, } };
 
 export type RunId = string;
 
@@ -1092,7 +1112,7 @@ export type ScheduleWorkspaceSpec = { kind: "managed" } | { kind: "selected_dire
 
 export type Scope = "pet.interact" | "agent.run" | "settings.read" | "settings.write" | "llm.read" | "llm.write" | "llm.test" | "llm.chat" | "avatar.read" | "avatar.manage" | "avatar.runtime" | "motion.read" | "motion.manage" | "motion.runtime" | "voice.read" | "voice.manage" | "voice.playback" | "voice.capture" | "workbench.open" | "workbench.window" | "workspace.read" | "workspace.write" | "workspace.exec" | "browser.observe" | "browser.control" | "computer.observe" | "computer.control" | "connectors.invoke" | "connectors.manage" | "channels.manage" | "gateway.manage" | "skills.manage" | "skills.use" | "devices.pair" | "admin.policy";
 
-export type ScopedPermissionRules = { fileSystem: FileSystemGrant[], network: NetworkGrant, process: ProcessGrant, browser: BrowserGrant, computer: ComputerGrant, mcp: McpPermissionRule[], connectors: ConnectorPermissionRule[], };
+export type ScopedPermissionRules = { fileSystem: FileSystemGrant[], fileSystemUnrestrictedRead?: boolean, fileSystemUnrestrictedWrite?: boolean, network: NetworkGrant, process: ProcessGrant, browser: BrowserGrant, computer: ComputerGrant, mcp: McpPermissionRule[], connectors: ConnectorPermissionRule[], };
 
 export type SessionContextBinding = { kind: "workspace"; workspace_id: WorkspaceId } | { kind: "project"; project_id: ProjectId; checkout_id: CheckoutId };
 
@@ -1108,11 +1128,11 @@ export type SessionMetadataUpdateRequest = { context: MutationContext, sessionId
 
 export type SessionPage = { items: SessionRecord[], nextCursor: SessionCursor | null, };
 
-export type SessionPermissionConfig = { policy: AgentPermissionPolicy, extraAuthorizations?: SessionExtraAuthorizationSummary[], };
+export type SessionPermissionConfig = { policy: AgentPermissionPolicy, skillIds?: SkillId[], extraAuthorizations?: SessionExtraAuthorizationSummary[], };
 
 export type SessionPermissionConfigRequest = { sessionId: SessionId | null, entryProfile: EntryProfile, };
 
-export type SessionPermissionConfigUpdate = { sessionId: SessionId | null, entryProfile: EntryProfile, config: SessionPermissionConfig, };
+export type SessionPermissionConfigUpdate = { sessionId: SessionId | null, entryProfile: EntryProfile, expectedRevision: number, config: SessionPermissionConfig, };
 
 export type SessionRecord = { id: SessionId, context: SessionContextBinding, entryProfile: EntryProfile, title: string, archived: boolean, pinned: boolean, parentSessionId: SessionId | null, sourceRunId: RunId | null, createdAtMs: number, updatedAtMs: number, };
 
@@ -1302,7 +1322,7 @@ export type WorkbenchEnvironmentChangeReason = "files" | "git" | "binding" | "pl
 
 export type WorkbenchEnvironmentChanged = { sessionId: SessionId, revision: number, reasons: WorkbenchEnvironmentChangeReason[], };
 
-export type WorkbenchEnvironmentSnapshot = { sessionId: SessionId, /** Project sessions expose their checkout here. Workspace sessions leave this empty. */ checkout: CheckoutRecord | null, /** Non-Project sessions expose their managed or selected Workspace here. */ workspace: AgentWorkspace | null, bindingRevision: number, baselineRevision: string | null, changes: EnvironmentChangeSummary, git: EnvironmentGitSummary, handoff: EnvironmentHandoffState, activity: EnvironmentActivity | null, sources: SessionSourceRecord[], revision: number, generatedAtMs: number, };
+export type WorkbenchEnvironmentSnapshot = { sessionId: SessionId, /** Project sessions expose their checkout here. Workspace sessions leave this empty. */ checkout: CheckoutRecord | null, /** Non-Project sessions expose their managed or selected Workspace here. */ workspace: AgentWorkspace | null, bindingRevision: number, baselineRevision: string | null, changes: EnvironmentChangeSummary, git: EnvironmentGitSummary, handoff: EnvironmentHandoffState, activities: EnvironmentActivity[], sources: SessionSourceRecord[], revision: number, generatedAtMs: number, };
 
 export type WorkbenchGitAction = { kind: "commit"; message: string | null } | { kind: "switch_branch"; branch: string; remote: boolean } | { kind: "create_branch"; branch: string };
 
@@ -1318,13 +1338,15 @@ export type WorkbenchHandoffRequest = { idempotencyKey: string, sessionId: Sessi
 
 export type WorkbenchHandoffResponse = { session: SessionRecord, checkout: CheckoutRecord, environment: WorkbenchEnvironmentSnapshot, };
 
-export type WorkbenchPlanAcceptanceSnapshot = { plan: ProposedPlan, task: WorkbenchTaskSnapshot, };
+export type WorkbenchPlanAcceptanceSnapshot = { plan: PlanDocument, confirmation: PlanConfirmation, task: WorkbenchTaskSnapshot, };
+
+export type WorkbenchPlanSkipSnapshot = { plan: PlanDocument, confirmation: PlanConfirmation, };
 
 export type WorkbenchRoute = "home" | "settings/general" | "settings/appearance" | "settings/llm" | "settings/avatar" | "settings/motion" | "settings/voice" | "settings/skills" | "settings/mcp" | "settings/integrations" | "settings/browser" | "settings/computer-use" | "settings/runtime-security" | "settings/diagnostics" | "developer/motion-lab";
 
 export type WorkbenchSessionListItem = { session: SessionRecord, latestRun: SessionRunActivity | null, latestTerminalRun: SessionRunActivity | null, };
 
-export type WorkbenchSessionSnapshot = { session: SessionRecord, checkout: CheckoutRecord | null, runs: RunRecord[], events: RunEventEnvelope[], transcript: TranscriptItem[], attachments: AttachmentRecord[], pendingApprovals: ApprovalRequestRecord[], proposedPlans: ProposedPlan[], artifacts: ArtifactRecord[], agentTasks: AgentTaskRecord[], runSummaries: RunSummaryRecord[], browserSessions: BrowserSession[], browserAutomationLeases: BrowserAutomationLease[], externalBrowserObservations: ExternalBrowserLeaseObservation[], hostAccessRequests: HostAccessRequestRecord[], computerControlSessions: ComputerControlSession[], sources: SessionSourceRecord[], };
+export type WorkbenchSessionSnapshot = { session: SessionRecord, checkout: CheckoutRecord | null, runs: RunRecord[], events: RunEventEnvelope[], transcript: TranscriptItem[], attachments: AttachmentRecord[], pendingApprovals: ApprovalRequestRecord[], planDocuments: PlanDocument[], planConfirmations: PlanConfirmation[], executionPlans: ExecutionPlanState[], artifacts: ArtifactRecord[], agentTasks: AgentTaskRecord[], runSummaries: RunSummaryRecord[], browserSessions: BrowserSession[], browserAutomationLeases: BrowserAutomationLease[], externalBrowserObservations: ExternalBrowserLeaseObservation[], hostAccessRequests: HostAccessRequestRecord[], computerControlSessions: ComputerControlSession[], sources: SessionSourceRecord[], };
 
 export type WorkbenchTaskSnapshot = { project: ProjectRecord | null, checkout: CheckoutRecord | null, session: SessionRecord, run: RunRecord, };
 

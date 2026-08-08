@@ -50,6 +50,20 @@ fn should_restrict_workspace(
         && profile != PermissionProfile::FullAccess
 }
 
+fn should_register_user_input(
+    is_review: bool,
+    behavior_mode: hachimi_protocol::BehaviorMode,
+    availability: UserInputAvailability,
+    has_parent_run: bool,
+    agent_depth: u8,
+) -> bool {
+    !is_review
+        && behavior_mode == hachimi_protocol::BehaviorMode::Plan
+        && availability == UserInputAvailability::Available
+        && !has_parent_run
+        && agent_depth == 0
+}
+
 fn is_git_workspace(root: &Path) -> bool {
     let marker = root.join(".git");
     std::fs::metadata(marker).is_ok()
@@ -101,6 +115,7 @@ struct DesktopStepWorldStateRefresher {
     sandbox_backend: Option<Arc<dyn SandboxBackend>>,
     initial_sandbox: SandboxCapabilityReport,
     initial_mcp_bindings: Arc<[McpToolSelection]>,
+    host_identity_revision: String,
     session_id: hachimi_protocol::SessionId,
     run_id: hachimi_protocol::RunId,
     unattended: bool,
@@ -262,13 +277,14 @@ impl DesktopStepWorldStateRefresher {
                 .initial_mcp_bindings
                 .iter()
                 .all(|binding| world.mcp_bindings.iter().any(|live| live == binding));
-        world.host_revision = hash_json(&(
+        world.host_revision = host_revision_for(
+            &self.host_identity_revision,
             world.host_ready,
             &world.agents_revision,
             &world.mcp_revision,
             &world.skills_revision,
             &world.sandbox,
-        ));
+        );
 
         if self.unattended && !drift_codes.is_empty() {
             if !self.drift_reported.swap(true, Ordering::AcqRel) {
@@ -706,7 +722,13 @@ impl DesktopAgentRunPreparer {
             mcp_runtimes,
             &authorization,
             &mut tool_executors,
-            !is_review && request.user_input_availability == UserInputAvailability::Available,
+            should_register_user_input(
+                is_review,
+                request.run.configuration.behavior_mode,
+                request.user_input_availability,
+                request.parent_run_id.is_some(),
+                request.agent_depth,
+            ),
         )
         .await?;
         let attachment_context = self
@@ -755,6 +777,7 @@ impl DesktopAgentRunPreparer {
                 sandbox_backend: self.sandbox_backend.clone(),
                 initial_sandbox: request.sandbox_snapshot.clone(),
                 initial_mcp_bindings: mcp_bindings.into(),
+                host_identity_revision: checkout.updated_at_ms.to_string(),
                 session_id: request.session.id.clone(),
                 run_id: request.run.id.clone(),
                 unattended: request.authority.mode == hachimi_protocol::AuthorityMode::Unattended,
@@ -767,6 +790,7 @@ impl DesktopAgentRunPreparer {
                 "project_id={};checkout_id={};checkout_kind={:?}",
                 project.id, checkout.id, checkout.kind
             )),
+            host_revision_snapshot: request.host_revision_snapshot.clone(),
             state,
             world_refresher: Some(world_refresher),
             diff_tracker: Some(diff_tracker),
@@ -986,7 +1010,13 @@ impl DesktopAgentRunPreparer {
             mcp_runtimes,
             &authorization,
             &mut tool_executors,
-            request.user_input_availability == UserInputAvailability::Available,
+            should_register_user_input(
+                false,
+                request.run.configuration.behavior_mode,
+                request.user_input_availability,
+                request.parent_run_id.is_some(),
+                request.agent_depth,
+            ),
         )
         .await?;
         let mut messages = vec![system_message(format!(
@@ -1017,6 +1047,7 @@ impl DesktopAgentRunPreparer {
                 sandbox_backend: self.sandbox_backend.clone(),
                 initial_sandbox: request.sandbox_snapshot.clone(),
                 initial_mcp_bindings: mcp_bindings.into(),
+                host_identity_revision: workspace_id.clone(),
                 session_id: request.session.id.clone(),
                 run_id: request.run.id.clone(),
                 unattended: request.authority.mode == hachimi_protocol::AuthorityMode::Unattended,
@@ -1026,6 +1057,7 @@ impl DesktopAgentRunPreparer {
             initial_messages: messages,
             tool_executors,
             host_context: Some(format!("context=workspace;workspace_id={workspace_id}")),
+            host_revision_snapshot: request.host_revision_snapshot.clone(),
             state,
             world_refresher: Some(world_refresher),
             diff_tracker: None,
@@ -1043,6 +1075,9 @@ impl DesktopAgentRunPreparer {
         tool_executors: &mut Vec<Arc<dyn ToolExecutor>>,
         allow_user_input: bool,
     ) -> Result<(), AgentExecutionError> {
+        if let Some(tool) = crate::desktop_e2e::blocking_external_effect_tool() {
+            tool_executors.push(authorized_tool(tool, authorization.clone()));
+        }
         if self.runtime_features.multi_agent {
             tool_executors.extend(self.multi_agent.tools_for_parent(request.clone()));
         }
@@ -1053,20 +1088,17 @@ impl DesktopAgentRunPreparer {
                 request.run.id.clone(),
             ));
         }
-        if let Some(plan_id) = request.run.configuration.accepted_plan_id.clone() {
-            let session_id = request.session.id.clone();
-            let environment_change_sink = self.environment_change_sink(vec![
-                hachimi_protocol::WorkbenchEnvironmentChangeReason::Plan,
-            ]);
-            tool_executors.push(hachimi_agent::update_plan_tool(
-                self.store.clone(),
-                plan_id,
-                request.run.id.clone(),
-                Some(Arc::new(move || {
-                    environment_change_sink(session_id.clone());
-                })),
-            ));
-        }
+        let session_id = request.session.id.clone();
+        let environment_change_sink = self.environment_change_sink(vec![
+            hachimi_protocol::WorkbenchEnvironmentChangeReason::Plan,
+        ]);
+        tool_executors.push(hachimi_agent::update_plan_tool(
+            self.store.clone(),
+            request.run.id.clone(),
+            Some(Arc::new(move || {
+                environment_change_sink(session_id.clone());
+            })),
+        ));
         if !runtime_skills.is_empty() {
             let mut skill_authorization = authorization.clone();
             skill_authorization.capability_host = "skill-host".into();
@@ -1219,7 +1251,7 @@ fn world_state(
     selected: &[hachimi_skills::SkillRunSelection],
     workload: &WorkloadResolution,
     mcp_tools: &[McpToolSelection],
-    host_revision: &str,
+    host_identity_revision: &str,
     agents_revision: &str,
     instructions: Vec<AgentInstructionLayer>,
 ) -> StepWorldState {
@@ -1248,18 +1280,29 @@ fn world_state(
             },
         })
         .collect::<Vec<_>>();
+    let agents_revision = agents_revision.to_owned();
+    let skills_revision = hash_json(
+        &selected
+            .iter()
+            .map(|value| (&value.record.id, &value.revision))
+            .collect::<Vec<_>>(),
+    );
+    let mcp_revision = hash_json(mcp_tools);
+    let host_revision = host_revision_for(
+        host_identity_revision,
+        true,
+        &agents_revision,
+        &mcp_revision,
+        &skills_revision,
+        sandbox,
+    );
     StepWorldState {
         context_revision: 1,
         profile_revision: 1,
-        agents_revision: agents_revision.into(),
-        skills_revision: hash_json(
-            &selected
-                .iter()
-                .map(|value| (&value.record.id, &value.revision))
-                .collect::<Vec<_>>(),
-        ),
-        mcp_revision: hash_json(mcp_tools),
-        host_revision: host_revision.into(),
+        agents_revision,
+        skills_revision,
+        mcp_revision,
+        host_revision,
         instructions: instructions.into(),
         skill_activations: activations.into(),
         mcp_bindings: mcp_tools.to_vec().into(),
@@ -1268,6 +1311,24 @@ fn world_state(
         sandbox: sandbox.clone(),
         host_ready: true,
     }
+}
+
+fn host_revision_for(
+    identity_revision: &str,
+    host_ready: bool,
+    agents_revision: &str,
+    mcp_revision: &str,
+    skills_revision: &str,
+    sandbox: &SandboxCapabilityReport,
+) -> String {
+    hash_json(&(
+        identity_revision,
+        host_ready,
+        agents_revision,
+        mcp_revision,
+        skills_revision,
+        sandbox,
+    ))
 }
 
 fn filter_mcp_runtimes(
@@ -1642,5 +1703,75 @@ mod tests {
             mcp_runtime_filter_mode(true, false, false),
             McpRuntimeFilterMode::Disabled
         );
+    }
+
+    #[test]
+    fn initial_and_refreshed_host_revision_use_the_same_identity_inputs() {
+        let sandbox = SandboxCapabilityReport {
+            backend: "none".into(),
+            readiness: hachimi_protocol::SandboxReadiness::Unavailable,
+            os_enforced: false,
+            filesystem_enforced: false,
+            process_enforced: false,
+            network_enforced: false,
+            version: None,
+            stable_error_code: Some("sandbox_unavailable".into()),
+            diagnostics: Vec::new(),
+        };
+        let initial = host_revision_for("checkout-v1", true, "agents", "mcp", "skills", &sandbox);
+        let refreshed = host_revision_for("checkout-v1", true, "agents", "mcp", "skills", &sandbox);
+        assert_eq!(initial, refreshed);
+    }
+
+    #[test]
+    fn request_user_input_is_registered_only_for_interactive_root_plan_runs() {
+        use hachimi_protocol::BehaviorMode;
+
+        assert!(should_register_user_input(
+            false,
+            BehaviorMode::Plan,
+            UserInputAvailability::Available,
+            false,
+            0,
+        ));
+        for denied in [
+            should_register_user_input(
+                false,
+                BehaviorMode::Default,
+                UserInputAvailability::Available,
+                false,
+                0,
+            ),
+            should_register_user_input(
+                false,
+                BehaviorMode::Plan,
+                UserInputAvailability::Unavailable,
+                false,
+                0,
+            ),
+            should_register_user_input(
+                false,
+                BehaviorMode::Plan,
+                UserInputAvailability::Available,
+                true,
+                0,
+            ),
+            should_register_user_input(
+                false,
+                BehaviorMode::Plan,
+                UserInputAvailability::Available,
+                false,
+                1,
+            ),
+            should_register_user_input(
+                true,
+                BehaviorMode::Plan,
+                UserInputAvailability::Available,
+                false,
+                0,
+            ),
+        ] {
+            assert!(!denied);
+        }
     }
 }

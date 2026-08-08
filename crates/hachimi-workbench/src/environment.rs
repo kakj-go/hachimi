@@ -6,8 +6,8 @@ use std::{
 use hachimi_protocol::{
     AgentWorkspaceStatus, CheckoutKind, ComputerControlStatus, EnvironmentActivity,
     EnvironmentChangeSummary, EnvironmentGitSummary, EnvironmentHandoffState, ForgeKind,
-    GitRefRecord, GitRemoteRecord, PlanStepStatus, SessionContextBinding, SessionId,
-    WorkbenchEnvironmentSnapshot,
+    GitRefRecord, GitRemoteRecord, PlanConfirmationStatus, PlanStepStatus, SessionContextBinding,
+    SessionId, WorkbenchEnvironmentSnapshot,
 };
 use sha2::{Digest, Sha256};
 
@@ -103,13 +103,17 @@ impl WorkbenchService {
                         workspace.root_path.clone(),
                     ));
                 }
+                let environment_state =
+                    self.store.get_session_environment_state(session_id).await?;
                 (
                     None,
                     Some(workspace.clone()),
                     root,
                     None,
-                    0,
-                    u64::try_from(workspace.updated_at_ms.max(0)).unwrap_or(u64::MAX),
+                    environment_state
+                        .as_ref()
+                        .map_or(0, |state| state.binding_revision),
+                    environment_state.map_or(0, |state| state.revision),
                     EnvironmentHandoffState {
                         local_checkout_id: None,
                         managed_checkout_id: None,
@@ -125,12 +129,14 @@ impl WorkbenchService {
             .active_browser_automation_lease_for_session(session_id)
             .await?;
         let runs = self.store.list_runs(session_id).await?;
-        let plans = self.store.list_proposed_plans(session_id).await?;
+        let plans = self.store.list_plan_documents(session_id).await?;
+        let confirmations = self.store.list_plan_confirmations(session_id).await?;
+        let execution_plans = self.store.list_execution_plans(session_id).await?;
         let computer_controls = self
             .store
             .list_session_computer_control_sessions(session_id)
             .await?;
-        let activity = if let Some(lease) = browser_lease {
+        let browser_activity = if let Some(lease) = browser_lease {
             if let (Some(workspace_id), Some(browser_tab_id)) =
                 (lease.workspace_id.as_ref(), lease.tab_id.as_ref())
             {
@@ -175,49 +181,65 @@ impl WorkbenchService {
             }
         } else {
             None
-        }
-        .or_else(|| {
-            computer_controls
+        };
+        let computer_activity = computer_controls
+            .iter()
+            .find(|control| {
+                matches!(
+                    control.status,
+                    ComputerControlStatus::Active | ComputerControlStatus::Suspended
+                )
+            })
+            .and_then(|control| {
+                control
+                    .app
+                    .as_ref()
+                    .map(|app| EnvironmentActivity::Computer {
+                        control_session_id: control.id.clone(),
+                        run_id: control.owner_run_id.clone(),
+                        app_id: app.app_id.clone(),
+                        app_name: app.display_name.clone(),
+                    })
+            });
+        let plan_activity = plans.iter().rev().find_map(|plan| {
+            let confirmation = confirmations
                 .iter()
-                .find(|control| {
-                    matches!(
-                        control.status,
-                        ComputerControlStatus::Active | ComputerControlStatus::Suspended
-                    )
-                })
-                .and_then(|control| {
-                    control
-                        .app
-                        .as_ref()
-                        .map(|app| EnvironmentActivity::Computer {
-                            control_session_id: control.id.clone(),
-                            run_id: control.owner_run_id.clone(),
-                            app_id: app.app_id.clone(),
-                            app_name: app.display_name.clone(),
-                        })
-                })
-        })
-        .or_else(|| {
-            runs.iter()
-                .rev()
-                .find(|run| !run.status.is_terminal())
-                .and_then(|run| {
-                    plans
-                        .iter()
-                        .rev()
-                        .find(|plan| plan.accepted_run_id.as_ref() == Some(&run.id))
-                })
-                .and_then(|plan| {
-                    plan.steps
-                        .iter()
-                        .find(|step| step.status == PlanStepStatus::InProgress)
-                        .map(|step| EnvironmentActivity::Plan {
-                            plan_id: plan.id.clone(),
-                            step_id: step.id.clone(),
-                            description: step.description.clone(),
-                        })
-                })
+                .find(|confirmation| confirmation.plan_id == plan.id)?;
+            if confirmation.status == PlanConfirmationStatus::Superseded {
+                return None;
+            }
+            let execution_run_id = confirmation.accepted_run_id.clone();
+            let execution_status = execution_run_id.as_ref().and_then(|run_id| {
+                runs.iter()
+                    .find(|run| &run.id == run_id)
+                    .map(|run| run.status)
+            });
+            let current_step = execution_run_id.as_ref().and_then(|run_id| {
+                execution_plans
+                    .iter()
+                    .find(|state| &state.run_id == run_id)
+                    .and_then(|state| {
+                        state
+                            .steps
+                            .iter()
+                            .find(|step| step.status == PlanStepStatus::InProgress)
+                            .cloned()
+                    })
+            });
+            Some(EnvironmentActivity::Plan {
+                plan_id: plan.id.clone(),
+                revision: plan.revision,
+                title: plan.title.clone(),
+                confirmation_status: confirmation.status,
+                execution_run_id,
+                execution_status,
+                current_step,
+            })
         });
+        let activities = [plan_activity, browser_activity, computer_activity]
+            .into_iter()
+            .flatten()
+            .collect();
         let sources = self.store.list_session_sources(session_id).await?;
         Ok(WorkbenchEnvironmentSnapshot {
             session_id: session.id,
@@ -228,7 +250,7 @@ impl WorkbenchService {
             changes,
             git,
             handoff,
-            activity,
+            activities,
             sources,
             revision: environment_revision,
             generated_at_ms: now_ms(),
@@ -552,9 +574,10 @@ mod tests {
 
     use hachimi_protocol::{
         BehaviorMode, BrowserAutomationLeaseStatus, BrowserAutomationSurfaceKind,
-        BrowserCapability, EntryProfile, ExecutionTarget, LlmSettings, PermissionProfile,
-        PlanAcceptanceRequest, PlanId, PlanStep, PlanStepId, ProposedPlan, ProposedPlanStatus,
-        RunStatus, WorkbenchTaskStartRequest,
+        BrowserCapability, EntryProfile, ExecutionTarget, ItemId, ItemPayload, ItemRelations,
+        ItemStatus, LlmSettings, PermissionProfile, PlanAcceptanceRequest, PlanDocument, PlanId,
+        PlanStep, PlanStepId, RunStatus, TranscriptItem, TranscriptItemKind,
+        WorkbenchTaskStartRequest,
     };
     use hachimi_storage::AgentStore;
     use tokio_util::sync::CancellationToken;
@@ -706,29 +729,36 @@ mod tests {
             .transition_run(&task.run.id, RunStatus::Succeeded, None)
             .await
             .expect("succeeded");
-        let plan = service
+        let source_item_id = ItemId::random();
+        service
             .store()
-            .create_proposed_plan(ProposedPlan {
+            .append_transcript_item(TranscriptItem {
+                id: source_item_id.clone(),
+                session_id: task.session.id.clone(),
+                run_id: Some(task.run.id.clone()),
+                sequence: 0,
+                kind: TranscriptItemKind::Plan,
+                status: ItemStatus::Completed,
+                payload: ItemPayload::Plan {
+                    text: "# Finish environment alignment".into(),
+                },
+                relations: ItemRelations::default(),
+                created_at_ms: now_ms(),
+            })
+            .await
+            .expect("plan item");
+        let (plan, _) = service
+            .store()
+            .create_plan_document(PlanDocument {
                 id: PlanId::from("environment-plan"),
                 session_id: task.session.id.clone(),
-                run_id: task.run.id.clone(),
+                source_run_id: task.run.id.clone(),
+                source_item_id,
                 revision: 0,
+                title: "Finish environment alignment".into(),
                 goal: "Finish environment alignment".into(),
-                assumptions: Vec::new(),
-                steps: vec![PlanStep {
-                    id: PlanStepId::from("step-pending"),
-                    description: "Prepare changes".into(),
-                    status: PlanStepStatus::Pending,
-                }],
-                affected_resources: Vec::new(),
-                verification: Vec::new(),
-                risks: Vec::new(),
-                open_questions: Vec::new(),
-                content_markdown: "Finish environment alignment".into(),
-                status: ProposedPlanStatus::Proposed,
-                accepted_run_id: None,
+                content_markdown: "# Finish environment alignment".into(),
                 created_at_ms: now_ms(),
-                accepted_at_ms: None,
             })
             .await
             .expect("plan");
@@ -748,7 +778,6 @@ mod tests {
         service
             .store()
             .update_execution_plan(
-                &accepted.plan.id,
                 &accepted.task.run.id,
                 None,
                 &[
@@ -771,9 +800,9 @@ mod tests {
             .await
             .expect("plan environment");
         assert!(matches!(
-            plan_environment.activity,
-            Some(EnvironmentActivity::Plan { description, .. })
-                if description == "Verify the environment summary"
+            plan_environment.activities.iter().find(|activity| matches!(activity, EnvironmentActivity::Plan { .. })),
+            Some(EnvironmentActivity::Plan { current_step: Some(step), .. })
+                if step.description == "Verify the environment summary"
         ));
 
         let workspace = service
@@ -802,10 +831,21 @@ mod tests {
             .environment_snapshot(&task.session.id)
             .await
             .expect("browser environment");
-        assert!(matches!(
-            browser_environment.activity,
-            Some(EnvironmentActivity::Browser { domain, .. }) if domain == "docs.example.com"
-        ));
+        assert!(
+            browser_environment
+                .activities
+                .iter()
+                .any(|activity| matches!(
+                    activity,
+                    EnvironmentActivity::Browser { domain, .. } if domain == "docs.example.com"
+                ))
+        );
+        assert!(
+            browser_environment
+                .activities
+                .iter()
+                .any(|activity| matches!(activity, EnvironmentActivity::Plan { .. }))
+        );
 
         service
             .store()
@@ -821,9 +861,9 @@ mod tests {
             .await
             .expect("resumed plan");
         assert!(matches!(
-            resumed_plan.activity,
-            Some(EnvironmentActivity::Plan { description, .. })
-                if description == "Verify the environment summary"
+            resumed_plan.activities.iter().find(|activity| matches!(activity, EnvironmentActivity::Plan { .. })),
+            Some(EnvironmentActivity::Plan { current_step: Some(step), .. })
+                if step.description == "Verify the environment summary"
         ));
     }
 }

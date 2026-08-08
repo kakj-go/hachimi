@@ -255,6 +255,11 @@ async fn direct_terminal_preserves_cwd_and_ctrl_c_interrupts_foreground_command(
     }
 
     let root = tempfile::tempdir().expect("terminal root");
+    std::fs::write(
+        root.path().join(".hachimi-direct-terminal-cwd"),
+        "expected-cwd",
+    )
+    .expect("terminal cwd marker");
     let registry = ProcessRegistry::default();
     let mut launch = spec(
         root.path(),
@@ -266,6 +271,7 @@ async fn direct_terminal_preserves_cwd_and_ctrl_c_interrupts_foreground_command(
         true,
         64 * 1024,
     );
+    launch.cwd = root.path().canonicalize().expect("canonical terminal root");
     launch.environment = std::env::vars().collect();
     launch.timeout = Some(Duration::from_secs(30));
     let launched = registry.spawn(launch).await.expect("direct terminal");
@@ -278,24 +284,17 @@ async fn direct_terminal_preserves_cwd_and_ctrl_c_interrupts_foreground_command(
             &registry,
             &process_id,
             "cwd",
-            b"Write-Output ('cwd:' + (Get-Location).Path)\r",
+            b"$value = Get-Content -Raw -LiteralPath '.hachimi-direct-terminal-cwd'; Write-Output ('cwd:' + $value)\r",
         )
         .await?;
-        let expected = root.path().to_string_lossy().to_ascii_lowercase();
         read_until(
             &registry,
             &process_id,
             &mut after,
             &mut output,
-            &root.path().to_string_lossy(),
+            "cwd:expected-cwd",
         )
         .await?;
-        let actual = String::from_utf8_lossy(&output).to_ascii_lowercase();
-        if !actual.contains(&expected) {
-            return Err(format!(
-                "terminal cwd did not match {expected:?}; output: {actual:?}"
-            ));
-        }
 
         write(&registry, &process_id, "ping", b"ping.exe -t 127.0.0.1\r").await?;
         read_until(&registry, &process_id, &mut after, &mut output, "TTL=").await?;

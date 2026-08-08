@@ -30,6 +30,7 @@ use tokio_util::sync::CancellationToken;
 use super::{CommandError, ControlMethod, DesktopState, epoch_millis, require_window};
 
 pub(super) const TASK_NOTIFICATION_EVENT: &str = "workbench-task-notification";
+const SCHEDULE_ACTIVITY_MARKER: &str = "schedule.activity_marker";
 
 #[tauri::command]
 pub(super) async fn choose_schedule_workspace_directory(
@@ -765,11 +766,6 @@ async fn launch_scheduled_agent_run(
     let created = launched.created;
     state
         .agent_store
-        .bind_task_run_execution(&task_run.id, &created.session.id, &created.run.id, now_ms())
-        .await
-        .map_err(store_to_launch_error)?;
-    state
-        .agent_store
         .append_transcript_item(TranscriptItem {
             id: ItemId::random(),
             session_id: created.session.id.clone(),
@@ -778,7 +774,7 @@ async fn launch_scheduled_agent_run(
             kind: TranscriptItemKind::SystemContext,
             status: ItemStatus::Completed,
             payload: ItemPayload::SystemContext {
-                code: "schedule.heartbeat".into(),
+                code: SCHEDULE_ACTIVITY_MARKER.into(),
                 message: format!(
                     "Scheduled occurrence {} started as a fresh Run.",
                     task_run.invocation_key
@@ -1006,6 +1002,13 @@ async fn validate_schedule_runtime_revisions(
         )
         .await
         .map_err(|error| CommandError::new(error.code, error.message))?;
+        crate::host_revision_snapshots::validate_connector_policy_effects(
+            &state.plugin_host,
+            &schedule.permission_policy,
+            &schedule.host_revision_snapshot.connectors,
+        )
+        .await
+        .map_err(|error| CommandError::new(error.code, error.message))?;
         state
             .plugin_host
             .verify_contribution_revisions(&schedule.contribution_revisions)
@@ -1134,38 +1137,6 @@ async fn validate_schedule_runtime_revisions(
             }
         }
     }
-    if !full_access {
-        for selection in &schedule.host_revision_snapshot.connectors {
-            for action in &selection.allowed_actions {
-                let requires_write =
-                    !schedule
-                        .permission_policy
-                        .rules
-                        .connectors
-                        .iter()
-                        .any(|rule| {
-                            rule.account_id == selection.account_id
-                                && rule
-                                    .read_only_actions
-                                    .iter()
-                                    .any(|read_only| read_only == action)
-                        });
-                if !schedule.permission_policy.allows_connector(
-                    &selection.account_id,
-                    action,
-                    requires_write,
-                ) {
-                    return Err(CommandError::new(
-                        "schedule_connector_action_not_authorized",
-                        format!(
-                            "Connector action {} on {} requires an exact persisted rule",
-                            action, selection.account_id
-                        ),
-                    ));
-                }
-            }
-        }
-    }
     skill_revisions.sort();
     skill_revisions.dedup();
     if skill_revisions != schedule.skill_revisions {
@@ -1191,7 +1162,7 @@ fn validate_unattended_browser_policy(schedule: &ScheduleDefinition) -> Result<(
     {
         return Ok(());
     }
-    if browser.origins.is_empty() {
+    if browser.origins.is_empty() && !browser.unrestricted_origins {
         return Err(CommandError::new(
             "schedule_browser_grant_invalid",
             "an unattended Browser grant requires a document origin and capability",
@@ -1684,13 +1655,19 @@ fn now_ms() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::{
-        mcp_dependency_available, mutation_fingerprint, needs_attention_completion,
-        schedule_creation_error_outcome, scheduled_completion_status, task_notification_status,
+        SCHEDULE_ACTIVITY_MARKER, mcp_dependency_available, mutation_fingerprint,
+        needs_attention_completion, schedule_creation_error_outcome, scheduled_completion_status,
+        task_notification_status,
     };
     use hachimi_protocol::{
         McpServerHealthRecord, McpServerHealthState, McpServerId, McpServerRecord,
         McpServerTransport, McpServerView, RunStatus, SkillToolDependency, TaskRunStatus,
     };
+
+    #[test]
+    fn scheduled_run_uses_activity_marker_context() {
+        assert_eq!(SCHEDULE_ACTIVITY_MARKER, "schedule.activity_marker");
+    }
 
     fn mcp_server(state: McpServerHealthState) -> McpServerView {
         let id = McpServerId::from("calendar");

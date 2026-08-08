@@ -876,8 +876,18 @@ pub struct ComputerAppDescriptor {
 #[serde(rename_all = "camelCase")]
 pub struct ComputerAppCandidate {
     pub app: ComputerAppDescriptor,
+    #[serde(default)]
+    pub window_count: u32,
     /// A bounded PNG included only in this response. It must never be persisted.
     pub icon_png_base64: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct PermissionCommandCandidate {
+    pub name: String,
+    pub executable_path: String,
+    pub source: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]

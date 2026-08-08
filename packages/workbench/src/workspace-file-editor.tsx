@@ -1,6 +1,17 @@
-import { AlertTriangle, Button, Check, ComposerInput, File, RefreshCw, X } from "@hachimi/ui";
+import {
+  AlertTriangle,
+  Button,
+  Check,
+  Code2,
+  ComposerInput,
+  File,
+  FileText,
+  RefreshCw,
+  X,
+} from "@hachimi/ui";
 import { Show, createEffect, createSignal, onCleanup, untrack } from "solid-js";
 
+import { MarkdownContent } from "./timeline/message-markdown";
 import "./workspace-file-editor.css";
 
 interface MonacoDisposable {
@@ -30,15 +41,19 @@ export function WorkspaceFileEditor(props: {
   conflict: boolean;
   readOnlyMessage?: string | undefined;
   showHeader?: boolean;
+  workspaceRoot: string | undefined;
   locale: "zh-CN" | "en-US";
   onInput: (value: string) => void;
   onSave: () => void;
   onReload: () => void;
   onKeepLocal: () => void;
   onClose: () => void;
+  onOpenPath: ((path: string) => void) | undefined;
 }) {
   const [monacoReady, setMonacoReady] = createSignal(false);
+  const [showMarkdownSource, setShowMarkdownSource] = createSignal(false);
   const zh = () => props.locale === "zh-CN";
+  const markdownFile = () => isMarkdownPath(props.path);
   let container: HTMLDivElement | undefined;
   let editor: MonacoEditor | undefined;
   let contentChange: MonacoDisposable | undefined;
@@ -49,7 +64,9 @@ export function WorkspaceFileEditor(props: {
   let loadingMonaco = false;
 
   createEffect(() => {
+    const sourceVisible = !isMarkdownPath(props.path) || showMarkdownSource();
     if (
+      !sourceVisible ||
       !props.editable ||
       editor ||
       loadingMonaco ||
@@ -105,6 +122,10 @@ export function WorkspaceFileEditor(props: {
       .finally(() => {
         loadingMonaco = false;
       });
+  });
+
+  createEffect(() => {
+    if (props.path) setShowMarkdownSource(false);
   });
 
   createEffect(() => {
@@ -166,40 +187,92 @@ export function WorkspaceFileEditor(props: {
           <Button onClick={props.onKeepLocal}>{zh() ? "保留本地" : "Keep local"}</Button>
         </div>
       </Show>
+      <Show when={markdownFile()}>
+        <div class="workspace-markdown-toolbar" role="toolbar">
+          <Button
+            classList={{ active: !showMarkdownSource() }}
+            aria-label={zh() ? "预览 Markdown" : "Preview Markdown"}
+            title={zh() ? "预览 Markdown" : "Preview Markdown"}
+            aria-pressed={!showMarkdownSource()}
+            onClick={() => setShowMarkdownSource(false)}
+          >
+            <FileText size={14} />
+          </Button>
+          <Show when={props.editable}>
+            <Button
+              classList={{ active: showMarkdownSource() }}
+              aria-label={zh() ? "编辑 Markdown 源码" : "Edit Markdown source"}
+              title={zh() ? "编辑 Markdown 源码" : "Edit Markdown source"}
+              aria-pressed={showMarkdownSource()}
+              onClick={() => setShowMarkdownSource(true)}
+            >
+              <Code2 size={14} />
+            </Button>
+          </Show>
+        </div>
+      </Show>
       <Show
         when={props.editable}
         fallback={
-          <div class="workspace-editor-readonly">
-            <p>{props.readOnlyMessage}</p>
-            <pre>{props.value}</pre>
-          </div>
+          <Show
+            when={markdownFile()}
+            fallback={
+              <div class="workspace-editor-readonly">
+                <p>{props.readOnlyMessage}</p>
+                <pre>{props.value}</pre>
+              </div>
+            }
+          >
+            <MarkdownContent
+              class="workspace-markdown-preview timeline-message-text"
+              text={props.value}
+              workspaceRoot={props.workspaceRoot}
+              onOpenPath={props.onOpenPath}
+            />
+          </Show>
         }
       >
-        <div
-          ref={container}
-          class="workspace-monaco-editor"
-          classList={{ ready: monacoReady() }}
-          data-testid="workspace-monaco-editor"
-        />
-        <ComposerInput
-          label={zh() ? `${props.path} 编辑器` : `${props.path} editor`}
-          class="workspace-editor-fallback"
-          classList={{ hidden: monacoReady() }}
-          aria-hidden={monacoReady() || undefined}
-          tabIndex={monacoReady() ? -1 : undefined}
-          data-testid="workspace-editor-fallback"
-          value={props.value}
-          onInput={(event) => props.onInput(event.currentTarget.value)}
-          onKeyDown={(event) => {
-            if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "s") {
-              event.preventDefault();
-              props.onSave();
-            }
-          }}
-        />
+        <Show
+          when={!markdownFile() || showMarkdownSource()}
+          fallback={
+            <MarkdownContent
+              class="workspace-markdown-preview timeline-message-text"
+              text={props.value}
+              workspaceRoot={props.workspaceRoot}
+              onOpenPath={props.onOpenPath}
+            />
+          }
+        >
+          <div
+            ref={container}
+            class="workspace-monaco-editor"
+            classList={{ ready: monacoReady() }}
+            data-testid="workspace-monaco-editor"
+          />
+          <ComposerInput
+            label={zh() ? `${props.path} 编辑器` : `${props.path} editor`}
+            class="workspace-editor-fallback"
+            classList={{ hidden: monacoReady() }}
+            aria-hidden={monacoReady() || undefined}
+            tabIndex={monacoReady() ? -1 : undefined}
+            data-testid="workspace-editor-fallback"
+            value={props.value}
+            onInput={(event) => props.onInput(event.currentTarget.value)}
+            onKeyDown={(event) => {
+              if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "s") {
+                event.preventDefault();
+                props.onSave();
+              }
+            }}
+          />
+        </Show>
       </Show>
     </section>
   );
+}
+
+function isMarkdownPath(path: string): boolean {
+  return /\.(?:md|markdown)$/i.test(path);
 }
 
 function monacoTheme(): "vs" | "vs-dark" {

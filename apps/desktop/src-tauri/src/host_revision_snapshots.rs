@@ -75,7 +75,7 @@ pub(super) async fn snapshot_from_current_connector_policy(
                 descriptor
                     .actions
                     .iter()
-                    .any(|available| available == *action)
+                    .any(|available| available.name.as_str() == action.as_str())
             })
             .cloned()
             .collect::<Vec<_>>();
@@ -106,6 +106,9 @@ pub(super) async fn snapshot_from_current_connector_policy(
     let snapshot = snapshot_from_permission_policy(policy, &selections)
         .ok_or_else(|| "restricted Connector policy did not produce a snapshot".to_owned())?;
     validate_connector_revision_selections(host, &snapshot.connectors)
+        .await
+        .map_err(|error| format!("{}: {}", error.code, error.message))?;
+    validate_connector_policy_effects(host, policy, &snapshot.connectors)
         .await
         .map_err(|error| format!("{}: {}", error.code, error.message))?;
     Ok(Some(snapshot))
@@ -198,6 +201,75 @@ pub(super) async fn validate_connector_revision_selections(
     Ok(())
 }
 
+pub(super) async fn validate_connector_policy_effects(
+    host: &hachimi_extensions::PluginHost,
+    policy: &AgentPermissionPolicy,
+    selections: &[ConnectorRevisionSelection],
+) -> Result<(), HostRevisionSnapshotError> {
+    if policy.level == PermissionProfile::FullAccess {
+        return Ok(());
+    }
+    for selection in selections {
+        let descriptor = host
+            .connector_driver_descriptor(
+                &selection.contribution_revision.plugin_id,
+                &selection.contribution_revision.contribution_id,
+            )
+            .await
+            .map_err(|error| {
+                HostRevisionSnapshotError::drift(format!(
+                    "Connector driver is unavailable or changed: {error}"
+                ))
+            })?;
+        let rule = policy
+            .rules
+            .connectors
+            .iter()
+            .find(|rule| rule.account_id == selection.account_id)
+            .ok_or_else(|| {
+                HostRevisionSnapshotError::unauthorized(
+                    "Connector account is outside the persisted permission policy",
+                )
+            })?;
+        validate_connector_rule_effects(policy, rule, selection, &descriptor)?;
+    }
+    Ok(())
+}
+
+fn validate_connector_rule_effects(
+    policy: &AgentPermissionPolicy,
+    rule: &hachimi_protocol::ConnectorPermissionRule,
+    selection: &ConnectorRevisionSelection,
+    descriptor: &ConnectorDriverDescriptor,
+) -> Result<(), HostRevisionSnapshotError> {
+    for action in &selection.allowed_actions {
+        let requires_write = if action == ENTERPRISE_ATTACHMENT_ACTION {
+            true
+        } else {
+            descriptor
+                .action(action)
+                .ok_or_else(|| {
+                    HostRevisionSnapshotError::drift(format!(
+                        "Connector action {action} is unavailable"
+                    ))
+                })?
+                .effect
+                .requires_write()
+        };
+        if rule.read_only_actions.contains(action) && requires_write {
+            return Err(HostRevisionSnapshotError::unauthorized(format!(
+                "Connector action {action} cannot be downgraded to read-only"
+            )));
+        }
+        if !policy.allows_connector(&selection.account_id, action, requires_write) {
+            return Err(HostRevisionSnapshotError::unauthorized(format!(
+                "Connector action {action} is outside the persisted permission policy"
+            )));
+        }
+    }
+    Ok(())
+}
+
 pub(super) async fn authorize_enterprise_attachment_download(
     host: &hachimi_extensions::PluginHost,
     selections: &[ConnectorRevisionSelection],
@@ -261,14 +333,15 @@ fn selection_matches_descriptor(
             .any(|action| action == ENTERPRISE_ATTACHMENT_ACTION)
             || revision.account_id.as_ref() == Some(&selection.account_id))
         && selection.allowed_actions.iter().all(|action| {
-            action == ENTERPRISE_ATTACHMENT_ACTION || descriptor.actions.contains(action)
+            action == ENTERPRISE_ATTACHMENT_ACTION || descriptor.action(action).is_some()
         })
 }
 
 #[cfg(test)]
 mod tests {
     use hachimi_protocol::{
-        ConnectorAccountId, ConnectorRevision, ConnectorRuntimeKind, ContributionRevision, PluginId,
+        ConnectorAccountId, ConnectorActionDescriptor, ConnectorActionEffect, ConnectorRevision,
+        ConnectorRuntimeKind, ContributionRevision, PluginId,
     };
 
     use super::*;
@@ -300,7 +373,10 @@ mod tests {
                 schema_hash: "schema".into(),
                 action_hash: "actions".into(),
             },
-            actions: vec!["send".into()],
+            actions: vec![ConnectorActionDescriptor {
+                name: "send".into(),
+                effect: ConnectorActionEffect::ExternalSideEffect,
+            }],
         }
     }
 
@@ -348,5 +424,23 @@ mod tests {
 
         policy.level = PermissionProfile::FullAccess;
         assert!(snapshot_from_permission_policy(&policy, &[]).is_none());
+    }
+
+    #[test]
+    fn external_side_effect_cannot_be_downgraded_to_read_only() {
+        let selection = selection(&["send"], true);
+        let rule = hachimi_protocol::ConnectorPermissionRule {
+            account_id: selection.account_id.clone(),
+            actions: vec!["send".into()],
+            read_only_actions: vec!["send".into()],
+            contribution_revision: "actions".into(),
+        };
+        let mut policy = AgentPermissionPolicy::default();
+        policy.rules.connectors.push(rule.clone());
+
+        let error = validate_connector_rule_effects(&policy, &rule, &selection, &descriptor())
+            .expect_err("side-effect action must not be treated as read-only");
+        assert_eq!(error.code, "agent_connector_action_not_authorized");
+        assert!(error.message.contains("cannot be downgraded"));
     }
 }

@@ -58,8 +58,10 @@ pub(super) async fn send_model_request(
     }) {
         body["max_output_tokens"] = Value::from(max_output_tokens);
     }
-    if runtime.capabilities.reasoning_summary {
-        body["reasoning"] = json!({ "summary": "auto" });
+    if runtime.capabilities.reasoning_summary
+        && let Some(summary) = runtime.settings.reasoning_summary.as_provider_value()
+    {
+        body["reasoning"] = json!({ "summary": summary });
     }
     let response = send_request(runtime, endpoint, body, cancellation).await?;
     let is_event_stream = response
@@ -872,7 +874,11 @@ mod tests {
                 base_url,
                 model_name: "mock-responses".into(),
                 protocol: ProviderProtocolKind::Responses,
-                reasoning_summary,
+                reasoning_summary: if reasoning_summary {
+                    hachimi_protocol::ReasoningSummaryMode::Auto
+                } else {
+                    hachimi_protocol::ReasoningSummaryMode::None
+                },
                 remote_compaction,
                 structured_output_mode: StructuredOutputMode::Disabled,
                 ..LlmSettings::default()

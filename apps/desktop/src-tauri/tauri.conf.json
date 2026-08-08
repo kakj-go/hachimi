@@ -41,15 +41,9 @@
     "active": true,
     "targets": ["nsis", "msi"],
     "licenseFile": "../../../LICENSE",
-    "externalBin": [
-      "binaries/hachimi-workspace-worker",
-      "binaries/hachimi-sandbox-launcher",
-      "binaries/hachimi-sandbox-canary",
-      "binaries/hachimi-sandbox-attest",
-      "binaries/hachimi-sandbox-setup"
-    ],
     "icon": ["icons/32x32.png", "icons/128x128.png", "icons/icon.ico"],
     "resources": {
+      "resources/internal-runtime/": "internal-runtime/",
       "../../../LICENSE": "LICENSE",
       "../../../NOTICE.md": "NOTICE.md",
       "../../../assets/avatar-default/2639776812528692620/2639776812528692620.vrm": "resources/avatar-default/2639776812528692620/2639776812528692620.vrm",

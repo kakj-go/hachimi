@@ -28,6 +28,10 @@ pub struct ConnectorPermissionRule {
 #[serde(rename_all = "camelCase")]
 pub struct ScopedPermissionRules {
     pub file_system: Vec<FileSystemGrant>,
+    #[serde(default)]
+    pub file_system_unrestricted_read: bool,
+    #[serde(default)]
+    pub file_system_unrestricted_write: bool,
     pub network: NetworkGrant,
     pub process: ProcessGrant,
     pub browser: BrowserGrant,

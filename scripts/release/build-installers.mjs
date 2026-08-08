@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { readFileSync, rmSync } from "node:fs";
+import { mkdirSync, readFileSync, readdirSync, rmSync } from "node:fs";
 import { resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -45,7 +45,10 @@ function buildInstallers() {
     if (!output.startsWith(`${bundleRoot}${sep}`)) {
       throw new Error(`release_installer_output_escaped:${output}`);
     }
-    rmSync(output, { recursive: true, force: true });
+    mkdirSync(output, { recursive: true });
+    for (const entry of readdirSync(output)) {
+      rmSync(resolve(output, entry), { recursive: true, force: true });
+    }
   }
   process.stdout.write(`Building NSIS with source version ${sourceVersion}.\n`);
   runTauri(["build", "--bundles", "nsis", "--config", tauriConfig]);

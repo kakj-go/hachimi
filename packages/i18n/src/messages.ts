@@ -298,12 +298,13 @@ export const zhCn = {
   "settings.compatibilityProfile": "兼容档案",
   "settings.compatibilityProfile.description":
     "默认严格校验 openai-strict；其他方言必须预先登记并通过探测。",
-  "settings.embeddingModel": "Embedding 模型",
-  "settings.embeddingModel.description":
-    "可选，仅启用 Provider-neutral Embeddings；不会创建 Memory。",
   "settings.reasoningSummary": "Provider reasoning summary",
   "settings.reasoningSummary.description":
     "只展示 Provider 明确标记为公开 summary 的内容，不读取隐藏 reasoning。",
+  "settings.reasoningSummary.auto": "自动",
+  "settings.reasoningSummary.concise": "简洁",
+  "settings.reasoningSummary.detailed": "详细",
+  "settings.reasoningSummary.none": "不显示",
   "settings.remoteCompaction": "远程压缩",
   "settings.remoteCompaction.description":
     "仅 Responses 可启用；失败或能力漂移时回退本地 checkpoint。",
@@ -711,12 +712,13 @@ export const enUs: Record<MessageKey, string> = {
   "settings.compatibilityProfile": "Compatibility profile",
   "settings.compatibilityProfile.description":
     "openai-strict validates the official wire shape; other dialects must be registered and probed.",
-  "settings.embeddingModel": "Embedding model",
-  "settings.embeddingModel.description":
-    "Optional provider-neutral Embeddings capability; it does not create Memory.",
   "settings.reasoningSummary": "Provider reasoning summary",
   "settings.reasoningSummary.description":
     "Displays only content explicitly marked by the Provider as a public summary, never hidden reasoning.",
+  "settings.reasoningSummary.auto": "Auto",
+  "settings.reasoningSummary.concise": "Concise",
+  "settings.reasoningSummary.detailed": "Detailed",
+  "settings.reasoningSummary.none": "None",
   "settings.remoteCompaction": "Remote compaction",
   "settings.remoteCompaction.description":
     "Responses only; failures or capability drift fall back to the local checkpoint.",

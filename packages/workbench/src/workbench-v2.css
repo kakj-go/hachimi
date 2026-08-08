@@ -752,8 +752,12 @@
 }
 
 .workbench-gate {
+  width: 100%;
+  min-width: 0;
   max-height: min(340px, 46vh);
-  overflow: auto;
+  overflow-x: hidden;
+  overflow-y: auto;
+  box-sizing: border-box;
   border: 1px solid var(--color-border-base);
   border-radius: var(--radius-xl);
   background: var(--color-bg-control);
@@ -764,6 +768,7 @@
 .workbench-gate [data-component="approval-card"],
 .workbench-gate [data-component="approval"] {
   margin: 0;
+  min-width: 0;
   border: 0;
   box-shadow: none;
 }
@@ -859,7 +864,9 @@
 }
 
 .user-input-pager {
+  min-width: 0;
   display: flex;
+  flex: 0 0 auto;
   align-items: center;
   gap: 2px;
 }
@@ -900,10 +907,6 @@
   align-items: center;
   justify-content: space-between;
   gap: 10px;
-}
-
-.plan-confirmation-gate > header > small {
-  color: var(--color-text-faint);
 }
 
 .plan-confirmation-options {
@@ -979,21 +982,47 @@
   border-radius: 50%;
 }
 
-.plan-revision-field {
-  display: grid;
-  gap: 7px;
-  color: var(--color-text-muted);
-  font-size: var(--font-size-sm);
-}
-
-.plan-revision-field textarea {
-  min-height: 86px;
-  padding: 10px;
+.plan-revision-composer {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 6px 5px 10px;
   border: 1px solid var(--color-border-base);
   border-radius: var(--radius-md);
-  background: var(--color-bg-control);
+  background: var(--color-bg-elevated);
+}
+
+.plan-revision-composer:focus-within {
+  border-color: var(--color-border-focus);
+}
+
+.plan-revision-composer input {
+  min-width: 0;
+  height: 30px;
+  flex: 1;
+  padding: 0;
+  border: 0;
+  outline: 0;
+  background: transparent;
   color: var(--color-text-base);
-  resize: vertical;
+  font: var(--font-size-sm)/1.4 var(--font-ui);
+}
+
+.plan-revision-composer input::placeholder {
+  color: var(--color-text-faint);
+}
+
+.plan-revision-composer button {
+  width: 30px;
+  min-width: 30px;
+  height: 30px;
+  min-height: 30px;
+  padding: 0;
+}
+
+.plan-confirmation-gate > footer {
+  justify-content: flex-end;
 }
 
 .workbench-inspector {
@@ -1261,12 +1290,9 @@
 
 .inspector-plan-view {
   padding: 16px;
-}
-.inspector-plan-view pre {
-  margin: 0;
-  color: var(--color-text-base);
-  font: var(--font-size-sm)/1.65 var(--font-ui);
-  white-space: pre-wrap;
+  color: var(--color-text-muted);
+  font-size: var(--font-size-sm);
+  line-height: 1.65;
 }
 
 .environment-diff-stat,
@@ -1707,11 +1733,13 @@
 
 .user-input-choices {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: minmax(0, 1fr);
   gap: 7px;
 }
 
 .user-input-choices button {
+  width: 100%;
+  min-width: 0;
   min-height: 52px;
   justify-content: flex-start;
   gap: 9px;
@@ -1725,8 +1753,10 @@
 }
 
 .user-input-choices button > span:last-child {
+  min-width: 0;
   display: grid;
   gap: 2px;
+  overflow-wrap: anywhere;
 }
 
 .choice-index {

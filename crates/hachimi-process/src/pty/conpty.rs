@@ -502,8 +502,8 @@ fn spawn_native(
         .encode_wide()
         .chain(std::iter::once(0))
         .collect::<Vec<_>>();
+    let cwd = win32_compatible_cwd(cwd);
     let cwd_wide = cwd
-        .as_os_str()
         .encode_wide()
         .chain(std::iter::once(0))
         .collect::<Vec<_>>();
@@ -572,6 +572,42 @@ fn spawn_native(
     // host-side pipe ends to the reader and writer tasks.
     let process = unsafe { OwnedHandle::from_raw_handle(process_info.hProcess as _) };
     Ok((console, output, input, process))
+}
+
+fn win32_compatible_cwd(cwd: &Path) -> OsString {
+    // PowerShell 5 accepts a verbatim cwd but cannot resolve relative provider paths from it.
+    let value = cwd.as_os_str().encode_wide().collect::<Vec<_>>();
+    let verbatim = [b'\\' as u16, b'\\' as u16, b'?' as u16, b'\\' as u16];
+    if !value.starts_with(&verbatim) {
+        return cwd.as_os_str().to_owned();
+    }
+
+    let is_drive_path = value.len() >= 7
+        && u8::try_from(value[4]).is_ok_and(|letter| letter.is_ascii_alphabetic())
+        && value[5] == b':' as u16
+        && matches!(value[6], value if value == b'\\' as u16 || value == b'/' as u16);
+    if is_drive_path {
+        return OsString::from_wide(&value[4..]);
+    }
+
+    let unc = [
+        (b'U' as u16, b'u' as u16),
+        (b'N' as u16, b'n' as u16),
+        (b'C' as u16, b'c' as u16),
+        (b'\\' as u16, b'\\' as u16),
+    ];
+    if value.get(4..8).is_some_and(|prefix| {
+        prefix
+            .iter()
+            .zip(unc)
+            .all(|(&actual, (upper, lower))| actual == upper || actual == lower)
+    }) {
+        let mut compatible = vec![b'\\' as u16, b'\\' as u16];
+        compatible.extend_from_slice(&value[8..]);
+        return OsString::from_wide(&compatible);
+    }
+
+    cwd.as_os_str().to_owned()
 }
 
 fn create_pipe() -> Result<(OwnedHandle, OwnedHandle), ProcessError> {
@@ -797,5 +833,23 @@ mod conpty_tests {
         let mut byte = [0_u8; 1];
         assert_eq!(read.read(&mut byte).expect("read"), 1);
         assert_eq!(byte, [b'x']);
+    }
+
+    #[test]
+    fn process_cwd_strips_only_win32_compatible_verbatim_prefixes() {
+        assert_eq!(
+            win32_compatible_cwd(Path::new(r"\\?\C:\Hachimi\project")),
+            OsString::from(r"C:\Hachimi\project")
+        );
+        assert_eq!(
+            win32_compatible_cwd(Path::new(r"\\?\unc\server\share\project")),
+            OsString::from(r"\\server\share\project")
+        );
+        assert_eq!(
+            win32_compatible_cwd(Path::new(
+                r"\\?\Volume{00000000-0000-0000-0000-000000000000}\"
+            )),
+            OsString::from(r"\\?\Volume{00000000-0000-0000-0000-000000000000}\")
+        );
     }
 }

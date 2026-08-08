@@ -167,12 +167,17 @@ pub fn restore_or_default_placement(
             scale_factor: 1.0,
         };
     };
-    let x = i64::from(monitor.bounds.x) + i64::from(monitor.bounds.width)
-        - i64::from(window_width)
-        - i64::from(margin);
-    let y = i64::from(monitor.bounds.y) + i64::from(monitor.bounds.height)
-        - i64::from(window_height)
-        - i64::from(margin);
+    let available_width = monitor.bounds.width.saturating_sub(window_width);
+    let available_height = monitor.bounds.height.saturating_sub(window_height);
+    let biased_offset = |available: u32| {
+        let preferred = u64::from(available) * 58 / 100;
+        let gutter = u64::from(margin.min(available / 2));
+        preferred.clamp(gutter, u64::from(available).saturating_sub(gutter))
+    };
+    let x = i64::from(monitor.bounds.x)
+        + i64::try_from(biased_offset(available_width)).unwrap_or(i64::MAX);
+    let y = i64::from(monitor.bounds.y)
+        + i64::try_from(biased_offset(available_height)).unwrap_or(i64::MAX);
     WindowPlacementV1 {
         x: x.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32,
         y: y.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32,
@@ -257,7 +262,7 @@ mod tests {
     }
 
     #[test]
-    fn offscreen_saved_position_uses_primary_bottom_right() {
+    fn offscreen_saved_position_uses_primary_center_with_lower_right_bias() {
         let monitors = vec![MonitorGeometry {
             name: Some("primary".into()),
             bounds: PhysicalRect {
@@ -278,8 +283,8 @@ mod tests {
             scale_factor: 1.0,
         };
         let restored = restore_or_default_placement(Some(&saved), &monitors, 360, 480, 24);
-        assert_eq!(restored.x, -384);
-        assert_eq!(restored.y, 576);
+        assert_eq!(restored.x, -1016);
+        assert_eq!(restored.y, 348);
     }
 
     #[test]

@@ -26,6 +26,7 @@ import {
   StatusBanner,
   Tabs,
   TextField,
+  Tooltip,
   Upload,
   Workspace,
 } from "@hachimi/ui";
@@ -65,6 +66,15 @@ interface SkillDropTarget {
   key: string;
 }
 
+interface SkillCardMetadata {
+  summary: string;
+  tooltip: string;
+}
+
+const SKILL_LIST_DEFAULT_WIDTH = 380;
+const SKILL_LIST_MIN_WIDTH = 260;
+const SKILL_LIST_MAX_WIDTH = 480;
+
 export function SkillsSettingsPage() {
   const i18n = useI18n();
   const copy = (zh: string, en: string) => (i18n.locale() === "zh-CN" ? zh : en);
@@ -91,7 +101,7 @@ export function SkillsSettingsPage() {
   const [renameName, setRenameName] = createSignal("");
   const [confirmation, setConfirmation] = createSignal<ConfirmationRequest>();
   const [confirming, setConfirming] = createSignal(false);
-  const [skillListWidth, setSkillListWidth] = createSignal(290);
+  const [skillListWidth, setSkillListWidth] = createSignal(SKILL_LIST_DEFAULT_WIDTH);
   const [dropActive, setDropActive] = createSignal(false);
   const [dropTargetKey, setDropTargetKey] = createSignal<string>();
   const [dropNotice, setDropNotice] = createSignal<string>();
@@ -415,8 +425,8 @@ export function SkillsSettingsPage() {
     setConfirmation({
       title: copy(`删除 Skill “${skill.name}”？`, `Delete Skill “${skill.name}”?`),
       description: copy(
-        "这个 Skill 的全部文件会移动到应用内部回收目录。",
-        "All files in this Skill will move to the application's internal trash.",
+        "这个 Skill 的全部文件会移动到其来源目录下的回收目录。",
+        "All files in this Skill will move to the trash directory under its source root.",
       ),
       confirmLabel: copy("删除 Skill", "Delete Skill"),
       danger: true,
@@ -480,7 +490,8 @@ export function SkillsSettingsPage() {
 
   function clampSkillListWidth(width: number): number {
     const available = workspaceElement?.clientWidth ?? 900;
-    return Math.round(Math.max(220, Math.min(width, Math.max(220, available - 360))));
+    const maximum = Math.min(SKILL_LIST_MAX_WIDTH, Math.max(SKILL_LIST_MIN_WIDTH, available - 360));
+    return Math.round(Math.max(SKILL_LIST_MIN_WIDTH, Math.min(width, maximum)));
   }
 
   function startSkillListResize(event: PointerEvent): void {
@@ -630,7 +641,7 @@ export function SkillsSettingsPage() {
               onChange={changeSkillScope}
               tabs={[
                 { value: "built_in", label: copy("内置技能", "Built-in"), content: <></> },
-                { value: "custom", label: copy("自定义技能", "Custom"), content: <></> },
+                { value: "custom", label: copy("其他技能", "Other"), content: <></> },
               ]}
             />
           </div>
@@ -649,13 +660,14 @@ export function SkillsSettingsPage() {
                       classList={{
                         "skill-is-disabled": !skill.enabled,
                         "skill-drop-target": dropTargetKey() === `${skill.id}:`,
+                        selected: selectedSkillId() === skill.id && !selectedPath(),
                       }}
                       data-skill-drop-skill-id={skill.editable ? skill.id : undefined}
                       data-skill-drop-parent-path={skill.editable ? "" : undefined}
                     >
                       <Button
                         type="button"
-                        class="skill-tree-label"
+                        class="skill-tree-label skill-card-select"
                         data-testid={`skill-row-${skill.name}`}
                         classList={{ selected: selectedSkillId() === skill.id && !selectedPath() }}
                         onClick={() => void selectSkill(skill.id)}
@@ -665,23 +677,18 @@ export function SkillsSettingsPage() {
                         ) : (
                           <Folder size={15} />
                         )}
-                        <span title={skill.qualifiedName}>
-                          {skillDisplayName(skill, i18n.locale() === "zh-CN")}
-                        </span>
-                        <Show when={!skill.editable}>
-                          <span class="skill-disabled-indicator">{skill.scope}</span>
-                        </Show>
-                        <Show when={skill.treeRevision}>
-                          <span
-                            class="skill-disabled-indicator"
-                            title={`${copy("内容版本", "Content revision")}: ${skill.treeRevision}`}
-                          >
-                            rev {skill.treeRevision.slice(0, 8)}
+                        <span class="skill-card-copy">
+                          <span class="skill-card-name" title={skill.qualifiedName}>
+                            {skillDisplayName(skill, i18n.locale() === "zh-CN")}
                           </span>
-                        </Show>
-                        <Show when={!skill.enabled}>
-                          <span class="skill-disabled-indicator">{copy("已禁用", "Disabled")}</span>
-                        </Show>
+                          <Tooltip
+                            label={skillCardMetadata(skill, i18n.locale() === "zh-CN").tooltip}
+                          >
+                            <span class="skill-card-meta" data-testid={`skill-meta-${skill.name}`}>
+                              {skillCardMetadata(skill, i18n.locale() === "zh-CN").summary}
+                            </span>
+                          </Tooltip>
+                        </span>
                       </Button>
                       <div class="skill-tree-row-controls">
                         <div class="skill-tree-row-menu">
@@ -768,8 +775,11 @@ export function SkillsSettingsPage() {
           tabIndex={0}
           aria-label={copy("调整技能列表宽度", "Resize Skill list")}
           aria-orientation="vertical"
-          aria-valuemin={220}
-          aria-valuemax={Math.max(220, (workspaceElement?.clientWidth ?? 900) - 360)}
+          aria-valuemin={SKILL_LIST_MIN_WIDTH}
+          aria-valuemax={Math.min(
+            SKILL_LIST_MAX_WIDTH,
+            Math.max(SKILL_LIST_MIN_WIDTH, (workspaceElement?.clientWidth ?? 900) - 360),
+          )}
           aria-valuenow={skillListWidth()}
           onPointerDown={startSkillListResize}
           onKeyDown={(event) => {
@@ -816,6 +826,7 @@ export function SkillsSettingsPage() {
                 path={snapshot().relativePath}
                 kind={snapshot().editorKind}
                 value={draft()}
+                contentAvailable={snapshot().content !== null}
                 dirty={dirty()}
                 saving={saving()}
                 readOnly={!selectedSkill()?.editable}
@@ -972,6 +983,49 @@ export function SkillsSettingsPage() {
   );
 }
 
+function skillCardMetadata(skill: SkillRecord, zh: boolean): SkillCardMetadata {
+  const access = skill.editable ? (zh ? "可编辑" : "Editable") : zh ? "只读" : "Read only";
+  const disabled = skill.enabled ? "" : zh ? " · 已禁用" : " · Disabled";
+  let source: string;
+  let availability: string;
+
+  switch (skill.scope) {
+    case "built_in":
+      source = zh ? "Hachimi 内置" : "Built into Hachimi";
+      availability = zh ? "全局" : "Global";
+      break;
+    case "user":
+      source = zh ? "用户 Skill" : "User Skill";
+      availability = zh ? "全局" : "Global";
+      break;
+    case "repo":
+      source = zh ? "项目 Skill" : "Project Skill";
+      availability = zh ? "当前项目" : "Current project";
+      break;
+    case "system":
+      source = skill.namespace?.startsWith("plugin-")
+        ? zh
+          ? "Plugin 提供"
+          : "Provided by a plugin"
+        : zh
+          ? "系统提供"
+          : "System provided";
+      availability = zh ? "全局" : "Global";
+      break;
+    case "admin":
+      source = zh ? "管理员提供" : "Administrator provided";
+      availability = zh ? "全局" : "Global";
+      break;
+  }
+
+  return {
+    summary: `${source} · ${availability} · ${access}${disabled}`,
+    tooltip: zh
+      ? `来源：${source}；范围：${availability}可用；权限：${access}${skill.enabled ? "" : "；状态：已禁用"}`
+      : `Source: ${source}; availability: ${availability}; access: ${access}${skill.enabled ? "" : "; status: Disabled"}`,
+  };
+}
+
 function SkillNode(props: {
   skillId: string;
   editable: boolean;
@@ -1015,6 +1069,7 @@ function SkillNode(props: {
           "skill-drop-target":
             props.node.kind === "directory" &&
             props.activeDropKey === `${props.skillId}:${props.node.relativePath}`,
+          selected: props.selectedPath === props.node.relativePath,
         }}
         {...(props.editable && props.node.kind === "directory"
           ? {
@@ -1037,8 +1092,8 @@ function SkillNode(props: {
           ) : (
             <Code2 size={14} />
           )}
-          <span>{props.node.name}</span>
-          <Show when={props.node.editorKind === "unsupported"}>
+          <span title={props.node.relativePath}>{props.node.name}</span>
+          <Show when={props.editable && props.node.editorKind === "unsupported"}>
             <span class="node-meta">{props.copy("只读", "Read only")}</span>
           </Show>
         </Button>

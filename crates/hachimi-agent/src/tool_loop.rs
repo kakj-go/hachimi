@@ -19,6 +19,7 @@ use tokio_util::sync::CancellationToken;
 use crate::{
     ModelRuntime, ModelRuntimeError, StepContextFactory, StepContextInput, StepRuntimeState,
     StepWorldState, StepWorldStateRefresher, ToolCall, ToolOrchestrator, ToolResult, ToolRuntime,
+    context_budget, microcompact_request, runtime_continuity::RuntimeContinuitySnapshot,
 };
 
 #[derive(Debug, Clone, PartialEq)]
@@ -27,8 +28,9 @@ pub enum LoopEvent {
     ToolStarted(ToolCall),
     ToolCompleted(ToolResult),
     ContextCompacted {
-        before_chars: usize,
-        after_chars: usize,
+        tokens_before: u64,
+        tokens_after: u64,
+        compacted_items: u32,
         reason: &'static str,
     },
     UsageReconciled {
@@ -87,7 +89,7 @@ pub struct ToolLoopRunOptions<'a> {
     pub budget: &'a RunBudget,
     pub run_tool_allowlist: Option<Vec<String>>,
     pub capability_grants: Option<CapabilityGrantSet>,
-    pub request_context: Option<&'a str>,
+    pub(crate) continuity: &'a RuntimeContinuitySnapshot,
     pub world_refresher: Option<Arc<dyn StepWorldStateRefresher>>,
     pub steering: Option<Arc<dyn SteeringSource>>,
     pub checkpoint_reporter: Option<Arc<dyn RunCheckpointReporter>>,
@@ -147,7 +149,7 @@ impl ToolLoopDriver {
             budget,
             run_tool_allowlist,
             capability_grants,
-            request_context,
+            continuity,
             world_refresher,
             steering,
             checkpoint_reporter,
@@ -209,7 +211,7 @@ impl ToolLoopDriver {
             let mut request_messages = step.model_messages.to_vec();
             inject_request_context(
                 &mut request_messages,
-                request_context,
+                continuity,
                 entry_profile,
                 workload.workload,
                 mode,
@@ -219,8 +221,34 @@ impl ToolLoopDriver {
                 budget.max_model_requests.saturating_sub(model_requests),
                 budget.max_tool_calls.saturating_sub(tool_calls),
             );
-            let (request_context_tokens, request_count_source) =
-                self.model.count_tokens(&request_messages);
+            let mut request_count = self.model.count_tokens(&request_messages);
+            if let Some(budget) = context_budget(&capabilities)
+                && request_count.0 >= budget.auto_threshold
+            {
+                let stats = microcompact_request(&mut request_messages, |messages| {
+                    self.model.count_tokens(messages)
+                });
+                let changed_items = stats
+                    .compacted_items
+                    .saturating_add(stats.repaired_items)
+                    .saturating_add(stats.removed_images);
+                if changed_items > 0 {
+                    emit(LoopEvent::ContextCompacted {
+                        tokens_before: stats.tokens_before,
+                        tokens_after: stats.tokens_after,
+                        compacted_items: changed_items,
+                        reason: "predictive_microcompact",
+                    });
+                }
+                request_count = (stats.tokens_after, stats.source);
+                if request_count.0 >= budget.auto_threshold {
+                    return Err(ModelRuntimeError::ContextCompactionRequired {
+                        active_context_tokens: request_count.0,
+                        threshold_tokens: budget.auto_threshold,
+                    });
+                }
+            }
+            let (request_context_tokens, request_count_source) = request_count;
             let provider_output_budget = capabilities
                 .max_output_tokens
                 .unwrap_or(4_096)
@@ -233,7 +261,13 @@ impl ToolLoopDriver {
                     provider_output_budget.min(available)
                 });
             if capabilities.context_window.is_some() && request_output_budget == 0 {
-                return Err(ModelRuntimeError::ContextOverflow);
+                return Err(ModelRuntimeError::ContextCompactionRequired {
+                    active_context_tokens: request_context_tokens,
+                    threshold_tokens: context_budget(&capabilities)
+                        .map_or(capabilities.context_window.unwrap_or_default(), |budget| {
+                            budget.auto_threshold
+                        }),
+                });
             }
             let request = ModelRequest {
                 messages: request_messages,
@@ -434,7 +468,7 @@ impl ToolLoopDriver {
                             name: call.name,
                             arguments: Value::Null,
                         };
-                        messages.push(ModelMessage::tool(&model_call, result.model_content));
+                        messages.push(ModelMessage::tool(&model_call, tool_model_content(&result)));
                     }
                     continue;
                 }
@@ -530,7 +564,7 @@ impl ToolLoopDriver {
                     name: call.name,
                     arguments: Value::Null,
                 };
-                messages.push(ModelMessage::tool(&model_call, result.model_content));
+                messages.push(ModelMessage::tool(&model_call, tool_model_content(&result)));
             }
             if let Some(code) = needs_attention {
                 return Err(ModelRuntimeError::NeedsAttention(code));
@@ -563,7 +597,24 @@ fn parameter_hash(value: &Value) -> String {
         .collect()
 }
 
-fn provider_revision(capabilities: &hachimi_protocol::ProviderCapabilities) -> String {
+fn tool_model_content(result: &ToolResult) -> String {
+    format!(
+        "[tool status={} name={}]\n{}",
+        match result.status {
+            crate::ToolResultStatus::Succeeded => "succeeded",
+            crate::ToolResultStatus::Failed => "failed",
+            crate::ToolResultStatus::Rejected => "rejected",
+            crate::ToolResultStatus::Aborted => "aborted",
+            crate::ToolResultStatus::TimedOut => "timed_out",
+        },
+        result.tool_name,
+        result.model_content
+    )
+}
+
+pub(crate) fn provider_capabilities_revision(
+    capabilities: &hachimi_protocol::ProviderCapabilities,
+) -> String {
     parameter_hash(&serde_json::to_value(capabilities).unwrap_or(Value::Null))
 }
 
@@ -578,7 +629,7 @@ fn recovery_revisions(
         mcp_revision: world.mcp_revision.clone(),
         plugin_revision: plugin_revision.to_owned(),
         host_revision: world.host_revision.clone(),
-        provider_revision: provider_revision(capabilities),
+        provider_revision: provider_capabilities_revision(capabilities),
     }
 }
 
@@ -597,7 +648,7 @@ async fn report_checkpoint(
 #[allow(clippy::too_many_arguments)]
 fn inject_request_context(
     messages: &mut Vec<ModelMessage>,
-    context: Option<&str>,
+    continuity: &RuntimeContinuitySnapshot,
     entry_profile: EntryProfile,
     workload: WorkloadKind,
     mode: BehaviorMode,
@@ -607,7 +658,6 @@ fn inject_request_context(
     remaining_model_requests: u32,
     remaining_tool_calls: u32,
 ) {
-    let supplied = context.unwrap_or("No additional host context was supplied.");
     let instruction_layers = if world.instructions.is_empty() {
         "No AGENTS.md instruction layers are active.".to_owned()
     } else {
@@ -629,6 +679,13 @@ fn inject_request_context(
         .map(|binding| format!("{}:{}", binding.server_id, binding.tool_name))
         .collect::<Vec<_>>()
         .join(",");
+    let skill_activations = world
+        .skill_activations
+        .iter()
+        .map(|activation| format!("{}@{}", activation.skill_id, activation.content_revision))
+        .collect::<Vec<_>>()
+        .join(",");
+    let continuity_snapshot = continuity.render();
     let disabled_tools = world.disabled_tool_names.join(",");
     let diagnostics = if world.diagnostics.is_empty() {
         "none".to_owned()
@@ -638,7 +695,7 @@ fn inject_request_context(
     let message = ModelMessage {
         role: hachimi_protocol::ModelRole::System,
         content: format!(
-            "{}\n\nRequest-scoped runtime facts: entry_profile={entry_profile:?}; workload={workload:?}; mode={mode:?}; run_generation={run_generation}; context_revision={}; profile_revision={}; agents_revision={}; skills_revision={}; mcp_revision={}; host_revision={}; host_ready={}; sandbox_readiness={:?}; sandbox_os_enforced={}; sandbox_filesystem_enforced={}; sandbox_process_enforced={}; sandbox_network_enforced={}; active_mcp_bindings=[{mcp_bindings}]; disabled_tools=[{disabled_tools}]; diagnostics=[{diagnostics}]; remaining_model_requests_after_this_request={remaining_model_requests}; remaining_tool_calls={remaining_tool_calls}. Re-evaluate current tool policy and approval results on every call; this context grants no authority. {supplied}\n\nCurrent layered AGENTS.md instructions:\n{instruction_layers}",
+            "{}\n\nRequest-scoped runtime state (non-persistent and non-authorizing): entry_profile={entry_profile:?}; workload={workload:?}; mode={mode:?}; run_generation={run_generation}; session_context={session_context:?}; context_revision={}; profile_revision={}; agents_revision={}; skills_revision={}; mcp_revision={}; host_revision={}; host_ready={}; sandbox_readiness={:?}; sandbox_os_enforced={}; sandbox_filesystem_enforced={}; sandbox_process_enforced={}; sandbox_network_enforced={}; active_skills=[{skill_activations}]; active_mcp_bindings=[{mcp_bindings}]; disabled_tools=[{disabled_tools}]; diagnostics=[{diagnostics}]; remaining_model_requests_after_this_request={remaining_model_requests}; remaining_tool_calls={remaining_tool_calls}. Re-evaluate current tool policy, Connector/Host revisions, Approval and UserInput on every call; this context grants no authority.\n\nStructured runtime continuity snapshot:\n<runtime_continuity_snapshot>{continuity_snapshot}</runtime_continuity_snapshot>\n\nCurrent layered AGENTS.md instructions:\n{instruction_layers}",
             crate::profile_runtime_context(entry_profile, workload, mode, session_context),
             world.context_revision,
             world.profile_revision,
@@ -712,7 +769,7 @@ mod tests {
         collections::VecDeque,
         future,
         sync::{
-            Mutex,
+            LazyLock, Mutex,
             atomic::{AtomicUsize, Ordering},
         },
     };
@@ -722,6 +779,9 @@ mod tests {
 
     use super::*;
     use crate::{ModelEventStream, ToolExecutor, ToolFuture, ToolInvocation, ToolRegistry};
+
+    static TEST_CONTINUITY: LazyLock<RuntimeContinuitySnapshot> =
+        LazyLock::new(RuntimeContinuitySnapshot::default);
 
     fn run_options(budget: &RunBudget) -> ToolLoopRunOptions<'_> {
         ToolLoopRunOptions {
@@ -771,7 +831,7 @@ mod tests {
             budget,
             run_tool_allowlist: None,
             capability_grants: None,
-            request_context: None,
+            continuity: &TEST_CONTINUITY,
             world_refresher: None,
             steering: None,
             checkpoint_reporter: None,

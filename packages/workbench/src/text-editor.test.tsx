@@ -156,6 +156,20 @@ describe("Skill text editor", () => {
     mounted.dispose();
   });
 
+  it("shows unsupported UTF-8 files as read-only text", () => {
+    const mounted = mount({
+      path: "notes.txt",
+      kind: "unsupported",
+      value: "read-only notes",
+      contentAvailable: true,
+    });
+    expect(mounted.host.querySelector('[data-testid="skill-text-viewer"]')?.textContent).toContain(
+      "read-only notes",
+    );
+    expect(mounted.host.querySelector('[data-testid="skill-save"]')).toBeNull();
+    mounted.dispose();
+  });
+
   it("shows Skill metadata only for the root SKILL.md", () => {
     const mounted = mount({
       path: "references/notes.md",

@@ -102,6 +102,17 @@
     color: var(--color-text-base);
   }
 
+  .field-input-action {
+    min-width: 0;
+    display: flex;
+    align-items: center;
+  }
+
+  .field-input-action [data-component="text-field-input"] {
+    min-width: 0;
+    flex: 1;
+  }
+
   [data-component="field-description"] {
     color: var(--color-text-muted);
     font-size: var(--font-size-xs);
@@ -745,7 +756,8 @@
 
   [data-component="select-content"]::-webkit-scrollbar,
   [data-component="dropdown-content"]::-webkit-scrollbar {
-    width: 10px;
+    width: 6px;
+    height: 6px;
   }
 
   [data-component="select-content"]::-webkit-scrollbar-track,
@@ -755,7 +767,7 @@
 
   [data-component="select-content"]::-webkit-scrollbar-thumb,
   [data-component="dropdown-content"]::-webkit-scrollbar-thumb {
-    border: 3px solid transparent;
+    border: 1px solid transparent;
     border-radius: 999px;
     background: color-mix(in srgb, var(--color-text-base) 30%, transparent);
     background-clip: padding-box;
@@ -1032,6 +1044,165 @@
     display: flex;
     flex-wrap: wrap;
     gap: 8px 14px;
+  }
+
+  .permission-policy-list {
+    display: grid;
+    gap: 8px;
+    min-width: 0;
+  }
+
+  .permission-policy-list > header,
+  .permission-policy-file-selection > header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+  }
+
+  .permission-policy-list-actions {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+
+  .permission-policy-item {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto auto;
+    align-items: center;
+    gap: 6px;
+    min-width: 0;
+    padding: 7px 8px;
+    border: 1px solid var(--color-border-muted);
+    border-radius: var(--radius-sm);
+    background: var(--color-bg-base);
+  }
+
+  .permission-policy-item-label {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: var(--font-size-sm);
+  }
+
+  .permission-policy-item-meta,
+  .permission-policy-empty,
+  .permission-policy-browser-check > span {
+    color: var(--color-text-muted);
+    font-size: var(--font-size-xs);
+  }
+
+  .permission-policy-tags {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+
+  .permission-policy-tag {
+    display: inline-flex;
+    align-items: center;
+    max-width: 100%;
+    gap: 4px;
+    padding: 4px 6px 4px 8px;
+    border: 1px solid var(--color-border-muted);
+    border-radius: var(--radius-sm);
+    background: var(--color-bg-base);
+    color: var(--color-text-base);
+    font-size: var(--font-size-xs);
+  }
+
+  .permission-policy-tag > button {
+    display: inline-grid;
+    place-items: center;
+    width: 20px;
+    height: 20px;
+    padding: 0;
+    border: 0;
+    background: transparent;
+    color: var(--color-text-muted);
+    cursor: pointer;
+  }
+
+  .permission-policy-inline-input,
+  .permission-policy-search-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+
+  .permission-policy-inline-input > input,
+  .permission-policy-search-row > input {
+    min-width: 0;
+    flex: 1;
+  }
+
+  .permission-policy-browser-check {
+    display: grid;
+    gap: 2px;
+  }
+
+  .permission-policy-detail-dialog,
+  .permission-policy-search-dialog {
+    display: grid;
+    gap: 14px;
+    min-width: min(640px, 80vw);
+  }
+
+  .permission-policy-detail-dialog > code {
+    overflow: hidden;
+    padding: 8px;
+    border: 1px solid var(--color-border-muted);
+    border-radius: var(--radius-sm);
+    background: var(--color-bg-base);
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .permission-policy-file-selection,
+  .permission-policy-search-results {
+    display: grid;
+    gap: 8px;
+    max-height: 300px;
+    overflow: auto;
+  }
+
+  .permission-policy-search-results {
+    padding: 8px;
+    border: 1px solid var(--color-border-muted);
+    border-radius: var(--radius-sm);
+    background: var(--color-bg-base);
+  }
+
+  .permission-policy-application-option {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .permission-policy-result-active {
+    border-radius: var(--radius-sm);
+    background: var(--color-bg-elevated);
+  }
+
+  .permission-policy-application-option img,
+  .permission-policy-application-fallback {
+    width: 28px;
+    height: 28px;
+    flex: 0 0 28px;
+    border-radius: var(--radius-sm);
+  }
+
+  .permission-policy-validation {
+    color: var(--color-state-danger);
+    font-size: var(--font-size-sm);
+  }
+
+  .permission-policy-application-fallback {
+    display: grid;
+    place-items: center;
+    background: var(--color-bg-elevated);
+    color: var(--color-text-muted);
+    font-weight: 650;
   }
 
   @media (max-width: 760px) {

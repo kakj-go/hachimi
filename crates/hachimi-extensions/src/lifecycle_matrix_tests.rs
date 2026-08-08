@@ -276,7 +276,7 @@ fn fixture_content(kind: PluginContributionKind, plugin_id: &PluginId) -> (Strin
         ),
         PluginContributionKind::Connector => (
             "connectors/fixture.json",
-            json!({"hostIdentity":"hachimi.sample-crm.local.v1","transport":"local","actions":["get"],"webhook":false,"poll":false,"externalNetwork":false}),
+            json!({"hostIdentity":"hachimi.sample-crm.local.v1","transport":"local","actions":[{"name":"get","effect":"read_only"}],"webhook":false,"poll":false,"externalNetwork":false}),
         ),
         PluginContributionKind::BrowserExtension => ("browser-extension", Value::Null),
         PluginContributionKind::ScheduledTaskTemplate => {

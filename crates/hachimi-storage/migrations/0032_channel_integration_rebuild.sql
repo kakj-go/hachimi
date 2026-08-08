@@ -106,7 +106,7 @@ CREATE TABLE enterprise_operation_ledger (
     idempotency_key TEXT NOT NULL,
     operation TEXT NOT NULL,
     input_hash TEXT NOT NULL,
-    status TEXT NOT NULL CHECK(status IN ('claimed', 'completed', 'indeterminate', 'failed')),
+    status TEXT NOT NULL CHECK(status IN ('claimed', 'dispatched', 'completed', 'indeterminate', 'failed')),
     provider_request_id TEXT,
     provider_result_id TEXT,
     result_json TEXT,

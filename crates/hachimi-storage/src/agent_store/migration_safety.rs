@@ -325,7 +325,7 @@ mod tests {
                 .fetch_one(store.pool())
                 .await
                 .expect("migration version");
-        assert_eq!(version, 41);
+        assert_eq!(version, 42);
 
         let backup_directory = PathBuf::from(format!("{}.backups", database.display()));
         let manifest_path = fs::read_dir(&backup_directory)
@@ -337,7 +337,7 @@ mod tests {
         let manifest: MigrationBackupManifest =
             serde_json::from_slice(&fs::read(manifest_path).expect("manifest bytes"))
                 .expect("manifest");
-        assert_eq!((manifest.from_migration, manifest.to_migration), (18, 41));
+        assert_eq!((manifest.from_migration, manifest.to_migration), (18, 42));
         assert_eq!(manifest.protocol_version, 31);
         let backup = backup_directory.join(&manifest.database_file);
         assert_eq!(

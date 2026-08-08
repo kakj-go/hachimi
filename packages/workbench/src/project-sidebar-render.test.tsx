@@ -170,6 +170,7 @@ describe("ProjectSidebar expansion", () => {
     expect(row.getAttribute("aria-expanded")).toBe("false");
     expect(mounted.host.textContent).not.toContain("Project conversation");
     expect(row.querySelector('[data-icon="Folder"]')).not.toBeNull();
+    expect(row.querySelector('[data-icon="ChevronDown"]')).toBeNull();
 
     row.click();
     expect(mounted.onSelectProject).toHaveBeenCalledWith(project.id);

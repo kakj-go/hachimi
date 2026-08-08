@@ -143,7 +143,7 @@ impl SkillHost {
             .into_iter()
             .filter(|stored| skill_is_visible(stored, &self.root, roots))
             .map(|mut stored| {
-                stored.record.editable = managed_user_skill(&stored, &self.root);
+                stored.record.editable = editable_user_skill(&stored, &self.root, roots);
                 stored.record
             })
             .collect::<Vec<_>>();
@@ -245,6 +245,40 @@ impl SkillHost {
             if canonical != *root && canonical.starts_with(root) {
                 reject_reparse_chain(root, &canonical)?;
                 return Ok(canonical);
+            }
+        }
+        Err(SkillHostError::InvalidPath)
+    }
+
+    pub(crate) fn checked_write_directory_root(
+        &self,
+        stored: &StoredSkillRecord,
+    ) -> Result<(PathBuf, PathBuf), SkillHostError> {
+        if stored.record.scope != SkillScope::User {
+            return Err(SkillHostError::InvalidPath);
+        }
+        let path = PathBuf::from(&stored.stable_path);
+        reject_reparse(&path)?;
+        let canonical = fs::canonicalize(path)?;
+        if !canonical.is_dir() {
+            return Err(SkillHostError::InvalidPath);
+        }
+        let roots = self
+            .catalog_roots
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut editable_roots = vec![self.root.clone()];
+        editable_roots.extend(
+            roots
+                .iter()
+                .filter(|root| root.scope == SkillScope::User)
+                .filter_map(|root| fs::canonicalize(&root.path).ok()),
+        );
+        editable_roots.sort_by_key(|root| std::cmp::Reverse(root.components().count()));
+        for root in editable_roots {
+            if canonical != root && canonical.starts_with(&root) {
+                reject_reparse_chain(&root, &canonical)?;
+                return Ok((canonical, root));
             }
         }
         Err(SkillHostError::InvalidPath)
@@ -372,9 +406,24 @@ impl SkillHost {
     }
 }
 
-fn managed_user_skill(stored: &StoredSkillRecord, user_root: &Path) -> bool {
-    stored.record.scope == SkillScope::User
-        && Path::new(&stored.stable_path).parent() == Some(user_root)
+fn editable_user_skill(
+    stored: &StoredSkillRecord,
+    user_root: &Path,
+    roots: &[SkillCatalogRoot],
+) -> bool {
+    if stored.record.scope != SkillScope::User {
+        return false;
+    }
+    let path = Path::new(&stored.stable_path);
+    if path.parent() == Some(user_root) {
+        return true;
+    }
+    roots.iter().any(|root| {
+        root.scope == SkillScope::User
+            && fs::canonicalize(&root.path)
+                .ok()
+                .is_some_and(|root| path.starts_with(&root) && path != root)
+    })
 }
 
 fn skill_is_visible(
@@ -386,7 +435,7 @@ fn skill_is_visible(
     if !path.is_dir() {
         return false;
     }
-    if managed_user_skill(stored, user_root) {
+    if editable_user_skill(stored, user_root, roots) {
         return true;
     }
     roots.iter().any(|root| {
@@ -735,6 +784,37 @@ mod tests {
             .await,
             Err(SkillHostError::InvalidPath)
         ));
+    }
+
+    #[tokio::test]
+    async fn static_user_catalog_skills_are_editable_and_move_to_local_trash() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let store = AgentStore::connect_in_memory().await.expect("store");
+        let host = SkillHost::new(temp.path().join("managed-user"), store).expect("host");
+        let external_user = temp.path().join("agents-user");
+        write_skill(&external_user, "find-skills", "find-skills");
+        host.set_catalog_roots(vec![SkillCatalogRoot::new(
+            &external_user,
+            SkillScope::User,
+        )])
+        .expect("roots");
+
+        let record = host
+            .list()
+            .await
+            .expect("catalog")
+            .into_iter()
+            .find(|record| record.name == "find-skills")
+            .expect("external user Skill");
+        assert!(record.editable);
+        assert!(host.remove(&record.id).await.expect("remove user Skill"));
+        assert!(!external_user.join("find-skills").exists());
+        assert_eq!(
+            fs::read_dir(external_user.join(crate::TRASH_DIRECTORY))
+                .expect("local trash")
+                .count(),
+            1
+        );
     }
 
     #[tokio::test]

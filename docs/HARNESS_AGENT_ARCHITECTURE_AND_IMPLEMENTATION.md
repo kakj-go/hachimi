@@ -2,13 +2,13 @@
 
 产品/API 行为固定参考：[ref:OAI-PRODUCT-BROWSER-20260730] [ref:OAI-PRODUCT-CHROME-20260730] [ref:OAI-PRODUCT-COMPUTER-20260730] [ref:OAI-PRODUCT-PLUGINS-20260730] [ref:OAI-PRODUCT-SCHEDULED-20260730] [ref:OAI-PRODUCT-RESPONSES-20260730] [ref:GITHUB-API-20260730] [ref:GITLAB-API-20260730] [ref:GITEE-API-20260730] [ref:GITEA-FORGEJO-API-20260730] [ref:WECOM-API-20260730] [ref:DINGTALK-STREAM-SDK-GO-20260731] [ref:FEISHU-SDK-GO-20260731]。
 
-更新时间：2026-08-06
+更新时间：2026-08-08
 
 ## 1. 边界与来源
 
-Hachimi 以 Codex 为统一 Agent 与权限模型主基线：当前选择性适配 Session/Turn/Item、Tool Orchestrator、`AGENTS.md`、Skills、MCP、Session/Thread 持久化恢复、Process、Workspace、Compaction 和 Sandbox 控制流，并以 Codex Browser/Chrome、Computer Use、Plugins/Connectors 和 Scheduled Tasks 的公开产品行为约束本地 Host。OpenClaw 只作为本地常驻 Gateway、Channel 插件与确定性消息路由、Cron/Heartbeat/事件触发、Task ledger、投递和后台任务重启 reconciliation 的深度参考；实际代码派生仍以来源登记为准。Compaction 仅把 Claude Code Best 用作 clean-room 行为参考。没有嵌入任一完整产品 Runtime、产品提示词或授权模型。
+Hachimi 以 Codex 为统一 Agent 与权限模型主基线：当前选择性适配 Session/Turn/Item、Tool Orchestrator、`AGENTS.md`、Skills、MCP、Session/Thread 持久化恢复、Process、Workspace、Compaction 和 Sandbox 控制流，并以 Codex Browser/Chrome、Computer Use、Plugins/Connectors 和 Scheduled Tasks 的公开产品行为约束本地 Host。OpenClaw 只作为本地常驻 Gateway、Channel 插件与确定性消息路由、Cron/事件触发、Task ledger、投递和后台任务重启 reconciliation 的深度参考。实际代码派生仍以来源登记为准。Compaction 仅把 Claude Code Best 用作 clean-room 行为参考。没有嵌入任一完整产品 Runtime、产品提示词或授权模型。
 
-统一 Agent、Workspace 与权限体系的核心代码和本地单测已完成：核心模型、五类来源 launcher、V2 schema epoch、资源级 filesystem deny/glob、MCP schema fencing、Connector action/revision/effect fencing、managed Workspace reconciliation、共享权限编辑器和 Pet 扩展授权均已落地。Desktop E2E 仍有 4 个显式 skip（外部 Host pairing fixture 与 Bundle 管理依赖），因此当前状态保留为“部分完成”；发布级真实外部 Gate 尚未完成。本地代码完成不代表 alpha/GA 已发布；真实 Provider/Forge、外部企业组织与 standard-user/elevated Windows 证据仍按路线图阻塞。Memory 为远期，不采用 Codex Memory 方案。Hachimi 保持本机单用户运行，不增加登录或租户体系。
+统一 Agent、Workspace 与权限体系的核心代码和本地单测已完成：核心模型、五类来源 launcher、V2 schema epoch、资源级 filesystem deny/glob、MCP schema fencing、Connector action/revision/effect fencing、managed Workspace reconciliation、共享权限编辑器和 Pet 扩展授权均已落地。Multi-Agent task tree 和独立 Agent Review 的正式 Workbench 入口仍需收口；真实 Provider、外部组织与 standard-user/elevated Windows 证据按路线图阻塞。Hachimi 保持本机单用户运行，不增加登录或租户体系。
 
 ## 2. Kernel 结构
 
@@ -128,9 +128,13 @@ StepContext 只注入有界 metadata；模型可调用分页 `skills.list`，首
 
 ## 8. Compaction
 
-Compaction 是唯一上下文裁剪入口，支持 Auto/Manual/ProviderOverflow、本地 checkpoint 和 Responses-only Remote Compaction。远程 capability 必须由配置、probe 与运行时响应同时证明；失败、超时、越界或漂移回退本地，不静默伪造 Remote。summary 只接收 Provider 明确允许展示的内容，不读取隐藏 reasoning。
+Compaction 是唯一上下文裁剪入口，支持 Auto/Manual/ProviderOverflow、本地 checkpoint 和 Responses-only Remote Compaction。正常路径使用 `ModelRuntime::count_tokens` 与 Provider `context_window`/`max_output_tokens` 计算 summary reserve、Claude 风格 tier buffer、预计单轮增长和预测阈值；字符阈值只在 Provider 未报告 context window 时作为 fallback。模型请求先对临时视图执行确定性 Microcompact，永久 transcript 和旧 checkpoint 不变。
 
-只有 checkpoint 完整 Completed 才安装新 Model View。overflow 每次删除一个完整历史组，保护最新用户目标、未完成事项、recent tail 和动态上下文；仍超限返回 `compaction_source_overflow` 并保留旧 checkpoint。`billed_usage` 只增不减，`active_context_tokens`/`remaining_context_tokens` 在安装后重算。
+只有 checkpoint 完整 Completed 且 `covered_through_sequence` 单调推进才安装新 Model View。压缩单位是完整 `ConversationGroup`，不会拆开 User/Assistant/tool_use/tool_result/continuation；瞬时模型视图可修复 orphan/duplicate/unresolved 工具配对，但 append-only transcript 不改写。最近两个完整回合、当前 Run、Approval/UserInput 受保护。Browser/Computer/image/Office/PDF 大内容在下一次模型请求后只留 bounded Artifact reference，未知 MCP/Connector 工具保守保留 head/tail。
+
+固定 overflow 状态机为 Group 校验 → Microcompact → 重新计数 → Semantic/Remote Compact → 最多删除一个最老完整 Group 后重试 → typed `PromptTooLong`。预测超限触发 Auto/MidRun，Provider `ContextOverflow` 触发 Reactive/MidRun；每个 Run 最多三次上下文重建，Provider overflow 最多重试一次。每次重建刷新 AGENTS、Plan、Skill revision、Session sources、Workspace/Git、MCP/Connector/Host revision 与 Artifact reference，并计入现有 context budget。取消不安装 checkpoint，usage 单调累计；不新增 migration、持久熔断、Session Memory Compact、Partial Compact 或 cache-prefix 优化。
+
+Workbench 只把 trim 后精确等于 `/compact` 的输入识别为 typed manual command；它不创建 Run、不追加 User Item。无 Session、活跃 Run、附件或显式 Skill 选择均稳定拒绝并保留输入；`/compact foo` 仍是普通 Prompt。
 
 ## 9. Scheduler 与后台任务
 
@@ -139,6 +143,8 @@ ScheduleDefinition 是持久主列表，Scheduler 只计算 occurrence、claim i
 权限 owner 是 ScheduleDefinition；Prompt/名称/时间/通知变化不改变权限 revision，权限、Context、workload、Skill/MCP/贡献点集合变化会更新 definition revision 并取消受影响的活跃 Run。Browser/Computer 范围只来自统一权限 policy；`HostRevisionSnapshot` 只固定 Connector account/action/content/Host/Schema revision，不承载 Browser 或 Computer 权限。企业附件保留动作 `download_attachment` 必须同时匹配 account、contribution revision 和 action；授权缺失或 revision 漂移映射为 `NeedsAttention`，`connector_invoke` 不能绕过附件专用链。Skill、MCP、Plugin/Connector、Sandbox/Host readiness 漂移同样进入 `NeedsAttention`；后台不等待 Approval/UserInput。
 
 重启时 completed invocation 不重复、无执行器 running TaskRun → Lost、queued claim 可安全重新分派，旧临时 secret/Approval/UserInput/lease 不恢复。手动 Run 不改变 next occurrence；每个 Schedule 同时最多一个 invocation，全局后台并发上限为 2，交互优先。
+
+Gateway process heartbeat、Channel transport/WebSocket heartbeat 和 lease heartbeat 已实现；`schedule.activity_marker` 只标记 Scheduled occurrence 已启动，不承担周期唤醒或通知语义。
 
 ## 10. App Server 与本地传输
 
@@ -150,25 +156,25 @@ Release 默认开启 Workspace、MCP、Scheduler 与本地 Host 框架，但默�
 
 控制协议统一为 v31。V2 schema epoch 不迁移旧 Session/Project/Schedule/Channel/Grant；启动前按 reset journal 清理 Hachimi 管理的凭据、旧数据库、managed Workspace/worktree、Browser Agent profile 和运行产物，失败即阻止 Desktop/Gateway Runtime 并允许重试。用户 Project、Scheduled 显式目录、Avatar/motion/voice 资产与外观设置必须保留；外部 Git Credential Manager 与 SSH Agent 不属于清理范围。
 
-设置的信息架构只保留“平台集成”产品页：正式 Provider catalog 仅包含企业微信、钉钉和飞书，一个逻辑账户关联可独立启停的 Connector/API 与 Channel/消息能力，凭据正文只进入 Windows Credential Manager。Gateway 不暴露总开关，而由首个/最后一个消息账户自动注册、启动、停止和注销。测试 Provider 不进入正式 UI；本地应用访问继续属于 Computer Use。
+设置的信息架构只保留“平台集成”产品页：正式 Provider catalog 包含钉钉、飞书、企业微信 AI Bot、企业微信自建应用和微信 iLink；其中企业微信自建应用、钉钉和飞书同时提供 Connector/API 能力。一个逻辑账户可独立启停 API 与 Channel/消息能力，凭据正文只进入 Windows Credential Manager。Gateway 不暴露总开关，而由首个/最后一个消息账户自动注册、启动、停止和注销。测试 Provider 不进入正式 UI；本地应用访问继续属于 Computer Use。
+
+当前 Connector 定义账号、凭据引用、结构化 Action effect、权限、幂等、撤销、revision fencing 和 health；内置平台授权 UI 展示只读/外部副作用并由服务端禁止降级。Plugins 菜单当前保持禁用并显示“暂不开放 / Not available”，内部 Bundle lifecycle 不等于用户可用的第三方安装能力。
 
 ## 11. P1–P8 已落地架构与后置验证
 
 - **P1–P4**：durable Run recovery、三类 Provider、Remote context 和父子 Agent Task 已接入统一 Store/Executor/Projector；`agent.spawn/send/wait/cancel/collect` 与其他工具统一按权限、Host readiness 和 Plan mode 决策，不按来源/Profile/workload 建白名单；真实 OpenAI Gate 仍环境阻塞。
 - **P5**：标准 Git Remote、Agent 原生 `git.remotes/git.push/forge.change.query/forge.change.mutate` 与四类 Forge adapter 已接入共享 Host、side-effect ledger、Credential Manager/GCM/SSH、expected revision/OID 和审批 [ref:GITHUB-API-20260730] [ref:GITLAB-API-20260730] [ref:GITEE-API-20260730] [ref:GITEA-FORGEJO-API-20260730]。mutation 响应未知时只做有界远端查询，并按 source/target、可见字段、状态和 commit OID 精确证明结果；无法证明仍保持 `indeterminate`，不会重放。supplied Approval 重新匹配 Session/Run generation/Tool call/参数哈希/解析主体/一次性 scope/有效期，不能复用旧审批完成 merge；source ref 仍是不可变前置条件。真实 staging Gate 环境阻塞。
-- **P6**：完整 contribution lifecycle 和跨产品 reconciliation 已接入；扩展只允许本地/内置/管理员 Bundle，不建设 Marketplace。Plugin Runtime 保留给官方集成，用户管理界面与第三方 Bundle 产品化后续开放。
+- **P6**：完整 contribution lifecycle 和跨产品 reconciliation 已接入；当前产品只暴露内置 Bundle lifecycle，用户 Plugins 管理入口未开放。
 - **P7**：三个企业 REST driver、事件认证、Channel contribution、EventSource、transport supervisor、结构化 mention、统一权限控制的 25 MiB 受控附件下载和 Artifact fencing 已接入 [ref:WECOM-API-20260730] [ref:DINGTALK-STREAM-SDK-GO-20260731] [ref:FEISHU-SDK-GO-20260731]；后台 account/action/revision fencing 与 `NeedsAttention` 已复用同一验证器；三个外部企业组织 Gate 真实环境待验证，外部组织标识不构成 Hachimi 租户。
 - **P8**：统一 Workbench Host Session、Browser/Computer Inspector、Observe-first、接管/恢复和双 Browser lease 原语已接入；终态 Run 必须 fresh generation，真实 Windows UI smoke 环境阻塞。
 - **Office**：产品边界是本地 DOCX/XLSX/PPTX/PDF 和文件整理，通过 Skills、普通 Tool/MCP、Artifact 与格式验证完成，不增加在线 Office 服务依赖或专用 Agent Kernel。
 
-Memory 不进入本轮架构；后续独立立项时再确定生命周期、隐私、检索和来源边界。
-
 ## 12. 验收与后置
 
-实现状态与真实环境验证使用路线图定义的双状态；本架构文档不维护第二套状态。P1–P8 核心代码与本地单测已完成，但统一 Agent V2 整体仍为“部分完成／真实环境待验证”。2026-08-06 当前 Windows 工作机的统一 `corepack pnpm check` 可运行集合通过，Desktop E2E 仍保留 4 个显式 skip；此前独立 Feature Flag E2E 继续验证模型 ToolPlan fail-closed。这些结果仍不替代后置真实外部与 Windows 身份 Gate。
+实现状态与外部 Gate 使用路线图定义的 `Implemented`、`Local Verified`、`Environment Blocked`、`Not Planned` 四态；本架构文档不维护第二套状态。P1–P8 核心代码与本地单测已完成，尚未运行的 Desktop/真实环境矩阵按路线图逐项披露。这些结果不替代真实 Provider、Chrome/CEF、企业组织或 Windows 身份 Gate，`Environment Blocked` 不计为测试失败。
 
 系统 Gate 包含两个缺一不可的隔离 Windows Runner：standard-user Runner 必须确认账户不属于 `BUILTIN\\Administrators` 且进程未提升，使用真实发布的 0.2.0 NSIS 升级到同一不可变候选，验证 per-user setup/repair、Workspace/Exec/MCP、Pet、Browser、Computer、本地 Plugin/Connector/Gateway、Scheduled continuation 和不跳过的 Desktop E2E；elevated Runner 必须下载同一候选并验证 linked-worktree ACL/双 lease、handle sentinel、restricted Office/MCP、真实 Scheduler soak、系统 Toast、便携恢复和高权限边界。两个 Gate 都上传脱敏 `summary.json`、同一候选 SHA-256 和必要日志，失败不自动重试。
 
-`v0.2.1` 已取消，升级基线固定为 `v0.2.0`。源码版本为 `0.3.0-alpha.8`；候选状态只由对应 clean commit 的 immutable manifest/Windows run artifact 记录，真实 Gate、tag 和 GitHub Release 尚未完成；alpha.1–alpha.7 未发布并由 alpha.8 合并取代。许可、候选哈希、来源哈希、六类 summary 聚合、候选 Gateway callback、故障代理 reconciliation、三类包解包后许可校验和不可覆盖 tag 的发布架构见 `docs/RELEASE_GATES.md`。管理员窗口、UAC 和安全桌面只验证稳定拒绝，不进入控制范围。
+源码版本为 `0.3.0-alpha.8`；候选状态只由对应 clean commit 的 immutable manifest/Windows run artifact 记录，真实 Gate、tag 和 GitHub Release 尚未完成。许可、候选哈希、来源哈希、证据聚合、候选 Gateway callback、故障代理 reconciliation、包内许可校验和不可覆盖 tag 的发布架构见 `docs/RELEASE_GATES.md`。管理员窗口、UAC 和安全桌面只验证稳定拒绝，不进入控制范围。
 
 路线图唯一状态见 `docs/ROADMAP.md`；来源登记唯一权威见 `docs/HARNESS_AGENT_SOURCE_PROVENANCE.md`。

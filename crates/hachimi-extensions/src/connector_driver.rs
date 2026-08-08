@@ -1,8 +1,8 @@
 use std::{future::Future, pin::Pin, sync::Arc};
 
 use hachimi_protocol::{
-    ConnectorAccount, ConnectorDriverDescriptor, ConnectorHealth, ConnectorInvocationRequest,
-    ConnectorRevision, ConnectorRuntimeKind, PluginId,
+    ConnectorAccount, ConnectorActionDescriptor, ConnectorActionEffect, ConnectorDriverDescriptor,
+    ConnectorHealth, ConnectorInvocationRequest, ConnectorRevision, ConnectorRuntimeKind, PluginId,
 };
 use hachimi_storage::AgentStore;
 use parking_lot::RwLock;
@@ -127,13 +127,13 @@ impl ConnectorDriver for SampleCrmDriver {
             runtime_kind: ConnectorRuntimeKind::Builtin,
             revision,
             actions: vec![
-                "get".into(),
-                "search".into(),
-                "create".into(),
-                "update".into(),
-                "webhook_emit".into(),
-                "webhook_next".into(),
-                "poll".into(),
+                connector_action("get", ConnectorActionEffect::ReadOnly),
+                connector_action("search", ConnectorActionEffect::ReadOnly),
+                connector_action("create", ConnectorActionEffect::ExternalSideEffect),
+                connector_action("update", ConnectorActionEffect::ExternalSideEffect),
+                connector_action("webhook_emit", ConnectorActionEffect::ExternalSideEffect),
+                connector_action("webhook_next", ConnectorActionEffect::ExternalSideEffect),
+                connector_action("poll", ConnectorActionEffect::ReadOnly),
             ],
         }
     }
@@ -144,6 +144,13 @@ impl ConnectorDriver for SampleCrmDriver {
         request: &'a ConnectorInvocationRequest,
     ) -> ConnectorDriverFuture<'a, Value> {
         Box::pin(async move { Self::execute_action(context, request).await })
+    }
+}
+
+fn connector_action(name: &str, effect: ConnectorActionEffect) -> ConnectorActionDescriptor {
+    ConnectorActionDescriptor {
+        name: name.to_owned(),
+        effect,
     }
 }
 

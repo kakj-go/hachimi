@@ -8,7 +8,7 @@ fn write_sample_plugin(root: &Path) {
     fs::create_dir_all(root.join("connectors")).expect("connectors");
     fs::write(
         root.join("connectors/sample-crm.json"),
-        br#"{"hostIdentity":"hachimi.sample-crm.local.v1","transport":"local","actions":["get","search","create","update","webhook_emit","webhook_next","poll"],"webhook":true,"poll":true,"externalNetwork":false}"#,
+        br#"{"hostIdentity":"hachimi.sample-crm.local.v1","transport":"local","actions":[{"name":"get","effect":"read_only"},{"name":"search","effect":"read_only"},{"name":"create","effect":"external_side_effect"},{"name":"update","effect":"external_side_effect"},{"name":"webhook_emit","effect":"external_side_effect"},{"name":"webhook_next","effect":"external_side_effect"},{"name":"poll","effect":"read_only"}],"webhook":true,"poll":true,"externalNetwork":false}"#,
     )
     .expect("connector");
     let manifest = PluginManifest {
@@ -65,7 +65,7 @@ async fn builtin_enterprise_channel_follows_plugin_lifecycle_without_sidecar_dis
     let installs = tempfile::tempdir().expect("installs");
     write_builtin_wecom_app_channel_plugin(source.path());
     let store = AgentStore::connect_in_memory().await.expect("store");
-    let host = PluginHost::new(store, installs.path());
+    let host = PluginHost::new(store.clone(), installs.path());
 
     let installed = host.install_local(source.path()).await.expect("install");
     let installed_contribution = host
@@ -281,6 +281,90 @@ async fn local_bundle_upgrade_needs_attention_and_crm_is_idempotent() {
             .await,
         Err(ExtensionHostError::ContributionDrift)
     ));
+}
+
+#[tokio::test]
+async fn connector_effect_change_updates_action_hash_and_marks_account_drifted() {
+    let source = tempfile::tempdir().expect("source");
+    let installs = tempfile::tempdir().expect("installs");
+    write_sample_plugin(source.path());
+    let store = AgentStore::connect_in_memory().await.expect("store");
+    let host = PluginHost::new(store.clone(), installs.path());
+    let installed = host.install_local(source.path()).await.expect("install");
+    let enabled = host
+        .set_enabled(&installed.manifest.id, true)
+        .await
+        .expect("enable");
+    let account = host
+        .upsert_connector_account(ConnectorAccountUpsert {
+            id: ConnectorAccountId::from("effect-drift-account"),
+            plugin_id: enabled.manifest.id.clone(),
+            connector_id: "sample-crm".into(),
+            display_name: "Effect drift fixture".into(),
+            secret: None,
+        })
+        .await
+        .expect("account");
+    let original_hash = account.revision.action_hash.clone();
+    let descriptor_path = source.path().join("connectors/sample-crm.json");
+    let mut descriptor: Value =
+        serde_json::from_slice(&fs::read(&descriptor_path).expect("descriptor bytes"))
+            .expect("descriptor");
+    descriptor["actions"]
+        .as_array_mut()
+        .expect("actions")
+        .iter_mut()
+        .find(|action| action["name"] == "get")
+        .expect("get action")["effect"] = Value::String("external_side_effect".into());
+    fs::write(
+        &descriptor_path,
+        serde_json::to_vec_pretty(&descriptor).expect("updated descriptor"),
+    )
+    .expect("write descriptor");
+
+    let candidate = host
+        .install_local(source.path())
+        .await
+        .expect("install changed descriptor");
+    assert_eq!(candidate.status, PluginStatus::NeedsAttention);
+    let changed_plugin = host
+        .set_enabled(&candidate.manifest.id, true)
+        .await
+        .expect("re-enable changed descriptor");
+    let changed = connector_revision(&changed_plugin, "sample-crm").expect("changed revision");
+    assert_eq!(
+        changed.host_identity_hash,
+        account.revision.host_identity_hash
+    );
+    assert_eq!(changed.schema_hash, account.revision.schema_hash);
+    assert_ne!(changed.action_hash, original_hash);
+    let error = host
+        .invoke_connector(&ConnectorInvocationRequest {
+            account_id: account.id.clone(),
+            action: "get".into(),
+            arguments: json!({"id": "customer-1"}),
+            idempotency_key: "effect-drift".into(),
+            expected_revision: account.revision,
+        })
+        .await
+        .expect_err("changed effect must fence the stored authorization");
+    assert!(matches!(error, ExtensionHostError::ConnectorDrift));
+    let persisted_override = sqlx::query_scalar::<_, String>(
+        "SELECT health FROM connector_health_overrides WHERE account_id = ?",
+    )
+    .bind(account.id.as_str())
+    .fetch_optional(store.pool())
+    .await
+    .expect("health override");
+    assert_eq!(persisted_override.as_deref(), Some("action_drift"));
+    assert_eq!(
+        host.connector_account(&account.id)
+            .await
+            .expect("account lookup")
+            .expect("account")
+            .health,
+        ConnectorHealth::ActionDrift
+    );
 }
 
 #[tokio::test]

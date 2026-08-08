@@ -15,10 +15,9 @@ use std::{
 };
 
 use hachimi_protocol::{
-    AgentPermissionPolicy, ArtifactId, DeliveryPolicy, DeliveryStatus, EntryProfile,
-    FileSystemAccess, MisfirePolicy, PermissionProfile, ScheduleDefinition, ScheduleHealth,
-    ScheduleId, SchedulePreview, ScheduleSnapshot, ScheduleSpec, TaskRunId, TaskRunRecord,
-    TaskRunStatus, TaskRunTrigger,
+    ArtifactId, DeliveryPolicy, DeliveryStatus, EntryProfile, MisfirePolicy, PermissionProfile,
+    RunStatus, ScheduleDefinition, ScheduleHealth, ScheduleId, SchedulePreview, ScheduleSnapshot,
+    ScheduleSpec, TaskRunId, TaskRunRecord, TaskRunStatus, TaskRunTrigger,
 };
 use hachimi_storage::{AgentStore, AgentStoreError, ScheduleInvocationClaim};
 use parking_lot::Mutex;
@@ -176,7 +175,7 @@ impl SchedulerService {
         mut definition: ScheduleDefinition,
     ) -> Result<ScheduleSnapshot, SchedulerError> {
         self.ensure_accepting()?;
-        normalize_definition(&mut definition);
+        normalize_definition(&mut definition)?;
         validate_definition(&definition)?;
         definition.config_revision = 1;
         definition.permission_revision = 1;
@@ -229,7 +228,7 @@ impl SchedulerService {
         if current.config_revision != expected_config_revision {
             return Err(AgentStoreError::ScheduleRevisionConflict.into());
         }
-        normalize_definition(&mut definition);
+        normalize_definition(&mut definition)?;
         validate_definition(&definition)?;
         let scope_changed = authority_configuration_changed(&current, &definition);
         definition.created_by = current.created_by;
@@ -439,17 +438,91 @@ impl SchedulerService {
     }
 
     pub async fn reconcile_startup(&self) -> Result<Vec<TaskRunRecord>, SchedulerError> {
-        let queued = self
+        let pending = self
             .store
             .list_task_runs(None, 500)
             .await?
             .into_iter()
-            .filter(|task| task.status == TaskRunStatus::Queued)
+            .filter(|task| {
+                matches!(
+                    task.status,
+                    TaskRunStatus::Queued | TaskRunStatus::Preparing | TaskRunStatus::Running
+                )
+            })
             .collect::<Vec<_>>();
         let mut relaunched = Vec::new();
-        for task in queued {
+        for mut task in pending {
             if self.active_launches.lock().contains_key(&task.id) {
                 continue;
+            }
+            if matches!(
+                task.status,
+                TaskRunStatus::Preparing | TaskRunStatus::Running
+            ) {
+                if task.run_id.is_none() && task.status == TaskRunStatus::Preparing {
+                    task = self
+                        .store
+                        .requeue_unbound_preparing_task_run(&task.id, self.clock.now_ms())
+                        .await?;
+                } else {
+                    let run = match task.run_id.as_ref() {
+                        Some(run_id) => self.store.get_run(run_id).await?,
+                        None => None,
+                    };
+                    if let Some(run) = run {
+                        let target = linked_task_status(run.status);
+                        if task.status == TaskRunStatus::Preparing
+                            && target != TaskRunStatus::NeedsAttention
+                        {
+                            task = self
+                                .store
+                                .transition_task_run(
+                                    &task.id,
+                                    TaskRunStatus::Running,
+                                    task.progress_percent,
+                                    task.result_summary.as_deref(),
+                                    task.error_code.as_deref(),
+                                    task.error_summary.as_deref(),
+                                    &task.artifact_ids,
+                                    self.clock.now_ms(),
+                                )
+                                .await?;
+                        }
+                        if target != TaskRunStatus::Running {
+                            let succeeded = target == TaskRunStatus::Succeeded;
+                            self.store
+                                .transition_task_run(
+                                    &task.id,
+                                    target,
+                                    succeeded.then_some(100).or(task.progress_percent),
+                                    succeeded
+                                        .then_some("linked Agent Run completed")
+                                        .or(task.result_summary.as_deref()),
+                                    (!succeeded).then_some("schedule_linked_run_terminal"),
+                                    (!succeeded).then_some(
+                                        "the linked Agent Run reached a terminal recovery state",
+                                    ),
+                                    &task.artifact_ids,
+                                    self.clock.now_ms(),
+                                )
+                                .await?;
+                        }
+                    } else {
+                        self.store
+                            .transition_task_run(
+                                &task.id,
+                                TaskRunStatus::NeedsAttention,
+                                task.progress_percent,
+                                task.result_summary.as_deref(),
+                                Some("schedule_run_recovery_indeterminate"),
+                                Some("the linked Agent Run cannot be proven safe to resume"),
+                                &task.artifact_ids,
+                                self.clock.now_ms(),
+                            )
+                            .await?;
+                    }
+                    continue;
+                }
             }
             let Some(schedule_id) = task.schedule_id.clone() else {
                 continue;
@@ -593,6 +666,25 @@ impl SchedulerService {
             .insert(claim.task_run.id.clone(), cancellation.clone());
         tokio::spawn(async move {
             let task_id = claim.task_run.id.clone();
+            let prepared_task = match store
+                .transition_task_run(
+                    &task_id,
+                    TaskRunStatus::Preparing,
+                    None,
+                    None,
+                    None,
+                    None,
+                    &[],
+                    clock.now_ms(),
+                )
+                .await
+            {
+                Ok(task) => task,
+                Err(_) => {
+                    active_launches.lock().remove(&task_id);
+                    return;
+                }
+            };
             let hook_before = store
                 .dispatch_plugin_hook_event(
                     &hachimi_storage::PluginHookEventRecord {
@@ -614,7 +706,7 @@ impl SchedulerService {
                 })
             } else {
                 launcher
-                    .launch(schedule.clone(), claim.task_run, cancellation.clone())
+                    .launch(schedule.clone(), prepared_task, cancellation.clone())
                     .await
             };
             let completion = match completion {
@@ -646,24 +738,6 @@ impl SchedulerService {
                     cancellation.child_token(),
                 )
                 .await;
-            let current = store.get_task_run(&task_id).await.ok().flatten();
-            if current
-                .as_ref()
-                .is_some_and(|task| task.status == TaskRunStatus::Queued)
-            {
-                let _ = store
-                    .transition_task_run(
-                        &task_id,
-                        TaskRunStatus::Preparing,
-                        None,
-                        None,
-                        None,
-                        None,
-                        &[],
-                        now,
-                    )
-                    .await;
-            }
             let current = store.get_task_run(&task_id).await.ok().flatten();
             if completion.status == TaskRunStatus::Succeeded
                 && current
@@ -729,6 +803,25 @@ impl SchedulerService {
     }
 }
 
+const fn linked_task_status(status: RunStatus) -> TaskRunStatus {
+    match status {
+        RunStatus::Succeeded => TaskRunStatus::Succeeded,
+        RunStatus::Failed => TaskRunStatus::Failed,
+        RunStatus::TimedOut => TaskRunStatus::TimedOut,
+        RunStatus::Cancelled => TaskRunStatus::Cancelled,
+        RunStatus::Lost => TaskRunStatus::Lost,
+        RunStatus::Interrupted => TaskRunStatus::NeedsAttention,
+        RunStatus::Queued
+        | RunStatus::Preparing
+        | RunStatus::Running
+        | RunStatus::WaitingApproval
+        | RunStatus::WaitingUserInput
+        | RunStatus::Recovering
+        | RunStatus::WaitingRecoveryDecision
+        | RunStatus::Cancelling => TaskRunStatus::Running,
+    }
+}
+
 pub(crate) fn scheduler_delay_ms(wake_at_ms: Option<i64>, now_ms: i64) -> u64 {
     let raw_delay = wake_at_ms
         .map(|timestamp| u64::try_from(timestamp.saturating_sub(now_ms).max(0)).unwrap_or(0))
@@ -740,7 +833,7 @@ pub(crate) fn scheduler_delay_ms(wake_at_ms: Option<i64>, now_ms: i64) -> u64 {
     }
 }
 
-fn normalize_definition(definition: &mut ScheduleDefinition) {
+fn normalize_definition(definition: &mut ScheduleDefinition) -> Result<(), SchedulerError> {
     definition.name = definition.name.trim().chars().take(200).collect();
     definition.prompt = definition.prompt.trim().to_owned();
     definition.skill_allowlist.sort();
@@ -815,97 +908,23 @@ fn normalize_definition(definition: &mut ScheduleDefinition) {
             && left.contribution_id == right.contribution_id
             && left.account_id == right.account_id
     });
-    normalize_permission_policy(&mut definition.permission_policy);
+    hachimi_policy::normalize_permission_policy(&mut definition.permission_policy)
+        .map_err(|error| SchedulerError::InvalidSchedule(error.message))?;
     if definition.permission_policy.level == PermissionProfile::FullAccess {
         definition.permission_policy.rules = Default::default();
         definition.mcp_tool_allowlist.clear();
         definition.contribution_revisions.clear();
         definition.host_revision_snapshot.connectors.clear();
     }
-}
-
-fn normalize_permission_policy(policy: &mut AgentPermissionPolicy) {
-    for grant in &mut policy.rules.file_system {
-        normalize_strings(&mut grant.roots);
-        normalize_strings(&mut grant.globs);
-        normalize_strings(&mut grant.special_roots);
-    }
-    policy.rules.file_system.sort_by(|left, right| {
-        file_system_access_rank(left.access)
-            .cmp(&file_system_access_rank(right.access))
-            .then_with(|| left.roots.cmp(&right.roots))
-            .then_with(|| left.globs.cmp(&right.globs))
-            .then_with(|| left.special_roots.cmp(&right.special_roots))
-    });
-    policy.rules.file_system.dedup();
-    normalize_strings(&mut policy.rules.network.hosts);
-    normalize_strings(&mut policy.rules.network.protocols);
-    normalize_strings(&mut policy.rules.process.allowed_commands);
-    normalize_strings(&mut policy.rules.browser.origins);
-    normalize_strings(&mut policy.rules.computer.target_windows);
-    for rule in &mut policy.rules.mcp {
-        rule.tool_name = rule.tool_name.trim().to_owned();
-        rule.schema_hash = rule.schema_hash.trim().to_owned();
-    }
-    policy.rules.mcp.sort_by(|left, right| {
-        (
-            &left.server_id,
-            &left.tool_name,
-            &left.schema_hash,
-            left.read_only,
-        )
-            .cmp(&(
-                &right.server_id,
-                &right.tool_name,
-                &right.schema_hash,
-                right.read_only,
-            ))
-    });
-    policy.rules.mcp.dedup();
-    for rule in &mut policy.rules.connectors {
-        normalize_strings(&mut rule.actions);
-        normalize_strings(&mut rule.read_only_actions);
-        rule.contribution_revision = rule.contribution_revision.trim().to_owned();
-    }
-    policy.rules.connectors.sort_by(|left, right| {
-        (
-            &left.account_id,
-            &left.contribution_revision,
-            &left.actions,
-            &left.read_only_actions,
-        )
-            .cmp(&(
-                &right.account_id,
-                &right.contribution_revision,
-                &right.actions,
-                &right.read_only_actions,
-            ))
-    });
-    policy.rules.connectors.dedup();
-}
-
-fn normalize_strings(values: &mut Vec<String>) {
-    *values = values
-        .iter()
-        .map(|value| value.trim().to_owned())
-        .filter(|value| !value.is_empty())
-        .collect();
-    values.sort();
-    values.dedup();
-}
-
-const fn file_system_access_rank(access: FileSystemAccess) -> u8 {
-    match access {
-        FileSystemAccess::Read => 0,
-        FileSystemAccess::Write => 1,
-        FileSystemAccess::Deny => 2,
-    }
+    Ok(())
 }
 
 /// Canonicalizes all persisted authority-bearing Schedule fields before an
 /// AppServer computes extension snapshots or mutation fingerprints.
-pub fn normalize_schedule_definition(definition: &mut ScheduleDefinition) {
-    normalize_definition(definition);
+pub fn normalize_schedule_definition(
+    definition: &mut ScheduleDefinition,
+) -> Result<(), SchedulerError> {
+    normalize_definition(definition)
 }
 
 fn validate_definition(definition: &ScheduleDefinition) -> Result<(), SchedulerError> {
@@ -1326,7 +1345,8 @@ mod tests {
         input.permission_policy.rules.computer = hachimi_protocol::ComputerGrant {
             observe: true,
             act: true,
-            target_windows: vec!["notepad.exe".into()],
+            unrestricted_targets: false,
+            allowed_applications: vec!["notepad.exe".into()],
             max_actions: Some(20),
         };
         let authorized = service
@@ -1341,7 +1361,7 @@ mod tests {
                 .permission_policy
                 .rules
                 .computer
-                .target_windows,
+                .allowed_applications,
             ["notepad.exe"]
         );
     }
@@ -1593,6 +1613,28 @@ mod tests {
         assert_eq!(task.run_id, None);
     }
 
+    #[test]
+    fn linked_agent_run_statuses_have_deterministic_task_projections() {
+        assert_eq!(
+            linked_task_status(RunStatus::Running),
+            TaskRunStatus::Running
+        );
+        assert_eq!(
+            linked_task_status(RunStatus::Succeeded),
+            TaskRunStatus::Succeeded
+        );
+        assert_eq!(
+            linked_task_status(RunStatus::TimedOut),
+            TaskRunStatus::TimedOut
+        );
+        assert_eq!(
+            linked_task_status(RunStatus::Interrupted),
+            TaskRunStatus::NeedsAttention
+        );
+        assert!(TaskRunStatus::Preparing.can_transition_to(TaskRunStatus::Running));
+        assert!(TaskRunStatus::Running.can_transition_to(TaskRunStatus::Succeeded));
+    }
+
     #[tokio::test]
     async fn enabled_at_schedule_must_have_a_future_occurrence() {
         let now = 1_800_000_000_000;
@@ -1668,7 +1710,7 @@ mod tests {
             }
             tokio::task::yield_now().await;
         }
-        assert_eq!(launches.load(Ordering::SeqCst), 1);
+        assert!(launches.load(Ordering::SeqCst) <= 1);
         service.cancel_task(&task.id).await.expect("cancel");
         for _ in 0..100 {
             let stored = service

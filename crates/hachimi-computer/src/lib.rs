@@ -138,6 +138,14 @@ pub trait ComputerBroker: Send + Sync {
         })
     }
 
+    fn foreground_window<'a>(&'a self) -> ComputerBrokerFuture<'a, ComputerWindowIdentity> {
+        Box::pin(async {
+            Err(ComputerHostError::Broker(
+                "the Computer broker cannot read the foreground window".into(),
+            ))
+        })
+    }
+
     fn capture<'a>(&'a self, window_handle: &'a str) -> ComputerBrokerFuture<'a, CapturedWindow>;
 
     fn app_icon_png<'a>(
@@ -249,6 +257,12 @@ impl ComputerHost {
         Ok(windows)
     }
 
+    pub async fn foreground_window(&self) -> Result<ComputerWindowIdentity, ComputerHostError> {
+        let target = self.broker.foreground_window().await?;
+        validate_target(&target)?;
+        Ok(target)
+    }
+
     pub async fn app_icon_png(
         &self,
         app: &ComputerAppDescriptor,
@@ -288,13 +302,13 @@ impl ComputerHost {
             self.broker.release_frame(&captured.image_token);
             return Err(ComputerHostError::AppNotAllowed);
         };
-        if !grants.computer.target_windows.is_empty()
-            && !grants
+        let target_allowed = grants.computer.unrestricted_targets
+            || grants
                 .computer
-                .target_windows
+                .allowed_applications
                 .iter()
-                .any(|target| target == &captured.target.app_id)
-        {
+                .any(|target| target.eq_ignore_ascii_case(&captured.target.app.identity_hash));
+        if !target_allowed {
             drop(state);
             self.broker.release_frame(&captured.image_token);
             return Err(ComputerHostError::AppNotAllowed);
@@ -395,10 +409,10 @@ impl ComputerHost {
                 .rules
                 .get(&(frame_state.frame.session_id.clone(), app_id.clone()))
                 .is_some_and(|rule| rule.act)
-                && (grants.computer.target_windows.is_empty()
+                && (grants.computer.unrestricted_targets
                     || grants
                         .computer
-                        .target_windows
+                        .allowed_applications
                         .iter()
                         .any(|value| value == app_id));
             if !launch_allowed {
@@ -919,6 +933,7 @@ mod tests {
                 access: FileSystemAccess::Read,
                 roots: vec!["C:\\workspace".into()],
                 globs: Vec::new(),
+                files: Vec::new(),
                 special_roots: Vec::new(),
             }],
             network: NetworkGrant::default(),
@@ -927,7 +942,8 @@ mod tests {
             computer: ComputerGrant {
                 observe: true,
                 act: true,
-                target_windows: vec!["notepad.exe".into()],
+                allowed_applications: vec!["identity:notepad.exe".into()],
+                unrestricted_targets: false,
                 max_actions: Some(2),
             },
             review_each_command: true,
@@ -1169,5 +1185,82 @@ mod tests {
                 "{app_id}"
             );
         }
+    }
+
+    #[tokio::test]
+    #[ignore = "opt-in local Computer stress"]
+    async fn short_stress_releases_frames_and_fences_stale_epochs() {
+        let seconds = std::env::var("HACHIMI_STRESS_PHASE_SECONDS")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(300)
+            .clamp(1, 450);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(seconds);
+        let mut iterations = 0_u64;
+        while std::time::Instant::now() < deadline {
+            let released = Arc::new(Mutex::new(Vec::new()));
+            let host = ComputerHost::new(
+                Arc::new(TestBroker {
+                    target: target(),
+                    released: Some(Arc::clone(&released)),
+                }),
+                Arc::new(SystemComputerClock),
+            );
+            let session_id = SessionId::new(format!("stress-session-{iterations}"));
+            let run_id = RunId::new(format!("stress-run-{iterations}"));
+            host.set_app_rule(
+                &session_id,
+                ComputerAppRule {
+                    app_id: "notepad.exe".into(),
+                    observe: true,
+                    act: true,
+                    always_allowed: false,
+                    granted_by: "stress:test".into(),
+                    updated_at_ms: 1,
+                },
+            );
+            let active_grants = grants(&session_id, &run_id);
+            let frame = host
+                .observe(
+                    session_id.clone(),
+                    run_id,
+                    1,
+                    "0x1234",
+                    &active_grants,
+                    &sandbox(),
+                )
+                .await
+                .expect("observe");
+            let request = ComputerActionRequest {
+                frame_id: frame.id,
+                run_generation: 1,
+                target_fingerprint: frame.target.fingerprint,
+                expected_input_epoch: frame.input_epoch,
+                action: match iterations % 3 {
+                    0 => ComputerAction::TypeText {
+                        text: "stress".into(),
+                    },
+                    1 => ComputerAction::Scroll {
+                        delta_x: 0,
+                        delta_y: 120,
+                    },
+                    _ => ComputerAction::WindowResize {
+                        width: 800,
+                        height: 600,
+                    },
+                },
+            };
+            host.act(&request, &active_grants).await.expect("act");
+            assert_eq!(
+                host.act(&request, &active_grants).await,
+                Err(ComputerHostError::FrameNotFound)
+            );
+            assert_eq!(released.lock().len(), 1);
+            host.take_over(&session_id);
+            iterations = iterations.saturating_add(1);
+            tokio::task::yield_now().await;
+        }
+        assert!(iterations > 0);
+        eprintln!("computer_stress_iterations={iterations}");
     }
 }

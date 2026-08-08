@@ -2,11 +2,11 @@ use hachimi_protocol::{
     ApprovalId, ApprovalRequestRecord, ApprovalResolution, ApprovalStatus, ArtifactId,
     ArtifactKind, ArtifactRecord, AttachmentId, AttachmentRecord, CONTROL_PROTOCOL_VERSION,
     CapabilityDegradation, CheckoutRecord, CompactionCheckpoint, CompactionCheckpointId,
-    CompactionLifecycle, CompactionReason, ItemPayload, ItemStatus, McpHeaderView,
-    McpServerHealthRecord, McpServerHealthState, McpServerId, McpServerRecord, McpServerTransport,
-    PlanId, ProjectRecord, ProposedPlan, ProposedPlanStatus, RunEventEnvelope, RunEventPayload,
-    RunId, RunRecord, RunStatus, SessionId, SessionRecord, SessionRunActivity, ToolCallId,
-    TranscriptItem, TranscriptItemKind,
+    CompactionLifecycle, CompactionReason, ExecutionPlanState, ItemPayload, ItemStatus,
+    McpHeaderView, McpServerHealthRecord, McpServerHealthState, McpServerId, McpServerRecord,
+    McpServerTransport, PlanConfirmation, PlanConfirmationStatus, PlanDocument, PlanId,
+    ProjectRecord, RunEventEnvelope, RunEventPayload, RunId, RunRecord, RunStatus, SessionId,
+    SessionRecord, SessionRunActivity, ToolCallId, TranscriptItem, TranscriptItemKind,
 };
 use serde_json::{Value, json};
 use sqlx::{
@@ -47,6 +47,9 @@ mod lifecycle;
 mod mcp_cache;
 mod migration_safety;
 mod permissions;
+mod plan_acceptance;
+#[cfg(test)]
+mod plan_revision_tests;
 mod plugin_hooks;
 mod process;
 mod project;
@@ -63,6 +66,7 @@ mod schedule;
 mod schedule_event;
 pub(crate) mod side_effects;
 mod transaction_helpers;
+mod transcript;
 mod usage;
 mod user_input;
 mod workspace_authority;
@@ -224,280 +228,236 @@ impl AgentStore {
         &self.managed_artifacts.path
     }
 
-    pub async fn create_proposed_plan(
+    pub async fn create_plan_document(
         &self,
-        mut plan: ProposedPlan,
-    ) -> Result<ProposedPlan, AgentStoreError> {
+        mut plan: PlanDocument,
+    ) -> Result<(PlanDocument, PlanConfirmation), AgentStoreError> {
         let mut transaction = self.pool.begin().await?;
-        if let Some(existing) = get_proposed_plan_by_run_tx(&mut transaction, &plan.run_id).await? {
+        if let Some(existing) =
+            get_plan_document_by_run_tx(&mut transaction, &plan.source_run_id).await?
+        {
+            let confirmation = get_plan_confirmation_tx(&mut transaction, &existing.id)
+                .await?
+                .ok_or_else(|| AgentStoreError::ProposedPlanNotFound(existing.id.clone()))?;
             transaction.commit().await?;
-            return Ok(existing);
+            return Ok((existing, confirmation));
         }
         let previous_revision = sqlx::query_scalar::<_, i64>(
-            "SELECT COALESCE(MAX(revision), 0) FROM proposed_plans WHERE session_id = ?",
+            "SELECT COALESCE(MAX(revision), 0) FROM plan_documents WHERE session_id = ?",
         )
         .bind(plan.session_id.as_str())
         .fetch_one(&mut *transaction)
         .await?;
         plan.revision = u32::try_from(previous_revision.saturating_add(1)).unwrap_or(u32::MAX);
-        plan.status = ProposedPlanStatus::Proposed;
-        plan.accepted_run_id = None;
-        plan.accepted_at_ms = None;
         sqlx::query(
-            "UPDATE proposed_plans SET status = 'superseded' WHERE session_id = ? AND status = 'proposed'",
+            "UPDATE plan_confirmations SET status = 'superseded', resolved_at_ms = ? WHERE status = 'pending' AND plan_id IN (SELECT id FROM plan_documents WHERE session_id = ?)",
         )
+        .bind(plan.created_at_ms)
         .bind(plan.session_id.as_str())
         .execute(&mut *transaction)
         .await?;
         sqlx::query(
-            "INSERT INTO proposed_plans (id, session_id, run_id, revision, goal, assumptions_json, steps_json, affected_resources_json, verification_json, risks_json, open_questions_json, content_markdown, status, accepted_run_id, created_at_ms, accepted_at_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO plan_documents (id, session_id, run_id, source_item_id, revision, title, goal, content_markdown, created_at_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(plan.id.as_str())
         .bind(plan.session_id.as_str())
-        .bind(plan.run_id.as_str())
+        .bind(plan.source_run_id.as_str())
+        .bind(plan.source_item_id.as_str())
         .bind(i64::from(plan.revision))
+        .bind(&plan.title)
         .bind(&plan.goal)
-        .bind(serde_json::to_string(&plan.assumptions)?)
-        .bind(serde_json::to_string(&plan.steps)?)
-        .bind(serde_json::to_string(&plan.affected_resources)?)
-        .bind(serde_json::to_string(&plan.verification)?)
-        .bind(serde_json::to_string(&plan.risks)?)
-        .bind(serde_json::to_string(&plan.open_questions)?)
         .bind(&plan.content_markdown)
-        .bind(plan.status.as_str())
-        .bind(Option::<&str>::None)
         .bind(plan.created_at_ms)
-        .bind(Option::<i64>::None)
+        .execute(&mut *transaction)
+        .await?;
+        sqlx::query(
+            "INSERT INTO plan_confirmations (plan_id, status, accepted_run_id, resolved_at_ms) VALUES (?, 'pending', NULL, NULL)",
+        )
+        .bind(plan.id.as_str())
         .execute(&mut *transaction)
         .await?;
         append_event_tx(
             &mut transaction,
             &plan.session_id,
-            Some(&plan.run_id),
+            Some(&plan.source_run_id),
             "plan.proposed",
             json!({ "planId": plan.id, "revision": plan.revision }),
             plan.created_at_ms,
         )
         .await?;
         transaction.commit().await?;
-        Ok(plan)
+        self.bump_session_environment_revision(&plan.session_id)
+            .await?;
+        Ok((
+            plan.clone(),
+            PlanConfirmation {
+                plan_id: plan.id,
+                status: PlanConfirmationStatus::Pending,
+                accepted_run_id: None,
+                resolved_at_ms: None,
+            },
+        ))
     }
 
-    pub async fn get_proposed_plan(
+    pub async fn get_plan_document(
         &self,
         plan_id: &PlanId,
-    ) -> Result<Option<ProposedPlan>, AgentStoreError> {
-        let row = sqlx::query("SELECT * FROM proposed_plans WHERE id = ?")
+    ) -> Result<Option<PlanDocument>, AgentStoreError> {
+        let row = sqlx::query("SELECT * FROM plan_documents WHERE id = ?")
             .bind(plan_id.as_str())
             .fetch_optional(&self.pool)
             .await?;
-        row.as_ref().map(proposed_plan_from_row).transpose()
+        row.as_ref().map(plan_document_from_row).transpose()
     }
 
-    pub async fn update_execution_plan(
+    pub async fn get_plan_confirmation(
         &self,
         plan_id: &PlanId,
-        execution_run_id: &RunId,
-        explanation: Option<&str>,
-        steps: &[hachimi_protocol::PlanStep],
-    ) -> Result<ProposedPlan, AgentStoreError> {
+    ) -> Result<Option<PlanConfirmation>, AgentStoreError> {
+        let row = sqlx::query("SELECT * FROM plan_confirmations WHERE plan_id = ?")
+            .bind(plan_id.as_str())
+            .fetch_optional(&self.pool)
+            .await?;
+        row.as_ref().map(plan_confirmation_from_row).transpose()
+    }
+
+    pub async fn resolve_plan_confirmation(
+        &self,
+        plan_id: &PlanId,
+        expected: PlanConfirmationStatus,
+        status: PlanConfirmationStatus,
+        resolved_at_ms: i64,
+    ) -> Result<PlanConfirmation, AgentStoreError> {
         let mut transaction = self.pool.begin().await?;
-        let mut plan = get_proposed_plan_tx(&mut transaction, plan_id)
+        let result = sqlx::query(
+            "UPDATE plan_confirmations SET status = ?, resolved_at_ms = ? WHERE plan_id = ? AND status = ?",
+        )
+        .bind(status.as_str())
+        .bind(resolved_at_ms)
+        .bind(plan_id.as_str())
+        .bind(expected.as_str())
+        .execute(&mut *transaction)
+        .await?;
+        if result.rows_affected() != 1 {
+            return Err(AgentStoreError::ProposedPlanNotAcceptable(plan_id.clone()));
+        }
+        let plan = get_plan_document_tx(&mut transaction, plan_id)
             .await?
             .ok_or_else(|| AgentStoreError::ProposedPlanNotFound(plan_id.clone()))?;
-        if plan.status != ProposedPlanStatus::Accepted
-            || plan.accepted_run_id.as_ref() != Some(execution_run_id)
-        {
-            return Err(AgentStoreError::ProposedPlanRunMismatch);
-        }
-        plan.steps = steps.to_vec();
-        sqlx::query("UPDATE proposed_plans SET steps_json = ? WHERE id = ?")
-            .bind(serde_json::to_string(&plan.steps)?)
-            .bind(plan_id.as_str())
-            .execute(&mut *transaction)
-            .await?;
-        append_event_typed_tx(
+        append_event_tx(
             &mut transaction,
             &plan.session_id,
-            Some(execution_run_id),
-            "plan.updated",
-            Some(RunEventPayload::PlanUpdated {
-                plan_id: plan.id.clone(),
-                explanation: explanation.map(str::to_owned),
-                steps: plan.steps.clone(),
-            }),
-            json!({ "planId": plan.id, "stepCount": plan.steps.len() }),
-            now_ms(),
+            Some(&plan.source_run_id),
+            "plan.confirmation_resolved",
+            json!({ "planId": plan_id, "status": status }),
+            resolved_at_ms,
         )
         .await?;
         transaction.commit().await?;
         self.bump_session_environment_revision(&plan.session_id)
             .await?;
-        Ok(plan)
+        Ok(PlanConfirmation {
+            plan_id: plan_id.clone(),
+            status,
+            accepted_run_id: None,
+            resolved_at_ms: Some(resolved_at_ms),
+        })
     }
 
-    pub async fn list_proposed_plans(
+    pub async fn update_execution_plan(
+        &self,
+        execution_run_id: &RunId,
+        explanation: Option<&str>,
+        steps: &[hachimi_protocol::PlanStep],
+    ) -> Result<ExecutionPlanState, AgentStoreError> {
+        let mut transaction = self.pool.begin().await?;
+        let run = get_run_tx(&mut transaction, execution_run_id)
+            .await?
+            .ok_or_else(|| AgentStoreError::RunNotFound(execution_run_id.clone()))?;
+        let updated_at_ms = now_ms();
+        sqlx::query(
+            "INSERT INTO execution_plans (run_id, session_id, explanation, steps_json, updated_at_ms) VALUES (?, ?, ?, ?, ?) ON CONFLICT(run_id) DO UPDATE SET explanation = excluded.explanation, steps_json = excluded.steps_json, updated_at_ms = excluded.updated_at_ms",
+        )
+            .bind(execution_run_id.as_str())
+            .bind(run.session_id.as_str())
+            .bind(explanation)
+            .bind(serde_json::to_string(steps)?)
+            .bind(updated_at_ms)
+            .execute(&mut *transaction)
+            .await?;
+        append_event_typed_tx(
+            &mut transaction,
+            &run.session_id,
+            Some(execution_run_id),
+            "plan.updated",
+            Some(RunEventPayload::PlanUpdated {
+                explanation: explanation.map(str::to_owned),
+                plan: steps.to_vec(),
+            }),
+            json!({ "stepCount": steps.len() }),
+            updated_at_ms,
+        )
+        .await?;
+        transaction.commit().await?;
+        self.bump_session_environment_revision(&run.session_id)
+            .await?;
+        Ok(ExecutionPlanState {
+            session_id: run.session_id,
+            run_id: execution_run_id.clone(),
+            explanation: explanation.map(str::to_owned),
+            steps: steps.to_vec(),
+            updated_at_ms,
+        })
+    }
+
+    pub async fn get_execution_plan(
+        &self,
+        run_id: &RunId,
+    ) -> Result<Option<ExecutionPlanState>, AgentStoreError> {
+        let row = sqlx::query("SELECT * FROM execution_plans WHERE run_id = ?")
+            .bind(run_id.as_str())
+            .fetch_optional(&self.pool)
+            .await?;
+        row.as_ref().map(execution_plan_from_row).transpose()
+    }
+
+    pub async fn list_plan_documents(
         &self,
         session_id: &SessionId,
-    ) -> Result<Vec<ProposedPlan>, AgentStoreError> {
+    ) -> Result<Vec<PlanDocument>, AgentStoreError> {
         let rows = sqlx::query(
-            "SELECT * FROM proposed_plans WHERE session_id = ? ORDER BY revision ASC, id ASC",
+            "SELECT * FROM plan_documents WHERE session_id = ? ORDER BY revision ASC, id ASC",
         )
         .bind(session_id.as_str())
         .fetch_all(&self.pool)
         .await?;
-        rows.iter().map(proposed_plan_from_row).collect()
+        rows.iter().map(plan_document_from_row).collect()
     }
 
-    pub async fn accept_proposed_plan_idempotent(
+    pub async fn list_plan_confirmations(
         &self,
-        principal: &str,
-        idempotency_key: &str,
-        plan_id: &PlanId,
-        run: &RunRecord,
-    ) -> Result<(ProposedPlan, RunRecord), AgentStoreError> {
-        self.accept_proposed_plan_inner(principal, idempotency_key, plan_id, run, None)
-            .await
+        session_id: &SessionId,
+    ) -> Result<Vec<PlanConfirmation>, AgentStoreError> {
+        let rows = sqlx::query(
+            "SELECT c.* FROM plan_confirmations c JOIN plan_documents d ON d.id = c.plan_id WHERE d.session_id = ? ORDER BY d.revision ASC, d.id ASC",
+        )
+        .bind(session_id.as_str())
+        .fetch_all(&self.pool)
+        .await?;
+        rows.iter().map(plan_confirmation_from_row).collect()
     }
 
-    pub async fn accept_proposed_plan_authorized_idempotent(
+    pub async fn list_execution_plans(
         &self,
-        principal: &str,
-        idempotency_key: &str,
-        plan_id: &PlanId,
-        run: &RunRecord,
-        launch: AtomicRunLaunchInput<'_>,
-    ) -> Result<(ProposedPlan, RunRecord), AgentStoreError> {
-        self.accept_proposed_plan_inner(principal, idempotency_key, plan_id, run, Some(launch))
-            .await
-    }
-
-    async fn accept_proposed_plan_inner(
-        &self,
-        principal: &str,
-        idempotency_key: &str,
-        plan_id: &PlanId,
-        run: &RunRecord,
-        launch: Option<AtomicRunLaunchInput<'_>>,
-    ) -> Result<(ProposedPlan, RunRecord), AgentStoreError> {
-        let mut transaction = self.pool.begin().await?;
-        if let Some(existing_id) = sqlx::query_scalar::<_, String>(
-            "SELECT resource_id FROM idempotency_records WHERE principal = ? AND method = 'plan.accept' AND idempotency_key = ?",
+        session_id: &SessionId,
+    ) -> Result<Vec<ExecutionPlanState>, AgentStoreError> {
+        let rows = sqlx::query(
+            "SELECT * FROM execution_plans WHERE session_id = ? ORDER BY updated_at_ms ASC, run_id ASC",
         )
-        .bind(principal)
-        .bind(idempotency_key)
-        .fetch_optional(&mut *transaction)
-        .await?
-        {
-            let existing_run = get_run_tx(&mut transaction, &RunId::new(existing_id))
-                .await?
-                .ok_or_else(|| AgentStoreError::RunNotFound(run.id.clone()))?;
-            let accepted_plan_id = existing_run
-                .configuration
-                .accepted_plan_id
-                .as_ref()
-                .ok_or(AgentStoreError::ProposedPlanRunMismatch)?;
-            let plan = get_proposed_plan_tx(&mut transaction, accepted_plan_id)
-                .await?
-                .ok_or_else(|| AgentStoreError::ProposedPlanNotFound(accepted_plan_id.clone()))?;
-            if launch.is_some() {
-                run_bundle::require_authority_snapshot_tx(&mut transaction, &existing_run.id)
-                    .await?;
-            }
-            transaction.commit().await?;
-            return Ok((plan, existing_run));
-        }
-
-        let mut plan = get_proposed_plan_tx(&mut transaction, plan_id)
-            .await?
-            .ok_or_else(|| AgentStoreError::ProposedPlanNotFound(plan_id.clone()))?;
-        if plan.status != ProposedPlanStatus::Proposed {
-            return Err(AgentStoreError::ProposedPlanNotAcceptable(plan.id));
-        }
-        if run.session_id != plan.session_id
-            || run.status != RunStatus::Queued
-            || run.configuration.accepted_plan_id.as_ref() != Some(&plan.id)
-            || run.configuration.accepted_plan_revision != Some(plan.revision)
-        {
-            return Err(AgentStoreError::ProposedPlanRunMismatch);
-        }
-        let configuration_json = serde_json::to_string(&run.configuration)?;
-        sqlx::query(
-            "INSERT INTO runs (id, session_id, status, purpose, origin_json, generation, configuration_json, requested_capabilities_json, negotiated_capabilities_json, provider_capability_probe_json, capability_degradations_json, failure_code, created_at_ms, updated_at_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        )
-        .bind(run.id.as_str())
-        .bind(run.session_id.as_str())
-        .bind(run.status.as_str())
-        .bind(enum_to_db(&run.purpose)?)
-        .bind(serde_json::to_string(&run.origin)?)
-        .bind(i64::try_from(run.generation).unwrap_or(i64::MAX))
-        .bind(configuration_json)
-        .bind(serde_json::to_string(&run.requested_capabilities)?)
-        .bind(serde_json::to_string(&run.negotiated_capabilities)?)
-        .bind(serde_json::to_string(&run.provider_capability_probe)?)
-        .bind(serde_json::to_string(&run.capability_degradations)?)
-        .bind(&run.failure_code)
-        .bind(run.created_at_ms)
-        .bind(run.updated_at_ms)
-        .execute(&mut *transaction)
+        .bind(session_id.as_str())
+        .fetch_all(&self.pool)
         .await?;
-        sqlx::query(
-            "INSERT INTO run_attachments (run_id, attachment_id) SELECT ?, attachment_id FROM run_attachments WHERE run_id = ?",
-        )
-        .bind(run.id.as_str())
-        .bind(plan.run_id.as_str())
-        .execute(&mut *transaction)
-        .await?;
-        if let Some(launch) = launch {
-            let session_row = sqlx::query("SELECT * FROM sessions WHERE id = ?")
-                .bind(plan.session_id.as_str())
-                .fetch_one(&mut *transaction)
-                .await?;
-            let session = session_from_row(&session_row)?;
-            run_bundle::insert_atomic_launch_state_tx(&mut transaction, &session, run, launch)
-                .await?;
-        }
-        let accepted_at_ms = run.created_at_ms;
-        sqlx::query(
-            "UPDATE proposed_plans SET status = 'accepted', accepted_run_id = ?, accepted_at_ms = ? WHERE id = ? AND status = 'proposed'",
-        )
-        .bind(run.id.as_str())
-        .bind(accepted_at_ms)
-        .bind(plan.id.as_str())
-        .execute(&mut *transaction)
-        .await?;
-        plan.status = ProposedPlanStatus::Accepted;
-        plan.accepted_run_id = Some(run.id.clone());
-        plan.accepted_at_ms = Some(accepted_at_ms);
-        append_event_tx(
-            &mut transaction,
-            &run.session_id,
-            Some(&run.id),
-            "run.queued",
-            json!({ "status": run.status, "acceptedPlanId": plan.id, "planRevision": plan.revision }),
-            run.created_at_ms,
-        )
-        .await?;
-        append_event_tx(
-            &mut transaction,
-            &run.session_id,
-            Some(&run.id),
-            "plan.accepted",
-            json!({ "planId": plan.id, "revision": plan.revision, "executionRunId": run.id }),
-            accepted_at_ms,
-        )
-        .await?;
-        sqlx::query(
-            "INSERT INTO idempotency_records (principal, method, idempotency_key, resource_id, response_json, created_at_ms) VALUES (?, 'plan.accept', ?, ?, '{}', ?)",
-        )
-        .bind(principal)
-        .bind(idempotency_key)
-        .bind(run.id.as_str())
-        .bind(run.created_at_ms)
-        .execute(&mut *transaction)
-        .await?;
-        transaction.commit().await?;
-        Ok((plan, run.clone()))
+        rows.iter().map(execution_plan_from_row).collect()
     }
 
     pub async fn create_checkout(
@@ -857,6 +817,21 @@ impl AgentStore {
             .bind(run_id.as_str())
             .execute(&mut *transaction)
             .await?;
+            let accepted_plan_execution = sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM plan_confirmations WHERE accepted_run_id = ? AND status = 'accepted'",
+            )
+            .bind(run_id.as_str())
+            .fetch_one(&mut *transaction)
+            .await?
+                > 0;
+            if accepted_plan_execution {
+                environment::bump_session_environment_revision_tx(
+                    &mut transaction,
+                    &current.session_id,
+                    updated_at_ms,
+                )
+                .await?;
+            }
         }
         let updated = get_run_tx(&mut transaction, run_id)
             .await?

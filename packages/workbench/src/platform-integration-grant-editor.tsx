@@ -230,6 +230,7 @@ export function ChannelGrantEditor(props: {
                             permissionPolicy: withConnectorRules(
                               props.value.permissionPolicy,
                               connectorSelections,
+                              connectors(),
                             ),
                           });
                         }}
@@ -237,47 +238,52 @@ export function ChannelGrantEditor(props: {
                       <Show when={selected()}>
                         {(value) => (
                           <>
-                            <TextField
-                              label={props.zh ? "允许动作" : "Allowed actions"}
-                              value={value().allowedActions.join(", ")}
-                              disabled={Boolean(props.disabled)}
-                              onInput={(event) => {
-                                const connectorSelections = props.value.connectorSelections.map(
-                                  (selection) =>
-                                    selection.accountId === option.account.id
-                                      ? {
-                                          ...selection,
-                                          allowedActions: splitValues(event.currentTarget.value),
-                                        }
-                                      : selection,
-                                );
-                                update({
-                                  connectorSelections,
-                                  permissionPolicy: withConnectorRules(
-                                    props.value.permissionPolicy,
-                                    connectorSelections,
-                                  ),
-                                });
-                              }}
-                            />
-                            <TextField
-                              label={props.zh ? "其中只读动作" : "Read-only actions"}
-                              value={
-                                props.value.permissionPolicy.rules.connectors
-                                  .find((rule) => rule.accountId === option.account.id)
-                                  ?.readOnlyActions.join(", ") ?? ""
-                              }
-                              disabled={Boolean(props.disabled)}
-                              onInput={(event) =>
-                                update({
-                                  permissionPolicy: withConnectorReadOnlyActions(
-                                    props.value.permissionPolicy,
-                                    option.account.id,
-                                    splitValues(event.currentTarget.value),
-                                  ),
-                                })
-                              }
-                            />
+                            <div class="integration-grant-options">
+                              <For each={option.descriptor.actions}>
+                                {(action) => (
+                                  <Checkbox
+                                    label={`${action.name} · ${
+                                      action.effect === "read_only"
+                                        ? props.zh
+                                          ? "只读"
+                                          : "Read only"
+                                        : props.zh
+                                          ? "外部操作"
+                                          : "External action"
+                                    }`}
+                                    checked={value().allowedActions.includes(action.name)}
+                                    disabled={
+                                      Boolean(props.disabled) ||
+                                      (props.value.permissionPolicy.level === "read_only" &&
+                                        action.effect !== "read_only")
+                                    }
+                                    onChange={(event) => {
+                                      const connectorSelections =
+                                        props.value.connectorSelections.map((selection) =>
+                                          selection.accountId === option.account.id
+                                            ? {
+                                                ...selection,
+                                                allowedActions: toggle(
+                                                  selection.allowedActions,
+                                                  action.name,
+                                                  event.currentTarget.checked,
+                                                ),
+                                              }
+                                            : selection,
+                                        );
+                                      update({
+                                        connectorSelections,
+                                        permissionPolicy: withConnectorRules(
+                                          props.value.permissionPolicy,
+                                          connectorSelections,
+                                          connectors(),
+                                        ),
+                                      });
+                                    }}
+                                  />
+                                )}
+                              </For>
+                            </div>
                           </>
                         )}
                       </Show>
@@ -389,7 +395,7 @@ function toggleConnector(
     {
       accountId: option.account.id,
       contributionRevision: option.revision,
-      allowedActions: [...option.descriptor.actions],
+      allowedActions: option.descriptor.actions.map((action) => action.name),
     },
   ];
 }
@@ -397,44 +403,28 @@ function toggleConnector(
 function withConnectorRules(
   policy: ChannelGrant["permissionPolicy"],
   selections: ConnectorRevisionSelection[],
+  options: ConnectorOption[],
 ): ChannelGrant["permissionPolicy"] {
   return {
     ...policy,
     rules: {
       ...policy.rules,
-      connectors: selections.map((selection) => ({
-        accountId: selection.accountId,
-        actions: [...selection.allowedActions],
-        readOnlyActions:
-          policy.level === "read_only"
-            ? [...selection.allowedActions]
-            : (policy.rules.connectors
-                .find((rule) => rule.accountId === selection.accountId)
-                ?.readOnlyActions.filter((action) => selection.allowedActions.includes(action)) ??
-              []),
-        contributionRevision: selection.contributionRevision.actionHash ?? "",
-      })),
-    },
-  };
-}
-
-function withConnectorReadOnlyActions(
-  policy: ChannelGrant["permissionPolicy"],
-  accountId: string,
-  actions: string[],
-): ChannelGrant["permissionPolicy"] {
-  return {
-    ...policy,
-    rules: {
-      ...policy.rules,
-      connectors: policy.rules.connectors.map((rule) =>
-        rule.accountId === accountId
-          ? {
-              ...rule,
-              readOnlyActions: actions.filter((action) => rule.actions.includes(action)),
-            }
-          : rule,
-      ),
+      connectors: selections.map((selection) => {
+        const descriptor = options.find(
+          (option) => option.account.id === selection.accountId,
+        )?.descriptor;
+        const readOnlyActions = selection.allowedActions.filter((name) =>
+          descriptor?.actions.some(
+            (action) => action.name === name && action.effect === "read_only",
+          ),
+        );
+        return {
+          accountId: selection.accountId,
+          actions: [...selection.allowedActions],
+          readOnlyActions,
+          contributionRevision: selection.contributionRevision.actionHash ?? "",
+        };
+      }),
     },
   };
 }

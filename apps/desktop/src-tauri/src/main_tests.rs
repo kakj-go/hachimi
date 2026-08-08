@@ -99,7 +99,7 @@ fn provider_switches_force_legacy_chat_and_strip_remote_context() {
     let mut settings = hachimi_protocol::AppSettings::default().llm;
     settings.protocol = hachimi_protocol::ProviderProtocolKind::Responses;
     settings.embedding_model_name = "embedding-fixture".into();
-    settings.reasoning_summary = true;
+    settings.reasoning_summary = hachimi_protocol::ReasoningSummaryMode::Detailed;
     settings.remote_compaction = true;
     let mut features = hachimi_core::RuntimeFeatureSet::all_enabled();
     features.provider_extensions = false;
@@ -109,7 +109,10 @@ fn provider_switches_force_legacy_chat_and_strip_remote_context() {
         hachimi_protocol::ProviderProtocolKind::ChatCompletions
     );
     assert!(legacy.embedding_model_name.is_empty());
-    assert!(!legacy.reasoning_summary);
+    assert_eq!(
+        legacy.reasoning_summary,
+        hachimi_protocol::ReasoningSummaryMode::None
+    );
     assert!(!legacy.remote_compaction);
 
     features.provider_extensions = true;
@@ -119,7 +122,10 @@ fn provider_switches_force_legacy_chat_and_strip_remote_context() {
         responses.protocol,
         hachimi_protocol::ProviderProtocolKind::Responses
     );
-    assert!(!responses.reasoning_summary);
+    assert_eq!(
+        responses.reasoning_summary,
+        hachimi_protocol::ReasoningSummaryMode::None
+    );
     assert!(!responses.remote_compaction);
 }
 

@@ -226,6 +226,7 @@ impl McpClientError {
 pub struct McpStdioClient {
     server_info: McpServerInfo,
     process: Mutex<Option<McpProcess>>,
+    shutdown: CancellationToken,
     request_timeout: Duration,
     max_message_bytes: usize,
 }
@@ -277,6 +278,7 @@ impl McpStdioClient {
         process: McpProcess,
         cancellation: CancellationToken,
     ) -> Result<Self, McpClientError> {
+        let shutdown = CancellationToken::new();
         let mut client = Self {
             server_info: McpServerInfo {
                 server_id: config.server_id.clone(),
@@ -289,6 +291,7 @@ impl McpStdioClient {
                 prompts_supported: false,
             },
             process: Mutex::new(Some(process)),
+            shutdown,
             request_timeout: config.request_timeout,
             max_message_bytes: config.max_message_bytes,
         };
@@ -624,6 +627,7 @@ impl McpStdioClient {
     }
 
     pub async fn shutdown(&self) -> Result<(), McpClientError> {
+        self.shutdown.cancel();
         let mut guard = self.process.lock().await;
         if let Some(mut process) = guard.take() {
             process.terminate().await?;
@@ -714,6 +718,11 @@ impl McpStdioClient {
                     request_cancellation.cancel();
                     // Give a brokered elicitation one bounded poll window to cancel its persisted
                     // UserInput before the transport future is dropped and the process is killed.
+                    let _ = tokio::time::timeout(Duration::from_millis(250), &mut request).await;
+                    Err(McpClientError::Cancelled)
+                },
+                () = self.shutdown.cancelled() => {
+                    request_cancellation.cancel();
                     let _ = tokio::time::timeout(Duration::from_millis(250), &mut request).await;
                     Err(McpClientError::Cancelled)
                 },

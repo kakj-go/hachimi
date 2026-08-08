@@ -27,12 +27,12 @@ use hachimi_process_policy::{ProcessPolicy, tokio_command};
 use hachimi_protocol::{
     AgentPermissionPolicy, AttachmentId, AttachmentRecord, AuthorityMode, CheckoutId, CheckoutKind,
     CheckoutRecord, CheckoutStatus, ExecutionTarget, GitRefRecord, ItemPayload, LlmSettings,
-    PlanRevisionRequest, ProjectId, ProjectRecord, ProviderCapabilities, RunBudget, RunId,
-    RunOrigin, RunPurpose, ScopedPermissionRules, SessionContextBinding, SessionId,
-    WorkbenchAttachmentPreview, WorkbenchGitAction, WorkbenchGitPhaseResult,
-    WorkbenchGitPhaseStatus, WorkbenchGitRequest, WorkbenchGitResponse, WorkbenchSessionListItem,
-    WorkbenchSessionSnapshot, WorkbenchTaskSnapshot, WorkbenchTaskStartRequest, WorkloadKind,
-    WorkspaceId,
+    PlanId, PlanRevisionRequest, PlanSkipRequest, ProjectId, ProjectRecord, ProviderCapabilities,
+    RunBudget, RunId, RunOrigin, RunPurpose, ScopedPermissionRules, SessionContextBinding,
+    SessionId, WorkbenchAttachmentPreview, WorkbenchGitAction, WorkbenchGitPhaseResult,
+    WorkbenchGitPhaseStatus, WorkbenchGitRequest, WorkbenchGitResponse, WorkbenchPlanSkipSnapshot,
+    WorkbenchSessionListItem, WorkbenchSessionSnapshot, WorkbenchTaskSnapshot,
+    WorkbenchTaskStartRequest, WorkloadKind, WorkspaceId,
 };
 use hachimi_storage::{AgentStore, AgentStoreError, IdempotentMutationClaim};
 use sha2::{Digest, Sha256};
@@ -311,7 +311,9 @@ impl WorkbenchService {
             .into_iter()
             .filter(|approval| approval.session_id == *session_id)
             .collect();
-        let proposed_plans = self.store.list_proposed_plans(session_id).await?;
+        let plan_documents = self.store.list_plan_documents(session_id).await?;
+        let plan_confirmations = self.store.list_plan_confirmations(session_id).await?;
+        let execution_plans = self.store.list_execution_plans(session_id).await?;
         let artifacts = self.store.list_session_artifacts(session_id).await?;
         let agent_tasks = self.store.list_agent_tasks_for_session(session_id).await?;
         let run_summaries = self.store.list_run_summaries(session_id).await?;
@@ -341,7 +343,9 @@ impl WorkbenchService {
             transcript,
             attachments,
             pending_approvals,
-            proposed_plans,
+            plan_documents,
+            plan_confirmations,
+            execution_plans,
             artifacts,
             agent_tasks,
             run_summaries,
@@ -363,11 +367,20 @@ impl WorkbenchService {
     ) -> Result<WorkbenchTaskSnapshot, WorkbenchError> {
         let plan = self
             .store
-            .get_proposed_plan(&request.plan_id)
+            .get_plan_document(&request.plan_id)
             .await?
             .ok_or_else(|| AgentStoreError::ProposedPlanNotFound(request.plan_id.clone()))?;
-        if plan.status != hachimi_protocol::ProposedPlanStatus::Proposed
-            || plan.revision != request.expected_revision
+        let confirmation = self
+            .store
+            .get_plan_confirmation(&request.plan_id)
+            .await?
+            .ok_or_else(|| AgentStoreError::ProposedPlanNotFound(request.plan_id.clone()))?;
+        if plan.revision != request.expected_revision
+            || matches!(
+                confirmation.status,
+                hachimi_protocol::PlanConfirmationStatus::Accepted
+                    | hachimi_protocol::PlanConfirmationStatus::Skipped
+            )
         {
             return Err(WorkbenchError::StalePlanRevision);
         }
@@ -382,9 +395,9 @@ impl WorkbenchService {
             .ok_or_else(|| WorkbenchError::SessionNotFound(plan.session_id.clone()))?;
         let source_run = self
             .store
-            .get_run(&plan.run_id)
+            .get_run(&plan.source_run_id)
             .await?
-            .ok_or_else(|| AgentStoreError::RunNotFound(plan.run_id.clone()))?;
+            .ok_or_else(|| AgentStoreError::RunNotFound(plan.source_run_id.clone()))?;
         let (project_id, execution_target) = match &session.context {
             SessionContextBinding::Project {
                 project_id,
@@ -410,30 +423,71 @@ impl WorkbenchService {
         };
         let attachment_ids = self
             .store
-            .list_run_managed_attachments(&plan.run_id)
+            .list_run_managed_attachments(&plan.source_run_id)
             .await?
             .into_iter()
             .map(|record| record.attachment.id)
             .collect();
-        self.create_task(
-            &WorkbenchTaskStartRequest {
-                idempotency_key: request.idempotency_key.clone(),
-                entry_profile: session.entry_profile,
-                session_id: Some(session.id),
-                project_id,
-                prompt: instructions.to_owned(),
-                execution_target,
-                behavior_mode: hachimi_protocol::BehaviorMode::Plan,
-                permission_profile: source_run.configuration.permission_profile,
-                attachment_ids,
-                skill_ids: Vec::new(),
-            },
-            model_snapshot,
-            principal,
-            &request.idempotency_key,
-            cancellation,
-        )
-        .await
+        let task = self
+            .create_task_inner(
+                &WorkbenchTaskStartRequest {
+                    idempotency_key: request.idempotency_key.clone(),
+                    entry_profile: session.entry_profile,
+                    session_id: Some(session.id),
+                    project_id,
+                    prompt: instructions.to_owned(),
+                    execution_target,
+                    behavior_mode: hachimi_protocol::BehaviorMode::Plan,
+                    permission_profile: source_run.configuration.permission_profile,
+                    attachment_ids,
+                    skill_ids: Vec::new(),
+                },
+                model_snapshot,
+                principal,
+                &request.idempotency_key,
+                cancellation,
+                Some((&plan.id, plan.revision)),
+            )
+            .await?;
+        Ok(task)
+    }
+
+    pub async fn skip_plan(
+        &self,
+        request: &PlanSkipRequest,
+    ) -> Result<WorkbenchPlanSkipSnapshot, WorkbenchError> {
+        let plan = self
+            .store
+            .get_plan_document(&request.plan_id)
+            .await?
+            .ok_or_else(|| AgentStoreError::ProposedPlanNotFound(request.plan_id.clone()))?;
+        if plan.revision != request.expected_revision {
+            return Err(WorkbenchError::StalePlanRevision);
+        }
+        let confirmation = self
+            .store
+            .get_plan_confirmation(&request.plan_id)
+            .await?
+            .ok_or_else(|| AgentStoreError::ProposedPlanNotFound(request.plan_id.clone()))?;
+        let confirmation = match confirmation.status {
+            hachimi_protocol::PlanConfirmationStatus::Pending => {
+                self.store
+                    .resolve_plan_confirmation(
+                        &plan.id,
+                        hachimi_protocol::PlanConfirmationStatus::Pending,
+                        hachimi_protocol::PlanConfirmationStatus::Skipped,
+                        now_ms(),
+                    )
+                    .await?
+            }
+            hachimi_protocol::PlanConfirmationStatus::Skipped => confirmation,
+            _ => {
+                return Err(WorkbenchError::Store(
+                    AgentStoreError::ProposedPlanNotAcceptable(plan.id),
+                ));
+            }
+        };
+        Ok(WorkbenchPlanSkipSnapshot { plan, confirmation })
     }
 
     pub async fn git_refs(
@@ -815,6 +869,26 @@ impl WorkbenchService {
         idempotency_key: &str,
         cancellation: &CancellationToken,
     ) -> Result<WorkbenchTaskSnapshot, WorkbenchError> {
+        self.create_task_inner(
+            request,
+            model_snapshot,
+            principal,
+            idempotency_key,
+            cancellation,
+            None,
+        )
+        .await
+    }
+
+    async fn create_task_inner(
+        &self,
+        request: &WorkbenchTaskStartRequest,
+        model_snapshot: LlmSettings,
+        principal: &str,
+        idempotency_key: &str,
+        cancellation: &CancellationToken,
+        revised_plan: Option<(&PlanId, u32)>,
+    ) -> Result<WorkbenchTaskSnapshot, WorkbenchError> {
         let prompt = request.prompt.trim();
         if prompt.is_empty() || prompt.chars().count() > 32_000 {
             return Err(WorkbenchError::InvalidPrompt);
@@ -969,17 +1043,35 @@ impl WorkbenchService {
         }
         let launcher = AgentRunLauncher::new(self.store.clone());
         let launched = if let Some(session) = existing_session {
-            launcher
-                .launch_in_session(
-                    AgentRunLaunchRequest {
-                        create: create_request,
-                        policy,
-                        authority_mode: AuthorityMode::Interactive,
-                    },
-                    session,
-                )
-                .await?
+            if let Some((plan_id, expected_revision)) = revised_plan {
+                launcher
+                    .launch_plan_revision_in_session(
+                        AgentRunLaunchRequest {
+                            create: create_request,
+                            policy,
+                            authority_mode: AuthorityMode::Interactive,
+                        },
+                        session,
+                        plan_id,
+                        expected_revision,
+                    )
+                    .await?
+            } else {
+                launcher
+                    .launch_in_session(
+                        AgentRunLaunchRequest {
+                            create: create_request,
+                            policy,
+                            authority_mode: AuthorityMode::Interactive,
+                        },
+                        session,
+                    )
+                    .await?
+            }
         } else {
+            if revised_plan.is_some() {
+                return Err(WorkbenchError::SessionContextMismatch);
+            }
             launcher
                 .launch_new(AgentRunLaunchRequest {
                     create: create_request,
@@ -1236,14 +1328,16 @@ fn requested_provider_capabilities(settings: &LlmSettings) -> ProviderCapabiliti
 #[cfg(test)]
 mod tests {
     use hachimi_protocol::{
-        ClientId, MutationContext, PlanStep, PlanStepId, PlanStepStatus, RequestId,
+        ClientId, ItemId, ItemRelations, ItemStatus, MutationContext, RequestId, TranscriptItem,
+        TranscriptItemKind,
     };
 
     use std::process::Command as StdCommand;
 
     use hachimi_protocol::{
-        BehaviorMode, EntryProfile, PermissionProfile, PlanAcceptanceRequest, PlanId, ProposedPlan,
-        ProposedPlanStatus, RunRecord, RunStatus, WorkbenchTaskStartRequest,
+        BehaviorMode, EntryProfile, PermissionProfile, PlanAcceptanceRequest,
+        PlanConfirmationStatus, PlanDocument, PlanId, RunRecord, RunStatus,
+        WorkbenchTaskStartRequest,
     };
 
     use super::*;
@@ -1357,29 +1451,36 @@ mod tests {
             .transition_run(&snapshot.run.id, RunStatus::Succeeded, None)
             .await
             .expect("succeeded");
-        let plan = service
+        let source_item_id = ItemId::random();
+        service
             .store()
-            .create_proposed_plan(ProposedPlan {
+            .append_transcript_item(TranscriptItem {
+                id: source_item_id.clone(),
+                session_id: snapshot.session.id.clone(),
+                run_id: Some(snapshot.run.id.clone()),
+                sequence: 0,
+                kind: TranscriptItemKind::Plan,
+                status: ItemStatus::Completed,
+                payload: ItemPayload::Plan {
+                    text: "# Inspect the project".into(),
+                },
+                relations: ItemRelations::default(),
+                created_at_ms: now_ms(),
+            })
+            .await
+            .expect("plan item");
+        let (plan, _) = service
+            .store()
+            .create_plan_document(PlanDocument {
                 id: PlanId::from("plan-1"),
                 session_id: snapshot.session.id.clone(),
-                run_id: snapshot.run.id.clone(),
+                source_run_id: snapshot.run.id.clone(),
+                source_item_id,
                 revision: 0,
+                title: "Inspect the project".into(),
                 goal: "Inspect the project".into(),
-                assumptions: Vec::new(),
-                steps: vec![PlanStep {
-                    id: PlanStepId::from("step-1"),
-                    description: "Update README".into(),
-                    status: PlanStepStatus::Pending,
-                }],
-                affected_resources: vec!["README.md".into()],
-                verification: vec!["Review diff".into()],
-                risks: Vec::new(),
-                open_questions: Vec::new(),
-                content_markdown: "1. Update README\n2. Review diff".into(),
-                status: ProposedPlanStatus::Proposed,
-                accepted_run_id: None,
+                content_markdown: "# Inspect the project\n1. Update README\n2. Review diff".into(),
                 created_at_ms: now_ms(),
-                accepted_at_ms: None,
             })
             .await
             .expect("plan");
@@ -1393,7 +1494,10 @@ mod tests {
             .accept_plan(&acceptance_request, LlmSettings::default(), "test-user")
             .await
             .expect("accept");
-        assert_eq!(accepted.plan.status, ProposedPlanStatus::Accepted);
+        assert_eq!(
+            accepted.confirmation.status,
+            PlanConfirmationStatus::Accepted
+        );
         assert_eq!(
             accepted.task.run.configuration.behavior_mode,
             BehaviorMode::Default

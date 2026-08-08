@@ -16,6 +16,33 @@ pub enum StructuredOutputMode {
     Disabled,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ReasoningSummaryMode {
+    #[default]
+    Auto,
+    Concise,
+    Detailed,
+    None,
+}
+
+impl ReasoningSummaryMode {
+    #[must_use]
+    pub const fn is_enabled(self) -> bool {
+        !matches!(self, Self::None)
+    }
+
+    #[must_use]
+    pub const fn as_provider_value(self) -> Option<&'static str> {
+        match self {
+            Self::Auto => Some("auto"),
+            Self::Concise => Some("concise"),
+            Self::Detailed => Some("detailed"),
+            Self::None => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type)]
 #[serde(rename_all = "snake_case")]
 pub enum ProviderCapabilityProbeSource {
@@ -49,7 +76,7 @@ pub struct LlmSettings {
     #[serde(default)]
     pub embedding_model_name: String,
     #[serde(default)]
-    pub reasoning_summary: bool,
+    pub reasoning_summary: ReasoningSummaryMode,
     #[serde(default)]
     pub remote_compaction: bool,
     pub max_input_tokens: u32,
@@ -62,18 +89,43 @@ impl Default for LlmSettings {
     fn default() -> Self {
         Self {
             base_url: "http://localhost:11434/v1".into(),
-            model_name: "gemma4:e4b".into(),
+            model_name: "gpt-5.6-sol".into(),
             protocol: ProviderProtocolKind::ChatCompletions,
             compatibility_profile_id: default_provider_profile(),
             provider_endpoint_id: None,
             provider_account_id: None,
             embedding_model_name: String::new(),
-            reasoning_summary: false,
+            reasoning_summary: ReasoningSummaryMode::None,
             remote_compaction: false,
-            max_input_tokens: 0,
-            max_output_tokens: 0,
+            max_input_tokens: 1_050_000,
+            max_output_tokens: 128_000,
             structured_output_mode: StructuredOutputMode::Auto,
         }
+    }
+}
+
+impl LlmSettings {
+    /// Updates only the previous built-in defaults, leaving custom provider settings intact.
+    pub fn upgrade_legacy_defaults(&mut self) -> bool {
+        if self.base_url != "http://localhost:11434/v1"
+            || self.model_name != "gemma4:e4b"
+            || self.protocol != ProviderProtocolKind::ChatCompletions
+            || self.compatibility_profile_id != "openai-strict"
+            || self.provider_endpoint_id.is_some()
+            || self.provider_account_id.is_some()
+            || !self.embedding_model_name.is_empty()
+            || self.max_input_tokens != 0
+            || self.max_output_tokens != 0
+            || self.remote_compaction
+            || self.structured_output_mode != StructuredOutputMode::Auto
+        {
+            return false;
+        }
+        let defaults = Self::default();
+        self.model_name = defaults.model_name;
+        self.max_input_tokens = defaults.max_input_tokens;
+        self.max_output_tokens = defaults.max_output_tokens;
+        true
     }
 }
 
@@ -87,7 +139,7 @@ pub struct LlmSettingsView {
     pub provider_endpoint_id: Option<ProviderEndpointId>,
     pub provider_account_id: Option<ProviderAccountId>,
     pub embedding_model_name: String,
-    pub reasoning_summary: bool,
+    pub reasoning_summary: ReasoningSummaryMode,
     pub remote_compaction: bool,
     pub max_input_tokens: u32,
     pub max_output_tokens: u32,
@@ -126,7 +178,7 @@ pub struct LlmSettingsInput {
     pub provider_endpoint_id: Option<ProviderEndpointId>,
     pub provider_account_id: Option<ProviderAccountId>,
     pub embedding_model_name: String,
-    pub reasoning_summary: bool,
+    pub reasoning_summary: ReasoningSummaryMode,
     pub remote_compaction: bool,
     pub max_input_tokens: u32,
     pub max_output_tokens: u32,
@@ -143,4 +195,18 @@ pub struct LlmTestResult {
     pub latency_ms: u32,
     pub response_preview: String,
     pub capability_probe: ProviderCapabilityProbe,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_chat_completions_settings_disable_response_only_features() {
+        let settings = LlmSettings::default();
+
+        assert_eq!(settings.protocol, ProviderProtocolKind::ChatCompletions);
+        assert_eq!(settings.reasoning_summary, ReasoningSummaryMode::None);
+        assert!(!settings.remote_compaction);
+    }
 }

@@ -182,7 +182,7 @@ impl OpenAiCompatibleRuntime {
         let max_output_tokens =
             (settings.max_output_tokens > 0).then_some(u64::from(settings.max_output_tokens));
         let responses = settings.protocol == ProviderProtocolKind::Responses;
-        let reasoning_summary = responses && settings.reasoning_summary;
+        let reasoning_summary = responses && settings.reasoning_summary.is_enabled();
         let remote_compaction = responses && settings.remote_compaction;
         let embeddings = !settings.embedding_model_name.trim().is_empty();
         let mut runtime = Self::new(
@@ -1163,7 +1163,7 @@ pub fn validate_input(input: &LlmSettingsInput) -> Result<LlmSettings, LlmError>
         ));
     }
     if input.protocol != ProviderProtocolKind::Responses
-        && (input.reasoning_summary || input.remote_compaction)
+        && (input.reasoning_summary.is_enabled() || input.remote_compaction)
     {
         return Err(LlmError::InvalidConfiguration(
             "reasoning summary 与远程压缩仅支持 Responses 协议".into(),
@@ -1256,7 +1256,7 @@ pub async fn test_connection(
     if !completed || content.trim().is_empty() {
         return Err(LlmError::InvalidResponse);
     }
-    if settings.reasoning_summary && public_summary.trim().is_empty() {
+    if settings.reasoning_summary.is_enabled() && public_summary.trim().is_empty() {
         return Err(LlmError::InvalidConfiguration(
             "Provider 未返回已配置的公开 reasoning summary".into(),
         ));
@@ -1391,7 +1391,7 @@ mod tests {
             provider_endpoint_id: None,
             provider_account_id: None,
             embedding_model_name: String::new(),
-            reasoning_summary: false,
+            reasoning_summary: hachimi_protocol::ReasoningSummaryMode::None,
             remote_compaction: false,
             max_input_tokens: 0,
             max_output_tokens: 0,

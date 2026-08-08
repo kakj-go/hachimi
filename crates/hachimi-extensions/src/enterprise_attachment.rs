@@ -68,6 +68,7 @@ impl PluginHost {
         if staging.is_file() {
             fs::remove_file(&staging)?;
         }
+        dispatch_download(self, request).await?;
         let receipt = if request.provider_id.supports_enterprise_api() {
             let mut raw_credential = load_enterprise_credential(self, request).await?;
             let credential = EnterpriseCredential::parse(&raw_credential)
@@ -324,7 +325,8 @@ async fn claim_download(
                     .await?;
             }
             "completed" => return Err(ExtensionHostError::EnterpriseAttachmentDrift),
-            "claimed" | "indeterminate" => {
+            "claimed" => {}
+            "dispatched" | "indeterminate" => {
                 return Err(ExtensionHostError::EnterpriseIndeterminate);
             }
             _ => return Err(ExtensionHostError::EnterpriseTransport),
@@ -338,6 +340,23 @@ async fn claim_download(
         .execute(&mut *transaction)
         .await?;
     transaction.commit().await?;
+    Ok(())
+}
+
+async fn dispatch_download(
+    host: &PluginHost,
+    request: &EnterpriseAttachmentDownloadRequest,
+) -> Result<(), ExtensionHostError> {
+    let result = sqlx::query("UPDATE enterprise_operation_ledger SET status = 'dispatched', provider_request_id = COALESCE(provider_request_id, ?), updated_at_ms = ? WHERE account_id = ? AND idempotency_key = ? AND status = 'claimed'")
+        .bind(&request.idempotency_key)
+        .bind(now_ms())
+        .bind(&request.account_id)
+        .bind(&request.idempotency_key)
+        .execute(host.store.pool())
+        .await?;
+    if result.rows_affected() != 1 {
+        return Err(ExtensionHostError::EnterpriseIndeterminate);
+    }
     Ok(())
 }
 
@@ -647,7 +666,7 @@ async fn complete_download(
         .bind(&request.remote_id)
         .execute(&mut *transaction)
         .await?;
-    sqlx::query("UPDATE enterprise_operation_ledger SET status = 'completed', provider_result_id = ?, result_json = ?, error_code = NULL, updated_at_ms = ? WHERE account_id = ? AND idempotency_key = ? AND status = 'claimed'")
+    sqlx::query("UPDATE enterprise_operation_ledger SET status = 'completed', provider_result_id = ?, result_json = ?, error_code = NULL, updated_at_ms = ? WHERE account_id = ? AND idempotency_key = ? AND status = 'dispatched'")
         .bind(result.artifact_id.as_str())
         .bind(serde_json::to_string(result)?)
         .bind(now_ms())
@@ -730,7 +749,7 @@ async fn fail_download(
         .bind(&request.remote_id)
         .execute(&mut *transaction)
         .await?;
-    sqlx::query("UPDATE enterprise_operation_ledger SET status = ?, error_code = ?, updated_at_ms = ? WHERE account_id = ? AND idempotency_key = ? AND status = 'claimed'")
+    sqlx::query("UPDATE enterprise_operation_ledger SET status = ?, error_code = ?, updated_at_ms = ? WHERE account_id = ? AND idempotency_key = ? AND status = 'dispatched'")
         .bind(status)
         .bind(code)
         .bind(now_ms())

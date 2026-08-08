@@ -6,7 +6,7 @@ use std::{
 use hachimi_protocol::{
     AgentPermissionPolicy, AgentWorkspace, AgentWorkspaceKind, AgentWorkspaceOwner,
     AgentWorkspaceStatus, ApprovalRequestRecord, RunAuthoritySnapshot, RunId, RunOrigin, RunRecord,
-    ScheduleId, SessionId, WorkspaceId,
+    ScheduleId, SessionId, SkillId, WorkspaceId,
 };
 use sqlx::Row;
 
@@ -648,6 +648,41 @@ impl AgentStore {
         value
             .map(|value| serde_json::from_str(&value))
             .transpose()
+            .map_err(Into::into)
+    }
+
+    pub async fn store_permission_config(
+        &self,
+        owner_key: &str,
+        policy: &AgentPermissionPolicy,
+        skill_ids: &[SkillId],
+        timestamp_ms: i64,
+    ) -> Result<(), AgentStoreError> {
+        let mut transaction = self.pool().begin().await?;
+        sqlx::query("INSERT INTO agent_permission_policies(owner_key, policy_json, skill_allowlist_json, revision, updated_at_ms) VALUES(?, ?, ?, ?, ?) ON CONFLICT(owner_key) DO UPDATE SET policy_json = excluded.policy_json, skill_allowlist_json = excluded.skill_allowlist_json, revision = excluded.revision, updated_at_ms = excluded.updated_at_ms")
+            .bind(owner_key)
+            .bind(serde_json::to_string(policy)?)
+            .bind(serde_json::to_string(skill_ids)?)
+            .bind(i64::try_from(policy.revision).unwrap_or(i64::MAX))
+            .bind(timestamp_ms)
+            .execute(&mut *transaction)
+            .await?;
+        transaction.commit().await?;
+        Ok(())
+    }
+
+    pub async fn permission_skill_ids(
+        &self,
+        owner_key: &str,
+    ) -> Result<Vec<SkillId>, AgentStoreError> {
+        let value = sqlx::query_scalar::<_, String>(
+            "SELECT skill_allowlist_json FROM agent_permission_policies WHERE owner_key = ?",
+        )
+        .bind(owner_key)
+        .fetch_optional(self.pool())
+        .await?;
+        value
+            .map_or_else(|| Ok(Vec::new()), |value| serde_json::from_str(&value))
             .map_err(Into::into)
     }
 

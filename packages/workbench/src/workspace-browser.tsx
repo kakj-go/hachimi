@@ -100,7 +100,9 @@ export function WorkspaceBrowser(props: {
     const run = props.initialDiffRunId
       ? props.snapshot.runs.find((candidate) => candidate.id === props.initialDiffRunId)
       : latestRun();
-    if (diffScope() === "run" && run) return { kind: "run", run_id: run.id };
+    if (diffScope() === "run" && (run || props.initialDiffRunId)) {
+      return { kind: "run", run_id: run?.id ?? props.initialDiffRunId! };
+    }
     const currentCheckoutId = checkoutId();
     if (diffScope() === "session" && currentCheckoutId) {
       return {
@@ -583,6 +585,7 @@ export function WorkspaceBrowser(props: {
                     saving={saving()}
                     conflict={saveConflict()}
                     showHeader={false}
+                    workspaceRoot={props.snapshot.checkout?.path}
                     locale={i18n.locale()}
                     readOnlyMessage={
                       firstChunk()?.binary
@@ -604,6 +607,7 @@ export function WorkspaceBrowser(props: {
                     onReload={() => void openFile(path())}
                     onKeepLocal={() => void openFile(path(), true)}
                     onClose={closeFile}
+                    onOpenPath={(target) => void openFile(target)}
                   />
                   <Show when={chunks().length > 0 && lastChunk()?.eof === false}>
                     <Button

@@ -515,29 +515,15 @@ async fn prepare_runtime_grants(
         &grant.connector_selections,
     );
     if let Some(snapshot) = &host_revision_snapshot {
-        for selection in &snapshot.connectors {
-            for action in &selection.allowed_actions {
-                let requires_write = !grant.permission_policy.rules.connectors.iter().any(|rule| {
-                    rule.account_id == selection.account_id
-                        && rule
-                            .read_only_actions
-                            .iter()
-                            .any(|read_only| read_only == action)
-                });
-                if !grant.permission_policy.allows_connector(
-                    &selection.account_id,
-                    action,
-                    requires_write,
-                ) {
-                    return Err(format!(
-                        "Connector action {action} on {} is outside the Channel permission policy",
-                        selection.account_id
-                    ));
-                }
-            }
-        }
         crate::host_revision_snapshots::validate_connector_revision_selections(
             &state.plugin_host,
+            &snapshot.connectors,
+        )
+        .await
+        .map_err(|error| format!("{}: {}", error.code, error.message))?;
+        crate::host_revision_snapshots::validate_connector_policy_effects(
+            &state.plugin_host,
+            &grant.permission_policy,
             &snapshot.connectors,
         )
         .await

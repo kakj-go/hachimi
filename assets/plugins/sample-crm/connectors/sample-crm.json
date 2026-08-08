@@ -1,7 +1,15 @@
 {
   "hostIdentity": "hachimi.sample-crm.local.v1",
   "transport": "local",
-  "actions": ["get", "search", "create", "update", "webhook_emit", "webhook_next", "poll"],
+  "actions": [
+    { "name": "get", "effect": "read_only" },
+    { "name": "search", "effect": "read_only" },
+    { "name": "create", "effect": "external_side_effect" },
+    { "name": "update", "effect": "external_side_effect" },
+    { "name": "webhook_emit", "effect": "external_side_effect" },
+    { "name": "webhook_next", "effect": "external_side_effect" },
+    { "name": "poll", "effect": "read_only" }
+  ],
   "webhook": true,
   "poll": true,
   "externalNetwork": false

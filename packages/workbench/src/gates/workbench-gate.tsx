@@ -3,7 +3,7 @@ import type {
   ApprovalStatus,
   HostAccessDecision,
   HostAccessRequestRecord,
-  ProposedPlan,
+  PlanDocument,
   UserInputAnswer,
   UserInputRequestRecord,
   UserInputResolutionAction,
@@ -16,7 +16,8 @@ import {
   Send,
   ShieldAlert,
   ShieldCheck,
-  TextArea,
+  TextField,
+  X,
 } from "@hachimi/ui";
 import { For, Show, createSignal } from "solid-js";
 
@@ -26,7 +27,7 @@ export type WorkbenchGateProps = {
   userInput: UserInputRequestRecord | undefined;
   hostAccess: HostAccessRequestRecord | undefined;
   approval: ApprovalRequestRecord | undefined;
-  plan: ProposedPlan | undefined;
+  plan: PlanDocument | undefined;
   resolvingUserInput: boolean;
   resolvingHostAccess: boolean;
   resolvingApproval: boolean;
@@ -40,9 +41,9 @@ export type WorkbenchGateProps = {
   ) => void;
   onResolveApproval: (approval: ApprovalRequestRecord, decision: ApprovalStatus) => void;
   onResolveHostAccess: (request: HostAccessRequestRecord, decision: HostAccessDecision) => void;
-  onAcceptPlan: (plan: ProposedPlan) => void;
-  onRevisePlan: (plan: ProposedPlan, instructions: string) => void;
-  onDismissPlan: (plan: ProposedPlan) => void;
+  onAcceptPlan: (plan: PlanDocument) => void;
+  onRevisePlan: (plan: PlanDocument, instructions: string) => void;
+  onDismissPlan: (plan: PlanDocument) => void;
 };
 
 export function WorkbenchGate(props: WorkbenchGateProps) {
@@ -225,7 +226,17 @@ export function WorkbenchGate(props: WorkbenchGateProps) {
                 <CircleHelp size={17} />
                 <strong>{zh() ? "实施此计划？" : "Implement this plan?"}</strong>
               </span>
-              <small>{zh() ? `修订版 ${plan().revision}` : `Revision ${plan().revision}`}</small>
+              <Button
+                size="small"
+                variant="ghost"
+                data-testid="workbench-close-plan"
+                aria-label={zh() ? "关闭" : "Close"}
+                title={zh() ? "关闭" : "Close"}
+                disabled={props.acceptingPlan || props.revisingPlan}
+                onClick={() => props.onDismissPlan(plan())}
+              >
+                <X size={15} />
+              </Button>
             </header>
             <Show
               when={editingPlan()}
@@ -264,12 +275,37 @@ export function WorkbenchGate(props: WorkbenchGateProps) {
                 </div>
               }
             >
-              <TextArea
-                class="plan-revision-field"
+              <TextField
+                class="plan-revision-composer"
+                testId="workbench-plan-revision-input"
                 label={zh() ? "告诉 Agent 如何更改计划" : "Tell the agent what to change"}
+                hideLabel
                 autofocus
+                placeholder={zh() ? "告诉 Agent 如何更改计划…" : "Tell the agent what to change…"}
                 value={instructions()}
                 onInput={(event) => setInstructions(event.currentTarget.value)}
+                onKeyDown={(event) => {
+                  if (event.key === "Escape") {
+                    setEditingPlan(false);
+                    setInstructions("");
+                  } else if (event.key === "Enter" && !event.shiftKey) {
+                    event.preventDefault();
+                    const value = instructions().trim();
+                    if (value && !props.revisingPlan) props.onRevisePlan(plan(), value);
+                  }
+                }}
+                action={
+                  <Button
+                    data-testid="workbench-submit-plan-revision"
+                    variant="primary"
+                    disabled={props.revisingPlan || !instructions().trim()}
+                    aria-label={zh() ? "提交更改" : "Submit revision"}
+                    title={zh() ? "提交更改" : "Submit revision"}
+                    onClick={() => props.onRevisePlan(plan(), instructions().trim())}
+                  >
+                    <Send size={14} />
+                  </Button>
+                }
               />
               <footer>
                 <Button
@@ -281,14 +317,6 @@ export function WorkbenchGate(props: WorkbenchGateProps) {
                   }}
                 >
                   {zh() ? "取消" : "Cancel"}
-                </Button>
-                <Button
-                  data-testid="workbench-submit-plan-revision"
-                  variant="primary"
-                  disabled={props.revisingPlan || !instructions().trim()}
-                  onClick={() => props.onRevisePlan(plan(), instructions().trim())}
-                >
-                  <Send size={14} /> {zh() ? "提交更改" : "Submit revision"}
                 </Button>
               </footer>
             </Show>

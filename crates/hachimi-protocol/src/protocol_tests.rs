@@ -27,11 +27,71 @@ fn scope_deserialization_is_exact() {
 }
 
 #[test]
-fn default_settings_are_versioned() {
+fn permission_update_round_trips_revision_and_resource_scopes() {
+    let value = serde_json::json!({
+        "sessionId": null,
+        "entryProfile": "pet_conversation",
+        "expectedRevision": 7,
+        "config": {
+            "skillIds": ["office-documents", "office-pdf"],
+            "policy": {
+                "level": "writable",
+                "rules": {
+                    "fileSystem": [{
+                        "access": "read",
+                        "roots": ["C:\\workspace"],
+                        "globs": ["src/**/*.rs"],
+                        "files": ["Cargo.toml"],
+                        "specialRoots": []
+                    }],
+                    "fileSystemUnrestrictedRead": false,
+                    "fileSystemUnrestrictedWrite": false,
+                    "network": { "enabled": true, "unrestrictedHosts": false, "hosts": ["example.com"], "protocols": ["https"] },
+                    "process": { "spawn": true, "interactive": false, "unrestrictedCommands": false, "allowedCommands": [] },
+                    "browser": { "observe": true, "act": false, "upload": false, "download": false, "cookieStorage": false, "cdp": false, "unrestrictedOrigins": false, "origins": ["https://example.com"] },
+                    "computer": { "observe": true, "act": false, "unrestrictedTargets": false, "allowedApplications": ["sha256:app"], "maxActions": null },
+                    "mcp": [],
+                    "connectors": []
+                },
+                "revision": 7
+            },
+            "extraAuthorizations": []
+        }
+    });
+    let update: SessionPermissionConfigUpdate =
+        serde_json::from_value(value).expect("deserialize permission update");
+    assert_eq!(update.expected_revision, 7);
     assert_eq!(
-        AppSettings::default().schema_version,
-        SETTINGS_SCHEMA_VERSION
+        update.config.skill_ids,
+        [
+            SkillId::from("office-documents"),
+            SkillId::from("office-pdf")
+        ]
     );
+    assert_eq!(
+        update.config.policy.rules.file_system[0].files,
+        ["Cargo.toml"]
+    );
+    assert_eq!(
+        update.config.policy.rules.computer.allowed_applications,
+        ["sha256:app"]
+    );
+    let encoded = serde_json::to_value(update).expect("serialize permission update");
+    assert_eq!(encoded["expectedRevision"], 7);
+    assert_eq!(encoded["config"]["skillIds"][0], "office-documents");
+    assert_eq!(
+        encoded["config"]["policy"]["rules"]["computer"]["allowedApplications"][0],
+        "sha256:app"
+    );
+}
+
+#[test]
+fn default_settings_are_versioned() {
+    let settings = AppSettings::default();
+    assert_eq!(settings.schema_version, SETTINGS_SCHEMA_VERSION);
+    assert_eq!(settings.llm.model_name, "gpt-5.6-sol");
+    assert_eq!(settings.llm.max_input_tokens, 1_050_000);
+    assert_eq!(settings.llm.max_output_tokens, 128_000);
 }
 
 #[test]

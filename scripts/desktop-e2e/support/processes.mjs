@@ -15,17 +15,20 @@ $matches = @(Get-Process -ErrorAction SilentlyContinue | Where-Object {
   }
 } | Sort-Object StartTime -Descending)
 $matches | Select-Object -Skip $keepNewest | Stop-Process -Force -ErrorAction SilentlyContinue
-Start-Sleep -Milliseconds 100
-$remaining = @(Get-Process -ErrorAction SilentlyContinue | Where-Object {
-  try {
-    $_.Path -and [IO.Path]::GetFullPath($_.Path).Equals(
-      $target,
-      [StringComparison]::OrdinalIgnoreCase
-    )
-  } catch {
-    $false
-  }
-})
+$deadline = [DateTime]::UtcNow.AddSeconds(5)
+do {
+  Start-Sleep -Milliseconds 100
+  $remaining = @(Get-Process -ErrorAction SilentlyContinue | Where-Object {
+    try {
+      $_.Path -and [IO.Path]::GetFullPath($_.Path).Equals(
+        $target,
+        [StringComparison]::OrdinalIgnoreCase
+      )
+    } catch {
+      $false
+    }
+  })
+} while ($remaining.Count -gt $keepNewest -and [DateTime]::UtcNow -lt $deadline)
 if ($remaining.Count -gt $keepNewest) {
   exit 1
 }

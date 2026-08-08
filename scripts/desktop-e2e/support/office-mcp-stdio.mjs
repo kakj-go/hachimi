@@ -1,9 +1,38 @@
-import { copyFileSync, writeFileSync } from "node:fs";
+import { constants, copyFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { basename, extname, join } from "node:path";
 import { createInterface } from "node:readline";
 
 const root = process.cwd();
 const templates = join(root, "office-stdio-templates");
+const artifactExtensions = new Map([
+  ["desktop-e2e-create_document", "docx"],
+  ["desktop-e2e-create_spreadsheet", "xlsx"],
+  ["desktop-e2e-create_presentation", "pptx"],
+  ["desktop-e2e-create_pdf", "pdf"],
+]);
+
+function artifactPath(artifactId, expectedExtension) {
+  if (!/^desktop-e2e-[a-z_]+$/u.test(artifactId)) throw new Error("invalid_artifact_id");
+  const extension = artifactExtensions.get(artifactId);
+  if (!extension || (expectedExtension && extension !== expectedExtension)) {
+    throw new Error("artifact_extension_mismatch");
+  }
+  return join(root, `${artifactId}.${extension}`);
+}
+
+function sha256(path) {
+  return createHash("sha256").update(readFileSync(path)).digest("hex");
+}
+
+function copyIdempotent(source, destination) {
+  if (existsSync(destination)) {
+    if (sha256(source) !== sha256(destination)) throw new Error("overwrite_conflict");
+    return true;
+  }
+  copyFileSync(source, destination, constants.COPYFILE_EXCL);
+  return false;
+}
 
 const tools = [
   ["create_document", "docx"],
@@ -89,7 +118,7 @@ tools.push(
   },
 );
 
-function resultFor(request) {
+async function resultFor(request) {
   const method = request.method;
   if (method === "initialize") {
     return {
@@ -111,11 +140,38 @@ function resultFor(request) {
     create_pdf: "pdf",
   };
   if (name in extensions) {
+    const interruptionMarker = join(root, "desktop-e2e-office-interruption.marker");
+    if (
+      name === "create_document" &&
+      argumentsValue.body === "interrupt-before-receipt" &&
+      !existsSync(interruptionMarker)
+    ) {
+      writeFileSync(interruptionMarker, "dispatched_without_receipt", "utf8");
+      await new Promise(() => {});
+    }
+    if (name === "create_document" && argumentsValue.body === "interrupt-before-receipt") {
+      const destination = join(root, "desktop-e2e-interruption-document.docx");
+      const replayed = copyIdempotent(join(templates, "template.docx"), destination);
+      return {
+        content: [{ type: "text", text: "Recovered interrupted Office document creation" }],
+        structuredContent: {
+          artifactId: "desktop-e2e-interruption-document",
+          validated: true,
+          extension: "docx",
+          fileName: basename(destination),
+          revision: 1,
+          sha256: sha256(destination),
+          changedParts: ["package:create"],
+          replayed,
+        },
+        isError: false,
+      };
+    }
     const extension = extensions[name];
     const artifactId = `desktop-e2e-${name}`;
     const template = join(templates, `template.${extension}`);
-    const destination = join(root, `${artifactId}.${extension}`);
-    copyFileSync(template, destination);
+    const destination = artifactPath(artifactId, extension);
+    const replayed = copyIdempotent(template, destination);
     return {
       content: [{ type: "text", text: `Created and validated controlled artifact ${artifactId}` }],
       structuredContent: {
@@ -124,30 +180,50 @@ function resultFor(request) {
         extension,
         fileName: basename(destination),
         mediaType: extname(destination),
+        revision: 1,
+        sha256: sha256(destination),
+        changedParts: extension === "pdf" ? ["page:1"] : ["package:create"],
+        replayed,
       },
       isError: false,
     };
   }
   if (name === "inspect_artifact") {
     const artifactId = String(argumentsValue.artifactId ?? "");
-    const extension = artifactId.endsWith("create_pdf") ? "pdf" : "docx";
+    const extension = artifactExtensions.get(artifactId);
+    const path = artifactPath(artifactId, extension);
     return {
       content: [{ type: "text", text: `Inspected bounded metadata for ${artifactId}` }],
-      structuredContent: { artifactId, extension, contentIncluded: false },
+      structuredContent: {
+        artifactId,
+        extension,
+        revision: 1,
+        sha256: sha256(path),
+        contentIncluded: false,
+      },
       isError: false,
     };
   }
   if (name === "modify_artifact") {
     const artifactId = String(argumentsValue.artifactId ?? "");
-    copyFileSync(join(templates, "modified.docx"), join(root, `${artifactId}.docx`));
+    const destination = artifactPath(artifactId, "docx");
+    copyFileSync(join(templates, "modified.docx"), destination);
     return {
       content: [{ type: "text", text: `Modified and revalidated ${artifactId}` }],
-      structuredContent: { artifactId, modified: true, validated: true },
+      structuredContent: {
+        artifactId,
+        modified: true,
+        validated: true,
+        revision: 2,
+        sha256: sha256(destination),
+        changedParts: ["word/document.xml"],
+      },
       isError: false,
     };
   }
   if (name === "diff_artifact") {
     const artifactId = String(argumentsValue.artifactId ?? "");
+    artifactPath(artifactId);
     const diff = {
       artifactId,
       status: "modified",
@@ -165,13 +241,18 @@ function resultFor(request) {
   }
   if (name === "export_artifact") {
     const artifactId = String(argumentsValue.artifactId ?? "");
-    copyFileSync(join(root, `${artifactId}.pdf`), join(root, "desktop-e2e-exported.pdf"));
+    const source = artifactPath(artifactId, "pdf");
+    const exported = join(root, "desktop-e2e-exported.pdf");
+    const replayed = copyIdempotent(source, exported);
     return {
       content: [{ type: "text", text: `Exported controlled artifact ${artifactId}` }],
       structuredContent: {
         artifactId,
         format: "pdf",
         fileName: "desktop-e2e-exported.pdf",
+        revision: 1,
+        sha256: sha256(exported),
+        replayed,
       },
       isError: false,
     };
@@ -209,6 +290,7 @@ function resultFor(request) {
       target: String(argumentsValue.target ?? ""),
       delivered: true,
     };
+    artifactPath(receipt.artifactId);
     writeFileSync(join(root, "desktop-e2e-office-delivery.json"), JSON.stringify(receipt), "utf8");
     return {
       content: [{ type: "text", text: "Deterministic external delivery completed" }],
@@ -233,7 +315,7 @@ for await (const line of lines) {
   }
   if (!("id" in request)) continue;
   try {
-    const result = resultFor(request);
+    const result = await resultFor(request);
     process.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", id: request.id, result })}\n`);
   } catch (error) {
     process.stdout.write(

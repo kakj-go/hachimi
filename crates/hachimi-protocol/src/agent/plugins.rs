@@ -23,6 +23,10 @@ pub enum PluginHookEvent {
     ScheduleBefore,
     #[serde(rename = "schedule.after")]
     ScheduleAfter,
+    #[serde(rename = "context.compact.before")]
+    ContextCompactBefore,
+    #[serde(rename = "context.compact.after")]
+    ContextCompactAfter,
 }
 
 impl PluginHookEvent {
@@ -35,6 +39,8 @@ impl PluginHookEvent {
             Self::ToolAfter => "tool.after",
             Self::ScheduleBefore => "schedule.before",
             Self::ScheduleAfter => "schedule.after",
+            Self::ContextCompactBefore => "context.compact.before",
+            Self::ContextCompactAfter => "context.compact.after",
         }
     }
 }
@@ -383,6 +389,27 @@ pub enum ConnectorRuntimeKind {
     SandboxedStdioJsonRpc,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum ConnectorActionEffect {
+    ReadOnly,
+    ExternalSideEffect,
+}
+
+impl ConnectorActionEffect {
+    #[must_use]
+    pub const fn requires_write(self) -> bool {
+        matches!(self, Self::ExternalSideEffect)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ConnectorActionDescriptor {
+    pub name: String,
+    pub effect: ConnectorActionEffect,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct ConnectorDriverDescriptor {
@@ -390,7 +417,14 @@ pub struct ConnectorDriverDescriptor {
     pub connector_id: String,
     pub runtime_kind: ConnectorRuntimeKind,
     pub revision: ConnectorRevision,
-    pub actions: Vec<String>,
+    pub actions: Vec<ConnectorActionDescriptor>,
+}
+
+impl ConnectorDriverDescriptor {
+    #[must_use]
+    pub fn action(&self, name: &str) -> Option<&ConnectorActionDescriptor> {
+        self.actions.iter().find(|action| action.name == name)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]

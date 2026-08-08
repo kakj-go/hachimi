@@ -25,7 +25,13 @@ use hachimi_storage::{AgentStore, AgentStoreError};
 use thiserror::Error;
 use tokio_util::sync::CancellationToken;
 
-use crate::{ModelRuntime, ModelRuntimeError, ModelViewLimits, build_model_view_with_checkpoint};
+use crate::{
+    ModelRuntime, ModelRuntimeError, ModelViewLimits, build_model_view_with_checkpoint,
+    context_budget,
+};
+
+mod groups;
+use groups::prepare_source;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CompactionPolicy {
@@ -62,8 +68,8 @@ pub enum CompactionError {
     Runtime(#[from] ModelRuntimeError),
     #[error("compaction summary failed its quality gate: {0}")]
     QualityRejected(&'static str),
-    #[error("compaction source cannot fit in the provider context window")]
-    SourceOverflow,
+    #[error("compaction source remains too long after dropping one complete conversation group")]
+    PromptTooLong,
 }
 
 #[derive(Clone)]
@@ -166,28 +172,63 @@ impl SemanticCompactor {
         if cancellation.is_cancelled() {
             return Err(CompactionError::Runtime(ModelRuntimeError::Cancelled));
         }
+        let trigger = trigger_for_reason(reason);
         let transcript = self.store.list_transcript(session_id).await?;
         let previous = self.store.latest_compaction_checkpoint(session_id).await?;
+        let budget = context_budget(&self.model.capabilities());
+        let force = if force {
+            true
+        } else if let Some(budget) = budget {
+            let view_run_id = current_run_id
+                .cloned()
+                .unwrap_or_else(|| RunId::new("standalone-compaction-view"));
+            let view = build_model_view_with_checkpoint(
+                &transcript,
+                &view_run_id,
+                previous.as_ref(),
+                ModelViewLimits::default(),
+            );
+            // A negotiated token budget is authoritative. The character policy
+            // remains only for providers that do not expose a context window.
+            if self.model.count_tokens(&view.messages).0 < budget.auto_threshold {
+                return Ok(None);
+            }
+            true
+        } else {
+            false
+        };
+        let phase = match current_run_id {
+            Some(run_id)
+                if previous
+                    .as_ref()
+                    .is_some_and(|checkpoint| checkpoint.run_id.as_ref() == Some(run_id))
+                    || transcript.iter().any(|item| {
+                        item.run_id.as_ref() == Some(run_id)
+                            && matches!(
+                                item.kind,
+                                TranscriptItemKind::Assistant
+                                    | TranscriptItemKind::ToolExecution
+                                    | TranscriptItemKind::CommandExecution
+                                    | TranscriptItemKind::McpCall
+                                    | TranscriptItemKind::DynamicToolCall
+                                    | TranscriptItemKind::CollabToolCall
+                            )
+                    }) =>
+            {
+                CompactionPhase::MidRun
+            }
+            Some(_) => CompactionPhase::PreRun,
+            None => CompactionPhase::Standalone,
+        };
         let Some(source) = prepare_source(
             &transcript,
             current_run_id,
             previous.as_ref(),
             self.policy,
             force,
+            phase == CompactionPhase::MidRun,
         ) else {
             return Ok(None);
-        };
-        let trigger = trigger_for_reason(reason);
-        let phase = match current_run_id {
-            Some(run_id)
-                if previous
-                    .as_ref()
-                    .is_some_and(|checkpoint| checkpoint.run_id.as_ref() == Some(run_id)) =>
-            {
-                CompactionPhase::MidRun
-            }
-            Some(_) => CompactionPhase::PreRun,
-            None => CompactionPhase::Standalone,
         };
         let requested_implementation = if self.remote_compaction_enabled()
             || self
@@ -227,6 +268,34 @@ impl SemanticCompactor {
                 created_at_ms: now_ms(),
             })
             .await?;
+        if let Err(error) = self
+            .dispatch_hook(
+                "context.compact.before",
+                session_id,
+                current_run_id,
+                "started",
+                cancellation.child_token(),
+            )
+            .await
+        {
+            let _ = self
+                .complete_compaction_item(
+                    &item_id,
+                    ItemStatus::Failed,
+                    None,
+                    trigger,
+                    phase,
+                    requested_implementation,
+                    reason,
+                    None,
+                    0,
+                    Vec::new(),
+                    Some("compaction_hook_before_failed"),
+                    None,
+                )
+                .await;
+            return Err(error);
+        }
         let response = match self
             .request_summary(previous.as_ref(), &source.rendered, cancellation.clone())
             .await
@@ -237,9 +306,7 @@ impl SemanticCompactor {
                     CompactionError::Runtime(ModelRuntimeError::Cancelled) => {
                         (ItemStatus::Interrupted, "compaction_cancelled")
                     }
-                    CompactionError::SourceOverflow => {
-                        (ItemStatus::Failed, "compaction_source_overflow")
-                    }
+                    CompactionError::PromptTooLong => (ItemStatus::Failed, "prompt_too_long"),
                     CompactionError::QualityRejected(code) => (ItemStatus::Failed, *code),
                     CompactionError::Runtime(_) => (ItemStatus::Failed, "compaction_model_failed"),
                     CompactionError::Store(_) => (ItemStatus::Failed, "compaction_store_failed"),
@@ -314,6 +381,7 @@ impl SemanticCompactor {
                 .and_then(|checkpoint| checkpoint.summary.latest_user_goal.clone())
         });
         let mut warnings = response.warnings;
+        warnings.extend(source.warnings);
         if previous.is_some() {
             warnings.push("multiple_compactions_may_reduce_accuracy".into());
         }
@@ -398,7 +466,56 @@ impl SemanticCompactor {
             source: count_source,
         };
         checkpoint.lifecycle.token_snapshot = Some(token_snapshot.clone());
-        let checkpoint = self.store.create_compaction_checkpoint(&checkpoint).await?;
+        if let Err(error) = self
+            .dispatch_hook(
+                "context.compact.after",
+                session_id,
+                current_run_id,
+                "prepared",
+                cancellation.child_token(),
+            )
+            .await
+        {
+            let _ = self
+                .complete_compaction_item(
+                    &item_id,
+                    ItemStatus::Failed,
+                    None,
+                    trigger,
+                    phase,
+                    response.implementation,
+                    reason,
+                    Some(token_snapshot.clone()),
+                    response.trimmed_history_groups,
+                    warnings.clone(),
+                    Some("compaction_hook_after_failed"),
+                    response.fallback_reason.clone(),
+                )
+                .await;
+            return Err(error);
+        }
+        let checkpoint = match self.store.create_compaction_checkpoint(&checkpoint).await {
+            Ok(checkpoint) => checkpoint,
+            Err(error) => {
+                let _ = self
+                    .complete_compaction_item(
+                        &item_id,
+                        ItemStatus::Failed,
+                        None,
+                        trigger,
+                        phase,
+                        response.implementation,
+                        reason,
+                        Some(token_snapshot.clone()),
+                        response.trimmed_history_groups,
+                        warnings.clone(),
+                        Some("compaction_store_failed"),
+                        response.fallback_reason.clone(),
+                    )
+                    .await;
+                return Err(CompactionError::Store(error));
+            }
+        };
         if let Some(run_id) = current_run_id {
             let existing = self.store.get_run_usage_snapshot(run_id).await?;
             let billed_usage = add_usage(
@@ -435,6 +552,31 @@ impl SemanticCompactor {
         )
         .await?;
         Ok(Some(checkpoint))
+    }
+
+    async fn dispatch_hook(
+        &self,
+        event: &str,
+        session_id: &SessionId,
+        run_id: Option<&RunId>,
+        result_code: &str,
+        cancellation: CancellationToken,
+    ) -> Result<(), CompactionError> {
+        self.store
+            .dispatch_plugin_hook_event(
+                &hachimi_storage::PluginHookEventRecord {
+                    event: event.into(),
+                    session_id: Some(session_id.clone()),
+                    run_id: run_id.cloned(),
+                    run_generation: None,
+                    subject: session_id.as_str().into(),
+                    result_code: result_code.into(),
+                    created_at_ms: now_ms(),
+                },
+                cancellation,
+            )
+            .await?;
+        Ok(())
     }
 
     async fn request_summary(
@@ -548,7 +690,7 @@ impl SemanticCompactor {
             }
             if overflow {
                 if !trim_oldest_source_group(&mut source) {
-                    return Err(CompactionError::SourceOverflow);
+                    return Err(CompactionError::PromptTooLong);
                 }
                 trimmed_history_groups = trimmed_history_groups.saturating_add(1);
                 continue;
@@ -610,7 +752,7 @@ impl SemanticCompactor {
                 Ok(result) => result,
                 Err(ModelRuntimeError::ContextOverflow) => {
                     if !trim_oldest_source_group(&mut source) {
-                        return Err(CompactionError::SourceOverflow);
+                        return Err(CompactionError::PromptTooLong);
                     }
                     trimmed_history_groups = trimmed_history_groups.saturating_add(1);
                     continue;
@@ -756,10 +898,13 @@ fn compaction_error_code(error: &CompactionError) -> &'static str {
             "remote_capability_drift"
         }
         CompactionError::Runtime(ModelRuntimeError::ContextOverflow) => "remote_context_overflow",
+        CompactionError::Runtime(ModelRuntimeError::ContextCompactionRequired { .. }) => {
+            "compaction_required"
+        }
         CompactionError::Runtime(ModelRuntimeError::Cancelled) => "compaction_cancelled",
         CompactionError::Runtime(_) => "remote_provider_failed",
         CompactionError::QualityRejected(code) => code,
-        CompactionError::SourceOverflow => "compaction_source_overflow",
+        CompactionError::PromptTooLong => "prompt_too_long",
         CompactionError::Store(_) => "compaction_store_failed",
     }
 }
@@ -779,7 +924,7 @@ fn provider_capability_revision(
 }
 
 fn trim_oldest_source_group(source: &mut String) -> bool {
-    let marker = "\n\n[sequence=";
+    let marker = "\n\n[group ";
     let Some(next) = source.find(marker) else {
         return false;
     };
@@ -804,120 +949,6 @@ fn add_usage(left: TokenUsage, right: TokenUsage) -> TokenUsage {
         input_tokens: left.input_tokens.saturating_add(right.input_tokens),
         output_tokens: left.output_tokens.saturating_add(right.output_tokens),
     }
-}
-
-#[derive(Debug)]
-struct PreparedSource {
-    rendered: String,
-    latest_user_goal: Option<String>,
-    covered_through_sequence: u64,
-    source_items: usize,
-    source_chars: usize,
-    recent_tail_items: usize,
-}
-
-fn prepare_source(
-    transcript: &[TranscriptItem],
-    current_run_id: Option<&RunId>,
-    previous: Option<&CompactionCheckpoint>,
-    policy: CompactionPolicy,
-    force: bool,
-) -> Option<PreparedSource> {
-    let previous_sequence = previous
-        .map(|checkpoint| checkpoint.covered_through_sequence)
-        .unwrap_or_default();
-    let continuing_current_run = current_run_id.is_some_and(|run_id| {
-        previous.is_some_and(|checkpoint| checkpoint.run_id.as_ref() == Some(run_id))
-    });
-    let current_run_boundary = (!continuing_current_run)
-        .then(|| {
-            current_run_id.and_then(|run_id| {
-                transcript
-                    .iter()
-                    .find(|item| {
-                        item.run_id.as_ref() == Some(run_id)
-                            && item.kind != TranscriptItemKind::ContextCompaction
-                    })
-                    .map(|item| item.sequence)
-            })
-        })
-        .flatten();
-    let eligible = transcript
-        .iter()
-        .filter(|item| item.sequence > previous_sequence)
-        .filter(|item| current_run_boundary.is_none_or(|sequence| item.sequence < sequence))
-        .filter(|item| is_semantic_item(item.kind))
-        .collect::<Vec<_>>();
-    if eligible.len() <= policy.recent_tail_items {
-        return None;
-    }
-    let coverable = eligible.len().saturating_sub(policy.recent_tail_items);
-    let rendered_items = eligible[..coverable]
-        .iter()
-        .filter_map(|item| render_item(item, policy.max_item_chars).map(|text| (*item, text)))
-        .collect::<Vec<_>>();
-    let available_chars = rendered_items
-        .iter()
-        .map(|(_, rendered)| rendered.chars().count())
-        .sum::<usize>();
-    if !force && available_chars < policy.automatic_trigger_chars {
-        return None;
-    }
-    let mut rendered = String::new();
-    let mut selected = Vec::new();
-    for (item, text) in rendered_items {
-        let separator_chars = usize::from(!rendered.is_empty()) * 2;
-        let next_chars = text.chars().count().saturating_add(separator_chars);
-        if !selected.is_empty()
-            && rendered.chars().count().saturating_add(next_chars) > policy.max_source_chars
-        {
-            break;
-        }
-        if !rendered.is_empty() {
-            rendered.push_str("\n\n");
-        }
-        let remaining = policy
-            .max_source_chars
-            .saturating_sub(rendered.chars().count());
-        rendered.push_str(&bounded_head_tail(&text, remaining));
-        selected.push(item);
-        if rendered.chars().count() >= policy.max_source_chars {
-            break;
-        }
-    }
-    let last = selected.last()?;
-    let latest_user_goal = selected
-        .iter()
-        .rev()
-        .find(|item| item.kind == TranscriptItemKind::User)
-        .and_then(|item| transcript_text(item))
-        .map(|text| bounded_head_tail(&text, 8 * 1024));
-    Some(PreparedSource {
-        source_chars: rendered.chars().count(),
-        source_items: selected.len(),
-        recent_tail_items: eligible.len().saturating_sub(selected.len()),
-        covered_through_sequence: last.sequence,
-        rendered,
-        latest_user_goal,
-    })
-}
-
-const fn is_semantic_item(kind: TranscriptItemKind) -> bool {
-    matches!(
-        kind,
-        TranscriptItemKind::User
-            | TranscriptItemKind::Assistant
-            | TranscriptItemKind::Plan
-            | TranscriptItemKind::ToolExecution
-            | TranscriptItemKind::Approval
-            | TranscriptItemKind::Reasoning
-            | TranscriptItemKind::CommandExecution
-            | TranscriptItemKind::FileChange
-            | TranscriptItemKind::McpCall
-            | TranscriptItemKind::DynamicToolCall
-            | TranscriptItemKind::CollabToolCall
-            | TranscriptItemKind::Review
-    )
 }
 
 fn render_item(item: &TranscriptItem, max_chars: usize) -> Option<String> {
@@ -1099,6 +1130,10 @@ fn now_ms() -> i64 {
 }
 
 #[cfg(test)]
+#[path = "compaction/compaction_budget_tests.rs"]
+mod compaction_budget_tests;
+
+#[cfg(test)]
 mod tests {
     use std::sync::{
         Arc,
@@ -1257,7 +1292,12 @@ mod tests {
         }
     }
 
-    fn item(sequence: u64, run: &str, kind: TranscriptItemKind, text: &str) -> TranscriptItem {
+    pub(super) fn item(
+        sequence: u64,
+        run: &str,
+        kind: TranscriptItemKind,
+        text: &str,
+    ) -> TranscriptItem {
         let payload = match kind {
             TranscriptItemKind::User => ItemPayload::User {
                 text: text.into(),
@@ -1282,7 +1322,7 @@ mod tests {
         }
     }
 
-    async fn seeded_compaction_store() -> (AgentStore, SessionRecord, RunRecord) {
+    pub(super) async fn seeded_compaction_store() -> (AgentStore, SessionRecord, RunRecord) {
         let store = AgentStore::connect_in_memory().await.expect("store");
         let now = now_ms();
         let project = ProjectRecord {
@@ -1379,64 +1419,6 @@ mod tests {
         (store, session, run)
     }
 
-    #[test]
-    fn preserves_recent_tail_and_stops_before_current_run() {
-        let transcript = (1..=8)
-            .map(|sequence| {
-                let run = if sequence == 8 { "current" } else { "old" };
-                item(
-                    sequence,
-                    run,
-                    if sequence % 2 == 0 {
-                        TranscriptItemKind::Assistant
-                    } else {
-                        TranscriptItemKind::User
-                    },
-                    &format!("message {sequence}"),
-                )
-            })
-            .collect::<Vec<_>>();
-        let source = prepare_source(
-            &transcript,
-            Some(&RunId::from("current")),
-            None,
-            CompactionPolicy {
-                automatic_trigger_chars: 0,
-                recent_tail_items: 2,
-                ..CompactionPolicy::default()
-            },
-            false,
-        )
-        .expect("source");
-        assert_eq!(source.covered_through_sequence, 5);
-        assert_eq!(source.recent_tail_items, 2);
-        assert!(!source.rendered.contains("message 8"));
-    }
-
-    #[test]
-    fn extracts_only_bounded_continuity_identifiers() {
-        let identifiers = extract_identifiers(
-            "src/lib.rs run-42 deadbeefcafebaad https://example.com TOKEN=secret ordinary",
-            16,
-        );
-        assert!(identifiers.contains(&"src/lib.rs".to_owned()));
-        assert!(identifiers.contains(&"run-42".to_owned()));
-        assert!(identifiers.contains(&"deadbeefcafebaad".to_owned()));
-        assert!(!identifiers.iter().any(|value| value.contains("secret")));
-        assert!(
-            !identifiers
-                .iter()
-                .any(|value| value.contains("example.com"))
-        );
-    }
-
-    #[test]
-    fn older_checkpoint_identifiers_have_retention_priority() {
-        let previous = vec!["run-old".into(), "src/old.rs".into()];
-        let merged = merge_identifiers(&previous, vec!["run-new".into(), "src/new.rs".into()], 3);
-        assert_eq!(merged, vec!["run-old", "src/old.rs", "run-new"]);
-    }
-
     #[tokio::test]
     async fn accepted_summary_advances_checkpoint_and_rejected_summary_keeps_it() {
         let store = AgentStore::connect_in_memory().await.expect("store");
@@ -1521,8 +1503,8 @@ mod tests {
         .await
         .expect("compact")
         .expect("checkpoint");
-        assert_eq!(accepted.quality.source_items, 4);
-        assert_eq!(accepted.quality.recent_tail_items, 2);
+        assert_eq!(accepted.quality.source_items, 2);
+        assert_eq!(accepted.quality.recent_tail_items, 4);
         assert!(
             accepted
                 .summary
@@ -1764,7 +1746,7 @@ mod tests {
                 &format!("follow-up history group {sequence}"),
             );
             transcript_item.session_id = session.id.clone();
-            transcript_item.run_id = Some(run.id.clone());
+            transcript_item.run_id = None;
             store
                 .append_transcript_item(transcript_item)
                 .await

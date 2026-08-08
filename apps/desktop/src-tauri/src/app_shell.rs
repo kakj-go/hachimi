@@ -1,4 +1,5 @@
 use super::*;
+use tauri::WebviewUrl;
 
 pub(super) const fn release_feature_enabled(explicitly_disabled: bool) -> bool {
     !explicitly_disabled
@@ -848,13 +849,22 @@ pub(super) fn restore_pet_placement<R: Runtime>(
     state: &DesktopState,
 ) -> Result<(), CommandError> {
     let monitors = monitor_geometries(window);
-    let placement = restore_or_default_placement(
-        state.settings.read().pet_placement.as_ref(),
-        &monitors,
-        360,
-        480,
-        24,
-    );
+    let saved = state.settings.read().pet_placement.clone().filter(|saved| {
+        // Upgrade the old edge-pinned default once. Explicitly dragged
+        // positions remain untouched, while existing portable packages get
+        // the new center-biased placement on their next launch.
+        !monitors.iter().any(|monitor| {
+            i64::from(saved.x)
+                == i64::from(monitor.bounds.x) + i64::from(monitor.bounds.width)
+                    - i64::from(saved.width)
+                    - 24
+                && i64::from(saved.y)
+                    == i64::from(monitor.bounds.y) + i64::from(monitor.bounds.height)
+                        - i64::from(saved.height)
+                        - 24
+        })
+    });
+    let placement = restore_or_default_placement(saved.as_ref(), &monitors, 360, 480, 24);
     window.set_position(PhysicalPosition::new(placement.x, placement.y))?;
     Ok(())
 }

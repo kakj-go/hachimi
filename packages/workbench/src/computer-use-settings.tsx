@@ -33,10 +33,7 @@ export function ComputerUseSettings(props: { refreshRevision?: number } = {}) {
   const [requests, setRequests] = createSignal<HostAccessRequestRecord[]>([]);
   const [settingsLoading, setSettingsLoading] = createSignal(false);
   const [settingsSaving, setSettingsSaving] = createSignal(false);
-  const [candidatesLoading, setCandidatesLoading] = createSignal(false);
-  const [policiesLoading, setPoliciesLoading] = createSignal(false);
   const [policySavingIds, setPolicySavingIds] = createSignal<ReadonlySet<string>>(new Set());
-  const [requestsLoading, setRequestsLoading] = createSignal(false);
   const [requestSavingIds, setRequestSavingIds] = createSignal<ReadonlySet<string>>(new Set());
   const [settingsFailure, setSettingsFailure] = createSignal<string>();
   const [candidatesFailure, setCandidatesFailure] = createSignal<string>();
@@ -77,38 +74,29 @@ export function ComputerUseSettings(props: { refreshRevision?: number } = {}) {
   }
 
   async function loadCandidates() {
-    setCandidatesLoading(true);
     setCandidatesFailure(undefined);
     try {
       setCandidates(await commands.listComputerAppCandidates());
     } catch (error) {
       setCandidatesFailure(commandFailure(error).message);
-    } finally {
-      setCandidatesLoading(false);
     }
   }
 
   async function loadPolicies() {
-    setPoliciesLoading(true);
     setPoliciesFailure(undefined);
     try {
       setPolicies(await commands.listComputerAppPolicies());
     } catch (error) {
       setPoliciesFailure(commandFailure(error).message);
-    } finally {
-      setPoliciesLoading(false);
     }
   }
 
   async function loadRequests() {
-    setRequestsLoading(true);
     setRequestsFailure(undefined);
     try {
       setRequests(await commands.listHostAccessRequests());
     } catch (error) {
       setRequestsFailure(commandFailure(error).message);
-    } finally {
-      setRequestsLoading(false);
     }
   }
 
@@ -228,17 +216,10 @@ export function ComputerUseSettings(props: { refreshRevision?: number } = {}) {
         </SettingsCard>
       </SettingsSection>
 
-      <Show when={pending().length > 0 || requestsFailure() || requestsLoading()}>
+      <Show when={pending().length > 0 || requestsFailure()}>
         <SettingsSection title={zh() ? "待处理访问" : "Pending access"}>
           <Show when={requestsFailure()}>
             {(message) => <StatusBanner tone="danger">{message()}</StatusBanner>}
-          </Show>
-          <Show when={requestsLoading() && pending().length === 0}>
-            <SettingsCard>
-              <SettingsRow label={zh() ? "访问请求" : "Access requests"}>
-                <Badge>{zh() ? "正在检查" : "Checking"}</Badge>
-              </SettingsRow>
-            </SettingsCard>
           </Show>
           <Show when={pending().length > 0}>
             <SettingsCard>
@@ -305,15 +286,7 @@ export function ComputerUseSettings(props: { refreshRevision?: number } = {}) {
             each={apps()}
             fallback={
               <SettingsRow label={zh() ? "可用应用" : "Available applications"}>
-                <Badge>
-                  {candidatesLoading() || policiesLoading()
-                    ? zh()
-                      ? "正在发现"
-                      : "Discovering"
-                    : zh()
-                      ? "暂无"
-                      : "None"}
-                </Badge>
+                <Badge>{zh() ? "暂无" : "None"}</Badge>
               </SettingsRow>
             }
           >
@@ -329,9 +302,17 @@ export function ComputerUseSettings(props: { refreshRevision?: number } = {}) {
                       title={app().executablePath ?? app().executableName}
                     >
                       <span class="computer-app-icon" aria-hidden="true">
-                        <Show when={entry.iconPngBase64} fallback={app().displayName.slice(0, 1)}>
+                        <span>{app().displayName.slice(0, 1)}</span>
+                        <Show when={entry.iconPngBase64}>
                           {(icon) => (
-                            <img src={`data:image/png;base64,${icon()}`} alt="" loading="lazy" />
+                            <img
+                              src={`data:image/png;base64,${icon()}`}
+                              alt=""
+                              loading="lazy"
+                              onError={(event) => {
+                                event.currentTarget.style.display = "none";
+                              }}
+                            />
                           )}
                         </Show>
                       </span>

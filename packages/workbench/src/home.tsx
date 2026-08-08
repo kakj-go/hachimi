@@ -9,7 +9,7 @@ import {
   type HostAccessDecision,
   type HostAccessRequestRecord,
   type ProjectRecord,
-  type ProposedPlan,
+  type PlanDocument,
   type RunRecord,
   type RunRecoveryDecisionAction,
   type RunRecoverySnapshot,
@@ -52,6 +52,7 @@ import {
   untrack,
 } from "solid-js";
 import { desktopWorkbenchCommandPort, type WorkbenchCommandPort } from "./workbench-command-port";
+import { isManualCompactionCommand } from "./manual-compaction";
 import { directUserMutationContext, runMutationContext } from "./mutation-context";
 import { createProjectGitController } from "./project-git-controller";
 import { SandboxReadinessBanner } from "./sandbox-readiness-banner";
@@ -184,7 +185,6 @@ export function HomePage(props: {
     setInspectorTabs((current) => showInspectorLauncher(current));
     setInspectorVisible(true);
   };
-  const [dismissedPlanId, setDismissedPlanId] = createSignal<string>();
   const [selectedProjectId, setSelectedProjectId] = createSignal<string | undefined>(
     readSessionSelection(SELECTED_PROJECT_STORAGE_KEY),
   );
@@ -326,9 +326,15 @@ export function HomePage(props: {
     sessionSnapshot()?.hostAccessRequests.find((request) => request.status === "pending"),
   );
   const activePlan = createMemo(() =>
-    sessionSnapshot()
-      ?.proposedPlans.toReversed()
-      .find((plan) => plan.status === "proposed" && plan.id !== dismissedPlanId()),
+    (() => {
+      const snapshot = sessionSnapshot();
+      const confirmation = snapshot?.planConfirmations
+        .toReversed()
+        .find((candidate) => candidate.status === "pending");
+      return confirmation
+        ? snapshot?.planDocuments.find((plan) => plan.id === confirmation.planId)
+        : undefined;
+    })(),
   );
   const hasComposerGate = createMemo(() =>
     Boolean(pendingUserInputs()[0] || activeHostAccess() || activeApproval() || activePlan()),
@@ -596,7 +602,11 @@ export function HomePage(props: {
     };
     const connect = async () => {
       stopEnvironment = await commandPort.onEnvironmentChange((event) => {
-        if (!disposed && event.sessionId === sessionId && event.reasons.includes("browser")) {
+        if (
+          !disposed &&
+          event.sessionId === sessionId &&
+          (event.reasons.includes("browser") || event.reasons.includes("plan"))
+        ) {
           void loadProjection();
         }
       });
@@ -1001,6 +1011,47 @@ export function HomePage(props: {
     }
     const selectedSession = sessionSnapshot();
     const steeringRun = activeRun();
+    if (isManualCompactionCommand(prompt)) {
+      if (!selectedSession) {
+        setFailure(
+          i18n.locale() === "zh-CN"
+            ? "请先选择一个会话再压缩上下文。"
+            : "Select a Session before compacting context.",
+        );
+        return;
+      }
+      if (steeringRun) {
+        setFailure(
+          i18n.locale() === "zh-CN"
+            ? "运行进行中，无法手动压缩上下文。"
+            : "Manual compaction is unavailable while a Run is active.",
+        );
+        return;
+      }
+      if (attachments().length > 0 || selectedSkillIds().length > 0) {
+        setFailure(
+          i18n.locale() === "zh-CN"
+            ? "手动压缩不能同时携带附件或选择 Skills。"
+            : "Manual compaction cannot include attachments or selected Skills.",
+        );
+        return;
+      }
+      setSubmitting(true);
+      setFailure(undefined);
+      try {
+        await commandPort.compactWorkbenchSession({
+          idempotencyKey: crypto.randomUUID(),
+          sessionId: selectedSession.session.id,
+        });
+        setSessionSnapshot(await commandPort.getWorkbenchSession(selectedSession.session.id));
+        setDraft("");
+      } catch (error) {
+        setFailure(commandFailure(error).message);
+      } finally {
+        setSubmitting(false);
+      }
+      return;
+    }
     if (
       !selectedSession &&
       project &&
@@ -1194,7 +1245,7 @@ export function HomePage(props: {
     }
   }
 
-  async function acceptPlan(plan: ProposedPlan) {
+  async function acceptPlan(plan: PlanDocument) {
     setAcceptingPlanId(plan.id);
     setFailure(undefined);
     try {
@@ -1214,7 +1265,7 @@ export function HomePage(props: {
     }
   }
 
-  async function revisePlan(plan: ProposedPlan, instructions: string) {
+  async function revisePlan(plan: PlanDocument, instructions: string) {
     setRevisingPlanId(plan.id);
     setFailure(undefined);
     try {
@@ -1225,7 +1276,6 @@ export function HomePage(props: {
         instructions,
       });
       setTaskSnapshot(task);
-      setDismissedPlanId(plan.id);
       setSelectedSessionId(task.session.id);
       setSessionSnapshot(await commandPort.getWorkbenchSession(task.session.id));
       void refreshSessionActivity();
@@ -1233,6 +1283,21 @@ export function HomePage(props: {
       setFailure(commandFailure(error).message);
     } finally {
       setRevisingPlanId(undefined);
+    }
+  }
+
+  async function skipPlan(plan: PlanDocument) {
+    setFailure(undefined);
+    try {
+      await commandPort.skipWorkbenchPlan({
+        idempotencyKey: crypto.randomUUID(),
+        planId: plan.id,
+        expectedRevision: plan.revision,
+      });
+      const sessionId = selectedSessionId();
+      if (sessionId) setSessionSnapshot(await commandPort.getWorkbenchSession(sessionId));
+    } catch (error) {
+      setFailure(commandFailure(error).message);
     }
   }
 
@@ -1441,7 +1506,10 @@ export function HomePage(props: {
                       }
                       onOpenItem={(item) => {
                         if (item.kind === "plan" && item.payload.type === "plan") {
-                          openInspector({ kind: "plan", planId: item.payload.data.plan_id });
+                          const plan = snapshot().planDocuments.find(
+                            (candidate) => candidate.sourceItemId === item.id,
+                          );
+                          if (plan) openInspector({ kind: "plan", planId: plan.id });
                         } else if (
                           item.kind === "file_change" &&
                           item.payload.type === "file_change"
@@ -1568,7 +1636,7 @@ export function HomePage(props: {
                 }
                 onAcceptPlan={(plan) => void acceptPlan(plan)}
                 onRevisePlan={(plan, instructions) => void revisePlan(plan, instructions)}
-                onDismissPlan={(plan) => setDismissedPlanId(plan.id)}
+                onDismissPlan={(plan) => void skipPlan(plan)}
               />
             </Show>
             <div classList={{ hidden: hasComposerGate() }}>

@@ -2,6 +2,8 @@
 
 记录日期：2026-07-22（Asia/Shanghai）
 
+> 本文是历史机器验收记录，不代表当前 `0.3.0-alpha.8` 提交状态。当前功能缺口见 [路线图](ROADMAP.md)，当前发布 Gate 见 [RELEASE_GATES.md](RELEASE_GATES.md)。
+
 ## 阶段状态
 
 | 标记                      | 状态   | 说明                                                                       |

@@ -351,7 +351,18 @@ mod tests {
             replayed.status,
             hachimi_protocol::ScheduleEventReceiptStatus::Replayed
         );
-        assert_eq!(replayed.task_runs, accepted.task_runs);
+        assert_eq!(
+            replayed
+                .task_runs
+                .iter()
+                .map(|task| &task.id)
+                .collect::<Vec<_>>(),
+            accepted
+                .task_runs
+                .iter()
+                .map(|task| &task.id)
+                .collect::<Vec<_>>()
+        );
 
         let mut conflicting = event;
         conflicting.subject = Some("resource://document/other".into());

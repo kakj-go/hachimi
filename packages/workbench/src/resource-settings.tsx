@@ -558,15 +558,11 @@ export function VoiceSettingsPage() {
                 : (recognition()?.fallbackReason ?? i18n.t("settings.voice.backendDescription"))
             }
           >
-            <Badge tone={recognition()?.fallbackReason ? "warning" : "info"}>
-              {recognition()?.loading
-                ? i18n.t("settings.voice.loading")
-                : recognition()?.backend === "direct_ml"
-                  ? "DirectML"
-                  : recognition()?.backend === "cpu"
-                    ? "CPU"
-                    : i18n.t("settings.voice.detecting")}
-            </Badge>
+            <Show when={recognition()?.backend}>
+              <Badge tone={recognition()?.fallbackReason ? "warning" : "info"}>
+                {recognition()?.backend === "direct_ml" ? "DirectML" : "CPU"}
+              </Badge>
+            </Show>
           </SettingsRow>
           <SettingsRow
             label={i18n.t("settings.voice.inputLanguages")}
@@ -590,15 +586,13 @@ export function VoiceSettingsPage() {
             label={runtime()?.voiceName || i18n.t("settings.voice.builtIn")}
             description={i18n.t("settings.voice.offlineDescription")}
           >
-            <Badge
-              tone={runtime()?.available ? "success" : runtime()?.loading ? "warning" : "danger"}
-            >
-              {runtime()?.loading
-                ? i18n.t("settings.voice.loading")
-                : runtime()?.available
+            <Show when={runtime() && !runtime()!.loading}>
+              <Badge tone={runtime()?.available ? "success" : "danger"}>
+                {runtime()?.available
                   ? i18n.t("settings.voice.ready")
                   : i18n.t("settings.voice.unavailable")}
-            </Badge>
+              </Badge>
+            </Show>
           </SettingsRow>
           <SettingsRow
             label={i18n.t("settings.voice.computeMode")}

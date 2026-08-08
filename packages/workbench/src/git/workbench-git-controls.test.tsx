@@ -110,7 +110,7 @@ function environment(
       canHandoff: true,
       blockedReason: null,
     },
-    activity: null,
+    activities: [],
     sources: [],
     revision: 1,
     generatedAtMs: 1,

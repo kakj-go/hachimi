@@ -181,6 +181,9 @@ vi.mock("@hachimi/ui", () => {
       </div>
     ),
     StatusBanner: (props: { children?: JSX.Element }) => <div role="status">{props.children}</div>,
+    Tooltip: (props: { label: string; children: JSX.Element }) => (
+      <span data-tooltip-label={props.label}>{props.children}</span>
+    ),
     Tabs: (props: {
       value: string;
       tabs: readonly { value: string; label: JSX.Element; content: JSX.Element }[];
@@ -538,6 +541,41 @@ describe("extension settings pages", () => {
     submit?.click();
     await settle();
     expect(commandMocks.renameSkill).toHaveBeenCalledWith("skill-1", "release-helper");
+    mounted.dispose();
+  });
+
+  it("shows read-only state once on the selected built-in Skill root", async () => {
+    commandMocks.listSkills.mockResolvedValue([{ ...skill, scope: "built_in", editable: false }]);
+    commandMocks.getSkillTree.mockResolvedValue({
+      ...tree,
+      children: [
+        ...tree.children,
+        {
+          name: "openai.yaml",
+          relativePath: "agents/openai.yaml",
+          kind: "file",
+          editorKind: "unsupported",
+          sizeBytes: 10,
+          revision: "metadata-1",
+          children: [],
+        },
+      ],
+    });
+    const mounted = mount(() => <SkillsSettingsPage />);
+    await settle();
+    expect(
+      mounted.host.querySelector('[data-testid="skill-meta-release-notes"]')?.textContent,
+    ).toBe("Built into Hachimi · Global · Read only");
+    mounted.dispose();
+  });
+
+  it("labels user Skills as globally available without claiming how they were created", async () => {
+    const mounted = mount(() => <SkillsSettingsPage />);
+    await settle();
+    expect(
+      mounted.host.querySelector('[data-testid="skill-meta-release-notes"]')?.textContent,
+    ).toBe("User Skill · Global · Editable");
+    expect(mounted.host.textContent).toContain("Other");
     mounted.dispose();
   });
 

@@ -1,6 +1,9 @@
 use std::{fs, path::PathBuf};
 
-use hachimi_protocol::{ConnectorRevision, ConnectorRuntimeKind, InstalledPlugin};
+use hachimi_protocol::{
+    ConnectorActionDescriptor, ConnectorActionEffect, ConnectorRevision, ConnectorRuntimeKind,
+    InstalledPlugin,
+};
 use serde_json::{Value, json};
 
 use crate::{ExtensionHostError, safe_relative_path, value_hash};
@@ -11,7 +14,7 @@ pub(crate) struct LoadedConnectorDescriptor {
     pub(crate) runtime_kind: ConnectorRuntimeKind,
     pub(crate) entrypoint: Option<PathBuf>,
     pub(crate) args: Vec<String>,
-    pub(crate) actions: Vec<String>,
+    pub(crate) actions: Vec<ConnectorActionDescriptor>,
     pub(crate) revision: ConnectorRevision,
 }
 
@@ -53,18 +56,40 @@ pub(crate) fn connector_descriptor(
         .and_then(Value::as_array)
         .filter(|actions| !actions.is_empty())
         .ok_or_else(|| ExtensionHostError::InvalidManifest("connector actions missing".into()))?;
-    let actions = actions
+    let mut actions = actions
         .iter()
         .map(|action| {
-            action
-                .as_str()
+            let action = action.as_object().ok_or_else(|| {
+                ExtensionHostError::InvalidManifest("connector action is invalid".into())
+            })?;
+            let name = action
+                .get("name")
+                .and_then(Value::as_str)
                 .filter(|value| !value.trim().is_empty() && value.len() <= 128)
-                .map(str::to_owned)
                 .ok_or_else(|| {
-                    ExtensionHostError::InvalidManifest("connector action is invalid".into())
-                })
+                    ExtensionHostError::InvalidManifest("connector action name is invalid".into())
+                })?;
+            let effect = match action.get("effect").and_then(Value::as_str) {
+                Some("read_only") => ConnectorActionEffect::ReadOnly,
+                Some("external_side_effect") => ConnectorActionEffect::ExternalSideEffect,
+                _ => {
+                    return Err(ExtensionHostError::InvalidManifest(
+                        "connector action effect is invalid".into(),
+                    ));
+                }
+            };
+            Ok(ConnectorActionDescriptor {
+                name: name.to_owned(),
+                effect,
+            })
         })
         .collect::<Result<Vec<_>, _>>()?;
+    actions.sort_by(|left, right| left.name.cmp(&right.name));
+    if actions.windows(2).any(|pair| pair[0].name == pair[1].name) {
+        return Err(ExtensionHostError::InvalidManifest(
+            "connector action names must be unique".into(),
+        ));
+    }
     let runtime_kind = match descriptor.get("transport").and_then(Value::as_str) {
         Some("local")
             if descriptor.get("externalNetwork").and_then(Value::as_bool) == Some(false) =>

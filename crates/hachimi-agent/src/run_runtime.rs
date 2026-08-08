@@ -5,7 +5,7 @@ use hachimi_protocol::{
     AgentPermissionPolicy, AgentWorkspaceOwner, AgentWorkspaceStatus, ApprovalPolicy, AttachmentId,
     AuthorityMode, BehaviorMode, CapabilityGrantSet, CompactionCheckpoint, EntryProfile, ItemId,
     ItemPayload, ItemRelations, ItemStatus, LlmSettings, McpToolSelection, ModelEvent,
-    ModelMessage, ModelRequest, ModelRole, PermissionProfile, ProviderCapabilities,
+    ModelMessage, ModelRequest, ModelRole, PermissionProfile, PlanId, ProviderCapabilities,
     RunAuthoritySnapshot, RunBudget, RunConfiguration, RunDriverKind, RunId, RunOrigin, RunPurpose,
     RunRecord, RunStatus, SandboxCapabilityReport, ScheduleId, SessionContextBinding, SessionId,
     SessionRecord, SkillId, TranscriptItem, TranscriptItemKind, WorkloadKind,
@@ -21,8 +21,8 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{
     CompactionError, LaneError, ModelRuntime, ModelRuntimeError, ModelRuntimeFactory,
-    RunStepContext, SemanticCompactor, SessionLanes, StepRuntimeState, ToolExecutor, ToolRuntime,
-    TurnRuntime,
+    PersistedRunError, RunStepContext, SemanticCompactor, SessionLanes, StepRuntimeState,
+    ToolExecutor, ToolRuntime, TurnRuntime,
 };
 
 #[derive(Debug, Clone)]
@@ -267,6 +267,10 @@ impl AgentRunFactory {
                         effective_policy: &authorization.effective_policy,
                         authority_mode: authorization.authority_mode,
                         workspace_root: &workspace_root,
+                        task_run_id: match &run.origin {
+                            RunOrigin::Scheduled { task_run_id, .. } => Some(task_run_id),
+                            _ => None,
+                        },
                     },
                 )
                 .await
@@ -475,6 +479,7 @@ impl AgentRunFactory {
                         effective_policy: &authorization.effective_policy,
                         authority_mode: authorization.authority_mode,
                         workspace_root: &workspace_root,
+                        task_run_id: None,
                     },
                 )
                 .await
@@ -512,7 +517,27 @@ impl AgentRunFactory {
         authorization: AgentRunAuthorization,
     ) -> Result<(CreatedAgentRun, RunAuthoritySnapshot), AgentRunFactoryError> {
         let created = self
-            .create_in_session_inner(request, session, Some(authorization))
+            .create_in_session_inner(request, session, Some(authorization), None)
+            .await?;
+        let authority = self.required_authority(&created.run.id).await?;
+        Ok((created, authority))
+    }
+
+    pub(crate) async fn create_plan_revision_in_session_authorized(
+        &self,
+        request: AgentRunCreateRequest,
+        session: SessionRecord,
+        authorization: AgentRunAuthorization,
+        plan_id: &PlanId,
+        expected_revision: u32,
+    ) -> Result<(CreatedAgentRun, RunAuthoritySnapshot), AgentRunFactoryError> {
+        let created = self
+            .create_in_session_inner(
+                request,
+                session,
+                Some(authorization),
+                Some((plan_id, expected_revision)),
+            )
             .await?;
         let authority = self.required_authority(&created.run.id).await?;
         Ok((created, authority))
@@ -523,6 +548,7 @@ impl AgentRunFactory {
         mut request: AgentRunCreateRequest,
         session: SessionRecord,
         authorization: Option<AgentRunAuthorization>,
+        revised_plan: Option<(&PlanId, u32)>,
     ) -> Result<CreatedAgentRun, AgentRunFactoryError> {
         request.origin = normalized_origin(&request.context, request.entry_profile, request.origin);
         validate_create_request(&request)?;
@@ -586,29 +612,50 @@ impl AgentRunFactory {
                 .stored_policy_owner
                 .as_ref()
                 .map(|owner| owner.key(&session.id));
-            self.store
-                .create_agent_run_in_session_authorized_idempotent(
-                    &request.principal,
-                    &request.idempotency_key,
-                    &session,
-                    &run,
-                    &user_item,
-                    &request.attachment_ids,
-                    AtomicRunLaunchInput {
-                        proposed_workspace: None,
-                        workspace_owner: matches!(
-                            &session.context,
-                            SessionContextBinding::Workspace { .. }
-                        )
-                        .then_some(&workspace_owner),
-                        stored_policy_owner_key: stored_policy_owner_key.as_deref(),
-                        stored_policy: authorization.stored_policy.as_ref(),
-                        effective_policy: &authorization.effective_policy,
-                        authority_mode: authorization.authority_mode,
-                        workspace_root: &workspace_root,
-                    },
+            let launch = AtomicRunLaunchInput {
+                proposed_workspace: None,
+                workspace_owner: matches!(
+                    &session.context,
+                    SessionContextBinding::Workspace { .. }
                 )
-                .await?
+                .then_some(&workspace_owner),
+                stored_policy_owner_key: stored_policy_owner_key.as_deref(),
+                stored_policy: authorization.stored_policy.as_ref(),
+                effective_policy: &authorization.effective_policy,
+                authority_mode: authorization.authority_mode,
+                workspace_root: &workspace_root,
+                task_run_id: match &run.origin {
+                    RunOrigin::Scheduled { task_run_id, .. } => Some(task_run_id),
+                    _ => None,
+                },
+            };
+            if let Some((plan_id, expected_revision)) = revised_plan {
+                self.store
+                    .create_plan_revision_run_authorized_idempotent(
+                        &request.principal,
+                        &request.idempotency_key,
+                        &session,
+                        &run,
+                        &user_item,
+                        &request.attachment_ids,
+                        plan_id,
+                        expected_revision,
+                        launch,
+                    )
+                    .await?
+            } else {
+                self.store
+                    .create_agent_run_in_session_authorized_idempotent(
+                        &request.principal,
+                        &request.idempotency_key,
+                        &session,
+                        &run,
+                        &user_item,
+                        &request.attachment_ids,
+                        launch,
+                    )
+                    .await?
+            }
         } else {
             self.store
                 .create_agent_run_in_session_idempotent(
@@ -1029,6 +1076,14 @@ impl AgentExecutorRegistry {
         self.active.lock().is_empty()
     }
 
+    #[must_use]
+    pub fn has_active_session(&self, session_id: &SessionId) -> bool {
+        self.active
+            .lock()
+            .values()
+            .any(|run| &run.session_id == session_id)
+    }
+
     pub fn cancel(
         &self,
         run_id: &RunId,
@@ -1155,6 +1210,7 @@ pub struct PreparedAgentRun {
     pub initial_messages: Vec<ModelMessage>,
     pub tool_executors: Vec<Arc<dyn ToolExecutor>>,
     pub host_context: Option<String>,
+    pub host_revision_snapshot: Option<hachimi_protocol::HostRevisionSnapshot>,
     pub state: StepRuntimeState,
     pub world_refresher: Option<Arc<dyn crate::StepWorldStateRefresher>>,
     pub diff_tracker: Option<Arc<crate::RunDiffTracker>>,
@@ -1208,6 +1264,32 @@ impl AgentRunExecutor {
     #[must_use]
     pub const fn registry(&self) -> &Arc<AgentExecutorRegistry> {
         &self.registry
+    }
+
+    pub async fn compact_session(
+        &self,
+        configuration: &RunConfiguration,
+        session_id: &SessionId,
+        cancellation: CancellationToken,
+    ) -> Result<Option<CompactionCheckpoint>, AgentExecutionError> {
+        if self.registry.has_active_session(session_id) {
+            return Err(AgentExecutionError::Preparation(
+                "manual compaction requires an idle Session".into(),
+            ));
+        }
+        let _permit = self.registry.lanes.enter(session_id).await?;
+        let client = self.model_factory.create_session(configuration).await?;
+        let model: Arc<dyn ModelRuntime> = client;
+        SemanticCompactor::new(self.store.clone(), model)
+            .with_provider_context(&configuration.model_snapshot)
+            .compact(
+                session_id,
+                None,
+                hachimi_protocol::CompactionReason::Manual,
+                cancellation,
+            )
+            .await
+            .map_err(|error| AgentExecutionError::Execution(error.to_string()))
     }
 
     /// Runs a bounded, tool-free helper prompt through the same configured
@@ -1325,7 +1407,7 @@ impl AgentRunExecutor {
                     .create_session(&run.configuration)
                     .await?;
                 let model: Arc<dyn ModelRuntime> = client;
-                let checkpoint = if run.purpose == RunPurpose::Review {
+                let mut checkpoint = if run.purpose == RunPurpose::Review {
                     None
                 } else {
                     let compactor = SemanticCompactor::new(self.store.clone(), Arc::clone(&model))
@@ -1362,73 +1444,111 @@ impl AgentRunExecutor {
                         }
                     }
                 };
-                let prepared = self
-                    .preparer
-                    .prepare(
-                        request.clone(),
-                        checkpoint,
-                        Arc::clone(&model),
-                        combined.child_token(),
-                    )
-                    .await?;
-                let tools = Arc::new(
-                    ToolRuntime::from_executors(prepared.tool_executors.clone())
-                        .map_err(|error| AgentExecutionError::Preparation(error.to_string()))?,
-                );
-                if let Some(recovery) = request.recovery_checkpoint.as_ref() {
-                    if recovery.run_id != run.id
-                        || recovery.session_id != run.session_id
-                        || recovery.run_generation.saturating_add(1) != run.generation
-                    {
-                        return Err(AgentExecutionError::RecoveryDrift(
-                            "checkpoint lineage no longer matches the Run",
-                        ));
+                let mut compaction_restarts = 0_u8;
+                let mut provider_overflow_restarts = 0_u8;
+                loop {
+                    let prepared = self
+                        .preparer
+                        .prepare(
+                            request.clone(),
+                            checkpoint.clone(),
+                            Arc::clone(&model),
+                            combined.child_token(),
+                        )
+                        .await?;
+                    let tools = Arc::new(
+                        ToolRuntime::from_executors(prepared.tool_executors.clone())
+                            .map_err(|error| AgentExecutionError::Preparation(error.to_string()))?,
+                    );
+                    if let Some(recovery) = request.recovery_checkpoint.as_ref() {
+                        validate_recovery_context(recovery, &request, &prepared, &tools, &model)?;
                     }
-                    let world = prepared.state.snapshot().world;
-                    let current = hachimi_protocol::RecoveryRevisionSnapshot {
-                        agents_revision: world.agents_revision,
-                        skills_revision: world.skills_revision,
-                        mcp_revision: world.mcp_revision,
-                        plugin_revision: tools.registry().revision().to_owned(),
-                        host_revision: world.host_revision,
-                        provider_revision: runtime_provider_revision(&model.capabilities()),
+                    prepared
+                        .state
+                        .narrow_sandbox(request.sandbox_snapshot.clone());
+                    let turn = TurnRuntime::new(self.store.clone(), Arc::clone(&model), tools)
+                        .execute(
+                            run.clone(),
+                            prepared.initial_messages,
+                            RunStepContext {
+                                host_context: prepared.host_context,
+                                host_revision_snapshot: prepared.host_revision_snapshot,
+                                state: prepared.state,
+                                run_tool_allowlist: request.run_tool_allowlist.clone(),
+                                capability_grants: Some(request.capability_grants.clone()),
+                                world_refresher: prepared.world_refresher,
+                                diff_tracker: prepared.diff_tracker,
+                            },
+                            combined.child_token(),
+                        )
+                        .await;
+                    let runtime_error = match turn {
+                        Ok(_) => break Ok(()),
+                        Err(PersistedRunError::Runtime(
+                            error @ ModelRuntimeError::ContextCompactionRequired { .. },
+                        )) => (error, hachimi_protocol::CompactionReason::Automatic),
+                        Err(PersistedRunError::Runtime(
+                            error @ ModelRuntimeError::ContextOverflow,
+                        )) => {
+                            if provider_overflow_restarts >= 1 {
+                                break Err(AgentExecutionError::Model(prompt_too_long(
+                                    model.as_ref(),
+                                    &error,
+                                )));
+                            }
+                            provider_overflow_restarts =
+                                provider_overflow_restarts.saturating_add(1);
+                            (error, hachimi_protocol::CompactionReason::Reactive)
+                        }
+                        Err(error) => break Err(AgentExecutionError::Execution(error.to_string())),
                     };
-                    if !recovery_revisions_match(&recovery.revision_snapshot, &current)
-                        || (recovery.revision_snapshot.host_revision.is_empty()
-                            && current.host_revision != recovery.world_revision)
-                    {
-                        return Err(AgentExecutionError::RecoveryDrift(
-                            "Host, Skill, MCP, Plugin, or Sandbox revision changed",
-                        ));
+                    if compaction_restarts >= 3 || run.purpose == RunPurpose::Review {
+                        break Err(AgentExecutionError::Model(prompt_too_long(
+                            model.as_ref(),
+                            &runtime_error.0,
+                        )));
                     }
-                    if recovery.revision_snapshot.provider_revision.is_empty()
-                        && current.provider_revision != recovery.provider_revision
-                    {
-                        return Err(AgentExecutionError::RecoveryDrift(
-                            "Provider capabilities changed",
-                        ));
+                    let covered_before = checkpoint
+                        .as_ref()
+                        .map_or(0, |value| value.covered_through_sequence);
+                    let compactor = SemanticCompactor::new(self.store.clone(), Arc::clone(&model))
+                        .with_provider_context(&run.configuration.model_snapshot);
+                    let compacted = compactor
+                        .compact(
+                            &run.session_id,
+                            Some(&run.id),
+                            runtime_error.1,
+                            combined.child_token(),
+                        )
+                        .await;
+                    let Some(next) = compacted.ok().flatten() else {
+                        break Err(AgentExecutionError::Model(prompt_too_long(
+                            model.as_ref(),
+                            &runtime_error.0,
+                        )));
+                    };
+                    if next.covered_through_sequence <= covered_before {
+                        break Err(AgentExecutionError::Model(prompt_too_long(
+                            model.as_ref(),
+                            &runtime_error.0,
+                        )));
                     }
+                    compaction_restarts = compaction_restarts.saturating_add(1);
+                    self.store
+                        .append_event(
+                            &run.session_id,
+                            Some(&run.id),
+                            "context.compaction_restart",
+                            serde_json::json!({
+                                "restart": compaction_restarts,
+                                "reason": runtime_error.1,
+                                "checkpointId": next.id,
+                                "coveredThroughSequence": next.covered_through_sequence,
+                            }),
+                        )
+                        .await?;
+                    checkpoint = Some(next);
                 }
-                prepared
-                    .state
-                    .narrow_sandbox(request.sandbox_snapshot.clone());
-                TurnRuntime::new(self.store.clone(), model, tools)
-                    .execute(
-                        run.clone(),
-                        prepared.initial_messages,
-                        RunStepContext {
-                            host_context: prepared.host_context,
-                            state: prepared.state,
-                            run_tool_allowlist: request.run_tool_allowlist.clone(),
-                            capability_grants: Some(request.capability_grants.clone()),
-                            world_refresher: prepared.world_refresher,
-                            diff_tracker: prepared.diff_tracker,
-                        },
-                        combined,
-                    )
-                    .await
-                    .map_err(|error| AgentExecutionError::Execution(error.to_string()))?;
-                Ok(())
             }
             .await;
             watcher_stop.cancel();
@@ -1479,6 +1599,83 @@ impl AgentRunExecutor {
     }
 }
 
+fn validate_recovery_context(
+    recovery: &hachimi_protocol::RunStepCheckpoint,
+    request: &AgentRunRequest,
+    prepared: &PreparedAgentRun,
+    tools: &ToolRuntime,
+    model: &Arc<dyn ModelRuntime>,
+) -> Result<(), AgentExecutionError> {
+    if recovery.run_id != request.run.id
+        || recovery.session_id != request.run.session_id
+        || recovery.run_generation.saturating_add(1) != request.run.generation
+    {
+        return Err(AgentExecutionError::RecoveryDrift(
+            "checkpoint lineage no longer matches the Run",
+        ));
+    }
+    let world = prepared.state.snapshot().world;
+    let current = hachimi_protocol::RecoveryRevisionSnapshot {
+        agents_revision: world.agents_revision,
+        skills_revision: world.skills_revision,
+        mcp_revision: world.mcp_revision,
+        plugin_revision: tools.registry().revision().to_owned(),
+        host_revision: world.host_revision,
+        provider_revision: crate::tool_loop::provider_capabilities_revision(&model.capabilities()),
+    };
+    for (expected, current, reason) in [
+        (
+            &recovery.revision_snapshot.agents_revision,
+            &current.agents_revision,
+            "AGENTS revision changed",
+        ),
+        (
+            &recovery.revision_snapshot.skills_revision,
+            &current.skills_revision,
+            "Skill revision changed",
+        ),
+        (
+            &recovery.revision_snapshot.mcp_revision,
+            &current.mcp_revision,
+            "MCP revision changed",
+        ),
+        (
+            &recovery.revision_snapshot.plugin_revision,
+            &current.plugin_revision,
+            "Tool registry revision changed",
+        ),
+        (
+            &recovery.revision_snapshot.host_revision,
+            &current.host_revision,
+            "Host or Sandbox revision changed",
+        ),
+        (
+            &recovery.revision_snapshot.provider_revision,
+            &current.provider_revision,
+            "Provider capabilities changed",
+        ),
+    ] {
+        if !expected.is_empty() && expected != current {
+            return Err(AgentExecutionError::RecoveryDrift(reason));
+        }
+    }
+    if recovery.revision_snapshot.host_revision.is_empty()
+        && current.host_revision != recovery.world_revision
+    {
+        return Err(AgentExecutionError::RecoveryDrift(
+            "legacy Host or Sandbox revision changed",
+        ));
+    }
+    if recovery.revision_snapshot.provider_revision.is_empty()
+        && current.provider_revision != recovery.provider_revision
+    {
+        return Err(AgentExecutionError::RecoveryDrift(
+            "Provider capabilities changed",
+        ));
+    }
+    Ok(())
+}
+
 fn validate_agent_run_request(request: &AgentRunRequest) -> Result<(), AgentExecutionError> {
     if request.run.session_id != request.session.id
         || request.run.configuration.entry_profile != request.session.entry_profile
@@ -1516,7 +1713,21 @@ fn compaction_error_code(error: &CompactionError) -> &'static str {
         CompactionError::QualityRejected(code) => code,
         CompactionError::Runtime(_) => "compaction_model_failed",
         CompactionError::Store(_) => "compaction_store_failed",
-        CompactionError::SourceOverflow => "compaction_source_overflow",
+        CompactionError::PromptTooLong => "prompt_too_long",
+    }
+}
+
+fn prompt_too_long(model: &dyn ModelRuntime, error: &ModelRuntimeError) -> ModelRuntimeError {
+    let active_context_tokens = match error {
+        ModelRuntimeError::ContextCompactionRequired {
+            active_context_tokens,
+            ..
+        } => *active_context_tokens,
+        _ => 0,
+    };
+    ModelRuntimeError::PromptTooLong {
+        active_context_tokens,
+        context_window: model.capabilities().context_window.unwrap_or_default(),
     }
 }
 
@@ -1530,31 +1741,4 @@ fn current_time_ms() -> i64 {
             .as_millis(),
     )
     .unwrap_or(i64::MAX)
-}
-
-fn runtime_provider_revision(capabilities: &ProviderCapabilities) -> String {
-    use sha2::{Digest, Sha256};
-    let mut hasher = Sha256::new();
-    hasher.update(serde_json::to_vec(capabilities).unwrap_or_default());
-    hasher
-        .finalize()
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
-}
-
-fn recovery_revisions_match(
-    expected: &hachimi_protocol::RecoveryRevisionSnapshot,
-    current: &hachimi_protocol::RecoveryRevisionSnapshot,
-) -> bool {
-    [
-        (&expected.agents_revision, &current.agents_revision),
-        (&expected.skills_revision, &current.skills_revision),
-        (&expected.mcp_revision, &current.mcp_revision),
-        (&expected.plugin_revision, &current.plugin_revision),
-        (&expected.host_revision, &current.host_revision),
-        (&expected.provider_revision, &current.provider_revision),
-    ]
-    .into_iter()
-    .all(|(expected, current)| expected.is_empty() || expected == current)
 }

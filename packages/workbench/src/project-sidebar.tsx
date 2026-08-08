@@ -380,11 +380,6 @@ export function ProjectSidebar(props: {
                             <Folder size={16} />
                           )}
                           <span class="project-row-name">{project.displayName}</span>
-                          <ChevronDown
-                            class="project-chevron"
-                            classList={{ collapsed: !projectSessionsVisible(project.id) }}
-                            size={13}
-                          />
                         </span>
                       </Button>
                       <div class="project-row-actions">

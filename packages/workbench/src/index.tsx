@@ -5,10 +5,12 @@ import {
   type AppSettings,
   type AppearanceConfig,
   type BootstrapState,
+  type DiagnosticsPaths,
   type LlmSettingsInput,
   type LlmSettingsView,
   type LlmTestResult,
   type ProviderProtocolKind,
+  type ReasoningSummaryMode,
   type StructuredOutputMode,
   type Locale,
   type DiffMarkerMode,
@@ -37,6 +39,7 @@ import {
   DEFAULT_UI_FONT,
   Dropdown,
   Globe,
+  FolderOpen,
   Maximize2,
   Minus,
   Monitor,
@@ -91,7 +94,9 @@ import {
 } from "solid-js";
 
 import { runtimeFeatureVisibility } from "./runtime-feature-visibility";
+import { normalizeRemoteContextFields } from "./llm-settings-normalization";
 import "./workbench.css";
+import "./diagnostics-settings.css";
 import "./appearance-workbench.css";
 import "./workspace-browser.css";
 import "./resource-settings.css";
@@ -111,6 +116,7 @@ import { HostDomainSettingsPage } from "./host-domain-settings";
 import { PlatformIntegrationsSettings } from "./platform-integrations-settings";
 import { ResourceSettingsPage, VoiceSettingsPage } from "./resource-settings";
 import { SkillsSettingsPage } from "./skills-settings";
+import { PetPermissionSettings } from "./pet-permission-settings";
 import { normalizeWorkbenchRoute, SETTINGS_ROUTES } from "./routing";
 
 function initialRoute(): WorkbenchRoute {
@@ -120,6 +126,7 @@ function initialRoute(): WorkbenchRoute {
 function WindowChrome(props: {
   canGoBack: boolean;
   canGoForward: boolean;
+  motionLabEnabled: boolean;
   onBack: () => void;
   onForward: () => void;
   onToggleSidebar: () => void;
@@ -243,11 +250,15 @@ function WindowChrome(props: {
                 icon: <Palette size={15} />,
                 separatorBefore: true,
               },
-              {
-                id: "motion",
-                label: text("动作库实验室", "Motion Library Lab"),
-                icon: <Play size={15} />,
-              },
+              ...(props.motionLabEnabled
+                ? [
+                    {
+                      id: "motion",
+                      label: text("动作库实验室", "Motion Library Lab"),
+                      icon: <Play size={15} />,
+                    },
+                  ]
+                : []),
             ]}
             onSelect={(id) => {
               if (id === "toggle_sidebar") props.onToggleSidebar();
@@ -466,7 +477,7 @@ function SettingsShell(props: {
           item(null, "Plugins", <Puzzle size={17} />, {
             id: "plugins",
             disabled: true,
-            status: i18n.locale() === "zh-CN" ? "规划中" : "Planned",
+            status: i18n.locale() === "zh-CN" ? "暂不开放" : "Not available",
           }),
         ],
       },
@@ -693,6 +704,7 @@ function GeneralSettings(props: {
           </SettingsRow>
         </SettingsCard>
       </SettingsSection>
+      <PetPermissionSettings />
     </div>
   );
 }
@@ -705,6 +717,8 @@ function DiagnosticsSettings(props: {
   const i18n = useI18n();
   const [resetOpen, setResetOpen] = createSignal(false);
   const [resetting, setResetting] = createSignal(false);
+  const [paths, setPaths] = createSignal<DiagnosticsPaths>();
+  const [openingLogs, setOpeningLogs] = createSignal(false);
   async function persist(patch: Partial<AppSettings>) {
     const previous = props.settings;
     const next = { ...previous, ...patch };
@@ -726,6 +740,23 @@ function DiagnosticsSettings(props: {
       props.fail(commandFailure(error).message);
     }
   }
+  async function openLogs() {
+    setOpeningLogs(true);
+    try {
+      await commands.openLogsDirectory();
+    } catch (error) {
+      props.fail(commandFailure(error).message);
+    } finally {
+      setOpeningLogs(false);
+    }
+  }
+  onMount(() => {
+    void commands
+      .getDiagnosticsPaths()
+      .then(setPaths)
+      // eslint-disable-next-line solid/reactivity -- Promise failures are reported outside rendering.
+      .catch((error) => props.fail(commandFailure(error).message));
+  });
   return (
     <div class="settings-page settings-page-demo">
       <PageHeading
@@ -737,6 +768,37 @@ function DiagnosticsSettings(props: {
             : "Inspect build information, developer capabilities, and local data."
         }
       />
+      <SettingsSection title={i18n.locale() === "zh-CN" ? "运行日志" : "Application logs"}>
+        <SettingsCard class="settings-card settings-card-demo">
+          <SettingsRow
+            label={i18n.locale() === "zh-CN" ? "日志目录" : "Log directory"}
+            description={
+              i18n.locale() === "zh-CN"
+                ? "后端、前端和本地服务日志保存在应用数据目录，不在安装目录。"
+                : "Backend, frontend, and local-service logs are stored with app data, not in the installation directory."
+            }
+          >
+            <div class="settings-path-action">
+              <code title={paths()?.logDirectory}>{paths()?.logDirectory ?? "..."}</code>
+              <Button
+                size="small"
+                disabled={!paths() || openingLogs()}
+                title={i18n.locale() === "zh-CN" ? "打开日志目录" : "Open log directory"}
+                onClick={() => void openLogs()}
+              >
+                <FolderOpen size={14} />
+                {openingLogs()
+                  ? i18n.locale() === "zh-CN"
+                    ? "正在打开"
+                    : "Opening"
+                  : i18n.locale() === "zh-CN"
+                    ? "打开"
+                    : "Open"}
+              </Button>
+            </div>
+          </SettingsRow>
+        </SettingsCard>
+      </SettingsSection>
       <SettingsSection title={i18n.locale() === "zh-CN" ? "开发者" : "Developer"}>
         <SettingsCard class="settings-card settings-card-demo">
           <SettingsRow
@@ -1461,8 +1523,7 @@ function LlmSettingsPage(props: {
   const [modelName, setModelName] = createSignal("");
   const [protocol, setProtocol] = createSignal<ProviderProtocolKind>("chat_completions");
   const [compatibilityProfileId, setCompatibilityProfileId] = createSignal("openai-strict");
-  const [embeddingModelName, setEmbeddingModelName] = createSignal("");
-  const [reasoningSummary, setReasoningSummary] = createSignal(false);
+  const [reasoningSummary, setReasoningSummary] = createSignal<ReasoningSummaryMode>("none");
   const [remoteCompaction, setRemoteCompaction] = createSignal(false);
   const [maxInput, setMaxInput] = createSignal(0);
   const [maxOutput, setMaxOutput] = createSignal(0);
@@ -1480,17 +1541,14 @@ function LlmSettingsPage(props: {
     setModelName(next.modelName);
     setProtocol(props.providerExtensionsEnabled ? next.protocol : "chat_completions");
     setCompatibilityProfileId(next.compatibilityProfileId);
-    setEmbeddingModelName(props.providerExtensionsEnabled ? next.embeddingModelName : "");
-    setReasoningSummary(
-      props.providerExtensionsEnabled && props.providerRemoteContextEnabled
-        ? next.reasoningSummary
-        : false,
+    const remoteContext = normalizeRemoteContextFields(
+      next.protocol,
+      props.providerExtensionsEnabled && props.providerRemoteContextEnabled,
+      next.reasoningSummary,
+      next.remoteCompaction,
     );
-    setRemoteCompaction(
-      props.providerExtensionsEnabled && props.providerRemoteContextEnabled
-        ? next.remoteCompaction
-        : false,
-    );
+    setReasoningSummary(remoteContext.reasoningSummary);
+    setRemoteCompaction(remoteContext.remoteCompaction);
     setMaxInput(next.maxInputTokens);
     setMaxOutput(next.maxOutputTokens);
     setStructuredOutputMode(next.structuredOutputMode);
@@ -1498,6 +1556,12 @@ function LlmSettingsPage(props: {
     setClearKey(false);
   }
   function input(): LlmSettingsInput {
+    const remoteContext = normalizeRemoteContextFields(
+      protocol(),
+      props.providerExtensionsEnabled && props.providerRemoteContextEnabled,
+      reasoningSummary(),
+      remoteCompaction(),
+    );
     return {
       baseUrl: baseUrl(),
       modelName: modelName(),
@@ -1505,9 +1569,9 @@ function LlmSettingsPage(props: {
       compatibilityProfileId: compatibilityProfileId(),
       providerEndpointId: view()?.providerEndpointId ?? null,
       providerAccountId: view()?.providerAccountId ?? null,
-      embeddingModelName: props.providerExtensionsEnabled ? embeddingModelName() : "",
-      reasoningSummary: props.providerRemoteContextEnabled ? reasoningSummary() : false,
-      remoteCompaction: props.providerRemoteContextEnabled ? remoteCompaction() : false,
+      embeddingModelName: "",
+      reasoningSummary: remoteContext.reasoningSummary,
+      remoteCompaction: remoteContext.remoteCompaction,
       maxInputTokens: maxInput(),
       maxOutputTokens: maxOutput(),
       structuredOutputMode: structuredOutputMode(),
@@ -1572,7 +1636,7 @@ function LlmSettingsPage(props: {
                 const next = value as ProviderProtocolKind;
                 setProtocol(next);
                 if (next !== "responses") {
-                  setReasoningSummary(false);
+                  setReasoningSummary("none");
                   setRemoteCompaction(false);
                 }
               }}
@@ -1634,32 +1698,25 @@ function LlmSettingsPage(props: {
             <TextField
               label={i18n.t("settings.modelName")}
               value={modelName()}
-              placeholder="gemma4:e4b"
+              placeholder="gpt-5.6-sol"
               onInput={(event) => setModelName(event.currentTarget.value)}
             />
           </SettingsRow>
-          <Show when={props.providerExtensionsEnabled}>
-            <SettingsRow
-              label={i18n.t("settings.embeddingModel")}
-              description={i18n.t("settings.embeddingModel.description")}
-            >
-              <TextField
-                label={i18n.t("settings.embeddingModel")}
-                value={embeddingModelName()}
-                placeholder="text-embedding-3-small"
-                onInput={(event) => setEmbeddingModelName(event.currentTarget.value)}
-              />
-            </SettingsRow>
-          </Show>
           <Show when={protocol() === "responses" && props.providerRemoteContextEnabled}>
             <SettingsRow
               label={i18n.t("settings.reasoningSummary")}
               description={i18n.t("settings.reasoningSummary.description")}
             >
-              <Toggle
-                checked={reasoningSummary()}
+              <SelectField
+                value={reasoningSummary()}
                 label={i18n.t("settings.reasoningSummary")}
-                onChange={setReasoningSummary}
+                options={[
+                  { value: "auto", label: i18n.t("settings.reasoningSummary.auto") },
+                  { value: "concise", label: i18n.t("settings.reasoningSummary.concise") },
+                  { value: "detailed", label: i18n.t("settings.reasoningSummary.detailed") },
+                  { value: "none", label: i18n.t("settings.reasoningSummary.none") },
+                ]}
+                onChange={(value) => setReasoningSummary(value as ReasoningSummaryMode)}
               />
             </SettingsRow>
             <SettingsRow
@@ -1763,6 +1820,7 @@ function LoadedWorkbench(props: {
   const [historyIndex, setHistoryIndex] = createSignal(0);
   const [failure, setFailure] = createSignal<string>();
   const [sidebarCollapsed, setSidebarCollapsed] = createSignal(window.innerWidth <= 760);
+  let narrowViewport = window.innerWidth <= 760;
   const route = () => history()[historyIndex()] ?? "home";
   let stopNavigation: (() => void) | undefined;
   let stopSettings: (() => void) | undefined;
@@ -1788,8 +1846,16 @@ function LoadedWorkbench(props: {
       navigate("settings/general");
     }
   };
+  const handleResize = () => {
+    const nextNarrowViewport = window.innerWidth <= 760;
+    if (nextNarrowViewport !== narrowViewport) {
+      narrowViewport = nextNarrowViewport;
+      setSidebarCollapsed(nextNarrowViewport);
+    }
+  };
   onMount(() => {
     window.addEventListener("keydown", handleShortcut);
+    window.addEventListener("resize", handleResize);
     // eslint-disable-next-line solid/reactivity -- Tauri callbacks are live event handlers.
     void listen<WorkbenchRoute>("workbench:navigate", ({ payload }) => {
       // Tauri delivers this callback after mount; the router signals remain live.
@@ -1805,6 +1871,7 @@ function LoadedWorkbench(props: {
   });
   onCleanup(() => {
     window.removeEventListener("keydown", handleShortcut);
+    window.removeEventListener("resize", handleResize);
     stopNavigation?.();
     stopSettings?.();
   });
@@ -1824,6 +1891,7 @@ function LoadedWorkbench(props: {
           <WindowChrome
             canGoBack={historyIndex() > 0}
             canGoForward={historyIndex() < history().length - 1}
+            motionLabEnabled={motionLabEnabled}
             onBack={back}
             onForward={forward}
             onToggleSidebar={() => setSidebarCollapsed((value) => !value)}

@@ -1,5 +1,3 @@
-//! Local Codex-style Plugin Bundle and deterministic Connector Host.
-
 mod channel_manifest;
 mod connector_driver;
 mod connector_manifest;
@@ -1133,7 +1131,6 @@ impl PluginHost {
             .ok_or(ExtensionHostError::ConnectorNotHealthy)?;
         if account.health != ConnectorHealth::Healthy {
             if account.health == ConnectorHealth::RateLimited {
-                // Window-based rate limits remain recoverable and retain their ledger.
                 if !rate_limit_window_expired(&self.store, &account.id).await? {
                     return Err(ExtensionHostError::RateLimited);
                 }
@@ -1661,6 +1658,8 @@ fn load_contribution(
                                         | "tool.after"
                                         | "schedule.before"
                                         | "schedule.after"
+                                        | "context.compact.before"
+                                        | "context.compact.after"
                                 )
                             })
                         })

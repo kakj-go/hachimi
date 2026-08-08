@@ -2,11 +2,11 @@
   "hostIdentity": "hachimi.enterprise.wecom_app.v1",
   "transport": "local",
   "actions": [
-    "account_identity",
-    "department_list",
-    "member_list",
-    "message_send",
-    "event_subscribe"
+    { "name": "account_identity", "effect": "read_only" },
+    { "name": "department_list", "effect": "read_only" },
+    { "name": "member_list", "effect": "read_only" },
+    { "name": "message_send", "effect": "external_side_effect" },
+    { "name": "event_subscribe", "effect": "external_side_effect" }
   ],
   "webhook": true,
   "poll": false,

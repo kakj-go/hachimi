@@ -1,5 +1,8 @@
 import { join } from "node:path";
 
+import { _setGlobal } from "@wdio/globals";
+import { remote } from "webdriverio";
+
 import { cleanupExecutableProcesses } from "./processes.mjs";
 
 let restartSequence = 0;
@@ -52,18 +55,41 @@ export async function restartApplication() {
   const webviewData = process.env.HACHIMI_DESKTOP_E2E_WEBVIEW_DATA;
   if (!application || !webviewData) throw new Error("Desktop E2E restart paths are unavailable");
   restartSequence += 1;
-  await browser.reloadSession({
-    "tauri:options": {
-      application,
-      webviewOptions: {
-        // The application database remains under HACHIMI_DATA_DIR. A new
-        // browser-only profile avoids WebView2's short-lived Preferences lock.
-        userDataFolder: join(webviewData, `restart-${restartSequence}`),
+  // Let tauri-driver release its current Edge session before terminating any
+  // surviving application process. reloadSession() cannot do this reliably:
+  // once the native process exits, its follow-up DELETE targets an invalid
+  // Edge session and tauri-driver may retain the stale session internally.
+  try {
+    await browser.deleteSession();
+  } catch {
+    // The native process may have already exited. Exact-path cleanup below is
+    // still required before asking tauri-driver for a replacement session.
+  }
+  cleanupExecutableProcesses(application);
+  const replacement = await remote({
+    hostname: "127.0.0.1",
+    port: 4444,
+    path: "/",
+    logLevel: "warn",
+    connectionRetryCount: 0,
+    capabilities: {
+      "tauri:options": {
+        application,
+        webviewOptions: {
+          // The application database remains under HACHIMI_DATA_DIR. A new
+          // browser-only profile avoids WebView2's short-lived Preferences lock.
+          userDataFolder: join(webviewData, `restart-${restartSequence}`),
+        },
       },
     },
   });
-  // tauri-driver can leave the old native process alive after reloadSession.
-  // The application path is unique to this E2E build, so retain only the
-  // newest exact executable instance and never match a user's installed app.
-  cleanupExecutableProcesses(application, { keepNewest: 1 });
+  _setGlobal("browser", replacement);
+  _setGlobal("driver", replacement);
+  _setGlobal("$", (selector) => replacement.$(selector));
+  _setGlobal("$$", (selector) => replacement.$$(selector));
+  await browser.waitUntil(async () => (await browser.getWindowHandles()).length > 0, {
+    timeout: 30_000,
+    interval: 100,
+    timeoutMsg: "Restarted Hachimi process did not expose a WebDriver window",
+  });
 }

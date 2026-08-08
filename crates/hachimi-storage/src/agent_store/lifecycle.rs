@@ -672,6 +672,10 @@ fn forkable_history_payload(
 }
 
 #[cfg(test)]
+#[path = "lifecycle_resume_matrix_tests.rs"]
+mod resume_matrix_tests;
+
+#[cfg(test)]
 mod tests {
     use hachimi_protocol::{
         ApprovalPolicy, ArtifactId, BehaviorMode, CheckoutId, CheckoutKind, CheckoutRecord,
@@ -686,7 +690,7 @@ mod tests {
 
     use super::*;
 
-    async fn seed() -> (AgentStore, SessionRecord, hachimi_protocol::RunRecord) {
+    pub(super) async fn seed() -> (AgentStore, SessionRecord, hachimi_protocol::RunRecord) {
         let store = AgentStore::connect_in_memory().await.expect("store");
         let now = 1_700_000_000_000_i64;
         let project = ProjectRecord {

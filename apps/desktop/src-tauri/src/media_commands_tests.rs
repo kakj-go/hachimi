@@ -1,5 +1,15 @@
 use super::*;
 
+#[test]
+fn pet_permission_revision_conflict_is_rejected() {
+    assert!(crate::permission_runtime::validate_permission_revision(4, 4).is_ok());
+    let error = crate::permission_runtime::validate_permission_revision(3, 4)
+        .expect_err("stale permission revision");
+    assert_eq!(error.code, "permission_revision_conflict");
+    assert!(error.message.contains("expected revision 3"));
+    assert!(error.message.contains("current revision 4"));
+}
+
 fn provider_input(protocol: ProviderProtocolKind) -> LlmSettingsInput {
     LlmSettingsInput {
         base_url: "https://api.openai.com/v1".into(),
@@ -9,7 +19,7 @@ fn provider_input(protocol: ProviderProtocolKind) -> LlmSettingsInput {
         provider_endpoint_id: None,
         provider_account_id: None,
         embedding_model_name: String::new(),
-        reasoning_summary: false,
+        reasoning_summary: ReasoningSummaryMode::None,
         remote_compaction: false,
         max_input_tokens: 0,
         max_output_tokens: 0,

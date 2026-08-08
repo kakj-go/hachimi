@@ -51,6 +51,7 @@ chrono = { version = "=0.4.45", default-features = false, features = ["std"] }
 chrono-tz = "=0.10.4"
 keyring = { version = "=4.1.5", default-features = false, features = ["v1"] }
 parking_lot = "=0.12.5"
+png = "=0.18.1"
 cpal = "=0.17.3"
 reqwest = { version = "=0.13.4", default-features = false, features = ["blocking", "json", "multipart", "query", "rustls", "stream"] }
 rfd = { version = "=0.17.2", default-features = false, features = ["common-controls-v6"] }
@@ -89,7 +90,7 @@ base64 = "=0.22.1"
 aes = "=0.8.4"
 cbc = "=0.1.2"
 md5 = "=0.8.0"
-cef = "=151.2.0+151.3.14"
+cef = "=151.2.0"
 hmac = "=0.12.1"
 sha1 = "=0.10.7"
 diff = "=0.1.13"

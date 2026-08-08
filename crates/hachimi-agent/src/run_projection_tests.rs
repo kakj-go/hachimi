@@ -2,10 +2,11 @@ use futures_util::stream;
 use hachimi_protocol::{
     AgentMessagePhase, ApprovalPolicy, BehaviorMode, CheckoutId, CheckoutKind, CheckoutRecord,
     CheckoutStatus, EntryProfile, ExecutionTarget, LlmSettings, ModelFinishReason, ModelRequest,
-    ModelToolCall, PermissionProfile, ProjectId, ProjectRecord, ProviderCapabilities,
-    ProviderCapabilityProbe, ProviderCapabilityProbeSource, RunBudget, RunConfiguration,
-    RunDriverKind, RunEventPayload, RunId, RunOrigin, RunPurpose, SessionContextBinding, SessionId,
-    SessionRecord, ToolCallId, ToolDescriptor, ToolEffect, WorkloadKind,
+    ModelToolCall, PermissionProfile, PlanConfirmationStatus, ProjectId, ProjectRecord,
+    ProviderCapabilities, ProviderCapabilityProbe, ProviderCapabilityProbeSource, RunBudget,
+    RunConfiguration, RunDriverKind, RunEventPayload, RunId, RunOrigin, RunPurpose,
+    SessionContextBinding, SessionId, SessionRecord, ToolCallId, ToolDescriptor, ToolEffect,
+    WorkloadKind,
 };
 
 use super::*;
@@ -15,6 +16,15 @@ use crate::{
 };
 
 struct FinalModel;
+
+struct ChunkedPlanModel {
+    chunks: &'static [&'static str],
+}
+
+struct SplitPlanModel {
+    output: &'static str,
+    split: usize,
+}
 
 impl ModelRuntime for FinalModel {
     fn capabilities(&self) -> ProviderCapabilities {
@@ -49,6 +59,61 @@ impl ModelRuntime for FinalModel {
                     input_tokens: 7,
                     output_tokens: 3,
                 },
+            }),
+            Ok(ModelEvent::Completed {
+                finish_reason: ModelFinishReason::Stop,
+            }),
+        ]))
+    }
+}
+
+impl ModelRuntime for ChunkedPlanModel {
+    fn capabilities(&self) -> ProviderCapabilities {
+        ProviderCapabilities {
+            tool_calls: true,
+            parallel_tool_calls: true,
+            streaming_usage: true,
+            text_input: true,
+            ..ProviderCapabilities::default()
+        }
+    }
+
+    fn stream(&self, _request: ModelRequest, _cancellation: CancellationToken) -> ModelEventStream {
+        let events = self
+            .chunks
+            .iter()
+            .map(|chunk| {
+                Ok(ModelEvent::TextDelta {
+                    delta: (*chunk).to_owned(),
+                })
+            })
+            .chain(std::iter::once(Ok(ModelEvent::Completed {
+                finish_reason: ModelFinishReason::Stop,
+            })))
+            .collect::<Vec<_>>();
+        Box::pin(stream::iter(events))
+    }
+}
+
+impl ModelRuntime for SplitPlanModel {
+    fn capabilities(&self) -> ProviderCapabilities {
+        ProviderCapabilities {
+            tool_calls: true,
+            parallel_tool_calls: true,
+            streaming_usage: true,
+            text_input: true,
+            ..ProviderCapabilities::default()
+        }
+    }
+
+    fn stream(&self, _request: ModelRequest, _cancellation: CancellationToken) -> ModelEventStream {
+        let (before, after) = self.output.split_at(self.split);
+        Box::pin(stream::iter([
+            Ok(ModelEvent::TextDelta {
+                delta: before.to_owned(),
+            }),
+            Ok(ModelEvent::TextDelta {
+                delta: after.to_owned(),
             }),
             Ok(ModelEvent::Completed {
                 finish_reason: ModelFinishReason::Stop,
@@ -453,25 +518,45 @@ async fn authority_attention_is_persisted_as_an_event_and_stable_failure_code() 
 }
 
 #[tokio::test]
-async fn plan_run_persists_versioned_proposed_plan_and_plan_transcript() {
+async fn plan_run_persists_versioned_plan_document_and_plan_transcript() {
     let (store, run) = seeded_run("run-plan", BehaviorMode::Plan).await;
-    persisted_loop(&store, Arc::new(FinalModel))
-        .execute(
-            run.clone(),
-            vec![ModelMessage::user("Plan the change")],
-            CancellationToken::new(),
-        )
-        .await
-        .expect("execute");
+    persisted_loop(
+        &store,
+        Arc::new(ChunkedPlanModel {
+            chunks: &[
+                "I checked the request. ",
+                "<pro",
+                "posed_plan># Implement the change\n\n1. Update the code",
+                "</proposed_",
+                "plan> Ready for review.",
+            ],
+        }),
+    )
+    .execute(
+        run.clone(),
+        vec![ModelMessage::user("Plan the change")],
+        CancellationToken::new(),
+    )
+    .await
+    .expect("execute");
     let plans = store
-        .list_proposed_plans(&run.session_id)
+        .list_plan_documents(&run.session_id)
         .await
         .expect("plans");
     assert_eq!(plans.len(), 1);
     assert_eq!(plans[0].revision, 1);
-    assert_eq!(plans[0].status, ProposedPlanStatus::Proposed);
     assert_eq!(plans[0].goal, "Plan the change");
-    assert_eq!(plans[0].content_markdown, "done");
+    assert_eq!(plans[0].title, "Implement the change");
+    assert_eq!(
+        plans[0].content_markdown,
+        "# Implement the change\n\n1. Update the code"
+    );
+    let confirmations = store
+        .list_plan_confirmations(&run.session_id)
+        .await
+        .expect("confirmations");
+    assert_eq!(confirmations.len(), 1);
+    assert_eq!(confirmations[0].status, PlanConfirmationStatus::Pending);
     let transcript = store
         .list_transcript(&run.session_id)
         .await
@@ -481,6 +566,285 @@ async fn plan_run_persists_versioned_proposed_plan_and_plan_transcript() {
             .iter()
             .any(|item| item.kind == TranscriptItemKind::Plan)
     );
+    let visible_text = transcript
+        .iter()
+        .filter_map(|item| match &item.payload {
+            ItemPayload::Assistant { text, .. } | ItemPayload::Plan { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<String>();
+    assert!(visible_text.contains("I checked the request."));
+    assert!(visible_text.contains("Ready for review."));
+    assert!(!visible_text.contains("<proposed_plan>"));
+    assert!(!visible_text.contains("</proposed_plan>"));
+}
+
+#[tokio::test]
+async fn plan_tags_can_split_at_every_byte_boundary_without_leaking_markup() {
+    const OUTPUT: &str =
+        "Checked. <proposed_plan># Boundary-safe plan\n\nDo the work.</proposed_plan> Done.";
+    for split in 1..OUTPUT.len() {
+        let run_id = format!("run-plan-split-{split}");
+        let (store, run) = seeded_run(&run_id, BehaviorMode::Plan).await;
+        persisted_loop(
+            &store,
+            Arc::new(SplitPlanModel {
+                output: OUTPUT,
+                split,
+            }),
+        )
+        .execute(
+            run.clone(),
+            vec![ModelMessage::user("Plan the change")],
+            CancellationToken::new(),
+        )
+        .await
+        .expect("execute");
+        let plans = store
+            .list_plan_documents(&run.session_id)
+            .await
+            .expect("plans");
+        assert_eq!(plans.len(), 1, "split={split}");
+        assert_eq!(plans[0].title, "Boundary-safe plan", "split={split}");
+        let visible = store
+            .list_transcript(&run.session_id)
+            .await
+            .expect("transcript")
+            .into_iter()
+            .filter_map(|item| match item.payload {
+                ItemPayload::Assistant { text, .. } | ItemPayload::Plan { text } => Some(text),
+                _ => None,
+            })
+            .collect::<String>();
+        assert!(!visible.contains("proposed_plan"), "split={split}");
+    }
+}
+
+#[tokio::test]
+async fn incomplete_plan_markup_becomes_commentary_without_a_plan_item_or_gate() {
+    for (run_id, chunks) in [
+        ("run-plan-partial-open", &["Before <proposed_"][..]),
+        (
+            "run-plan-partial-close",
+            &["Before <proposed_plan># Draft\n\nKeep this</proposed_"][..],
+        ),
+        (
+            "run-plan-missing-close",
+            &["Before <proposed_plan># Draft\n\nKeep this"][..],
+        ),
+    ] {
+        let (store, run) = seeded_run(run_id, BehaviorMode::Plan).await;
+        persisted_loop(&store, Arc::new(ChunkedPlanModel { chunks }))
+            .execute(
+                run.clone(),
+                vec![ModelMessage::user("Plan the change")],
+                CancellationToken::new(),
+            )
+            .await
+            .expect("execute");
+        assert!(
+            store
+                .list_plan_documents(&run.session_id)
+                .await
+                .expect("plans")
+                .is_empty(),
+            "run={run_id}"
+        );
+        let transcript = store
+            .list_transcript(&run.session_id)
+            .await
+            .expect("transcript");
+        assert!(
+            transcript
+                .iter()
+                .all(|item| item.kind != TranscriptItemKind::Plan),
+            "run={run_id}"
+        );
+        let visible = transcript
+            .iter()
+            .filter_map(|item| match &item.payload {
+                ItemPayload::Assistant { text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<String>();
+        assert!(!visible.contains("proposed_"), "run={run_id}");
+        if run_id != "run-plan-partial-open" {
+            assert!(visible.contains("# Draft"), "run={run_id}");
+        }
+    }
+}
+
+#[tokio::test]
+async fn empty_plan_blocks_do_not_create_plan_items_or_confirmation_gates() {
+    for (run_id, block) in [
+        ("run-plan-empty", "<proposed_plan></proposed_plan>"),
+        (
+            "run-plan-whitespace",
+            "<proposed_plan> \n\t </proposed_plan>",
+        ),
+    ] {
+        let (store, run) = seeded_run(run_id, BehaviorMode::Plan).await;
+        persisted_loop(
+            &store,
+            Arc::new(SplitPlanModel {
+                output: block,
+                split: PROPOSED_PLAN_OPEN.len(),
+            }),
+        )
+        .execute(
+            run.clone(),
+            vec![ModelMessage::user("Plan the change")],
+            CancellationToken::new(),
+        )
+        .await
+        .expect("execute");
+        assert!(
+            store
+                .list_plan_documents(&run.session_id)
+                .await
+                .expect("plans")
+                .is_empty()
+        );
+        assert!(
+            store
+                .list_transcript(&run.session_id)
+                .await
+                .expect("transcript")
+                .iter()
+                .all(|item| item.kind != TranscriptItemKind::Plan)
+        );
+    }
+}
+
+#[tokio::test]
+async fn plan_projection_preserves_commentary_tool_commentary_plan_order() {
+    let (store, run) = seeded_run("run-plan-order", BehaviorMode::Plan).await;
+    let call = crate::ToolCall {
+        id: ToolCallId::from("call-read"),
+        name: "workspace_read_file".into(),
+        arguments: json!({ "path": "README.md" }),
+        step_revision: 1,
+        tool_plan_hash: "plan-hash".into(),
+        registry_revision: "registry".into(),
+    };
+    let result = ToolResult::succeeded(&call, "read", json!({ "text": "content" }));
+    let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+    for event in [
+        LoopEvent::Model(ModelEvent::AgentMessageStarted {
+            message_id: "before".into(),
+            phase: AgentMessagePhase::Commentary,
+        }),
+        LoopEvent::Model(ModelEvent::AgentMessageDelta {
+            message_id: "before".into(),
+            delta: "Checking files.".into(),
+        }),
+        LoopEvent::Model(ModelEvent::AgentMessageCompleted {
+            message_id: "before".into(),
+        }),
+        LoopEvent::ToolStarted(call),
+        LoopEvent::ToolCompleted(result),
+        LoopEvent::Model(ModelEvent::AgentMessageStarted {
+            message_id: "after".into(),
+            phase: AgentMessagePhase::Commentary,
+        }),
+        LoopEvent::Model(ModelEvent::AgentMessageDelta {
+            message_id: "after".into(),
+            delta: "The file confirms the approach.".into(),
+        }),
+        LoopEvent::Model(ModelEvent::AgentMessageCompleted {
+            message_id: "after".into(),
+        }),
+        LoopEvent::Model(ModelEvent::AgentMessageStarted {
+            message_id: "plan".into(),
+            phase: AgentMessagePhase::FinalAnswer,
+        }),
+        LoopEvent::Model(ModelEvent::AgentMessageDelta {
+            message_id: "plan".into(),
+            delta: "<proposed_plan># Ordered plan\n\nImplement it.</proposed_plan>".into(),
+        }),
+        LoopEvent::Model(ModelEvent::AgentMessageCompleted {
+            message_id: "plan".into(),
+        }),
+    ] {
+        sender.send(event).expect("projection event");
+    }
+    drop(sender);
+    project_loop_events(store.clone(), run.clone(), receiver)
+        .await
+        .expect("projection");
+    let kinds = store
+        .list_transcript(&run.session_id)
+        .await
+        .expect("transcript")
+        .into_iter()
+        .map(|item| item.kind)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        kinds,
+        vec![
+            TranscriptItemKind::Assistant,
+            TranscriptItemKind::ToolExecution,
+            TranscriptItemKind::Assistant,
+            TranscriptItemKind::Plan,
+        ]
+    );
+}
+
+#[tokio::test]
+async fn plan_run_without_complete_plan_block_keeps_commentary_without_a_gate() {
+    let (store, run) = seeded_run("run-plan-no-block", BehaviorMode::Plan).await;
+    persisted_loop(&store, Arc::new(FinalModel))
+        .execute(
+            run.clone(),
+            vec![ModelMessage::user("Plan the change")],
+            CancellationToken::new(),
+        )
+        .await
+        .expect("execute");
+    assert!(
+        store
+            .list_plan_documents(&run.session_id)
+            .await
+            .expect("plans")
+            .is_empty()
+    );
+    let transcript = store
+        .list_transcript(&run.session_id)
+        .await
+        .expect("transcript");
+    assert!(transcript.iter().any(|item| matches!(
+        &item.payload,
+        ItemPayload::Assistant { text, phase }
+            if text == "done" && *phase == AgentMessagePhase::Commentary
+    )));
+}
+
+#[tokio::test]
+async fn plan_run_uses_only_the_first_complete_plan_block() {
+    let (store, run) = seeded_run("run-plan-multiple", BehaviorMode::Plan).await;
+    persisted_loop(
+        &store,
+        Arc::new(ChunkedPlanModel {
+            chunks: &[
+                "<proposed_plan># First\n\nDo first.</proposed_plan>",
+                "<proposed_plan># Second\n\nDo second.</proposed_plan>",
+            ],
+        }),
+    )
+    .execute(
+        run.clone(),
+        vec![ModelMessage::user("Plan the change")],
+        CancellationToken::new(),
+    )
+    .await
+    .expect("execute");
+    let plans = store
+        .list_plan_documents(&run.session_id)
+        .await
+        .expect("plans");
+    assert_eq!(plans.len(), 1);
+    assert_eq!(plans[0].title, "First");
+    assert!(!plans[0].content_markdown.contains("Second"));
 }
 
 #[tokio::test]
@@ -549,4 +913,30 @@ async fn command_and_diff_results_become_bounded_evidence_artifacts() {
     assert_eq!(sanitized["path"], "secret.txt");
     assert_eq!(sanitized["contentBytes"], 18);
     assert!(!sanitized.to_string().contains("sensitive contents"));
+}
+
+#[test]
+fn continuity_artifact_reference_keeps_revision_without_binary_metadata() {
+    let artifact = ArtifactRecord {
+        id: ArtifactId::from("artifact-office-continuity"),
+        run_id: Some(RunId::from("run-office-continuity")),
+        kind: ArtifactKind::CommandEvidence,
+        display_name: "report.docx".into(),
+        content_hash: Some("sha256:abcd".into()),
+        metadata: json!({
+            "mimeType": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            "revision": "rev-4",
+            "changedParts": ["word/document.xml"],
+            "dataBase64": "QUJD".repeat(4_000),
+        }),
+        created_at_ms: 1,
+    };
+    let reference = artifact_continuity(&artifact);
+    let rendered = serde_json::to_string(&reference).expect("serialize continuity artifact");
+    assert!(rendered.contains("artifact-office-continuity"));
+    assert!(rendered.contains("sha256:abcd"));
+    assert!(rendered.contains("mimeType"));
+    assert!(rendered.contains("rev-4"));
+    assert!(!rendered.contains("dataBase64"));
+    assert!(!rendered.contains("QUJDQUJD"));
 }

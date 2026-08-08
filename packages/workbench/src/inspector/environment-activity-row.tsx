@@ -1,5 +1,5 @@
 import type { EnvironmentActivity } from "@hachimi/contracts";
-import { Bot, Button, Globe, Monitor } from "@hachimi/ui";
+import { Button, Globe, Lightbulb, Monitor } from "@hachimi/ui";
 import { Match, Switch } from "solid-js";
 
 export function EnvironmentActivityRow(props: {
@@ -52,11 +52,11 @@ export function EnvironmentActivityRow(props: {
           <Button
             class="environment-summary-row"
             data-testid="workbench-summary-plan-activity"
-            title={activity().description}
+            title={activity().current_step?.description ?? activity().title}
             onClick={() => props.onOpenPlan(activity().plan_id)}
           >
-            <Bot size={16} />
-            <span>{activity().description}</span>
+            <Lightbulb size={16} />
+            <span>{activity().title}</span>
             <span class="environment-row-tail">›</span>
           </Button>
         )}

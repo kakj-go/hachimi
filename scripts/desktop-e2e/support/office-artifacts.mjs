@@ -1,5 +1,5 @@
-import { readFileSync, writeFileSync } from "node:fs";
-import { extname } from "node:path";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { extname, isAbsolute, relative, resolve } from "node:path";
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
@@ -92,19 +92,33 @@ function zip(entries) {
 }
 
 function unzipStored(buffer) {
+  if (buffer.length > 64 * 1024 * 1024) throw new Error("Office fixture exceeds the size limit");
   const entries = new Map();
   let offset = 0;
   while (offset + 4 <= buffer.length && buffer.readUInt32LE(offset) === 0x04034b50) {
     const compression = buffer.readUInt16LE(offset + 8);
     const compressedSize = buffer.readUInt32LE(offset + 18);
+    const uncompressedSize = buffer.readUInt32LE(offset + 22);
     const nameLength = buffer.readUInt16LE(offset + 26);
     const extraLength = buffer.readUInt16LE(offset + 28);
+    if (compressedSize === 0 ? uncompressedSize > 0 : uncompressedSize / compressedSize > 100) {
+      throw new Error("Office fixture ZIP has an abnormal compression ratio");
+    }
     if (compression !== 0) throw new Error("Office fixture ZIP must use stored entries");
     const nameStart = offset + 30;
     const dataStart = nameStart + nameLength + extraLength;
     const dataEnd = dataStart + compressedSize;
     if (dataEnd > buffer.length) throw new Error("Office fixture ZIP entry is truncated");
     const name = decoder.decode(buffer.subarray(nameStart, nameStart + nameLength));
+    if (
+      name.startsWith("/") ||
+      name.includes("\\") ||
+      name.split("/").some((segment) => segment === ".." || segment === ".")
+    ) {
+      throw new Error(`Office fixture ZIP path traversal rejected for ${name}`);
+    }
+    if (entries.has(name)) throw new Error(`Office fixture ZIP has duplicate part ${name}`);
+    if (entries.size >= 2_048) throw new Error("Office fixture ZIP has too many parts");
     const data = buffer.subarray(dataStart, dataEnd);
     if (crc32(data) !== buffer.readUInt32LE(offset + 14)) {
       throw new Error(`Office fixture ZIP CRC mismatch for ${name}`);
@@ -114,6 +128,29 @@ function unzipStored(buffer) {
   }
   if (entries.size === 0) throw new Error("Office fixture is not an OOXML ZIP package");
   return entries;
+}
+
+function decodeXml(value) {
+  return value
+    .replaceAll("&lt;", "<")
+    .replaceAll("&gt;", ">")
+    .replaceAll("&quot;", '"')
+    .replaceAll("&apos;", "'")
+    .replaceAll("&amp;", "&");
+}
+
+function xmlTexts(value, prefix) {
+  return [
+    ...value.matchAll(new RegExp(`<${prefix}:t(?:\\s[^>]*)?>([\\s\\S]*?)<\\/${prefix}:t>`, "gu")),
+  ]
+    .map((match) => decodeXml(match[1]))
+    .filter(Boolean);
+}
+
+function pdfTexts(value) {
+  return [...value.matchAll(/\(((?:\\.|[^\\)])*)\)\s*Tj/gu)].map((match) =>
+    match[1].replaceAll(/\\([\\()])/gu, "$1"),
+  );
 }
 
 function xml(value) {
@@ -301,9 +338,19 @@ export function validateOfficeArtifact(path) {
     if (!text.startsWith("%PDF-1.4") || !text.includes("xref\n") || !text.endsWith("%%EOF\n")) {
       throw new Error("PDF fixture is missing its header, xref, or EOF marker");
     }
-    return { kind: extension, byteLength: buffer.length, parts: 5 };
+    return {
+      kind: extension,
+      byteLength: buffer.length,
+      parts: 5,
+      semantics: { pages: [{ page: 1, texts: pdfTexts(text) }] },
+    };
   }
   const entries = unzipStored(buffer);
+  for (const name of entries.keys()) {
+    if (/vbaProject\.bin$|macrosheets\//iu.test(name)) {
+      throw new Error(`OOXML macro content is not allowed: ${name}`);
+    }
+  }
   const required = {
     docx: ["[Content_Types].xml", "_rels/.rels", "word/document.xml"],
     xlsx: [
@@ -326,8 +373,61 @@ export function validateOfficeArtifact(path) {
   for (const part of required) {
     if (!entries.has(part)) throw new Error(`OOXML fixture is missing ${part}`);
   }
-  if (!decoder.decode(entries.get("[Content_Types].xml")).includes("openxmlformats")) {
+  const contentTypes = decoder.decode(entries.get("[Content_Types].xml"));
+  if (!contentTypes.includes("openxmlformats")) {
     throw new Error("OOXML fixture has invalid content types");
   }
-  return { kind: extension, byteLength: buffer.length, parts: entries.size };
+  if (/macroEnabled|vbaProject/iu.test(contentTypes)) {
+    throw new Error("OOXML macro-enabled content type is not allowed");
+  }
+  const semantics = {
+    docx: () => {
+      const texts = xmlTexts(decoder.decode(entries.get("word/document.xml")), "w");
+      return { title: texts[0] ?? "", paragraphs: texts.slice(1) };
+    },
+    xlsx: () => {
+      const workbook = decoder.decode(entries.get("xl/workbook.xml"));
+      const sheetName = decodeXml(workbook.match(/<sheet\s+name="([^"]+)"/u)?.[1] ?? "");
+      const worksheet = decoder.decode(entries.get("xl/worksheets/sheet1.xml"));
+      const cells = Object.fromEntries(
+        [
+          ...worksheet.matchAll(
+            /<c\s+r="([A-Z]+\d+)"[^>]*>[\s\S]*?<t(?:\s[^>]*)?>([\s\S]*?)<\/t>[\s\S]*?<\/c>/gu,
+          ),
+        ].map(([, reference, value]) => [reference, decodeXml(value)]),
+      );
+      return { sheets: [{ name: sheetName, cells }] };
+    },
+    pptx: () => ({
+      slides: [
+        {
+          slide: 1,
+          texts: xmlTexts(decoder.decode(entries.get("ppt/slides/slide1.xml")), "a"),
+        },
+      ],
+    }),
+  }[extension]();
+  return { kind: extension, byteLength: buffer.length, parts: entries.size, semantics };
+}
+
+export function createOfficePackageFixtureForTest(entries) {
+  return zip(entries);
+}
+
+export function validateOfficeOutputTarget(root, target, { overwrite = false } = {}) {
+  const resolvedRoot = resolve(root);
+  const resolvedTarget = resolve(target);
+  const relativeTarget = relative(resolvedRoot, resolvedTarget);
+  if (
+    relativeTarget === "" ||
+    relativeTarget === ".." ||
+    relativeTarget.startsWith(`..${process.platform === "win32" ? "\\" : "/"}`) ||
+    isAbsolute(relativeTarget)
+  ) {
+    throw new Error("Office output target escaped the authorized directory");
+  }
+  if (!overwrite && existsSync(resolvedTarget)) {
+    throw new Error("Office output target already exists and overwrite was not authorized");
+  }
+  return resolvedTarget;
 }

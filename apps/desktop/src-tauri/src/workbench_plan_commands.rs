@@ -21,6 +21,27 @@ pub(super) fn emit_workbench_run_completion(app: &AppHandle, run: RunRecord) {
     let _ = app.emit_to("workbench", WORKBENCH_RUN_EVENT, &run);
 }
 
+pub(super) async fn emit_plan_environment_if_present(
+    app: &AppHandle,
+    state: &DesktopState,
+    session_id: &hachimi_protocol::SessionId,
+) {
+    let Ok(environment) = state.workbench.environment_snapshot(session_id).await else {
+        return;
+    };
+    if environment
+        .activities
+        .iter()
+        .any(|activity| matches!(activity, hachimi_protocol::EnvironmentActivity::Plan { .. }))
+    {
+        crate::environment_commands::emit_workbench_environment(
+            app,
+            &environment,
+            vec![hachimi_protocol::WorkbenchEnvironmentChangeReason::Plan],
+        );
+    }
+}
+
 pub(super) async fn finalize_review_run(
     store: &AgentStore,
     snapshot: &WorkbenchTaskSnapshot,
@@ -99,8 +120,53 @@ pub(super) async fn revise_workbench_plan(
         )
         .await
         .map_err(|error| CommandError::operation("workbench_plan_revise_failed", error))?;
+    if let Ok(environment) = state
+        .workbench
+        .environment_snapshot(&snapshot.session.id)
+        .await
+    {
+        crate::environment_commands::emit_workbench_environment(
+            &app,
+            &environment,
+            vec![hachimi_protocol::WorkbenchEnvironmentChangeReason::Plan],
+        );
+    }
     if snapshot.run.status == hachimi_protocol::RunStatus::Queued {
         spawn_workbench_run(app, client, snapshot.clone(), Vec::new());
+    }
+    Ok(snapshot)
+}
+
+#[tauri::command]
+pub(super) async fn skip_workbench_plan(
+    app: AppHandle,
+    window: WebviewWindow,
+    state: State<'_, DesktopState>,
+    request: hachimi_protocol::PlanSkipRequest,
+) -> Result<hachimi_protocol::WorkbenchPlanSkipSnapshot, CommandError> {
+    state.authorize(&window, ControlMethod::WorkbenchWindow)?;
+    require_window(&window, "workbench")?;
+    if request.idempotency_key.trim().is_empty() || request.idempotency_key.len() > 128 {
+        return Err(CommandError::new(
+            "invalid_idempotency_key",
+            "idempotency key must contain 1-128 bytes",
+        ));
+    }
+    let snapshot = state
+        .workbench
+        .skip_plan(&request)
+        .await
+        .map_err(|error| CommandError::operation("workbench_plan_skip_failed", error))?;
+    if let Ok(environment) = state
+        .workbench
+        .environment_snapshot(&snapshot.plan.session_id)
+        .await
+    {
+        crate::environment_commands::emit_workbench_environment(
+            &app,
+            &environment,
+            vec![hachimi_protocol::WorkbenchEnvironmentChangeReason::Plan],
+        );
     }
     Ok(snapshot)
 }

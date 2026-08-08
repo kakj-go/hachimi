@@ -48,6 +48,8 @@ import { ChannelGrantEditor } from "./platform-integration-grant-editor";
 import { integrationFailureMessage } from "./platform-integration-errors";
 import { IntegrationAccountWizard } from "./platform-integration-wizard";
 import { createPermissionPolicy } from "./permission-policy-editor";
+import { PermissionScopeConfirmation } from "./permission-scope-confirmation";
+import { permissionScopeRisk } from "./permission-scope-risk";
 import { RuntimeHealthBanner } from "./runtime-health";
 
 type AccountDialogMode = "create" | "credentials" | "capabilities";
@@ -978,7 +980,12 @@ function PolicyDialog(props: {
   const [grant, setGrant] = createSignal(initial.grantCeiling);
   const [busy, setBusy] = createSignal(false);
   const [failure, setFailure] = createSignal<string>();
-  async function save() {
+  const [confirming, setConfirming] = createSignal(false);
+  async function save(confirmed = false) {
+    if (permissionScopeRisk(grant().permissionPolicy).hasUnrestrictedScope && !confirmed) {
+      setConfirming(true);
+      return;
+    }
     setBusy(true);
     setFailure(undefined);
     try {
@@ -1044,6 +1051,16 @@ function PolicyDialog(props: {
             {props.zh ? "保存" : "Save"}
           </Button>
         </div>
+        <PermissionScopeConfirmation
+          open={confirming()}
+          policy={grant().permissionPolicy}
+          zh={props.zh}
+          onCancel={() => setConfirming(false)}
+          onConfirm={() => {
+            setConfirming(false);
+            void save(true);
+          }}
+        />
       </div>
     </Dialog>
   );
@@ -1065,9 +1082,10 @@ function PairingDialog(props: {
   const [code, setCode] = createSignal<ChannelPairingCode>();
   const [failure, setFailure] = createSignal<string>();
   const [busy, setBusy] = createSignal(false);
+  const [confirming, setConfirming] = createSignal(false);
   const supportsGroups = () => props.provider.capabilities.includes("group");
   const supportsTopics = () => props.provider.capabilities.includes("topic");
-  async function generate() {
+  async function generate(confirmed = false) {
     setBusy(true);
     setFailure(undefined);
     try {
@@ -1083,6 +1101,10 @@ function PairingDialog(props: {
             ? "请选择群历史、话题历史和 @ 策略。"
             : "Select group history, topic history, and mention policy.",
         );
+        return;
+      }
+      if (permissionScopeRisk(value.grant.permissionPolicy).hasUnrestrictedScope && !confirmed) {
+        setConfirming(true);
         return;
       }
       setCode(
@@ -1208,6 +1230,16 @@ function PairingDialog(props: {
             <KeyRound size={15} /> {props.zh ? "生成" : "Generate"}
           </Button>
         </div>
+        <PermissionScopeConfirmation
+          open={confirming()}
+          policy={draft().grant.permissionPolicy}
+          zh={props.zh}
+          onCancel={() => setConfirming(false)}
+          onConfirm={() => {
+            setConfirming(false);
+            void generate(true);
+          }}
+        />
       </div>
     </Dialog>
   );

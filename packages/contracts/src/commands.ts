@@ -43,6 +43,7 @@ import type {
   ComputerHostSettings,
   ComputerHostSettingsUpdate,
   ComputerControlSession,
+  PermissionCommandCandidate,
   ComputerFrameId,
   ComputerFramePreview,
   EmbeddedBrowserSettings,
@@ -150,6 +151,7 @@ import type {
   PetTurnRequest,
   PlanAcceptanceRequest,
   PlanRevisionRequest,
+  PlanSkipRequest,
   PluginContributionSurface,
   PluginLifecycleJournalRecord,
   PluginPermissionDiff,
@@ -222,6 +224,7 @@ import type {
   WorkbenchHandoffRequest,
   WorkbenchHandoffResponse,
   WorkbenchPlanAcceptanceSnapshot,
+  WorkbenchPlanSkipSnapshot,
   WorkbenchGitRequest,
   WorkbenchGitResponse,
   WorkbenchAttachmentPreview,
@@ -229,6 +232,8 @@ import type {
   WorkbenchSessionSnapshot,
   WorkbenchTaskSnapshot,
   WorkbenchTaskStartRequest,
+  ManualCompactionRequest,
+  ManualCompactionResult,
 } from "./generated";
 
 export interface CommandFailure {
@@ -236,10 +241,19 @@ export interface CommandFailure {
   message: string;
 }
 
+export interface DiagnosticsPaths {
+  dataDirectory: string;
+  logDirectory: string;
+  backendLog: string;
+  frontendLog: string;
+}
+
 export const commands = {
   getBootstrapState: () => invoke<BootstrapState>("get_bootstrap_state"),
   frontendReady: () => invoke<void>("frontend_ready"),
   writeFrontendLog: (entry: FrontendLogEntry) => invoke<void>("write_frontend_log", { entry }),
+  getDiagnosticsPaths: () => invoke<DiagnosticsPaths>("get_diagnostics_paths"),
+  openLogsDirectory: () => invoke<void>("open_logs_directory"),
   getSettings: () => invoke<AppSettings>("get_settings"),
   updateSettings: (settings: AppSettings) => invoke<AppSettings>("update_settings", { settings }),
   resetLocalData: () => invoke<void>("reset_local_data"),
@@ -395,6 +409,12 @@ export const commands = {
   listComputerAppPolicies: () => invoke<ComputerAppPolicy[]>("list_computer_app_policies"),
   updateComputerAppPolicy: (update: ComputerAppPolicyUpdate) =>
     invoke<ComputerAppPolicy>("update_computer_app_policy", { update }),
+  choosePermissionDirectory: () => invoke<string | null>("choose_permission_directory"),
+  choosePermissionFiles: (root: string) => invoke<string[]>("choose_permission_files", { root }),
+  searchPermissionCommands: (prefix: string) =>
+    invoke<PermissionCommandCandidate[]>("search_permission_commands", { prefix }),
+  choosePermissionForegroundApplication: () =>
+    invoke<ComputerAppCandidate | null>("choose_permission_foreground_application"),
   listIntegrationProviders: () =>
     invoke<IntegrationProviderDefinition[]>("list_integration_providers"),
   listEnterpriseIntegrations: () =>
@@ -466,6 +486,8 @@ export const commands = {
     invoke<WorkbenchPlanAcceptanceSnapshot>("accept_workbench_plan", { request }),
   reviseWorkbenchPlan: (request: PlanRevisionRequest) =>
     invoke<WorkbenchTaskSnapshot>("revise_workbench_plan", { request }),
+  skipWorkbenchPlan: (request: PlanSkipRequest) =>
+    invoke<WorkbenchPlanSkipSnapshot>("skip_workbench_plan", { request }),
   executeWorkbenchGit: (request: WorkbenchGitRequest) =>
     invoke<WorkbenchGitResponse>("execute_workbench_git", { request }),
   listProjectGitRefs: (projectId: ProjectId) =>
@@ -516,6 +538,8 @@ export const commands = {
     invoke<CheckoutRecord>("cleanup_workbench_checkout", { checkoutId }),
   startWorkbenchTask: (request: WorkbenchTaskStartRequest) =>
     invoke<WorkbenchTaskSnapshot>("start_workbench_task", { request }),
+  compactWorkbenchSession: (request: ManualCompactionRequest) =>
+    invoke<ManualCompactionResult>("compact_workbench_session", { request }),
   cancelWorkbenchRun: (runId: string, expectedGeneration: number) =>
     invoke<RunRecord>("cancel_workbench_run", { runId, expectedGeneration }),
   listWorkspaceFiles: (request: FsListRequest) =>

@@ -145,13 +145,23 @@ export function HostDomainSettingsPage(props: {
     });
   }
 
-  async function installExtension(browser: SystemBrowserKind) {
+  async function configureExtension(browser: SystemBrowserKind) {
+    const opensExtensionStore = Boolean(
+      browserSettings()?.detectedBrowsers.find((entry) => entry.kind === browser)
+        ?.extensionStoreUrl,
+    );
+    const useChinese = zh();
     await run("pairing", async () => {
       await commands.installBrowserExtension(browser);
+      const browserName = browser === "chrome" ? "Chrome" : "Edge";
       setNotice(
-        zh()
-          ? "已打开扩展商店。安装后，Hachimi 会自动检测并请求一次授权。"
-          : "The extension store is open. After installation, Hachimi will detect the extension and request authorization once.",
+        opensExtensionStore
+          ? useChinese
+            ? `已打开 ${browserName} 扩展商店。完成扩展安装后，Hachimi 会检测连接并请求一次授权。`
+            : `The ${browserName} extension store is open. After installing the extension, Hachimi will detect the connection and request authorization once.`
+          : useChinese
+            ? `已打开扩展文件夹。请在 ${browserName} 的扩展管理页开启开发者模式，选择“加载已解压的扩展”，然后选择该文件夹。`
+            : `The extension folder is open. In ${browserName}, open the extensions page, enable Developer mode, choose Load unpacked, and select this folder.`,
       );
     });
   }
@@ -331,18 +341,20 @@ export function HostDomainSettingsPage(props: {
                   description={
                     browser.supported
                       ? zh()
-                        ? "已自动检测，可按需复用系统浏览器登录态。"
-                        : "Detected automatically and available for reusing system browser sessions."
+                        ? "配置扩展后，Agent 可使用此浏览器并复用其中的登录状态；不配置时仍可使用内置浏览器。"
+                        : "Configure the extension to let the Agent use this browser and its signed-in sessions. The embedded browser remains available without it."
                       : zh()
                         ? "当前版本不受支持，自动模式将使用内置浏览器。"
                         : "This version is unsupported; auto mode will use the embedded browser."
                   }
                 >
                   <Button
-                    disabled={Boolean(busy()) || !browser.supported || !browser.extensionStoreUrl}
-                    onClick={() => void installExtension(browser.kind)}
+                    disabled={Boolean(busy()) || !browser.supported}
+                    onClick={() => void configureExtension(browser.kind)}
                   >
-                    {zh() ? "安装扩展" : "Install extension"}
+                    {zh()
+                      ? `在 ${browser.kind === "chrome" ? "Chrome" : "Edge"} 中配置`
+                      : `Configure in ${browser.kind === "chrome" ? "Chrome" : "Edge"}`}
                   </Button>
                 </SettingsRow>
               )}

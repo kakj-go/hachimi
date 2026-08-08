@@ -11,6 +11,7 @@ hachimi-protocol.workspace = true
 hachimi-process-policy.workspace = true
 base64.workspace = true
 parking_lot.workspace = true
+png.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
@@ -22,6 +23,7 @@ uuid.workspace = true
 windows-capture.workspace = true
 windows = { workspace = true, features = [
   "Graphics_Capture",
+  "Win32_Graphics_Gdi",
   "Win32_Foundation",
   "Win32_Security",
   "Win32_Storage_FileSystem",
@@ -30,8 +32,10 @@ windows = { workspace = true, features = [
   "Win32_System_SystemServices",
   "Win32_System_Threading",
   "Win32_System_Variant",
+  "Win32_System_LibraryLoader",
   "Win32_UI_Input_KeyboardAndMouse",
   "Win32_UI_Shell_PropertiesSystem",
+  "Win32_UI_Shell",
   "Win32_UI_WindowsAndMessaging",
 ] }
 

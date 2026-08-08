@@ -156,6 +156,8 @@ pub enum PermissionProfile {
 pub struct SessionPermissionConfig {
     pub policy: AgentPermissionPolicy,
     #[serde(default)]
+    pub skill_ids: Vec<SkillId>,
+    #[serde(default)]
     pub extra_authorizations: Vec<SessionExtraAuthorizationSummary>,
 }
 
@@ -182,6 +184,8 @@ pub struct SessionPermissionConfigRequest {
 pub struct SessionPermissionConfigUpdate {
     pub session_id: Option<SessionId>,
     pub entry_profile: EntryProfile,
+    #[specta(type = specta_typescript::Number)]
+    pub expected_revision: u64,
     pub config: SessionPermissionConfig,
 }
 
@@ -606,10 +610,7 @@ pub enum ItemPayload {
         capability_revision: String,
     },
     Plan {
-        plan_id: PlanId,
-        revision: u32,
         text: String,
-        steps: Vec<PlanStep>,
     },
     ToolExecution {
         tool_call_id: ToolCallId,
@@ -935,9 +936,8 @@ pub enum RunEventPayload {
         item: Box<TranscriptItem>,
     },
     PlanUpdated {
-        plan_id: PlanId,
         explanation: Option<String>,
-        steps: Vec<PlanStep>,
+        plan: Vec<PlanStep>,
     },
     DiffUpdated {
         artifact_id: Option<ArtifactId>,
@@ -986,19 +986,21 @@ impl RunEventEnvelope {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type, Default)]
 #[serde(rename_all = "snake_case")]
-pub enum ProposedPlanStatus {
+pub enum PlanConfirmationStatus {
     #[default]
-    Proposed,
+    Pending,
     Accepted,
+    Skipped,
     Superseded,
 }
 
-impl ProposedPlanStatus {
+impl PlanConfirmationStatus {
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
-            Self::Proposed => "proposed",
+            Self::Pending => "pending",
             Self::Accepted => "accepted",
+            Self::Skipped => "skipped",
             Self::Superseded => "superseded",
         }
     }
@@ -1006,8 +1008,9 @@ impl ProposedPlanStatus {
     #[must_use]
     pub fn parse(value: &str) -> Option<Self> {
         Some(match value {
-            "proposed" => Self::Proposed,
+            "pending" => Self::Pending,
             "accepted" => Self::Accepted,
+            "skipped" => Self::Skipped,
             "superseded" => Self::Superseded,
             _ => return None,
         })
@@ -1016,25 +1019,38 @@ impl ProposedPlanStatus {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
-pub struct ProposedPlan {
+pub struct PlanDocument {
     pub id: PlanId,
     pub session_id: SessionId,
-    pub run_id: RunId,
+    pub source_run_id: RunId,
+    pub source_item_id: ItemId,
     pub revision: u32,
+    pub title: String,
     pub goal: String,
-    pub assumptions: Vec<String>,
-    pub steps: Vec<PlanStep>,
-    pub affected_resources: Vec<String>,
-    pub verification: Vec<String>,
-    pub risks: Vec<String>,
-    pub open_questions: Vec<String>,
     pub content_markdown: String,
-    pub status: ProposedPlanStatus,
-    pub accepted_run_id: Option<RunId>,
     #[specta(type = specta_typescript::Number)]
     pub created_at_ms: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct PlanConfirmation {
+    pub plan_id: PlanId,
+    pub status: PlanConfirmationStatus,
+    pub accepted_run_id: Option<RunId>,
     #[specta(type = Option<specta_typescript::Number>)]
-    pub accepted_at_ms: Option<i64>,
+    pub resolved_at_ms: Option<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ExecutionPlanState {
+    pub session_id: SessionId,
+    pub run_id: RunId,
+    pub explanation: Option<String>,
+    pub steps: Vec<PlanStep>,
+    #[specta(type = specta_typescript::Number)]
+    pub updated_at_ms: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
@@ -1713,6 +1729,9 @@ pub struct FileSystemGrant {
     pub access: FileSystemAccess,
     pub roots: Vec<String>,
     pub globs: Vec<String>,
+    /// Exact paths relative to one of the grant roots.
+    #[serde(default)]
+    pub files: Vec<String>,
     pub special_roots: Vec<String>,
 }
 
@@ -1720,6 +1739,8 @@ pub struct FileSystemGrant {
 #[serde(rename_all = "camelCase")]
 pub struct NetworkGrant {
     pub enabled: bool,
+    #[serde(default)]
+    pub unrestricted_hosts: bool,
     pub hosts: Vec<String>,
     pub protocols: Vec<String>,
 }
@@ -1729,6 +1750,8 @@ pub struct NetworkGrant {
 pub struct ProcessGrant {
     pub spawn: bool,
     pub interactive: bool,
+    #[serde(default)]
+    pub unrestricted_commands: bool,
     pub allowed_commands: Vec<String>,
 }
 
@@ -1737,7 +1760,9 @@ pub struct ProcessGrant {
 pub struct ComputerGrant {
     pub observe: bool,
     pub act: bool,
-    pub target_windows: Vec<String>,
+    #[serde(default)]
+    pub unrestricted_targets: bool,
+    pub allowed_applications: Vec<String>,
     pub max_actions: Option<u32>,
 }
 
@@ -1750,6 +1775,8 @@ pub struct BrowserGrant {
     pub download: bool,
     pub cookie_storage: bool,
     pub cdp: bool,
+    #[serde(default)]
+    pub unrestricted_origins: bool,
     pub origins: Vec<String>,
 }
 

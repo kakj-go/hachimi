@@ -1,6 +1,8 @@
 //! Policy, Approval, Sandbox-reporting, and Audit wrapper for capability tools.
 
 use std::{
+    env,
+    path::{Path, PathBuf},
     sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -915,13 +917,18 @@ fn structured_authority_decision(
                 .rules
                 .file_system
                 .iter()
-                .any(|grant| grant.access == FileSystemAccess::Deny || !grant.globs.is_empty())
+                .any(|grant| {
+                    grant.access == FileSystemAccess::Deny
+                        || !grant.globs.is_empty()
+                        || !grant.files.is_empty()
+                })
         {
             return StructuredAuthorityDecision::Deny {
                 code: "process_filesystem_scope_not_os_enforceable",
             };
         }
         if descriptor.effect == ToolEffect::Process
+            && !context.capability_grants.process.unrestricted_commands
             && !context
                 .capability_grants
                 .process
@@ -938,7 +945,7 @@ fn structured_authority_decision(
                 .process
                 .allowed_commands
                 .iter()
-                .any(|allowed| string_rule_matches(allowed, program))
+                .any(|allowed| command_rule_matches(allowed, program))
             {
                 return match context.authority.mode {
                     AuthorityMode::Interactive => StructuredAuthorityDecision::RequireApproval {
@@ -1120,6 +1127,45 @@ fn string_rule_matches(rule: &str, value: &str) -> bool {
                 .get(..prefix.len())
                 .is_some_and(|head| head.eq_ignore_ascii_case(prefix))
         })
+}
+
+fn command_rule_matches(rule: &str, program: &str) -> bool {
+    if string_rule_matches(rule, program) {
+        return true;
+    }
+    let Some(actual) = resolve_program_path(program) else {
+        return false;
+    };
+    let Ok(allowed) = std::fs::canonicalize(rule) else {
+        return false;
+    };
+    normalize_command_path(&actual) == normalize_command_path(&allowed)
+}
+
+fn resolve_program_path(program: &str) -> Option<PathBuf> {
+    let path = Path::new(program);
+    if path.components().count() > 1 {
+        return std::fs::canonicalize(path).ok();
+    }
+    let path_value = env::var_os("PATH")?;
+    let extensions = if cfg!(windows) {
+        vec!["", ".exe", ".com", ".cmd", ".bat"]
+    } else {
+        vec![""]
+    };
+    env::split_paths(&path_value)
+        .flat_map(|root| {
+            extensions
+                .iter()
+                .map(move |extension| root.join(format!("{program}{extension}")))
+        })
+        .find_map(|candidate| std::fs::canonicalize(candidate).ok())
+}
+
+fn normalize_command_path(path: &Path) -> String {
+    path.to_string_lossy()
+        .replace('\\', "/")
+        .to_ascii_lowercase()
 }
 
 fn parse_scope(value: &str) -> Option<Scope> {

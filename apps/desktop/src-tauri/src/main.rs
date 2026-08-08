@@ -23,6 +23,7 @@ mod computer_targeting;
 mod desktop_e2e;
 #[cfg(all(debug_assertions, feature = "desktop-e2e"))]
 mod desktop_e2e_agent_tools;
+mod diagnostics_commands;
 mod domain_run_launcher;
 mod embedded_browser;
 mod embedded_browser_agent;
@@ -42,6 +43,7 @@ mod mcp_runtime;
 mod media_commands;
 mod optional_resource_runtime;
 mod permission_runtime;
+mod permission_settings_commands;
 mod plugin_content_protocol;
 mod process_commands;
 mod project_git_commands;
@@ -54,6 +56,7 @@ mod scheduler_runtime;
 mod shutdown_coordinator;
 mod skill_drop;
 mod startup_error;
+mod startup_timeline;
 mod storage_layout;
 mod workbench_commands;
 mod workbench_plan_commands;
@@ -66,6 +69,7 @@ use browser_workspace_commands::*;
 use command_error::CommandError;
 use computer_settings_commands::*;
 use desktop_e2e::*;
+use diagnostics_commands::*;
 use environment_commands::*;
 use extension_commands::*;
 use forge_commands::*;
@@ -74,6 +78,7 @@ use integration_commands::*;
 use mcp_commands::*;
 use mcp_runtime::*;
 use media_commands::*;
+use permission_settings_commands::*;
 use process_commands::*;
 use project_git_commands::*;
 use project_tool_commands::*;
@@ -149,8 +154,8 @@ use hachimi_workbench::WorkbenchService;
 use parking_lot::{Mutex, RwLock};
 use serde::Serialize;
 use tauri::{
-    AppHandle, Emitter, LogicalPosition, Manager, PhysicalPosition, Runtime, State, WebviewUrl,
-    WebviewWindow, WebviewWindowBuilder, WindowEvent, Wry,
+    AppHandle, Emitter, LogicalPosition, Manager, PhysicalPosition, Runtime, State, WebviewWindow,
+    WebviewWindowBuilder, WindowEvent, Wry,
     menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
 };
@@ -311,6 +316,7 @@ struct PetWindowMotionEvent {
 
 struct DesktopState {
     storage_layout: StorageLayout,
+    log_directory: PathBuf,
     agent_store: AgentStore,
     settings: RwLock<AppSettings>,
     settings_store: SettingsStore,
@@ -676,7 +682,6 @@ fn copy_theme_profile(
         .and_then(|mut clipboard| clipboard.set_text(json))
         .map_err(|error| CommandError::operation("theme_copy_failed", error))
 }
-
 #[tauri::command]
 fn reset_theme_profile(
     window: WebviewWindow,
@@ -975,7 +980,6 @@ fn load_or_create_loopback_token(data_root: &Path) -> std::io::Result<String> {
     }
     Ok(token)
 }
-
 fn keyring_io_error(error: keyring::Error) -> std::io::Error {
     std::io::Error::other(format!("channel credential storage failed: {error}"))
 }
@@ -1109,6 +1113,8 @@ fn main() {
             get_bootstrap_state,
             frontend_ready,
             write_frontend_log,
+            get_diagnostics_paths,
+            open_logs_directory,
             get_settings,
             update_settings,
             reset_local_data,
@@ -1191,6 +1197,7 @@ fn main() {
             resolve_workbench_approval,
             accept_workbench_plan,
             revise_workbench_plan,
+            skip_workbench_plan,
             execute_workbench_git,
             list_project_git_refs,
             inspect_project_git,
@@ -1209,6 +1216,7 @@ fn main() {
             pin_workbench_checkout,
             cleanup_workbench_checkout,
             start_workbench_task,
+            compact_workbench_session,
             cancel_workbench_run,
             list_workspace_files,
             read_workspace_file_chunk,
@@ -1298,6 +1306,10 @@ fn main() {
             list_computer_app_candidates,
             list_computer_app_policies,
             update_computer_app_policy,
+            choose_permission_directory,
+            choose_permission_files,
+            search_permission_commands,
+            choose_permission_foreground_application,
             take_over_computer_control,
             resume_computer_control,
             stop_computer_control,
@@ -1365,23 +1377,7 @@ fn main() {
             exit_app,
         ])
         .setup(move |app| {
-            let startup_window = WebviewWindowBuilder::new(
-                app,
-                "startup",
-                WebviewUrl::App("startup.html".into()),
-            )
-            .title("Hachimi")
-            .inner_size(390.0, 150.0)
-            .resizable(false)
-            .decorations(false)
-            .always_on_top(true)
-            .visible(true)
-            .build()
-            .map_err(|error| {
-                tracing::warn!(%error, "startup feedback window could not be created");
-                error
-            })
-            .ok();
+            let mut startup_timeline = startup_timeline::StartupTimeline::new();
             let data_dir = storage_layout.root.clone();
             std::fs::create_dir_all(&data_dir)?;
             std::fs::write(data_dir.join(DATA_ROOT_SENTINEL_FILE), APP_IDENTIFIER)?;
@@ -1439,6 +1435,7 @@ fn main() {
             let approval_broker = PersistentApprovalBroker::new(agent_store.clone());
             let user_input_broker = PersistentUserInputBroker::new(agent_store.clone());
             let resource_dir = app.path().resource_dir()?;
+            startup_timeline.checkpoint("storage_and_recovery");
             tauri::async_runtime::block_on(agent_store.reconcile_browser_startup())?;
             let embedded_browser = Arc::new(embedded_browser::EmbeddedBrowserService::new(
                 app.handle().clone(),
@@ -1457,6 +1454,7 @@ fn main() {
             let managed_sandbox = managed_sandbox_runtime::stage_or_degrade(
                 &data_dir, &resource_dir, runtime_supervisor.clone(),
             );
+            startup_timeline.checkpoint("sandbox_resources");
             let sandbox_probe = Arc::new(
                 WindowsSandboxReadinessProbe::new(storage_layout.sandbox_setup_marker())
                     .with_runtime(
@@ -1482,6 +1480,7 @@ fn main() {
                 tracing::warn!(code = error.code, message = %error.message, "per-user Sandbox bootstrap/repair did not attest");
             }
             let sandbox_report = sandbox_runtime.snapshot().report;
+            startup_timeline.checkpoint("sandbox_attestation");
             let sandbox_backend: Option<Arc<dyn SandboxBackend>> =
                 deterministic_e2e_sandbox_backend().or_else(|| {
                     deterministic_report
@@ -1562,6 +1561,7 @@ fn main() {
                         AvatarCatalog::load(avatar_root)?
                     }
                 };
+            startup_timeline.checkpoint("skills_and_avatar");
             let optional_resources = optional_resource_runtime::stage_optional_resources(
                 app.handle(),
                 &data_dir,
@@ -1575,6 +1575,7 @@ fn main() {
             let sensevoice_dir = optional_resources.speech_model;
             let vits_dir = optional_resources.voice_model;
             let voice_catalog = VoiceCatalog::load(data_dir.join("voice-models"), &vits_dir)?;
+            startup_timeline.checkpoint("optional_resources");
             let current_voice_asset = voice_catalog.current_asset();
             let voice_model_available = current_voice_asset.is_some();
             let speech_recognizer = SpeechRecognizerRuntime::new(
@@ -1617,9 +1618,7 @@ fn main() {
             );
             feature_flags.runtime_features = runtime_features;
             feature_flags.plugin_runtime = feature_flags.runtime_features.plugin_runtime;
-            feature_flags.motion_lab = cfg!(debug_assertions)
-                || settings.developer_mode
-                || std::env::var("HACHIMI_ENABLE_MOTION_LAB").as_deref() == Ok("1");
+            feature_flags.motion_lab = cfg!(debug_assertions);
             let control_plane = Arc::new(ControlPlane::with_audit(
                 feature_flags,
                 Arc::new(PersistentControlAuditSink::new(agent_store.clone())),
@@ -1804,6 +1803,7 @@ fn main() {
                     |error| std::io::Error::other(format!("{}: {}", error.code, error.message)),
                 )?;
             }
+            startup_timeline.checkpoint("agent_services");
             let app_server = AppServer::new(Arc::clone(&control_plane), agent_lifecycle)
                 .with_brokers(
                     Arc::new(approval_broker.clone()),
@@ -1812,6 +1812,7 @@ fn main() {
                 .with_domain_handler(Arc::new(domain_handler));
             let state = DesktopState {
                 storage_layout: storage_layout.clone(),
+                log_directory: log_dir.clone(),
                 agent_store: agent_store.clone(),
                 settings: RwLock::new(settings.clone()),
                 settings_store: store,
@@ -1924,6 +1925,7 @@ fn main() {
             let managed = app.state::<DesktopState>();
             restore_pet_placement(&pet, &managed)
                 .map_err(|error| std::io::Error::other(error.message))?;
+            startup_timeline.checkpoint("pet_window");
             let moved_app = app.handle().clone();
             let previous_motion = Arc::new(StdMutex::new(None::<(i32, i32, Instant)>));
             let moved_motion = Arc::clone(&previous_motion);
@@ -1973,9 +1975,7 @@ fn main() {
                 open_workbench_route(app.handle(), &managed, WorkbenchRoute::Home)
                     .map_err(|error| std::io::Error::other(error.message))?;
             }
-            if let Some(window) = startup_window {
-                let _ = window.close();
-            }
+            startup_timeline.checkpoint("ready");
             Ok(())
         })
         .build(tauri::generate_context!());
@@ -1990,7 +1990,6 @@ fn main() {
         Err(error) => startup_error::show(&error, &startup_log_dir),
     }
 }
-
 #[cfg(test)]
 #[path = "main_tests.rs"]
 mod logging_tests;

@@ -453,6 +453,13 @@ impl DesktopAppDomainHandler {
         )
         .await
         .map_err(|error| AppServerDomainError::new(error.code, error.message))?;
+        crate::host_revision_snapshots::validate_connector_policy_effects(
+            &self.plugins,
+            &schedule.permission_policy,
+            &schedule.host_revision_snapshot.connectors,
+        )
+        .await
+        .map_err(|error| AppServerDomainError::new(error.code, error.message))?;
         self.plugins
             .verify_contribution_revisions(&schedule.contribution_revisions)
             .await
@@ -577,21 +584,9 @@ impl DesktopAppDomainHandler {
                 }
             }
         }
-        for selection in &schedule.host_revision_snapshot.connectors {
-            for action in &selection.allowed_actions {
-                if !schedule
-                    .permission_policy
-                    .allows_connector(&selection.account_id, action, true)
-                {
-                    return Err(AppServerDomainError::new(
-                        "schedule_connector_action_not_authorized",
-                        "Connector actions require an exact persisted writable rule",
-                    ));
-                }
-            }
-        }
         schedule.skill_revisions = skill_revisions;
-        hachimi_scheduler::normalize_schedule_definition(schedule);
+        hachimi_scheduler::normalize_schedule_definition(schedule)
+            .map_err(domain_error("scheduler_failed"))?;
         Ok(())
     }
 
@@ -604,7 +599,8 @@ impl DesktopAppDomainHandler {
         let response = match request {
             ScheduleAppRequest::Create(request) => {
                 let mut definition = request.definition;
-                hachimi_scheduler::normalize_schedule_definition(&mut definition);
+                hachimi_scheduler::normalize_schedule_definition(&mut definition)
+                    .map_err(domain_error("scheduler_failed"))?;
                 self.pin_schedule_runtime_revisions(&mut definition).await?;
                 let fingerprint = mutation_fingerprint(definition.id.as_str(), &definition)?;
                 ScheduleAppResponse::Created(
@@ -644,7 +640,8 @@ impl DesktopAppDomainHandler {
             }
             ScheduleAppRequest::Update(request) => {
                 let mut definition = request.definition;
-                hachimi_scheduler::normalize_schedule_definition(&mut definition);
+                hachimi_scheduler::normalize_schedule_definition(&mut definition)
+                    .map_err(domain_error("scheduler_failed"))?;
                 self.pin_schedule_runtime_revisions(&mut definition).await?;
                 let fingerprint = mutation_fingerprint(
                     definition.id.as_str(),

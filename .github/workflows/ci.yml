@@ -9,7 +9,66 @@ permissions:
   contents: read
 
 jobs:
-  windows-non-admin:
+  windows-static:
+    runs-on: windows-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24.10.0
+      - run: corepack enable
+      - run: corepack prepare pnpm@11.15.1 --activate
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm format:check:prettier
+      - run: pnpm typecheck
+      - run: pnpm lint:eslint
+      - run: pnpm test:node
+      - run: pnpm provenance:check
+      - run: pnpm release:check-clean
+
+  windows-rust:
+    runs-on: windows-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24.10.0
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - run: corepack enable
+      - run: corepack prepare pnpm@11.15.1 --activate
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm check:prepare
+      - run: pnpm format:check:rust
+      - run: pnpm lint:clippy
+      - run: pnpm test:rust
+      - run: pnpm contracts:check
+      - run: pnpm test:p0-adversarial
+      - run: pnpm release:check-clean
+
+  windows-ui:
+    runs-on: windows-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          lfs: true
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24.10.0
+      - run: corepack enable
+      - run: corepack prepare pnpm@11.15.1 --activate
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --filter @hachimi/ui exec playwright install chromium
+      - run: pnpm test:packages
+      - run: pnpm storybook:build
+      - run: pnpm test:visual
+      - run: pnpm release:check-clean
+
+  windows-desktop:
     runs-on: windows-latest
     timeout-minutes: 90
     steps:
@@ -25,6 +84,25 @@ jobs:
       - run: corepack enable
       - run: corepack prepare pnpm@11.15.1 --activate
       - run: pnpm install --frozen-lockfile
-      - run: pnpm --filter @hachimi/ui exec playwright install chromium
-      - run: pnpm check
+      - run: pnpm build
+      - run: pnpm test:desktop:e2e
       - run: pnpm release:check-clean
+
+  windows-non-admin:
+    if: ${{ always() }}
+    needs: [windows-static, windows-rust, windows-ui, windows-desktop]
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - name: Require all parallel Windows checks to pass
+        shell: powershell
+        run: |
+          $results = @(
+            '${{ needs.windows-static.result }}',
+            '${{ needs.windows-rust.result }}',
+            '${{ needs.windows-ui.result }}',
+            '${{ needs.windows-desktop.result }}'
+          )
+          if ($results -contains 'failure' -or $results -contains 'cancelled' -or $results -contains 'skipped') {
+            throw "Parallel Windows CI failed: $($results -join ', ')"
+          }

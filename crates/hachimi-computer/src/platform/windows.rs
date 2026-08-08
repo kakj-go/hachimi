@@ -5,21 +5,22 @@ use std::{
     os::windows::ffi::OsStrExt,
     path::{Path, PathBuf},
     process::Command,
-    sync::{Arc, OnceLock},
-    time::UNIX_EPOCH,
+    sync::{
+        Arc, OnceLock,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::{Duration, UNIX_EPOCH},
 };
 
-use base64::{Engine as _, engine::general_purpose::STANDARD};
 use hachimi_process_policy::ProcessPolicy;
 use hachimi_protocol::{
     ComputerAction, ComputerAppDescriptor, ComputerRuntimeHealth, ComputerWindowIdentity,
 };
-use parking_lot::Mutex;
+use parking_lot::{Condvar, Mutex};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use windows_capture::{
-    capture::{Context, GraphicsCaptureApiHandler},
-    encoder::{ImageEncoder, ImageEncoderPixelFormat, ImageFormat},
+    capture::{CaptureControl, Context, GraphicsCaptureApiHandler},
     frame::Frame,
     graphics_capture_api::InternalCaptureControl,
     settings::{
@@ -35,6 +36,10 @@ use ::windows::{
     Graphics::Capture::GraphicsCaptureSession,
     Win32::{
         Foundation::{HANDLE, HWND, LPARAM, PROPERTYKEY, RECT, WPARAM},
+        Graphics::Gdi::{
+            BI_RGB, BITMAPINFO, BITMAPINFOHEADER, CreateCompatibleDC, CreateDIBSection,
+            DIB_RGB_COLORS, DeleteDC, DeleteObject, HGDIOBJ, SelectObject,
+        },
         Security::{
             GetSidSubAuthority, GetSidSubAuthorityCount, GetTokenInformation,
             TOKEN_MANDATORY_LABEL, TOKEN_QUERY, TokenIntegrityLevel,
@@ -63,11 +68,12 @@ use ::windows::{
                 VK_TAB, VK_UP,
             },
             Shell::PropertiesSystem::{IPropertyStore, SHGetPropertyStoreForWindow},
+            Shell::{SHFILEINFOW, SHGFI_ICON, SHGFI_LARGEICON, SHGetFileInfoW},
             WindowsAndMessaging::{
-                EnumWindows, GetClassNameW, GetForegroundWindow, GetWindowRect, GetWindowTextW,
-                GetWindowThreadProcessId, IsWindow, IsWindowVisible, MoveWindow, PostMessageW,
-                SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE, SetCursorPos, SetForegroundWindow,
-                ShowWindow, WM_CLOSE,
+                DI_NORMAL, DestroyIcon, DrawIconEx, EnumWindows, GetClassNameW,
+                GetForegroundWindow, GetWindowRect, GetWindowTextW, GetWindowThreadProcessId,
+                IsWindow, IsWindowVisible, MoveWindow, PostMessageW, SW_MAXIMIZE, SW_MINIMIZE,
+                SW_RESTORE, SetCursorPos, SetForegroundWindow, ShowWindow, WM_CLOSE,
             },
         },
     },
@@ -75,13 +81,14 @@ use ::windows::{
 };
 
 const MAX_CAPTURE_DIMENSION: u32 = 16_384;
-const MAX_APP_ICON_PNG_BYTES: usize = 256 * 1024;
 const PKEY_APP_USER_MODEL_ID: PROPERTYKEY = PROPERTYKEY {
     fmtid: GUID::from_u128(0x9f4c2855_9f79_4b39_a8d0_e1d42de1d5f3),
     pid: 5,
 };
 static APP_DESCRIPTOR_CACHE: OnceLock<Mutex<HashMap<String, CachedAppDescriptor>>> =
     OnceLock::new();
+static APP_ICON_CACHE: OnceLock<Mutex<HashMap<String, Vec<u8>>>> = OnceLock::new();
+static WINDOW_CAPTURE: OnceLock<Mutex<WindowCaptureCache>> = OnceLock::new();
 
 pub(super) fn runtime_health() -> ComputerRuntimeHealth {
     let graphics_capture_available = GraphicsCaptureSession::IsSupported().unwrap_or(false);
@@ -141,6 +148,15 @@ pub(super) fn list_windows() -> Result<Vec<ComputerWindowIdentity>, ComputerHost
         .filter(|identity| !identity.title.trim().is_empty())
         .filter(|identity| is_user_application(&identity.app_id))
         .collect())
+}
+
+pub(super) fn foreground_window() -> Result<ComputerWindowIdentity, ComputerHostError> {
+    // SAFETY: GetForegroundWindow returns a borrowed handle or null.
+    let hwnd = unsafe { GetForegroundWindow() };
+    if hwnd.0.is_null() {
+        return Err(broker("foreground_window_missing"));
+    }
+    read_identity(&format!("0x{:x}", hwnd.0 as usize))
 }
 
 pub(super) fn read_identity(
@@ -211,6 +227,39 @@ pub(super) struct CapturedImage {
     pub png_bytes: Vec<u8>,
 }
 
+#[derive(Default)]
+struct WindowCaptureCache {
+    active: Option<ActiveWindowCapture>,
+}
+
+struct ActiveWindowCapture {
+    window_handle: isize,
+    requested: Arc<AtomicBool>,
+    state: Arc<Mutex<FrameState>>,
+    wake: Arc<Condvar>,
+    last_generation: u64,
+    control: Option<CaptureControl<StreamingCapture, String>>,
+}
+
+impl ActiveWindowCapture {
+    fn finished(&self) -> bool {
+        self.control
+            .as_ref()
+            .is_none_or(CaptureControl::is_finished)
+    }
+
+    fn stop(mut self) {
+        let Some(control) = self.control.take() else {
+            return;
+        };
+        if control.is_finished() {
+            let _ = control.wait();
+        } else {
+            let _ = control.stop();
+        }
+    }
+}
+
 pub(super) fn capture_window(window_handle: &str) -> Result<CapturedImage, ComputerHostError> {
     let handle = parse_handle(window_handle)?;
     let hwnd = HWND(handle as *mut _);
@@ -224,10 +273,50 @@ pub(super) fn capture_window(window_handle: &str) -> Result<CapturedImage, Compu
         .map_err(|_| broker("window_height_invalid"))?;
     validate_dimensions(width, height)?;
 
-    let captured = Arc::new(Mutex::new(None));
-    let flags = CaptureFlags {
-        captured: Arc::clone(&captured),
-    };
+    let mut cache = WINDOW_CAPTURE
+        .get_or_init(|| Mutex::new(WindowCaptureCache::default()))
+        .lock();
+    let replace = cache
+        .active
+        .as_ref()
+        .is_none_or(|active| active.window_handle != handle || active.finished());
+    if replace {
+        if let Some(active) = cache.active.take() {
+            active.stop();
+        }
+        cache.active = Some(start_window_capture(handle, window)?);
+    }
+    let active = cache.active.as_mut().expect("capture initialized");
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let mut state = active.state.lock();
+    if state.generation <= active.last_generation {
+        active.requested.store(true, Ordering::Release);
+    }
+    while state.generation <= active.last_generation {
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            return Err(broker(
+                "windows_graphics_capture_no_frame:timed out waiting for frame",
+            ));
+        }
+        active.wake.wait_for(&mut state, remaining);
+    }
+    active.last_generation = state.generation;
+    let captured = state
+        .image
+        .take()
+        .ok_or_else(|| broker("windows_graphics_capture_no_frame:frame payload missing"))?;
+    validate_dimensions(captured.width, captured.height)?;
+    Ok(captured)
+}
+
+fn start_window_capture(
+    window_handle: isize,
+    window: Window,
+) -> Result<ActiveWindowCapture, ComputerHostError> {
+    let requested = Arc::new(AtomicBool::new(false));
+    let state = Arc::new(Mutex::new(FrameState::default()));
+    let wake = Arc::new(Condvar::new());
     let settings = Settings::new(
         window,
         CursorCaptureSettings::WithoutCursor,
@@ -236,16 +325,22 @@ pub(super) fn capture_window(window_handle: &str) -> Result<CapturedImage, Compu
         MinimumUpdateIntervalSettings::Default,
         DirtyRegionSettings::Default,
         ColorFormat::Rgba8,
-        flags,
+        CaptureFlags {
+            requested: Arc::clone(&requested),
+            state: Arc::clone(&state),
+            wake: Arc::clone(&wake),
+        },
     );
-    OneFrameCapture::start(settings)
+    let control = StreamingCapture::start_free_threaded(settings)
         .map_err(|error| broker(format!("windows_graphics_capture:{error}")))?;
-    let captured = captured
-        .lock()
-        .take()
-        .ok_or_else(|| broker("windows_graphics_capture_no_frame"))?;
-    validate_dimensions(captured.width, captured.height)?;
-    Ok(captured)
+    Ok(ActiveWindowCapture {
+        window_handle,
+        requested,
+        state,
+        wake,
+        last_generation: 0,
+        control: Some(control),
+    })
 }
 
 pub(super) fn perform_action(
@@ -270,6 +365,7 @@ pub(super) fn perform_action(
         return Err(ComputerHostError::UserTakeover);
     }
     let rect = window_rect(hwnd)?;
+    arm_next_window_frame(hwnd.0 as isize);
 
     match action {
         ComputerAction::MouseMove { x, y } => move_pointer(rect, *x, *y),
@@ -390,6 +486,19 @@ pub(super) fn perform_action(
     }
 }
 
+fn arm_next_window_frame(window_handle: isize) {
+    let Some(cache) = WINDOW_CAPTURE.get() else {
+        return;
+    };
+    let cache = cache.lock();
+    if let Some(active) = cache.active.as_ref()
+        && active.window_handle == window_handle
+        && !active.finished()
+    {
+        active.requested.store(true, Ordering::Release);
+    }
+}
+
 fn mouse_button_flags(
     button: &str,
 ) -> Result<
@@ -409,14 +518,22 @@ fn mouse_button_flags(
 
 #[derive(Clone)]
 struct CaptureFlags {
-    captured: Arc<Mutex<Option<CapturedImage>>>,
+    requested: Arc<AtomicBool>,
+    state: Arc<Mutex<FrameState>>,
+    wake: Arc<Condvar>,
 }
 
-struct OneFrameCapture {
+#[derive(Default)]
+struct FrameState {
+    generation: u64,
+    image: Option<CapturedImage>,
+}
+
+struct StreamingCapture {
     flags: CaptureFlags,
 }
 
-impl GraphicsCaptureApiHandler for OneFrameCapture {
+impl GraphicsCaptureApiHandler for StreamingCapture {
     type Flags = CaptureFlags;
     type Error = String;
 
@@ -429,33 +546,45 @@ impl GraphicsCaptureApiHandler for OneFrameCapture {
     fn on_frame_arrived(
         &mut self,
         frame: &mut Frame,
-        capture_control: InternalCaptureControl,
+        _capture_control: InternalCaptureControl,
     ) -> Result<(), Self::Error> {
+        if !self.flags.requested.swap(false, Ordering::AcqRel) {
+            return Ok(());
+        }
         let width = frame.width();
         let height = frame.height();
         validate_dimensions(width, height).map_err(|error| error.to_string())?;
         let buffer = frame.buffer().map_err(|error| error.to_string())?;
         let mut packed = Vec::new();
-        let png_bytes = ImageEncoder::new(ImageFormat::Png, ImageEncoderPixelFormat::Rgba8)
-            .and_then(|encoder| {
-                encoder.encode(buffer.as_nopadding_buffer(&mut packed), width, height)
-            })
-            .map_err(|error| error.to_string())?;
-        *self.flags.captured.lock() = Some(CapturedImage {
+        let png_bytes = encode_rgba_png(buffer.as_nopadding_buffer(&mut packed), width, height)?;
+        let mut state = self.flags.state.lock();
+        state.generation = state.generation.saturating_add(1);
+        state.image = Some(CapturedImage {
             width,
             height,
             png_bytes,
         });
-        capture_control.stop();
+        self.flags.wake.notify_all();
         Ok(())
     }
 
     fn on_closed(&mut self) -> Result<(), Self::Error> {
-        if self.flags.captured.lock().is_none() {
-            return Err("capture_target_closed_before_first_frame".into());
-        }
         Ok(())
     }
+}
+
+fn encode_rgba_png(buffer: &[u8], width: u32, height: u32) -> Result<Vec<u8>, String> {
+    let mut output = Vec::new();
+    {
+        let mut encoder = png::Encoder::new(&mut output, width, height);
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        let mut writer = encoder.write_header().map_err(|error| error.to_string())?;
+        writer
+            .write_image_data(buffer)
+            .map_err(|error| error.to_string())?;
+    }
+    Ok(output)
 }
 
 fn process_image_path(process: HANDLE) -> Result<PathBuf, ComputerHostError> {
@@ -591,29 +720,103 @@ fn app_descriptor(hwnd: HWND, path: &Path) -> Result<ComputerAppDescriptor, Comp
 pub(super) fn app_icon_png(
     app: &ComputerAppDescriptor,
 ) -> Result<Option<Vec<u8>>, ComputerHostError> {
-    if let (Some(package_family_name), Some(app_user_model_id)) = (
-        app.package_family_name.as_deref(),
-        app.app_user_model_id.as_deref(),
-    ) && let Some(bytes) = packaged_icon_png(package_family_name, app_user_model_id)?
-    {
-        return Ok(Some(bytes));
+    let cache = APP_ICON_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Some(cached) = cache.lock().get(&app.identity_hash) {
+        return Ok(Some(cached.clone()));
     }
     let Some(path) = app.executable_path.as_deref() else {
         return Ok(None);
     };
-    let script = r#"Add-Type -AssemblyName System.Drawing; $icon = [System.Drawing.Icon]::ExtractAssociatedIcon($args[0]); if ($null -eq $icon) { exit 0 }; $bitmap = $icon.ToBitmap(); $stream = New-Object System.IO.MemoryStream; try { $bitmap.Save($stream, [System.Drawing.Imaging.ImageFormat]::Png); [Console]::Out.Write([Convert]::ToBase64String($stream.ToArray())) } finally { $stream.Dispose(); $bitmap.Dispose(); $icon.Dispose() }"#;
-    let Some(output) = powershell_text(script, Path::new(path)) else {
-        return Ok(None);
-    };
-    let bytes = STANDARD
-        .decode(output.trim())
-        .map_err(|error| broker(format!("app_icon_decode:{error}")))?;
-    if bytes.len() > MAX_APP_ICON_PNG_BYTES
-        || !bytes.starts_with(&[137, 80, 78, 71, 13, 10, 26, 10])
-    {
-        return Err(broker("app_icon_invalid"));
+    let result = native_icon_png(Path::new(path))?;
+    if let Some(bytes) = result.as_ref() {
+        cache
+            .lock()
+            .insert(app.identity_hash.clone(), bytes.clone());
     }
-    Ok(Some(bytes))
+    Ok(result)
+}
+
+fn native_icon_png(path: &Path) -> Result<Option<Vec<u8>>, ComputerHostError> {
+    let path_wide = wide_null(path.as_os_str());
+    let mut file_info = SHFILEINFOW::default();
+    // SAFETY: `path_wide` is a valid, nul-terminated UTF-16 path and
+    // `file_info` points to writable storage of the exact Shell structure size.
+    let result = unsafe {
+        SHGetFileInfoW(
+            PCWSTR(path_wide.as_ptr()),
+            ::windows::Win32::Storage::FileSystem::FILE_FLAGS_AND_ATTRIBUTES(0),
+            Some(std::ptr::addr_of_mut!(file_info)),
+            std::mem::size_of::<SHFILEINFOW>() as u32,
+            SHGFI_ICON | SHGFI_LARGEICON,
+        )
+    };
+    if result == 0 || file_info.hIcon.0.is_null() {
+        return Ok(None);
+    }
+    let icon = file_info.hIcon;
+    let result = render_icon_png(icon);
+    // SAFETY: Shell returned an owned icon handle which must be destroyed once.
+    let _ = unsafe { DestroyIcon(icon) };
+    result
+        .map(Some)
+        .map_err(|error| broker(format!("app_icon_render:{error}")))
+}
+
+fn render_icon_png(
+    icon: ::windows::Win32::UI::WindowsAndMessaging::HICON,
+) -> Result<Vec<u8>, String> {
+    const SIZE: i32 = 32;
+    let info = BITMAPINFO {
+        bmiHeader: BITMAPINFOHEADER {
+            biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+            biWidth: SIZE,
+            biHeight: -SIZE,
+            biPlanes: 1,
+            biBitCount: 32,
+            biCompression: BI_RGB.0,
+            ..BITMAPINFOHEADER::default()
+        },
+        ..BITMAPINFO::default()
+    };
+    let hdc = unsafe { CreateCompatibleDC(None) };
+    if hdc.0.is_null() {
+        return Err("create_icon_dc".into());
+    }
+    let mut pixels = std::ptr::null_mut();
+    let bitmap =
+        unsafe { CreateDIBSection(Some(hdc), &info, DIB_RGB_COLORS, &mut pixels, None, 0) }
+            .map_err(|error| format!("create_icon_bitmap:{error}"));
+    let Ok(bitmap) = bitmap else {
+        let _ = unsafe { DeleteDC(hdc) };
+        return Err(bitmap.unwrap_err());
+    };
+    let previous = unsafe { SelectObject(hdc, HGDIOBJ(bitmap.0)) };
+    let draw_result = unsafe { DrawIconEx(hdc, 0, 0, icon, SIZE, SIZE, 0, None, DI_NORMAL) };
+    let output = if let Err(error) = draw_result {
+        Err(format!("draw_icon:{error}"))
+    } else if pixels.is_null() {
+        Err("icon_pixels_null".into())
+    } else {
+        let bgra =
+            unsafe { std::slice::from_raw_parts(pixels.cast::<u8>(), (SIZE * SIZE * 4) as usize) };
+        let mut rgba = vec![0_u8; bgra.len()];
+        for (source, target) in bgra.chunks_exact(4).zip(rgba.chunks_exact_mut(4)) {
+            target[0] = source[2];
+            target[1] = source[1];
+            target[2] = source[0];
+            target[3] = if source[3] == 0 { 255 } else { source[3] };
+        }
+        encode_rgba_png(&rgba, SIZE as u32, SIZE as u32)
+            .map_err(|error| format!("encode_icon:{error}"))
+    };
+    if !previous.0.is_null() {
+        unsafe { SelectObject(hdc, previous) };
+    }
+    unsafe {
+        let _ = DeleteObject(HGDIOBJ(bitmap.0));
+        let _ = DeleteDC(hdc);
+    }
+    output
 }
 
 #[derive(Debug, Deserialize)]
@@ -647,14 +850,14 @@ fn packaged_app_metadata(app_user_model_id: &str) -> Option<PackagedAppMetadata>
     let package_family_name = package_family_from_aumid(app_user_model_id)?;
     let script = r#"
 $OutputEncoding = New-Object System.Text.UTF8Encoding($false)
-$package = Get-AppxPackage -PackageFamilyName $args[0] | Select-Object -First 1
+$package = Get-AppxPackage -PackageFamilyName $env:HACHIMI_POWERSHELL_ARG_0 | Select-Object -First 1
 if ($null -eq $package) { exit 0 }
 $manifest = Get-AppxPackageManifest -Package $package
-$applicationId = $args[1].Substring($args[1].IndexOf('!') + 1)
+$applicationId = $env:HACHIMI_POWERSHELL_ARG_1.Substring($env:HACHIMI_POWERSHELL_ARG_1.IndexOf('!') + 1)
 $application = @($manifest.Package.Applications.Application) | Where-Object { $_.Id -eq $applicationId } | Select-Object -First 1
-$startApp = @(Get-StartApps -ErrorAction SilentlyContinue) | Where-Object { $_.AppID -eq $args[1] } | Select-Object -First 1
+$startApp = @(Get-StartApps -ErrorAction SilentlyContinue) | Where-Object { $_.AppID -eq $env:HACHIMI_POWERSHELL_ARG_1 } | Select-Object -First 1
 $displayName = if ($null -ne $startApp) { $startApp.Name } elseif ($null -ne $application.VisualElements.DisplayName) { $application.VisualElements.DisplayName } else { $package.Name }
-[Console]::Out.Write(( [pscustomobject]@{ family = $package.PackageFamilyName; aumid = $args[1]; displayName = $displayName; publisher = $package.Publisher } | ConvertTo-Json -Compress ))
+[Console]::Out.Write(( [pscustomobject]@{ family = $package.PackageFamilyName; aumid = $env:HACHIMI_POWERSHELL_ARG_1; displayName = $displayName; publisher = $package.Publisher } | ConvertTo-Json -Compress ))
 "#;
     let output = powershell_args(
         script,
@@ -671,51 +874,6 @@ fn package_family_from_aumid(app_user_model_id: &str) -> Option<&str> {
     let package_family_name = package_family_name.trim();
     (!package_family_name.is_empty() && !application_id.trim().is_empty())
         .then_some(package_family_name)
-}
-
-fn packaged_icon_png(
-    package_family_name: &str,
-    app_user_model_id: &str,
-) -> Result<Option<Vec<u8>>, ComputerHostError> {
-    let script = r#"
-$OutputEncoding = New-Object System.Text.UTF8Encoding($false)
-Add-Type -AssemblyName System.Drawing
-$package = Get-AppxPackage -PackageFamilyName $args[0] | Select-Object -First 1
-if ($null -eq $package) { exit 0 }
-$manifest = Get-AppxPackageManifest -Package $package
-$applicationId = $args[1].Substring($args[1].IndexOf('!') + 1)
-$application = @($manifest.Package.Applications.Application) | Where-Object { $_.Id -eq $applicationId } | Select-Object -First 1
-$relative = if ($null -ne $application.VisualElements.Square44x44Logo) { $application.VisualElements.Square44x44Logo } else { $manifest.Package.Properties.Logo }
-if ([string]::IsNullOrWhiteSpace($relative) -or $relative.StartsWith('ms-resource:')) { exit 0 }
-$candidate = Join-Path $package.InstallLocation $relative
-if (-not (Test-Path -LiteralPath $candidate)) {
-  $base = [System.IO.Path]::GetFileNameWithoutExtension($candidate)
-  $directory = [System.IO.Path]::GetDirectoryName($candidate)
-  $candidate = Get-ChildItem -LiteralPath $directory -File -ErrorAction SilentlyContinue | Where-Object { $_.BaseName -like "$base*" } | Sort-Object Name | Select-Object -First 1 -ExpandProperty FullName
-}
-if ([string]::IsNullOrWhiteSpace($candidate) -or -not (Test-Path -LiteralPath $candidate)) { exit 0 }
-$image = [System.Drawing.Image]::FromFile($candidate)
-$stream = New-Object System.IO.MemoryStream
-try { $image.Save($stream, [System.Drawing.Imaging.ImageFormat]::Png); [Console]::Out.Write([Convert]::ToBase64String($stream.ToArray())) } finally { $stream.Dispose(); $image.Dispose() }
-"#;
-    let Some(output) = powershell_args(
-        script,
-        &[
-            std::ffi::OsStr::new(package_family_name),
-            std::ffi::OsStr::new(app_user_model_id),
-        ],
-    ) else {
-        return Ok(None);
-    };
-    let bytes = STANDARD
-        .decode(output.trim())
-        .map_err(|error| broker(format!("package_icon_decode:{error}")))?;
-    if bytes.len() > MAX_APP_ICON_PNG_BYTES
-        || !bytes.starts_with(&[137, 80, 78, 71, 13, 10, 26, 10])
-    {
-        return Err(broker("package_icon_invalid"));
-    }
-    Ok(Some(bytes))
 }
 
 fn packaged_identity_hash(
@@ -749,7 +907,7 @@ fn win32_identity_hash(
 }
 
 fn verified_publisher(path: &Path) -> Option<String> {
-    let script = r#"$signature = Get-AuthenticodeSignature -LiteralPath $args[0]; if ($signature.Status -eq 'Valid' -and $null -ne $signature.SignerCertificate) { [Console]::Out.Write($signature.SignerCertificate.GetNameInfo('SimpleName', $false)) }"#;
+    let script = r#"$signature = Get-AuthenticodeSignature -LiteralPath $env:HACHIMI_POWERSHELL_ARG_0; if ($signature.Status -eq 'Valid' -and $null -ne $signature.SignerCertificate) { [Console]::Out.Write($signature.SignerCertificate.GetNameInfo('SimpleName', $false)) }"#;
     powershell_text(script, path).filter(|value| !value.trim().is_empty())
 }
 
@@ -762,6 +920,12 @@ fn powershell_args(script: &str, args: &[&std::ffi::OsStr]) -> Option<String> {
         "powershell.exe",
         hachimi_process_policy::ProcessPolicy::HiddenBackground,
     );
+    // `-Command` treats trailing argv values as PowerShell source text. Pass
+    // paths through the child environment so spaces and non-ASCII characters
+    // remain intact instead of being parsed as code.
+    for (index, argument) in args.iter().enumerate() {
+        command.env(format!("HACHIMI_POWERSHELL_ARG_{index}"), argument);
+    }
     let output = command
         .args([
             "-NoLogo",
@@ -770,7 +934,6 @@ fn powershell_args(script: &str, args: &[&std::ffi::OsStr]) -> Option<String> {
             "-Command",
             script,
         ])
-        .args(args)
         .output()
         .ok()?;
     if !output.status.success() || output.stdout.len() > 512 * 1024 {
@@ -1235,8 +1398,13 @@ mod tests {
     };
 
     use ::windows::Win32::{
-        System::Threading::{OpenProcess, PROCESS_TERMINATE, TerminateProcess},
-        UI::WindowsAndMessaging::SetForegroundWindow,
+        System::Threading::{
+            AttachThreadInput, GetCurrentProcess, GetCurrentThreadId, GetProcessHandleCount,
+            OpenProcess, PROCESS_TERMINATE, TerminateProcess,
+        },
+        UI::WindowsAndMessaging::{
+            BringWindowToTop, MSG, PM_NOREMOVE, PeekMessageW, SetForegroundWindow,
+        },
     };
 
     use super::*;
@@ -1262,6 +1430,19 @@ mod tests {
             identity,
             packaged_identity_hash(family, aumid, Some("CN=Other"))
         );
+    }
+
+    #[test]
+    fn extracts_a_png_from_a_real_windows_executable() {
+        let path = std::env::var_os("WINDIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(r"C:\Windows"))
+            .join("Explorer.exe");
+        let icon = native_icon_png(&path)
+            .expect("shell icon extraction")
+            .expect("Explorer icon");
+        assert!(icon.starts_with(&[137, 80, 78, 71, 13, 10, 26, 10]));
+        assert!(icon.len() <= 256 * 1024);
     }
 
     #[test]
@@ -1304,7 +1485,7 @@ mod tests {
     impl Drop for TestProcessGuard {
         fn drop(&mut self) {
             if let Some(process_id) = self.window_process_id {
-                // SAFETY: the process ID belongs to the test-created Notepad
+                // SAFETY: the process ID belongs to the test-created fixture
                 // window and the returned handle is immediately owned.
                 if let Ok(process) = unsafe { OpenProcess(PROCESS_TERMINATE, false, process_id) } {
                     // SAFETY: OpenProcess returned a newly owned HANDLE.
@@ -1320,13 +1501,49 @@ mod tests {
 
     #[test]
     #[ignore = "requires an interactive default Windows desktop"]
-    fn captures_and_controls_a_real_notepad_window_with_wgc() {
+    fn captures_and_controls_the_win32_stress_fixture_with_wgc() {
+        let seconds = std::env::var("HACHIMI_STRESS_PHASE_SECONDS")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok());
+        let stress_deadline =
+            seconds.map(|seconds| Instant::now() + Duration::from_secs(seconds.clamp(1, 450)));
+        let mut iterations = 0_u64;
+        loop {
+            log_stress_handles(iterations, "before_iteration");
+            let fixture_deadline = stress_deadline
+                .map(|deadline| deadline.min(Instant::now() + Duration::from_secs(25)));
+            run_real_fixture_wgc_iteration(iterations, fixture_deadline);
+            log_stress_handles(iterations, "after_iteration");
+            iterations = iterations.saturating_add(1);
+            if stress_deadline.is_none_or(|deadline| Instant::now() >= deadline) {
+                break;
+            }
+        }
+        eprintln!("computer_real_stress_iterations={iterations}");
+    }
+
+    fn log_stress_handles(iteration: u64, stage: &str) {
+        if std::env::var_os("HACHIMI_COMPUTER_HANDLE_DIAGNOSTICS").is_none() {
+            return;
+        }
+        let mut count = 0_u32;
+        // SAFETY: GetCurrentProcess returns a valid pseudo-handle and count is writable.
+        if unsafe { GetProcessHandleCount(GetCurrentProcess(), &mut count) }.is_ok() {
+            eprintln!("computer_handle iteration={iteration} stage={stage} count={count}");
+        }
+    }
+
+    fn run_real_fixture_wgc_iteration(iteration: u64, fixture_deadline: Option<Instant>) {
         let existing = Window::enumerate()
             .expect("enumerate existing windows")
             .into_iter()
             .map(|window| window.as_raw_hwnd() as usize)
             .collect::<BTreeSet<_>>();
-        let child = Command::new("notepad.exe").spawn().expect("launch notepad");
+        let fixture = std::env::var("HACHIMI_COMPUTER_STRESS_FIXTURE")
+            .expect("HACHIMI_COMPUTER_STRESS_FIXTURE must name the built Win32 fixture");
+        let child = Command::new(&fixture)
+            .spawn()
+            .expect("launch Hachimi Computer stress fixture");
         let mut process_guard = TestProcessGuard {
             child,
             window_process_id: None,
@@ -1338,19 +1555,15 @@ mod tests {
                 .into_iter()
                 .find(|window| {
                     !existing.contains(&(window.as_raw_hwnd() as usize))
-                        && (window
-                            .process_name()
-                            .is_ok_and(|name| name.eq_ignore_ascii_case("notepad.exe"))
-                            || window.title().is_ok_and(|title| {
-                                title.to_ascii_lowercase().contains("notepad")
-                                    || title.contains("记事本")
-                            }))
+                        && window
+                            .title()
+                            .is_ok_and(|title| title == "Hachimi Computer Stress Fixture")
                 });
             if let Some(window) = candidate {
                 break window;
             }
             if Instant::now() >= deadline {
-                panic!("notepad did not expose a capturable window");
+                panic!("Hachimi Computer stress fixture did not expose a capturable window");
             }
             thread::sleep(Duration::from_millis(100));
         };
@@ -1361,16 +1574,86 @@ mod tests {
         assert!(!identity.protected_desktop);
         assert!(!identity.hachimi_owned);
 
-        let captured = capture_window(&handle).expect("WGC frame");
-        assert!(captured.width > 0 && captured.height > 0);
+        let mut previous_frame = capture_window(&handle).expect("WGC frame");
+        log_stress_handles(iteration, "after_capture_initial");
+        assert!(previous_frame.width > 0 && previous_frame.height > 0);
         assert!(
-            captured
+            previous_frame
                 .png_bytes
                 .starts_with(&[137, 80, 78, 71, 13, 10, 26, 10])
         );
 
         let hwnd = HWND(window.as_raw_hwnd());
-        let foreground_deadline = Instant::now() + Duration::from_secs(10);
+        let mut cycle = 0_u64;
+        loop {
+            select_stress_window(hwnd);
+            let actionable_identity = read_identity(&handle).expect("foreground window identity");
+            perform_action(
+                &actionable_identity,
+                &ComputerAction::TypeText {
+                    text: format!("Hachimi Computer Host stress {iteration}:{cycle} "),
+                },
+            )
+            .expect("fenced SendInput action");
+            let mutation_deadline = Instant::now() + Duration::from_secs(5);
+            let after_text_frame = loop {
+                let frame = capture_window(&handle).expect("WGC frame after text input");
+                if frame.png_bytes != previous_frame.png_bytes {
+                    break frame;
+                }
+                assert!(
+                    Instant::now() < mutation_deadline,
+                    "Computer fixture did not expose a changed WGC frame after controlled input"
+                );
+                thread::sleep(Duration::from_millis(100));
+            };
+            log_stress_handles(iteration, "after_capture_text");
+            select_stress_window(hwnd);
+            let after_text = read_identity(&handle).expect("identity after text input");
+            perform_action(
+                &after_text,
+                &ComputerAction::Scroll {
+                    delta_x: 0,
+                    delta_y: -120,
+                },
+            )
+            .expect("fenced scroll action");
+            select_stress_window(hwnd);
+            let before_resize = read_identity(&handle).expect("identity before resize");
+            perform_action(
+                &before_resize,
+                &ComputerAction::WindowResize {
+                    width: 720 + u32::try_from((iteration + cycle) % 2).unwrap_or_default() * 40,
+                    height: 520,
+                },
+            )
+            .expect("fenced resize action");
+            let resize_deadline = Instant::now() + Duration::from_secs(5);
+            let recaptured = loop {
+                let frame = capture_window(&handle).expect("WGC frame after controlled actions");
+                if frame.png_bytes != after_text_frame.png_bytes
+                    && frame.width >= 700
+                    && frame.height >= 500
+                {
+                    break frame;
+                }
+                assert!(
+                    Instant::now() < resize_deadline,
+                    "Computer fixture did not expose a changed WGC frame after resize"
+                );
+            };
+            log_stress_handles(iteration, "after_capture_resize");
+            previous_frame = recaptured;
+            cycle = cycle.saturating_add(1);
+            if fixture_deadline.is_none_or(|deadline| Instant::now() >= deadline) {
+                break;
+            }
+        }
+        assert!(previous_frame.width >= 700 && previous_frame.height >= 500);
+    }
+
+    fn select_stress_window(hwnd: HWND) {
+        let deadline = Instant::now() + Duration::from_secs(10);
         // SAFETY: GetForegroundWindow has no preconditions and returns a borrowed HWND value.
         while unsafe { GetForegroundWindow() } != hwnd {
             send_inputs(&[
@@ -1378,37 +1661,62 @@ mod tests {
                 keyboard_input(VK_MENU, true),
             ])
             .expect("test harness Alt activation");
-            // SAFETY: this test discovered and validated the HWND created by
-            // its own Notepad child. This harness-only focus step models the
-            // user's explicit selection; the production broker never changes
-            // the foreground window and rejects background targets.
-            let _ = unsafe { SetForegroundWindow(hwnd) };
-            assert!(
-                Instant::now() < foreground_deadline,
-                "Notepad did not remain the user-selected foreground window"
-            );
+            focus_owned_stress_window(hwnd);
+            if Instant::now() >= deadline {
+                let foreground = unsafe { GetForegroundWindow() };
+                let mut target_process = 0_u32;
+                let mut foreground_process = 0_u32;
+                let target_thread =
+                    unsafe { GetWindowThreadProcessId(hwnd, Some(&mut target_process)) };
+                let foreground_thread =
+                    unsafe { GetWindowThreadProcessId(foreground, Some(&mut foreground_process)) };
+                panic!(
+                    "computer_stress_foreground_contended: target={:?} pid={target_process} tid={target_thread}; foreground={:?} pid={foreground_process} tid={foreground_thread}",
+                    hwnd.0, foreground.0
+                );
+            }
             thread::sleep(Duration::from_millis(100));
         }
-        let actionable_identity = read_identity(&handle).expect("foreground window identity");
-        perform_action(
-            &actionable_identity,
-            &ComputerAction::TypeText {
-                text: "Hachimi Computer Host smoke".into(),
-            },
-        )
-        .expect("fenced SendInput action");
-        let mutation_deadline = Instant::now() + Duration::from_secs(5);
-        loop {
-            let changed = read_identity(&handle)
-                .is_ok_and(|current| current.title != actionable_identity.title);
-            if changed {
-                break;
-            }
-            assert!(
-                Instant::now() < mutation_deadline,
-                "Notepad did not reflect the controlled text input"
-            );
-            thread::sleep(Duration::from_millis(100));
+    }
+
+    fn focus_owned_stress_window(hwnd: HWND) {
+        // This ignored harness owns the fixture HWND. Temporarily sharing its
+        // input queues models explicit user selection without weakening the
+        // production broker's fail-closed foreground fencing.
+        let mut message = MSG::default();
+        // SAFETY: a no-remove peek initializes this test thread's USER32
+        // message queue without consuming application messages.
+        let _ = unsafe { PeekMessageW(&mut message, None, 0, 0, PM_NOREMOVE) };
+        let current_thread = unsafe { GetCurrentThreadId() };
+        let foreground = unsafe { GetForegroundWindow() };
+        let foreground_thread = if !foreground.0.is_null() {
+            unsafe { GetWindowThreadProcessId(foreground, None) }
+        } else {
+            0
+        };
+        let target_thread = unsafe { GetWindowThreadProcessId(hwnd, None) };
+        let foreground_attached = foreground_thread != 0
+            && foreground_thread != current_thread
+            && unsafe { AttachThreadInput(current_thread, foreground_thread, true) }.as_bool();
+        let target_attached = target_thread != 0
+            && target_thread != current_thread
+            && target_thread != foreground_thread
+            && unsafe { AttachThreadInput(current_thread, target_thread, true) }.as_bool();
+
+        // SAFETY: hwnd belongs to the live Computer fixture created by this test.
+        unsafe {
+            let _ = ShowWindow(hwnd, SW_RESTORE);
+            let _ = BringWindowToTop(hwnd);
+            let _ = SetForegroundWindow(hwnd);
+        }
+
+        if target_attached {
+            // SAFETY: this exactly balances the successful attachment above.
+            let _ = unsafe { AttachThreadInput(current_thread, target_thread, false) };
+        }
+        if foreground_attached {
+            // SAFETY: this exactly balances the successful attachment above.
+            let _ = unsafe { AttachThreadInput(current_thread, foreground_thread, false) };
         }
     }
 }

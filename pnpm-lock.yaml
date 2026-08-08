@@ -17,6 +17,9 @@ importers:
       '@wdio/cli':
         specifier: 9.30.0
         version: 9.30.0(@types/node@26.1.1)(expect-webdriverio@5.7.0)(supports-color@8.1.1)
+      '@wdio/globals':
+        specifier: 9.29.1
+        version: 9.29.1(expect-webdriverio@5.7.0)(webdriverio@9.30.0(supports-color@8.1.1))
       '@wdio/local-runner':
         specifier: 9.30.0
         version: 9.30.0(@wdio/globals@9.29.1)(supports-color@8.1.1)(webdriverio@9.30.0(supports-color@8.1.1))

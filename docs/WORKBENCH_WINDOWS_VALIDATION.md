@@ -1,6 +1,8 @@
 # Workbench Windows 验收清单
 
-更新时间：2026-08-02
+更新时间：2026-08-08
+
+本文记录 Windows 发布环境仍需执行的验收项。产品功能状态统一见 [路线图](ROADMAP.md)。
 
 ## 普通 Desktop E2E
 
@@ -8,7 +10,7 @@
 - [x] Git snapshot 已验证 `NotRepository`、`Unborn(main · 尚无提交)`、`Ready` 和 `Detached`；Detached 时 Managed Worktree 禁用，切回分支后立即恢复；
 - [x] 创建空 root commit 后无需刷新即可选择 Managed Worktree；
 - [x] 新任务使用草稿态，发送前不写 Session/Run，发送只创建一个 Checkout/Session/Run；
-- [x] Plan mode 无写入/Exec，接受 ProposedPlan 后创建新的 Default Run；
+- [x] Plan mode 无写入/Exec；完整 `PlanDocument` 产生独立 `PlanConfirmation` Gate，接受后创建新的 Default Run，`ExecutionPlanState` 仅表示按 Run 隔离的执行清单；
 - [x] Approval、secret UserInput、取消、断线补发和 generation fencing；
 - [x] 真实 WebView2 验证文件树 lazy load、Watch 新文件投影和逐文件 Run Diff/hunk；Workbench adapter 与 Workspace Rust 测试验证 Watch invalidate/generation fencing、搜索取消、Checkout Diff 和大 Diff 分块；
 - [x] 五个 Built-in Office Skill 已验证显式 activation 和真实容器 Artifact；模型通过 `skills.list`/`skills.read` 隐式激活 Office overlay，无效资源读取失败后可恢复且不扩大 Grant；
@@ -57,7 +59,7 @@ pnpm test:windows:release
 | 环境测试                                                              | 所属 Gate                 | 自动入口                          |
 | --------------------------------------------------------------------- | ------------------------- | --------------------------------- |
 | managed Chromium 真实页面、上传和下载                                 | standard-user             | `pnpm test:windows:standard-user` |
-| WGC/Notepad 真实截图和输入                                            | standard-user             | `pnpm test:windows:standard-user` |
+| WGC/专用 Computer fixture 真实截图和输入                              | standard-user             | `pnpm test:windows:standard-user` |
 | Gateway 当前用户启动项往返                                            | standard-user             | `pnpm test:windows:standard-user` |
 | SystemClock At/Every/Cron soak                                        | standard-user、elevated   | 两个 Windows Gate 均显式执行      |
 | Sandbox ACL/路径攻击、Workspace Worker、Agent Exec、MCP stdio、ConPTY | standard-user 或 elevated | 对应 Windows Gate 显式执行        |
@@ -66,4 +68,4 @@ pnpm test:windows:release
 
 失败产物只保留脱敏截图、WebDriver 日志和运行状态；不得保存 Prompt、secret、完整 Tool 输出或用户路径。
 
-当前 portable 已构建到 `target/portable/Hachimi-portable.zip`，并包含 Desktop、Workspace Worker、setup/launcher/canary/attest 与五个 Built-in Office Skill。当前非管理员会话运行真实 setup 时在受信 Git runtime ACL 阶段以 Windows error 5 fail closed；该结果不视为管理员验收通过。
+便携候选必须从对应 clean commit 重新构建并记录 SHA-256；工作目录中的临时产物不作为发布证据。非管理员会话运行需要提升权限的 setup 而 fail closed，不视为管理员验收通过。

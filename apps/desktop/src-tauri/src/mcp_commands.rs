@@ -12,17 +12,21 @@ pub(super) fn configured_mcp_control(
     data_dir: &Path,
     secrets: McpKeyring,
 ) -> McpControlService {
-    let supervisor = sandbox_backend.map_or_else(
-        || Arc::new(hachimi_capabilities::McpSupervisor::default()),
-        |backend| {
-            Arc::new(hachimi_capabilities::McpSupervisor::with_stdio_sandbox(
-                hachimi_capabilities::McpStdioSandboxHost::new(
-                    Arc::clone(backend),
-                    data_dir.join("mcp-hosts"),
-                ),
-            ))
-        },
-    );
+    let supervisor = if deterministic_e2e_sandbox_report().is_some() {
+        Arc::new(hachimi_capabilities::McpSupervisor::allow_unrestricted_stdio_for_tests())
+    } else {
+        sandbox_backend.map_or_else(
+            || Arc::new(hachimi_capabilities::McpSupervisor::default()),
+            |backend| {
+                Arc::new(hachimi_capabilities::McpSupervisor::with_stdio_sandbox(
+                    hachimi_capabilities::McpStdioSandboxHost::new(
+                        Arc::clone(backend),
+                        data_dir.join("mcp-hosts"),
+                    ),
+                ))
+            },
+        )
+    };
     McpControlService::with_secret_resolver(
         store.clone(),
         supervisor,
