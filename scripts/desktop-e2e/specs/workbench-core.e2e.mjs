@@ -325,11 +325,14 @@ describe("Hachimi Workbench core lifecycle", () => {
     );
     await waitForDisplayed(".workbench-bottom-panel .terminal-session.active .xterm");
 
-    await writeTerminal('Get-Location; Write-Output "terminal-e2e"');
+    writeFileSync(join(project, ".git", "hachimi-desktop-e2e-cwd"), "expected-cwd", "utf8");
+    await writeTerminal(
+      "$value = Get-Content -Raw -LiteralPath '.git/hachimi-desktop-e2e-cwd'; Write-Output ('cwd:' + $value)",
+    );
     await browser.waitUntil(
       async () => {
         const text = await $(".terminal-session.active .xterm-rows").getText();
-        return text.includes("terminal-e2e") && text.toLowerCase().includes(project.toLowerCase());
+        return text.includes("cwd:expected-cwd");
       },
       { timeout: 20_000, timeoutMsg: "Project terminal cwd or PTY output was incorrect" },
     );

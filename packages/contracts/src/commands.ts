@@ -241,10 +241,19 @@ export interface CommandFailure {
   message: string;
 }
 
+export interface DiagnosticsPaths {
+  dataDirectory: string;
+  logDirectory: string;
+  backendLog: string;
+  frontendLog: string;
+}
+
 export const commands = {
   getBootstrapState: () => invoke<BootstrapState>("get_bootstrap_state"),
   frontendReady: () => invoke<void>("frontend_ready"),
   writeFrontendLog: (entry: FrontendLogEntry) => invoke<void>("write_frontend_log", { entry }),
+  getDiagnosticsPaths: () => invoke<DiagnosticsPaths>("get_diagnostics_paths"),
+  openLogsDirectory: () => invoke<void>("open_logs_directory"),
   getSettings: () => invoke<AppSettings>("get_settings"),
   updateSettings: (settings: AppSettings) => invoke<AppSettings>("update_settings", { settings }),
   resetLocalData: () => invoke<void>("reset_local_data"),

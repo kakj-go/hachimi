@@ -23,6 +23,7 @@ mod computer_targeting;
 mod desktop_e2e;
 #[cfg(all(debug_assertions, feature = "desktop-e2e"))]
 mod desktop_e2e_agent_tools;
+mod diagnostics_commands;
 mod domain_run_launcher;
 mod embedded_browser;
 mod embedded_browser_agent;
@@ -68,6 +69,7 @@ use browser_workspace_commands::*;
 use command_error::CommandError;
 use computer_settings_commands::*;
 use desktop_e2e::*;
+use diagnostics_commands::*;
 use environment_commands::*;
 use extension_commands::*;
 use forge_commands::*;
@@ -314,6 +316,7 @@ struct PetWindowMotionEvent {
 
 struct DesktopState {
     storage_layout: StorageLayout,
+    log_directory: PathBuf,
     agent_store: AgentStore,
     settings: RwLock<AppSettings>,
     settings_store: SettingsStore,
@@ -1110,6 +1113,8 @@ fn main() {
             get_bootstrap_state,
             frontend_ready,
             write_frontend_log,
+            get_diagnostics_paths,
+            open_logs_directory,
             get_settings,
             update_settings,
             reset_local_data,
@@ -1807,6 +1812,7 @@ fn main() {
                 .with_domain_handler(Arc::new(domain_handler));
             let state = DesktopState {
                 storage_layout: storage_layout.clone(),
+                log_directory: log_dir.clone(),
                 agent_store: agent_store.clone(),
                 settings: RwLock::new(settings.clone()),
                 settings_store: store,

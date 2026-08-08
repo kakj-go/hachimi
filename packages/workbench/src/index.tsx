@@ -5,6 +5,7 @@ import {
   type AppSettings,
   type AppearanceConfig,
   type BootstrapState,
+  type DiagnosticsPaths,
   type LlmSettingsInput,
   type LlmSettingsView,
   type LlmTestResult,
@@ -38,6 +39,7 @@ import {
   DEFAULT_UI_FONT,
   Dropdown,
   Globe,
+  FolderOpen,
   Maximize2,
   Minus,
   Monitor,
@@ -94,6 +96,7 @@ import {
 import { runtimeFeatureVisibility } from "./runtime-feature-visibility";
 import { normalizeRemoteContextFields } from "./llm-settings-normalization";
 import "./workbench.css";
+import "./diagnostics-settings.css";
 import "./appearance-workbench.css";
 import "./workspace-browser.css";
 import "./resource-settings.css";
@@ -714,6 +717,8 @@ function DiagnosticsSettings(props: {
   const i18n = useI18n();
   const [resetOpen, setResetOpen] = createSignal(false);
   const [resetting, setResetting] = createSignal(false);
+  const [paths, setPaths] = createSignal<DiagnosticsPaths>();
+  const [openingLogs, setOpeningLogs] = createSignal(false);
   async function persist(patch: Partial<AppSettings>) {
     const previous = props.settings;
     const next = { ...previous, ...patch };
@@ -735,6 +740,23 @@ function DiagnosticsSettings(props: {
       props.fail(commandFailure(error).message);
     }
   }
+  async function openLogs() {
+    setOpeningLogs(true);
+    try {
+      await commands.openLogsDirectory();
+    } catch (error) {
+      props.fail(commandFailure(error).message);
+    } finally {
+      setOpeningLogs(false);
+    }
+  }
+  onMount(() => {
+    void commands
+      .getDiagnosticsPaths()
+      .then(setPaths)
+      // eslint-disable-next-line solid/reactivity -- Promise failures are reported outside rendering.
+      .catch((error) => props.fail(commandFailure(error).message));
+  });
   return (
     <div class="settings-page settings-page-demo">
       <PageHeading
@@ -746,6 +768,37 @@ function DiagnosticsSettings(props: {
             : "Inspect build information, developer capabilities, and local data."
         }
       />
+      <SettingsSection title={i18n.locale() === "zh-CN" ? "运行日志" : "Application logs"}>
+        <SettingsCard class="settings-card settings-card-demo">
+          <SettingsRow
+            label={i18n.locale() === "zh-CN" ? "日志目录" : "Log directory"}
+            description={
+              i18n.locale() === "zh-CN"
+                ? "后端、前端和本地服务日志保存在应用数据目录，不在安装目录。"
+                : "Backend, frontend, and local-service logs are stored with app data, not in the installation directory."
+            }
+          >
+            <div class="settings-path-action">
+              <code title={paths()?.logDirectory}>{paths()?.logDirectory ?? "..."}</code>
+              <Button
+                size="small"
+                disabled={!paths() || openingLogs()}
+                title={i18n.locale() === "zh-CN" ? "打开日志目录" : "Open log directory"}
+                onClick={() => void openLogs()}
+              >
+                <FolderOpen size={14} />
+                {openingLogs()
+                  ? i18n.locale() === "zh-CN"
+                    ? "正在打开"
+                    : "Opening"
+                  : i18n.locale() === "zh-CN"
+                    ? "打开"
+                    : "Open"}
+              </Button>
+            </div>
+          </SettingsRow>
+        </SettingsCard>
+      </SettingsSection>
       <SettingsSection title={i18n.locale() === "zh-CN" ? "开发者" : "Developer"}>
         <SettingsCard class="settings-card settings-card-demo">
           <SettingsRow

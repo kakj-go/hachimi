@@ -372,7 +372,6 @@ fn register_sandbox_sidecar_hashes() {
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
         return;
     }
-    let target = std::env::var("TARGET").expect("Cargo TARGET");
     for (name, environment) in [
         ("hachimi-sandbox-setup", "HACHIMI_SANDBOX_SETUP_SHA256"),
         (
@@ -386,7 +385,7 @@ fn register_sandbox_sidecar_hashes() {
             "HACHIMI_WORKSPACE_WORKER_SHA256",
         ),
     ] {
-        let path = Path::new("binaries").join(format!("{name}-{target}.exe"));
+        let path = Path::new("resources/internal-runtime").join(format!("{name}.exe"));
         println!("cargo:rerun-if-changed={}", path.display());
         if !path.is_file() {
             panic!(

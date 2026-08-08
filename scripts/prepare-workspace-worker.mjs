@@ -31,9 +31,18 @@ const targetRoot = process.env.CARGO_TARGET_DIR
   ? resolve(workspaceRoot, process.env.CARGO_TARGET_DIR)
   : resolve(workspaceRoot, "target");
 const binaries = resolve(workspaceRoot, "apps", "desktop", "src-tauri", "binaries");
+const internalRuntime = resolve(
+  workspaceRoot,
+  "apps",
+  "desktop",
+  "src-tauri",
+  "resources",
+  "internal-runtime",
+);
 const samplePluginBin = resolve(workspaceRoot, "assets", "plugins", "sample-crm", "bin");
 const suffix = process.platform === "win32" ? ".exe" : "";
 mkdirSync(binaries, { recursive: true });
+mkdirSync(internalRuntime, { recursive: true });
 mkdirSync(samplePluginBin, { recursive: true });
 
 for (const release of profiles) {
@@ -48,10 +57,15 @@ for (const release of profiles) {
     const profileDirectory = release ? "release" : "debug";
     const executableName = `${sidecar.binary}${suffix}`;
     const source = resolve(targetRoot, profileDirectory, executableName);
+    const profileRuntime = resolve(targetRoot, profileDirectory, "internal-runtime");
     const destination = resolve(binaries, `${sidecar.binary}-${host}${suffix}`);
+    const packagedDestination = resolve(internalRuntime, executableName);
+    mkdirSync(profileRuntime, { recursive: true });
     copyFileSync(source, destination);
+    copyFileSync(source, packagedDestination);
+    copyFileSync(source, resolve(profileRuntime, executableName));
     process.stdout.write(
-      `Prepared ${profileDirectory} sidecar ${sidecar.binary}: ${source}${release ? " (externalBin source)" : ""}\n`,
+      `Prepared ${profileDirectory} sidecar ${sidecar.binary}: ${source}${release ? " (packaged resource source)" : ""}\n`,
     );
   }
   const fixtureBinary = "hachimi-sidecar-fixture";
@@ -70,4 +84,6 @@ for (const release of profiles) {
     `Prepared ${profileDirectory} sample Plugin sidecar ${fixtureBinary}: ${fixtureSource}\n`,
   );
 }
-process.stdout.write(`Prepared ${sidecars.length} external sidecars in ${binaries}\n`);
+process.stdout.write(
+  `Prepared ${sidecars.length} packaged runtime executables in ${internalRuntime}\n`,
+);

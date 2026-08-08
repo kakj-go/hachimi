@@ -99,7 +99,7 @@ pub(super) fn stage(
     ];
     let mut issues = Vec::new();
     for (name, expected) in definitions {
-        let result = packaged_sidecar_path(name)
+        let result = packaged_sidecar_path(resource_root, name)
             .and_then(|source| stage_file(&source, &root.join(executable_name(name)), expected));
         if let Err(error) = result {
             let code = sidecar_error_code(name);
@@ -523,12 +523,26 @@ fn executable_name(name: &str) -> String {
     }
 }
 
-fn packaged_sidecar_path(name: &str) -> Result<PathBuf, String> {
-    std::env::current_exe()
-        .map_err(|error| error.to_string())?
-        .parent()
-        .map(|parent| parent.join(executable_name(name)))
-        .ok_or_else(|| "Hachimi executable has no parent directory".into())
+fn packaged_sidecar_path(resource_root: &Path, name: &str) -> Result<PathBuf, String> {
+    let file_name = executable_name(name);
+    let mut candidates = vec![resource_root.join("internal-runtime").join(&file_name)];
+    if let Ok(executable) = std::env::current_exe() {
+        if let Some(parent) = executable.parent() {
+            candidates.push(parent.join(&file_name));
+        }
+    }
+    candidates
+        .into_iter()
+        .find(|path| path.is_file())
+        .ok_or_else(|| {
+            format!(
+                "packaged Runtime resource is missing: {}",
+                resource_root
+                    .join("internal-runtime")
+                    .join(file_name)
+                    .display()
+            )
+        })
 }
 
 fn hash(bytes: &[u8]) -> String {
@@ -541,6 +555,21 @@ fn hash(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn packaged_sidecar_prefers_internal_runtime_resource() {
+        let resource_root = tempfile::tempdir().expect("resource root");
+        let runtime = resource_root.path().join("internal-runtime");
+        std::fs::create_dir_all(&runtime).expect("internal runtime");
+        let sidecar = runtime.join(executable_name("hachimi-sandbox-launcher"));
+        std::fs::write(&sidecar, b"launcher").expect("sidecar");
+
+        assert_eq!(
+            packaged_sidecar_path(resource_root.path(), "hachimi-sandbox-launcher")
+                .expect("packaged sidecar"),
+            sidecar
+        );
+    }
 
     #[test]
     fn cached_managed_git_validation_repairs_same_size_changes() {
