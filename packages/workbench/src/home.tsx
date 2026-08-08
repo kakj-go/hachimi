@@ -484,7 +484,7 @@ export function HomePage(props: {
     let disposed = false;
     void commandPort
       .initializeAgentControl({
-        clientVersion: "hachimi-desktop/0.3.0-alpha.8",
+        clientVersion: "hachimi-desktop/1.0.0",
         protocolVersion: CONTROL_PROTOCOL_VERSION,
         supportedFeatures: [
           "session_lifecycle_v2",

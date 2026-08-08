@@ -278,7 +278,7 @@ function WindowChrome(props: {
             ]}
             onSelect={(id) => {
               if (id === "settings") props.onNavigate("settings/general");
-              else window.alert(text("Hachimi 0.3.0-alpha.8", "Hachimi 0.3.0-alpha.8"));
+              else window.alert(text("Hachimi 1.0.0", "Hachimi 1.0.0"));
             }}
           >
             {i18n.t("workbench.menu.help")}
@@ -820,7 +820,7 @@ function DiagnosticsSettings(props: {
       <SettingsSection title={i18n.t("settings.about.title")}>
         <SettingsCard class="settings-card settings-card-demo">
           <SettingsRow label={i18n.t("settings.about.version")}>
-            <Badge>v0.3.0-alpha.8</Badge>
+            <Badge>v1.0.0</Badge>
           </SettingsRow>
           <SettingsRow
             label={i18n.t("settings.about.sourceLicense")}

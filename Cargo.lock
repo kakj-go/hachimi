@@ -2160,7 +2160,7 @@ dependencies = [
 
 [[package]]
 name = "hachimi-agent"
-version = "0.3.0-alpha.8"
+version = "1.0.0"
 dependencies = [
  "base64 0.22.1",
  "diff",
@@ -2190,7 +2190,7 @@ dependencies = [
 
 [[package]]
 name = "hachimi-approvals"
-version = "0.3.0-alpha.8"
+version = "1.0.0"
 dependencies = [
  "futures-util",
  "hachimi-core",
@@ -2204,11 +2204,11 @@ dependencies = [
 
 [[package]]
 name = "hachimi-audit"
-version = "0.3.0-alpha.8"
+version = "1.0.0"
 
 [[package]]
 name = "hachimi-avatar"
-version = "0.3.0-alpha.8"
+version = "1.0.0"
 dependencies = [
  "atomic-write-file",
  "base64 0.22.1",
@@ -2225,7 +2225,7 @@ dependencies = [
 
 [[package]]
 name = "hachimi-browser"
-version = "0.3.0-alpha.8"
+version = "1.0.0"
 dependencies = [
  "base64 0.22.1",
  "hachimi-core",
@@ -2245,7 +2245,7 @@ dependencies = [
 
 [[package]]
 name = "hachimi-capabilities"
-version = "0.3.0-alpha.8"
+version = "1.0.0"
 dependencies = [
  "base64 0.22.1",
  "futures-util",
@@ -2270,7 +2270,7 @@ dependencies = [
 
 [[package]]
 name = "hachimi-cef-host"
-version = "0.3.0-alpha.8"
+version = "1.0.0"
 dependencies = [
  "base64 0.22.1",
  "cef",
@@ -2285,7 +2285,7 @@ dependencies = [
 
 [[package]]
 name = "hachimi-channel-providers"
-version = "0.3.0-alpha.8"
+version = "1.0.0"
 dependencies = [
  "aes",
  "base64 0.22.1",
@@ -2305,7 +2305,7 @@ dependencies = [
 
 [[package]]
 name = "hachimi-computer"
-version = "0.3.0-alpha.8"
+version = "1.0.0"
 dependencies = [
  "base64 0.22.1",
  "hachimi-core",
@@ -2326,7 +2326,7 @@ dependencies = [
 
 [[package]]
 name = "hachimi-control-plane"
-version = "0.3.0-alpha.8"
+version = "1.0.0"
 dependencies = [
  "hachimi-approvals",
  "hachimi-audit",
@@ -2347,7 +2347,7 @@ dependencies = [
 
 [[package]]
 name = "hachimi-core"
-version = "0.3.0-alpha.8"
+version = "1.0.0"
 dependencies = [
  "serde",
  "specta",
@@ -2356,7 +2356,7 @@ dependencies = [
 
 [[package]]
 name = "hachimi-desktop"
-version = "0.3.0-alpha.8"
+version = "1.0.0"
 dependencies = [
  "arboard",
  "atomic-write-file",
@@ -2418,7 +2418,7 @@ dependencies = [
 
 [[package]]
 name = "hachimi-enterprise"
-version = "0.3.0-alpha.8"
+version = "1.0.0"
 dependencies = [
  "aes",
  "base64 0.22.1",
@@ -2443,7 +2443,7 @@ dependencies = [
 
 [[package]]
 name = "hachimi-extensions"
-version = "0.3.0-alpha.8"
+version = "1.0.0"
 dependencies = [
  "aes",
  "base64 0.22.1",
@@ -2471,7 +2471,7 @@ dependencies = [
 
 [[package]]
 name = "hachimi-forge"
-version = "0.3.0-alpha.8"
+version = "1.0.0"
 dependencies = [
  "hachimi-protocol",
  "keyring",
@@ -2486,7 +2486,7 @@ dependencies = [
 
 [[package]]
 name = "hachimi-gateway"
-version = "0.3.0-alpha.8"
+version = "1.0.0"
 dependencies = [
  "hachimi-channel-providers",
  "hachimi-core",
@@ -2511,7 +2511,7 @@ dependencies = [
 
 [[package]]
 name = "hachimi-llm"
-version = "0.3.0-alpha.8"
+version = "1.0.0"
 dependencies = [
  "futures-util",
  "hachimi-core",
@@ -2531,7 +2531,7 @@ dependencies = [
 
 [[package]]
 name = "hachimi-model-runtime"
-version = "0.3.0-alpha.8"
+version = "1.0.0"
 dependencies = [
  "futures-util",
  "hachimi-protocol",
@@ -2541,7 +2541,7 @@ dependencies = [
 
 [[package]]
 name = "hachimi-motion"
-version = "0.3.0-alpha.8"
+version = "1.0.0"
 dependencies = [
  "atomic-write-file",
  "hachimi-core",
@@ -2556,7 +2556,7 @@ dependencies = [
 
 [[package]]
 name = "hachimi-policy"
-version = "0.3.0-alpha.8"
+version = "1.0.0"
 dependencies = [
  "hachimi-core",
  "hachimi-protocol",
@@ -2566,7 +2566,7 @@ dependencies = [
 
 [[package]]
 name = "hachimi-process"
-version = "0.3.0-alpha.8"
+version = "1.0.0"
 dependencies = [
  "base64 0.22.1",
  "hachimi-process-policy",
@@ -2581,14 +2581,14 @@ dependencies = [
 
 [[package]]
 name = "hachimi-process-policy"
-version = "0.3.0-alpha.8"
+version = "1.0.0"
 dependencies = [
  "tokio",
 ]
 
 [[package]]
 name = "hachimi-protocol"
-version = "0.3.0-alpha.8"
+version = "1.0.0"
 dependencies = [
  "hachimi-core",
  "serde",
@@ -2602,7 +2602,7 @@ dependencies = [
 
 [[package]]
 name = "hachimi-sandbox"
-version = "0.3.0-alpha.8"
+version = "1.0.0"
 dependencies = [
  "atomic-write-file",
  "hachimi-process-policy",
@@ -2621,7 +2621,7 @@ dependencies = [
 
 [[package]]
 name = "hachimi-scheduler"
-version = "0.3.0-alpha.8"
+version = "1.0.0"
 dependencies = [
  "chrono",
  "chrono-tz",
@@ -2640,7 +2640,7 @@ dependencies = [
 
 [[package]]
 name = "hachimi-skills"
-version = "0.3.0-alpha.8"
+version = "1.0.0"
 dependencies = [
  "atomic-write-file",
  "hachimi-protocol",
@@ -2656,7 +2656,7 @@ dependencies = [
 
 [[package]]
 name = "hachimi-storage"
-version = "0.3.0-alpha.8"
+version = "1.0.0"
 dependencies = [
  "atomic-write-file",
  "base64 0.22.1",
@@ -2677,7 +2677,7 @@ dependencies = [
 
 [[package]]
 name = "hachimi-user-input"
-version = "0.3.0-alpha.8"
+version = "1.0.0"
 dependencies = [
  "futures-util",
  "hachimi-protocol",
@@ -2690,7 +2690,7 @@ dependencies = [
 
 [[package]]
 name = "hachimi-voice"
-version = "0.3.0-alpha.8"
+version = "1.0.0"
 dependencies = [
  "atomic-write-file",
  "bzip2 0.4.4",
@@ -2712,7 +2712,7 @@ dependencies = [
 
 [[package]]
 name = "hachimi-windowing"
-version = "0.3.0-alpha.8"
+version = "1.0.0"
 dependencies = [
  "hachimi-protocol",
  "thiserror 2.0.19",
@@ -2720,7 +2720,7 @@ dependencies = [
 
 [[package]]
 name = "hachimi-workbench"
-version = "0.3.0-alpha.8"
+version = "1.0.0"
 dependencies = [
  "base64 0.22.1",
  "hachimi-agent",
@@ -2740,7 +2740,7 @@ dependencies = [
 
 [[package]]
 name = "hachimi-workspace"
-version = "0.3.0-alpha.8"
+version = "1.0.0"
 dependencies = [
  "atomic-write-file",
  "base64 0.22.1",

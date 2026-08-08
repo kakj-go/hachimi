@@ -2,7 +2,14 @@
 
 Hachimi 是一个 Windows 先行的本地桌面 Agent 和透明 3D 桌宠。它把对话、项目工作区、工具调用、定时任务和桌宠交互放在同一个 Runtime 中，使用 Tauri 2、Rust、SolidJS、Three.js 和 three-vrm 构建。
 
-当前版本是 `0.3.0-alpha.8` 开发预览版，尚未创建 tag 或发布正式安装包。源码采用 Apache-2.0；官方预编译包包含默认 VRM，默认 VRM 的资源许可限制见 [NOTICE](NOTICE.md)。
+当前版本是 `beta-1.0` Windows 预发行版。源码采用 Apache-2.0；官方预编译包包含默认 VRM，默认 VRM 的资源许可限制见 [NOTICE](NOTICE.md)。
+
+## 下载
+
+- **Windows 10/11 x64**：[下载 MSI 安装程序](https://github.com/kakj-go/hachimi/releases/download/beta-1.0/Hachimi_1.0.0_x64_en-US.msi)，也可以在 [beta-1.0 发布页](https://github.com/kakj-go/hachimi/releases/tag/beta-1.0) 获取其他 Windows 安装包。
+- **macOS / Linux**：暂不支持，当前没有可用的安装包。
+
+Windows 安装包目前未进行代码签名，安装时系统可能显示安全提示。beta 版本仍在开发和验证阶段，请先备份重要数据。
 
 ## 界面预览
 
