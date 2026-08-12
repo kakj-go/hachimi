@@ -1,6 +1,6 @@
 # 3D 角色模型指南
 
-Hachimi Avatar Motion Runtime V4 的模型导入只接受 `.vrm`，支持 VRM 0.x 与 VRM 1.0。普通 `.glb` 不进入桌宠运行时。身体动作来自内置或用户导入的正式 VRMA 1.0，并动态重定向到当前 Runtime Ready 模型。
+Hachimi Avatar Motion Runtime V5 的模型导入只接受 `.vrm`，支持 VRM 0.x 与 VRM 1.0。普通 `.glb` 不进入桌宠运行时。身体动作来自内置或用户导入的正式 VRMA 1.0，并动态重定向到当前 Runtime Ready 模型。
 
 ## Runtime Ready 要求
 
@@ -22,7 +22,7 @@ Hachimi Avatar Motion Runtime V4 的模型导入只接受 `.vrm`，支持 VRM 0.
 - [VRoid Studio](https://vroid.com/en/studio)：免费创建并导出自己的 VRM，最适合作为可控角色来源。
 - [VRM Add-on for Blender](https://github.com/saturday06/VRM-Addon-for-Blender)：为已有模型完成 Humanoid、表情、LookAt、MToon 与 SpringBone 配置并导出 VRM。
 
-Sketchfab 下载的 GLB 不能直接导入 Runtime V4。将 `.glb` 后缀改成 `.vrm` 也不会生成 VRM 元数据；必须在 Blender、Unity 或 VRoid 工具链中完成骨骼、蒙皮、表情、材质和二级物理配置，再导出为 VRM。
+Sketchfab 下载的 GLB 不能直接导入 Runtime V5。将 `.glb` 后缀改成 `.vrm` 也不会生成 VRM 元数据；必须在 Blender、Unity 或 VRoid 工具链中完成骨骼、蒙皮、表情、材质和二级物理配置，再导出为 VRM。
 
 ## 授权检查
 

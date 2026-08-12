@@ -1,4 +1,8 @@
-import type { MotionCatalogEntry, MotionRuntimeAsset } from "@hachimi/contracts";
+import type {
+  MotionCatalogEntry,
+  MotionRuntimeAsset,
+  MotionTransitionProfile,
+} from "@hachimi/contracts";
 import type { VRM, VRMHumanBoneName } from "@pixiv/three-vrm";
 import { createVRMAnimationClip, type VRMAnimation } from "@pixiv/three-vrm-animation";
 import {
@@ -6,6 +10,7 @@ import {
   MathUtils,
   Quaternion,
   QuaternionKeyframeTrack,
+  Vector2,
   Vector3,
   VectorKeyframeTrack,
   type AnimationClip,
@@ -13,12 +18,22 @@ import {
   type KeyframeTrack,
 } from "three";
 import type { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
+import {
+  MOTION_FEATURE_VERSION,
+  buildMotionFeatureIndex,
+  type MotionFeatureIndex,
+} from "./graph/index";
 
 export interface SampledMotionPose {
   rotations: ReadonlyMap<string, Quaternion>;
   hipsPosition?: Vector3;
   expressions: ReadonlyMap<string, number>;
   lookAt?: { yawDegrees: number; pitchDegrees: number };
+}
+
+export interface MotionFeatureCacheAdapter {
+  read(cacheKey: string): Promise<string | null>;
+  write(cacheKey: string, payload: string): Promise<void>;
 }
 
 interface CompiledTrack {
@@ -160,10 +175,17 @@ class CompiledMotion {
 
   sample(timeMs: number, mirror: boolean): SampledMotionPose {
     const durationMs = Math.max(this.entry.durationMs, 1);
-    const positionMs =
-      this.entry.playbackMode === "loop"
+    const localPositionMs =
+      this.entry.loopMode === "loop"
         ? ((timeMs % durationMs) + durationMs) % durationMs
         : Math.min(Math.max(timeMs, 0), durationMs - 0.001);
+    const sourceStartMs = this.entry.sourceStartMs ?? 0;
+    const sourceEndMs = this.entry.sourceEndMs ?? durationMs;
+    const positionMs = MathUtils.lerp(
+      sourceStartMs,
+      Math.max(sourceEndMs, sourceStartMs + 0.001),
+      localPositionMs / durationMs,
+    );
     const timeSeconds = positionMs / 1000;
     const rotations = new Map<string, Quaternion>();
     const expressions = new Map<string, number>();
@@ -210,6 +232,13 @@ class CompiledMotion {
         );
       }
     }
+    if (this.entry.proceduralYawDegrees && rotations.has("hips")) {
+      const phase = MathUtils.clamp(localPositionMs / durationMs, 0, 1);
+      const yaw = MathUtils.degToRad(this.entry.proceduralYawDegrees) * Math.sin(Math.PI * phase);
+      rotations
+        .get("hips")!
+        .premultiply(new Quaternion().setFromAxisAngle(new Vector3(0, 1, 0), mirror ? -yaw : yaw));
+    }
     return {
       rotations,
       expressions,
@@ -225,11 +254,13 @@ export class MotionAssetLibrary {
   private readonly sourceUse = new Map<string, number>();
   private readonly compiled = new WeakMap<VRM, Map<string, CompiledSlot>>();
   private readonly pending = new WeakMap<VRM, Map<string, Promise<CompiledMotion>>>();
+  private readonly features = new WeakMap<VRM, Map<string, MotionFeatureIndex>>();
   private useCounter = 0;
 
   constructor(
     private readonly loader: GLTFLoader,
     private readonly resolveAsset: (id: string) => Promise<MotionRuntimeAsset | null>,
+    private readonly featureCache?: MotionFeatureCacheAdapter,
   ) {}
 
   setCatalog(entries: readonly MotionCatalogEntry[]): void {
@@ -256,9 +287,88 @@ export class MotionAssetLibrary {
     return slot.motion.sample(timeMs, mirror && slot.motion.entry.mirrorable);
   }
 
+  featureIndex(
+    vrm: VRM,
+    id: string,
+    profile: MotionTransitionProfile,
+  ): MotionFeatureIndex | undefined {
+    const existing = this.features.get(vrm)?.get(id);
+    if (existing) return existing;
+    const motion = this.compiled.get(vrm)?.get(id)?.motion;
+    if (!motion) return undefined;
+    const skeletonSignature = VRM_HUMANOID_BONES.filter((bone) =>
+      vrm.humanoid.getNormalizedBoneNode(bone),
+    ).join(",");
+    const index = buildMotionFeatureIndex({
+      motionId: id,
+      contentHash: motion.entry.sha256,
+      skeletonSignature,
+      durationMs: motion.entry.durationMs,
+      loop: motion.entry.loopMode === "loop",
+      entryWindows: profile.entryWindows,
+      exitWindows: profile.exitWindows,
+      sample: (timeMs) => motion.sample(timeMs, false),
+    });
+    let byId = this.features.get(vrm);
+    if (!byId) {
+      byId = new Map();
+      this.features.set(vrm, byId);
+    }
+    byId.set(id, index);
+    return index;
+  }
+
+  async prepareFeatureIndex(
+    vrm: VRM,
+    id: string,
+    profile: MotionTransitionProfile,
+  ): Promise<MotionFeatureIndex> {
+    await this.compiledMotion(vrm, id);
+    const existing = this.features.get(vrm)?.get(id);
+    if (existing) return existing;
+    const motion = this.compiled.get(vrm)?.get(id)?.motion;
+    if (!motion) throw new Error(`Motion ${id} is not compiled`);
+    const skeletonSignature = VRM_HUMANOID_BONES.filter((bone) =>
+      vrm.humanoid.getNormalizedBoneNode(bone),
+    ).join(",");
+    const cacheKey = `${skeletonSignature}:${motion.entry.sha256}:v${MOTION_FEATURE_VERSION}`;
+    if (this.featureCache) {
+      try {
+        const payload = await this.featureCache.read(cacheKey);
+        const restored = payload ? deserializeMotionFeatureIndex(payload, cacheKey, id) : undefined;
+        if (restored) {
+          this.storeFeatureIndex(vrm, id, restored);
+          return restored;
+        }
+      } catch {
+        // Corrupt and unavailable caches are rebuilt from the immutable source motion.
+      }
+    }
+    const built = this.featureIndex(vrm, id, profile);
+    if (!built) throw new Error(`Motion ${id} feature analysis failed`);
+    if (this.featureCache) {
+      try {
+        await this.featureCache.write(cacheKey, serializeMotionFeatureIndex(built));
+      } catch {
+        // Persistence is an optimization; the analyzed in-memory index remains authoritative.
+      }
+    }
+    return built;
+  }
+
+  private storeFeatureIndex(vrm: VRM, id: string, index: MotionFeatureIndex): void {
+    let byId = this.features.get(vrm);
+    if (!byId) {
+      byId = new Map();
+      this.features.set(vrm, byId);
+    }
+    byId.set(id, index);
+  }
+
   clear(vrm: VRM): void {
     this.compiled.delete(vrm);
     this.pending.delete(vrm);
+    this.features.delete(vrm);
   }
 
   compiledCount(vrm: VRM): number {
@@ -414,6 +524,162 @@ function mirrorBone(bone: string): string {
 
 function evictCompiled(slots: Map<string, CompiledSlot>, keep: string): void {
   pruneLeastRecentlyUsed(slots, MAX_COMPILED_PER_AVATAR, keep, (slot) => slot.lastUsed);
+}
+
+export function serializeMotionFeatureIndex(index: MotionFeatureIndex): string {
+  return JSON.stringify({
+    cacheKey: index.cacheKey,
+    motionId: index.motionId,
+    durationMs: index.durationMs,
+    sampleHz: index.sampleHz,
+    loopSeamDegrees: index.loopSeamDegrees,
+    loopSeamRootDistance: index.loopSeamRootDistance,
+    frames: index.frames.map((frame) => ({
+      timeMs: frame.timeMs,
+      loopPhase: frame.loopPhase,
+      footContact: frame.footContact,
+      safeEntry: frame.safeEntry,
+      safeExit: frame.safeExit,
+      pose: {
+        rotations: [...frame.pose.rotations].map(([name, value]) => [name, ...value.toArray()]),
+        hips: frame.pose.hipsPosition?.toArray(),
+        expressions: [...frame.pose.expressions],
+        lookAt: frame.pose.lookAt,
+      },
+      velocity: {
+        angular: [...frame.velocity.angular].map(([name, value]) => [name, ...value.toArray()]),
+        hips: frame.velocity.hips.toArray(),
+        expressions: [...frame.velocity.expressions],
+        lookAt: frame.velocity.lookAt.toArray(),
+      },
+    })),
+  });
+}
+
+export function deserializeMotionFeatureIndex(
+  payload: string,
+  expectedCacheKey: string,
+  expectedMotionId: string,
+): MotionFeatureIndex | undefined {
+  const value = JSON.parse(payload) as Record<string, unknown>;
+  if (
+    value["cacheKey"] !== expectedCacheKey ||
+    value["motionId"] !== expectedMotionId ||
+    !finiteNumberValue(value["durationMs"]) ||
+    !finiteNumberValue(value["sampleHz"]) ||
+    !Array.isArray(value["frames"])
+  )
+    return undefined;
+  const frames = value["frames"].map((raw) => {
+    const frame = raw as Record<string, unknown>;
+    const pose = frame["pose"] as Record<string, unknown>;
+    const velocity = frame["velocity"] as Record<string, unknown>;
+    return {
+      timeMs: requiredNumber(frame["timeMs"]),
+      loopPhase: requiredNumber(frame["loopPhase"]),
+      footContact: requiredFootContact(frame["footContact"]),
+      safeEntry: Boolean(frame["safeEntry"]),
+      safeExit: Boolean(frame["safeExit"]),
+      pose: {
+        rotations: new Map(
+          requiredRows(pose["rotations"], 5).map(([name, x, y, z, w]) => [
+            String(name),
+            new Quaternion(Number(x), Number(y), Number(z), Number(w)).normalize(),
+          ]),
+        ),
+        expressions: new Map(
+          requiredRows(pose["expressions"], 2).map(([name, amount]) => [
+            String(name),
+            Number(amount),
+          ]),
+        ),
+        ...(pose["hips"]
+          ? { hipsPosition: vector3From(pose["hips"]) }
+          : {}),
+        ...(pose["lookAt"]
+          ? {
+              lookAt: {
+                yawDegrees: requiredNumber(
+                  (pose["lookAt"] as Record<string, unknown>)["yawDegrees"],
+                ),
+                pitchDegrees: requiredNumber(
+                  (pose["lookAt"] as Record<string, unknown>)["pitchDegrees"],
+                ),
+              },
+            }
+          : {}),
+      },
+      velocity: {
+        angular: new Map(
+          requiredRows(velocity["angular"], 4).map(([name, x, y, z]) => [
+            String(name),
+            new Vector3(Number(x), Number(y), Number(z)),
+          ]),
+        ),
+        hips: vector3From(velocity["hips"]),
+        expressions: new Map(
+          requiredRows(velocity["expressions"], 2).map(([name, amount]) => [
+            String(name),
+            Number(amount),
+          ]),
+        ),
+        lookAt: vector2From(velocity["lookAt"]),
+      },
+    };
+  });
+  return {
+    cacheKey: expectedCacheKey,
+    motionId: expectedMotionId,
+    durationMs: Number(value["durationMs"]),
+    sampleHz: Number(value["sampleHz"]),
+    frames,
+    loopSeamDegrees: requiredNumber(value["loopSeamDegrees"]),
+    loopSeamRootDistance: requiredNumber(value["loopSeamRootDistance"]),
+  };
+}
+
+function requiredRows(value: unknown, width: number): unknown[][] {
+  if (!Array.isArray(value)) throw new Error("Invalid motion feature rows");
+  for (const row of value) {
+    if (
+      !Array.isArray(row) ||
+      row.length !== width ||
+      row.slice(1).some((part) => !finiteNumberValue(part))
+    )
+      throw new Error("Invalid motion feature row");
+  }
+  return value as unknown[][];
+}
+
+function vector3From(value: unknown): Vector3 {
+  const row = requiredVector(value, 3);
+  return new Vector3(row[0]!, row[1]!, row[2]!);
+}
+
+function vector2From(value: unknown): Vector2 {
+  const row = requiredVector(value, 2);
+  return new Vector2(row[0]!, row[1]!);
+}
+
+function requiredVector(value: unknown, width: number): number[] {
+  if (!Array.isArray(value) || value.length !== width || value.some((part) => !finiteNumberValue(part)))
+    throw new Error("Invalid motion feature vector");
+  return value as number[];
+}
+
+function requiredNumber(value: unknown): number {
+  if (!finiteNumberValue(value)) throw new Error("Invalid motion feature number");
+  return value;
+}
+
+function finiteNumberValue(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value);
+}
+
+function requiredFootContact(value: unknown) {
+  if (!["left", "right", "both", "air", "unknown"].includes(String(value)))
+    throw new Error("Invalid foot contact value");
+  return value as "left" | "right" | "both" | "air" | "unknown";
 }
 
 function evictSources(

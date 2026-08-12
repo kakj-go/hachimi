@@ -123,6 +123,58 @@ export function buildSourceSummary(workspaceRoot) {
       };
     }),
   };
+  const avatarMotionRegistry = JSON.parse(
+    readFileSync(
+      resolve(workspaceRoot, "docs", "references", "avatar-motion", "registry.json"),
+      "utf8",
+    ),
+  );
+  if (
+    avatarMotionRegistry.schemaVersion !== 1 ||
+    !Array.isArray(avatarMotionRegistry.sources) ||
+    !avatarMotionRegistry.sources.length
+  ) {
+    throw new Error("release_source_registry_invalid:avatarMotion");
+  }
+  const avatarMotionIds = new Set();
+  registries.avatarMotion = {
+    sha256: registryDigests.avatarMotion,
+    sources: avatarMotionRegistry.sources.map((source) => {
+      for (const key of [
+        "id",
+        "name",
+        "kind",
+        "version",
+        "canonicalUrl",
+        "license",
+        "classification",
+        "implementationStatus",
+      ]) {
+        required(source[key], `release_source_reference_missing:avatarMotion:${key}`);
+      }
+      if (avatarMotionIds.has(source.id)) {
+        throw new Error("release_source_reference_duplicate:avatarMotion");
+      }
+      avatarMotionIds.add(source.id);
+      const canonical = new URL(source.canonicalUrl);
+      if (canonical.protocol !== "https:") {
+        throw new Error(`release_source_reference_url_invalid:avatarMotion:${source.id}`);
+      }
+      if (source.kind === "repository" && !/^[a-f0-9]{40}$/i.test(source.version)) {
+        throw new Error(`release_source_reference_commit_invalid:avatarMotion:${source.id}`);
+      }
+      return {
+        id: source.id,
+        name: source.name,
+        kind: source.kind,
+        version: source.version,
+        canonicalUrl: source.canonicalUrl,
+        license: source.license,
+        classification: source.classification,
+        implementationStatus: source.implementationStatus,
+      };
+    }),
+  };
   return { schemaVersion: 1, registries };
 }
 

@@ -7,9 +7,9 @@ import {
   type InteractionRegion,
   type MotionCatalogEntry,
   type MotionCatalogSnapshot,
-  type MotionCategory,
+  type MotionFamily,
   type MotionImportInspection,
-  type MotionPlaybackMode,
+  type MotionLoopMode,
   type MotionRootMode,
 } from "@hachimi/contracts";
 import { useI18n } from "@hachimi/i18n";
@@ -41,12 +41,12 @@ import {
 } from "solid-js";
 import {
   INTERACTION_REGIONS,
-  MOTION_CATEGORIES,
+  MOTION_FAMILIES,
   interactionRegionLabel,
-  motionCategoryLabel,
+  motionFamilyLabel,
   motionDescription,
   motionName,
-  motionPlaybackLabel,
+  motionLoopLabel,
   motionRootLabel,
 } from "./motion-localization";
 import { MotionPreviewCanvas } from "./motion-preview";
@@ -60,6 +60,7 @@ export function MotionSettingsPage() {
   const [tab, setTab] = createSignal<MotionSettingsTab>("motions");
   const [catalog, setCatalog] = createSignal<MotionCatalogSnapshot>({
     entries: [],
+    transitionProfiles: [],
     bindings: [],
     disabledMotionIds: [],
   });
@@ -71,7 +72,7 @@ export function MotionSettingsPage() {
   const [selectedRegion, setSelectedRegion] = createSignal<InteractionRegion>("head_top");
   const [previewMirror, setPreviewMirror] = createSignal(false);
   const [query, setQuery] = createSignal("");
-  const [category, setCategory] = createSignal<MotionCategory | "all">("all");
+  const [category, setCategory] = createSignal<MotionFamily | "all">("all");
   const [source, setSource] = createSignal<MotionSourceFilter>("all");
   const [interactionQuery, setInteractionQuery] = createSignal("");
   const [inspection, setInspection] = createSignal<MotionImportInspection>();
@@ -79,8 +80,8 @@ export function MotionSettingsPage() {
   const [pendingDelete, setPendingDelete] = createSignal<MotionCatalogEntry>();
   const [name, setName] = createSignal("");
   const [description, setDescription] = createSignal("");
-  const [editCategory, setEditCategory] = createSignal<MotionCategory>("gesture");
-  const [playbackMode, setPlaybackMode] = createSignal<MotionPlaybackMode>("once");
+  const [editCategory, setEditCategory] = createSignal<MotionFamily>("gesture");
+  const [playbackMode, setPlaybackMode] = createSignal<MotionLoopMode>("once");
   const [rootMode, setRootMode] = createSignal<MotionRootMode>("in_place");
   const [importRegion, setImportRegion] = createSignal<InteractionRegion | "">("");
   const [busy, setBusy] = createSignal(false);
@@ -97,7 +98,7 @@ export function MotionSettingsPage() {
         entry.descriptionZh ?? ""
       } ${entry.tags.join(" ")}`.toLocaleLowerCase();
       return (
-        (category() === "all" || entry.category === category()) &&
+        (category() === "all" || entry.family === category()) &&
         (source() === "all" || entry.source === source()) &&
         (!normalized || localizedSearch.includes(normalized))
       );
@@ -125,7 +126,7 @@ export function MotionSettingsPage() {
       snapshot.entries.find(
         (entry) =>
           entry.source === "builtin" &&
-          entry.category === "idle" &&
+          entry.family === "idle" &&
           /standard waiting/i.test(entry.name),
       ) ?? snapshot.entries[0];
     setSelectedMotionId(preferred?.id);
@@ -245,8 +246,8 @@ export function MotionSettingsPage() {
   function resetEditor(entry?: MotionCatalogEntry) {
     setName(entry?.name ?? "");
     setDescription(entry?.description ?? "");
-    setEditCategory(entry?.category ?? "gesture");
-    setPlaybackMode(entry?.playbackMode ?? "once");
+    setEditCategory(entry?.family ?? "gesture");
+    setPlaybackMode(entry?.loopMode ?? "once");
     setRootMode(entry?.rootMode ?? "in_place");
     setImportRegion("");
   }
@@ -283,8 +284,7 @@ export function MotionSettingsPage() {
         token: value.token,
         name: name().trim(),
         description: description().trim(),
-        category: editCategory(),
-        playbackMode: playbackMode(),
+        loopMode: playbackMode(),
         rootMode: rootMode(),
         interactionRegion: importRegion() || null,
       });
@@ -317,8 +317,8 @@ export function MotionSettingsPage() {
           id: entry.id,
           name: name().trim(),
           description: description().trim(),
-          category: editCategory(),
-          playbackMode: playbackMode(),
+          family: editCategory(),
+          loopMode: playbackMode(),
           rootMode: rootMode(),
         }),
       );
@@ -402,12 +402,12 @@ export function MotionSettingsPage() {
                     value={category()}
                     options={[
                       { value: "all", label: text("全部分类", "All categories") },
-                      ...MOTION_CATEGORIES.map((value) => ({
+                      ...MOTION_FAMILIES.map((value) => ({
                         value,
-                        label: motionCategoryLabel(value, i18n.locale()),
+                        label: motionFamilyLabel(value, i18n.locale()),
                       })),
                     ]}
-                    onChange={(value) => setCategory(value as MotionCategory | "all")}
+                    onChange={(value) => setCategory(value as MotionFamily | "all")}
                   />
                 </div>
                 <div class="motion-filter-control source">
@@ -432,6 +432,7 @@ export function MotionSettingsPage() {
                 <For each={filteredEntries()}>
                   {(entry) => {
                     const disabled = () => catalog().disabledMotionIds.includes(entry.id);
+                    const analysisReady = () => entry.analysisStatus === "ready";
                     const boundRegions = () =>
                       catalog()
                         .bindings.filter((binding) => binding.motionId === entry.id)
@@ -466,8 +467,8 @@ export function MotionSettingsPage() {
                           </Badge>
                         </div>
                         <div class="motion-entry-badges">
-                          <Badge>{motionCategoryLabel(entry.category, i18n.locale())}</Badge>
-                          <Badge>{motionPlaybackLabel(entry.playbackMode, i18n.locale())}</Badge>
+                          <Badge>{motionFamilyLabel(entry.family, i18n.locale())}</Badge>
+                          <Badge>{motionLoopLabel(entry.loopMode, i18n.locale())}</Badge>
                           <Badge>{motionRootLabel(entry.rootMode, i18n.locale())}</Badge>
                           <Badge tone={entry.hasFingerMotion ? "success" : "neutral"}>
                             {entry.hasFingerMotion
@@ -479,6 +480,13 @@ export function MotionSettingsPage() {
                           </Badge>
                           <Show when={disabled()}>
                             <Badge tone="warning">{text("已禁用", "Disabled")}</Badge>
+                          </Show>
+                          <Show when={!analysisReady()}>
+                            <Badge tone="warning">
+                              {entry.analysisStatus === "pending"
+                                ? text("分析中", "Analysis pending")
+                                : text("分析失败", "Analysis failed")}
+                            </Badge>
                           </Show>
                           <For each={boundRegions()}>
                             {(region) => (
@@ -497,7 +505,7 @@ export function MotionSettingsPage() {
                             <SelectField
                               label={text("绑定到互动区域", "Bind to interaction")}
                               value={boundRegions()[0] ?? ""}
-                              disabled={disabled()}
+                              disabled={disabled() || !analysisReady()}
                               options={[
                                 {
                                   value: "",
@@ -534,6 +542,7 @@ export function MotionSettingsPage() {
                             <Toggle
                               checked={!disabled()}
                               label={text("启用动作", "Enable motion")}
+                              disabled={!analysisReady()}
                               onChange={(enabled) => void setMotionEnabled(entry.id, enabled)}
                             />
                           </div>
@@ -728,15 +737,15 @@ function MotionEditorDialog(props: {
   inspection: MotionImportInspection | undefined;
   name: string;
   description: string;
-  category: MotionCategory;
-  playbackMode: MotionPlaybackMode;
+  category: MotionFamily;
+  playbackMode: MotionLoopMode;
   rootMode: MotionRootMode;
   interactionRegion: InteractionRegion | "";
   busy: boolean;
   onName: (value: string) => void;
   onDescription: (value: string) => void;
-  onCategory: (value: MotionCategory) => void;
-  onPlaybackMode: (value: MotionPlaybackMode) => void;
+  onCategory: (value: MotionFamily) => void;
+  onPlaybackMode: (value: MotionLoopMode) => void;
   onRootMode: (value: MotionRootMode) => void;
   onInteractionRegion: (value: InteractionRegion | "") => void;
   onCancel: () => void;
@@ -776,20 +785,20 @@ function MotionEditorDialog(props: {
       <SelectField
         label={text("分类", "Category")}
         value={props.category}
-        options={MOTION_CATEGORIES.map((value) => ({
+        options={MOTION_FAMILIES.map((value) => ({
           value,
-          label: motionCategoryLabel(value, i18n.locale()),
+          label: motionFamilyLabel(value, i18n.locale()),
         }))}
-        onChange={(value) => props.onCategory(value as MotionCategory)}
+        onChange={(value) => props.onCategory(value as MotionFamily)}
       />
       <SelectField
         label={text("播放方式", "Playback")}
         value={props.playbackMode}
         options={(["once", "loop", "hold"] as const).map((value) => ({
           value,
-          label: motionPlaybackLabel(value, i18n.locale()),
+          label: motionLoopLabel(value, i18n.locale()),
         }))}
-        onChange={(value) => props.onPlaybackMode(value as MotionPlaybackMode)}
+        onChange={(value) => props.onPlaybackMode(value as MotionLoopMode)}
       />
       <SelectField
         label={text("Root 模式", "Root mode")}

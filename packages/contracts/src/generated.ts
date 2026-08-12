@@ -306,8 +306,6 @@ export type ClearEmbeddedBrowserDataRequest = { data: BrowserDataKind[], };
 
 export type ClientId = string;
 
-export type ClipMotionRequest = { requestId: string, motionId: string, active: boolean, priority: number, mirror: boolean, channelWeights: MotionChannelWeight[], };
-
 export type CompactionCheckpoint = { id: CompactionCheckpointId, sessionId: SessionId, runId: RunId | null, previousCheckpointId: CompactionCheckpointId | null, coveredThroughSequence: number, reason: CompactionReason, lifecycle?: CompactionLifecycle, summary: CompactionSummary, quality: CompactionQuality, createdAtMs: number, };
 
 export type CompactionCheckpointId = string;
@@ -756,33 +754,55 @@ export type ModelRole = "system" | "user" | "assistant" | "tool";
 
 export type ModelToolCall = { id: ToolCallId, name: string, arguments: unknown, };
 
+export type MotionAnalysisStatus = "pending" | "ready" | "failed";
+
 export type MotionAssetBindingsClearRequest = { motionId: string, };
 
 export type MotionBindingResetRequest = { region: InteractionRegion, };
 
-export type MotionCatalogEntry = { id: string, source: MotionSource, protected: boolean, name: string, nameZh?: string, description: string, descriptionZh?: string, fileName: string, sha256: string, sizeBytes: number, durationMs: number, category: MotionCategory, tags: string[], playbackMode: MotionPlaybackMode, rootMode: MotionRootMode, channels: BehaviorChannel[], animatedBones: string[], fingerBoneCount: number, hasFingerMotion: boolean, hasExpression: boolean, hasLookAt: boolean, mirrorable: boolean, transitionInMs: number, transitionOutMs: number, sourceProject: string, sourcePaths: string[], warnings?: string[], };
+export type MotionCatalogEntry = { id: string, source: MotionSource, analysisStatus?: MotionAnalysisStatus, protected: boolean, name: string, nameZh?: string, description: string, descriptionZh?: string, fileName: string, sha256: string, sizeBytes: number, durationMs: number, family: MotionFamily, tags: string[], loopMode: MotionLoopMode, derivedFromMotionId?: string | null, motionRole?: MotionRole | null, sourceStartMs?: number | null, sourceEndMs?: number | null, proceduralYawDegrees?: number | null, rootMode: MotionRootMode, slot: MotionSlot, channelMask: BehaviorChannel[], transitionProfileId: string, fallbackMotionId: string, animatedBones: string[], fingerBoneCount: number, hasFingerMotion: boolean, hasExpression: boolean, hasLookAt: boolean, mirrorable: boolean, sourceProject: string, sourcePaths: string[], warnings?: string[], };
 
-export type MotionCatalogSnapshot = { entries: MotionCatalogEntry[], bindings: InteractionMotionBinding[], disabledMotionIds: string[], };
-
-export type MotionCategory = "idle" | "reaction" | "gesture" | "speech" | "locomotion" | "performance";
+export type MotionCatalogSnapshot = { entries: MotionCatalogEntry[], transitionProfiles: MotionTransitionProfile[], bindings: InteractionMotionBinding[], disabledMotionIds: string[], };
 
 export type MotionChannelWeight = { channel: BehaviorChannel, /** Semantic channel weight in permille, clamped by consumers to 0..=1000. */ weight: number, };
 
 export type MotionEnabledUpdateRequest = { id: string, enabled: boolean, };
 
-export type MotionImportCommitRequest = { token: string, name: string, description: string, category: MotionCategory, playbackMode: MotionPlaybackMode, rootMode: MotionRootMode, interactionRegion?: InteractionRegion | null, };
+export type MotionFamily = "idle" | "reaction" | "gesture" | "speech" | "locomotion" | "performance" | "recovery" | "unknown";
+
+export type MotionFeatureCacheReadRequest = { cacheKey: string, };
+
+export type MotionFeatureCacheWriteRequest = { cacheKey: string, payload: string, };
+
+export type MotionImportCommitRequest = { token: string, name: string, description: string, loopMode: MotionLoopMode, rootMode: MotionRootMode, interactionRegion?: InteractionRegion | null, };
 
 export type MotionImportInspection = { token: string | null, originalFileName: string, sizeBytes: number, sha256: string, durationMs: number, animatedBones: string[], fingerBoneCount: number, hasExpression: boolean, hasLookAt: boolean, warnings: string[], };
 
-export type MotionMetadataUpdateRequest = { id: string, name: string, description: string, category: MotionCategory, playbackMode: MotionPlaybackMode, rootMode: MotionRootMode, };
+export type MotionInertialHalfLives = { rootMs: number, bodyMs: number, armsMs: number, lookAtMs: number, expressionMs: number, };
 
-export type MotionPlaybackMode = "once" | "loop" | "hold";
+export type MotionIntentRequest = { requestId: string, motionId: string, slot: MotionSlot, active: boolean, priority: number, interruptPolicy: MotionInterruptPolicy, mirror: boolean, channelWeights: MotionChannelWeight[], locomotion?: MotionLocomotionIntent | null, };
+
+export type MotionInterruptPolicy = "immediate" | "safe_point" | "finish";
+
+export type MotionLocomotionIntent = { direction: (number | null)[], desiredSpeed: number | null, remainingDistance: number | null, };
+
+export type MotionLoopMode = "once" | "loop" | "hold";
+
+export type MotionMetadataUpdateRequest = { id: string, name: string, description: string, family: MotionFamily, loopMode: MotionLoopMode, rootMode: MotionRootMode, };
+
+export type MotionRole = "walk_start" | "walk_loop" | "walk_stop" | "turn_left" | "turn_right" | "locomotion_recover_to_idle" | "action_recover_to_idle";
 
 export type MotionRootMode = "discard" | "in_place" | "stage";
 
 export type MotionRuntimeAsset = { entry: MotionCatalogEntry, assetUrl: string, };
 
+export type MotionSlot = "base" | "locomotion" | "speech" | "action";
+
 export type MotionSource = "builtin" | "user";
+
+export type MotionTransitionProfile = { id: string, family: MotionFamily, preferredDurationMs: number, minimumDurationMs: number, maximumDurationMs: number, interruptPolicy: MotionInterruptPolicy, blendProfileId: string, syncGroup: string | null, entryWindows: MotionTransitionWindow[], exitWindows: MotionTransitionWindow[], channelMask: BehaviorChannel[], inertialHalfLives?: MotionInertialHalfLives | null, };
+
+export type MotionTransitionWindow = { startMs: number, endMs: number, };
 
 export type MutationContext = { requestId: RequestId, clientId: ClientId, protocolVersion: number, idempotencyKey: string, expectedRunId: RunId | null, expectedGeneration: number | null, };
 

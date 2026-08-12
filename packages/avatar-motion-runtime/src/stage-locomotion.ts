@@ -54,8 +54,12 @@ export class StageLocomotionController {
       this.phase = "idle";
     } else {
       this.positionX = clampStage(this.positionX + this.speed * delta);
-      if (this.phase === "start" || this.phase === "turn") {
+      if (this.phase === "start") {
         if (Math.abs(this.speed) > 0.08) this.phase = "walk";
+      } else if (this.phase === "turn") {
+        if (Math.sign(this.speed) === this.facing && Math.abs(this.speed) > 0.08) {
+          this.phase = "walk";
+        }
       } else if (Math.abs(distance) < 0.045) {
         this.phase = "stop";
       }

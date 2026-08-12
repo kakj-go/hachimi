@@ -67,6 +67,9 @@ if (!existsSync(driver) || !existsSync(nativeDriver)) {
 mkdirSync(project, { recursive: true });
 mkdirSync(data, { recursive: true });
 writeFileSync(join(data, ".hachimi-data-root"), "com.hachimi.desktop", "utf8");
+if (process.env.HACHIMI_DESKTOP_E2E_SPEC?.includes("avatar-motion-v5.e2e.mjs")) {
+  seedAvatarMotionV5Fixtures(root, data);
+}
 const loopbackToken = "hachimi-desktop-e2e-loopback-token-00000001";
 mkdirSync(join(data, "gateway"), { recursive: true });
 writeFileSync(join(data, "gateway", "loopback.token"), loopbackToken, "utf8");
@@ -96,6 +99,75 @@ const officeStdioServer = join(artifacts, "office-mcp-stdio.mjs");
 copyFileSync(join(root, "scripts/desktop-e2e/support/office-mcp-stdio.mjs"), officeStdioServer);
 writeFileSync(join(project, "README.md"), "# Desktop E2E fixture\n", "utf8");
 writeFileSync(attachment, "Use the deterministic Desktop E2E workflow.\n", "utf8");
+
+function seedAvatarMotionV5Fixtures(repositoryRoot, dataRoot) {
+  const builtinRoot = join(repositoryRoot, "assets", "avatar-motions-v5");
+  const catalog = JSON.parse(readFileSync(join(builtinRoot, "catalog.json"), "utf8"));
+  const fallback = catalog.entries.find((entry) => entry.name.trim().toLowerCase() === "waiting");
+  const sources = catalog.entries.filter(
+    (entry) =>
+      !entry.derivedFromMotionId &&
+      ["reaction", "gesture"].includes(entry.family) &&
+      ["hips", "spine", "head", "leftUpperArm", "rightUpperArm"].every((bone) =>
+        entry.animatedBones.includes(bone),
+      ),
+  );
+  if (!fallback || sources.length < 2) {
+    throw new Error("Avatar Motion V5 E2E fixtures require an idle and two complete motions");
+  }
+  const fixtures = [
+    userMotionFixture(sources[0], fallback.id, "user.desktop-e2e.ready", "ready"),
+    userMotionFixture(sources[1], fallback.id, "user.desktop-e2e.missing", "missing"),
+  ];
+  const motionRoot = join(dataRoot, "motions-v5");
+  for (const entry of fixtures) {
+    const blobRoot = join(motionRoot, "blobs", entry.sha256);
+    mkdirSync(blobRoot, { recursive: true });
+    copyFileSync(
+      join(builtinRoot, "builtin", entry.sha256 + ".vrma"),
+      join(blobRoot, "source.vrma"),
+    );
+  }
+  writeFileSync(
+    join(motionRoot, "catalog.json"),
+    JSON.stringify(
+      { schemaVersion: 4, entries: fixtures, bindings: [], disabledMotionIds: [] },
+      null,
+      2,
+    ) + "\n",
+    "utf8",
+  );
+}
+
+function userMotionFixture(source, fallbackMotionId, id, label) {
+  return {
+    ...source,
+    id,
+    source: "user",
+    analysisStatus: "ready",
+    protected: false,
+    name: `Desktop E2E ${label} VRMA`,
+    nameZh: `Desktop E2E ${label} VRMA`,
+    description: "Deterministic user VRMA fixture.",
+    descriptionZh: "Deterministic user VRMA fixture.",
+    fileName: "source.vrma",
+    family: "unknown",
+    tags: ["unknown", "user", "desktop-e2e"],
+    loopMode: "once",
+    derivedFromMotionId: null,
+    motionRole: null,
+    sourceStartMs: null,
+    sourceEndMs: null,
+    proceduralYawDegrees: null,
+    rootMode: "in_place",
+    slot: "action",
+    transitionProfileId: "unknown.conservative",
+    fallbackMotionId,
+    sourceProject: "Desktop E2E user fixture",
+    sourcePaths: [`desktop-e2e/${label}.vrma`],
+    warnings: [],
+  };
+}
 
 let mcpToolSchemaRevision = 1;
 const mcpServer = createServer((request, response) => {

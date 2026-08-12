@@ -21,10 +21,10 @@ describe("FaceExpressionMixer", () => {
 });
 
 describe("FaceGazeRuntime", () => {
-  it("moves eyes before the head and only recruits the chest for a large target", () => {
+  it("keeps the eyes bounded while recruiting a faster, wider head and chest turn", () => {
     const gaze = new FaceGazeRuntime(() => 0.5);
     gaze.reset(1_000);
-    gaze.attend(26, 8, 1_000, 1_000);
+    gaze.attend(40, 30, 1_000, 1_000);
     const first = gaze.update(1_016, 0.016);
     const settled = gaze.update(1_500, 0.484);
 
@@ -32,8 +32,35 @@ describe("FaceGazeRuntime", () => {
     expect(first.headYaw).toBe(0);
     expect(first.chestYaw).toBe(0);
     expect(settled.eyeYaw).toBeLessThanOrEqual(28);
-    expect(settled.headYaw).toBeGreaterThan(0);
-    expect(settled.chestYaw).toBeGreaterThan(0);
+    expect(settled.eyePitch).toBeLessThanOrEqual(18);
+    expect(settled.headYaw).toBeGreaterThan(23);
+    expect(settled.headPitch).toBeGreaterThan(12);
+    expect(settled.chestYaw).toBeGreaterThan(7);
+  });
+
+  it("does not recruit the chest for small cursor movements", () => {
+    const gaze = new FaceGazeRuntime(() => 0.5);
+    gaze.reset(1_000);
+    gaze.attend(13, 6, 1_000, 1_000);
+
+    const settled = gaze.update(1_500, 0.5);
+
+    expect(settled.headYaw).toBeGreaterThan(9);
+    expect(settled.chestYaw).toBe(0);
+  });
+
+  it("maps cursor input through the dead zone and wider gaze profile", () => {
+    const gaze = new FaceGazeRuntime(() => 0.5);
+    gaze.reset(1_000);
+    gaze.attendCursor(0.03, 0.03, 1_000);
+    const centered = gaze.update(1_500, 0.5);
+    gaze.attendCursor(1, -1, 1_500);
+    const corner = gaze.update(2_000, 0.5);
+
+    expect(centered.headYaw).toBe(0);
+    expect(centered.headPitch).toBe(0);
+    expect(corner.headYaw).toBeGreaterThan(23);
+    expect(corner.headPitch).toBeLessThan(-11);
   });
 
   it("uses curiosity and energy to vary unconstrained micro-saccades", () => {

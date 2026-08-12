@@ -12,9 +12,10 @@ use atomic_write_file::AtomicWriteFile;
 use hachimi_core::FeatureAvailability;
 use hachimi_protocol::{
     BehaviorChannel, InteractionMotionBinding, InteractionMotionBindingUpdateRequest,
-    InteractionRegion, MotionAssetBindingsClearRequest, MotionCatalogEntry, MotionCatalogSnapshot,
-    MotionCategory, MotionEnabledUpdateRequest, MotionImportCommitRequest, MotionImportInspection,
-    MotionMetadataUpdateRequest, MotionSource,
+    InteractionRegion, MotionAnalysisStatus, MotionAssetBindingsClearRequest, MotionCatalogEntry,
+    MotionCatalogSnapshot, MotionEnabledUpdateRequest, MotionFamily, MotionImportCommitRequest,
+    MotionImportInspection, MotionInterruptPolicy, MotionLoopMode, MotionMetadataUpdateRequest,
+    MotionSlot, MotionSource, MotionTransitionProfile, MotionTransitionWindow,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -23,10 +24,12 @@ use thiserror::Error;
 use uuid::Uuid;
 
 const MAX_VRMA_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_FEATURE_INDEX_BYTES: usize = 16 * 1024 * 1024;
 const STATE_FILE: &str = "catalog.json";
 const USER_BLOB_FILE: &str = "source.vrma";
-const BUILTIN_SCHEMA_VERSION: u32 = 1;
-const STATE_SCHEMA_VERSION: u32 = 3;
+const FEATURE_CACHE_DIR: &str = "features";
+const BUILTIN_SCHEMA_VERSION: u32 = 2;
+const STATE_SCHEMA_VERSION: u32 = 4;
 
 #[must_use]
 pub const fn availability() -> FeatureAvailability {
@@ -63,6 +66,8 @@ pub enum MotionError {
     InvalidBinding,
     #[error("内置动作目录无效: {0}")]
     InvalidBuiltin(String),
+    #[error("动作分析未通过，不能启用或绑定")]
+    AnalysisFailed,
 }
 
 #[derive(Debug, Clone)]
@@ -117,6 +122,7 @@ struct BuiltinCatalogDocument {
     schema_version: u32,
     spec_version: String,
     entries: Vec<MotionCatalogEntry>,
+    transition_profiles: Vec<MotionTransitionProfile>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -134,6 +140,7 @@ pub struct MotionCatalog {
     root: PathBuf,
     builtin_root: PathBuf,
     builtin_entries: Vec<MotionCatalogEntry>,
+    transition_profiles: Vec<MotionTransitionProfile>,
     state: MotionStateDocument,
 }
 
@@ -143,18 +150,22 @@ impl MotionCatalog {
         builtin_catalog: impl AsRef<Path>,
     ) -> Result<Self, MotionError> {
         let root = root.into();
+        remove_legacy_motion_cache(&root)?;
         fs::create_dir_all(root.join("blobs"))?;
+        fs::create_dir_all(root.join(FEATURE_CACHE_DIR))?;
         let builtin_catalog = builtin_catalog.as_ref();
         let builtin_root = builtin_catalog
             .parent()
             .ok_or_else(|| MotionError::InvalidBuiltin("catalog has no parent".into()))?
             .join("builtin");
-        let builtins: BuiltinCatalogDocument = serde_json::from_slice(&fs::read(builtin_catalog)?)?;
+        let mut builtins: BuiltinCatalogDocument =
+            serde_json::from_slice(&fs::read(builtin_catalog)?)?;
         if builtins.schema_version != BUILTIN_SCHEMA_VERSION || builtins.spec_version != "1.0" {
             return Err(MotionError::InvalidBuiltin(
                 "unsupported catalog version".into(),
             ));
         }
+        hydrate_derived_entries(&mut builtins.entries)?;
         validate_builtin_entries(&builtin_root, &builtins.entries)?;
         let state_path = root.join(STATE_FILE);
         let state_exists = state_path.is_file();
@@ -171,6 +182,7 @@ impl MotionCatalog {
             root,
             builtin_root,
             builtin_entries: builtins.entries,
+            transition_profiles: builtins.transition_profiles,
             state,
         };
         catalog.state.schema_version = STATE_SCHEMA_VERSION;
@@ -211,6 +223,7 @@ impl MotionCatalog {
             root,
             builtin_root: PathBuf::new(),
             builtin_entries: Vec::new(),
+            transition_profiles: default_transition_profiles(),
             state,
         };
         catalog.state.schema_version = STATE_SCHEMA_VERSION;
@@ -232,6 +245,7 @@ impl MotionCatalog {
     pub fn snapshot(&self) -> MotionCatalogSnapshot {
         MotionCatalogSnapshot {
             entries: self.all_entries(),
+            transition_profiles: self.transition_profiles.clone(),
             bindings: self.state.bindings.clone(),
             disabled_motion_ids: self.state.disabled_motion_ids.iter().cloned().collect(),
         }
@@ -239,7 +253,11 @@ impl MotionCatalog {
 
     #[must_use]
     pub fn asset_for(&self, id: &str) -> Option<MotionAsset> {
-        if let Some(entry) = self.builtin_entries.iter().find(|entry| entry.id == id) {
+        if let Some(entry) = self
+            .builtin_entries
+            .iter()
+            .find(|entry| entry.id == id && entry.analysis_status == MotionAnalysisStatus::Ready)
+        {
             let path = self.builtin_root.join(&entry.file_name);
             return path.is_file().then(|| MotionAsset {
                 entry: entry.clone(),
@@ -250,7 +268,7 @@ impl MotionCatalog {
             .state
             .entries
             .iter()
-            .find(|entry| entry.id == id)?
+            .find(|entry| entry.id == id && entry.analysis_status == MotionAnalysisStatus::Ready)?
             .clone();
         let path = self
             .root
@@ -258,6 +276,42 @@ impl MotionCatalog {
             .join(&entry.sha256)
             .join(USER_BLOB_FILE);
         path.is_file().then_some(MotionAsset { entry, path })
+    }
+
+    pub fn read_feature_index(&self, cache_key: &str) -> Result<Option<String>, MotionError> {
+        let path = self.feature_index_path(cache_key)?;
+        if !path.is_file() {
+            return Ok(None);
+        }
+        let bytes = fs::read(path)?;
+        if bytes.len() > MAX_FEATURE_INDEX_BYTES {
+            return Ok(None);
+        }
+        let payload = String::from_utf8(bytes).map_err(|_| MotionError::InvalidVrma)?;
+        serde_json::from_str::<Value>(&payload)?;
+        Ok(Some(payload))
+    }
+
+    pub fn write_feature_index(&self, cache_key: &str, payload: &str) -> Result<(), MotionError> {
+        if payload.len() > MAX_FEATURE_INDEX_BYTES {
+            return Err(MotionError::TooLarge);
+        }
+        serde_json::from_str::<Value>(payload)?;
+        atomic_bytes(&self.feature_index_path(cache_key)?, payload.as_bytes())
+    }
+
+    fn feature_index_path(&self, cache_key: &str) -> Result<PathBuf, MotionError> {
+        if cache_key.is_empty() || cache_key.len() > 1_024 {
+            return Err(MotionError::InvalidVrma);
+        }
+        let hash = Sha256::digest(cache_key.as_bytes())
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        Ok(self
+            .root
+            .join(FEATURE_CACHE_DIR)
+            .join(format!("{hash}.json")))
     }
 
     pub fn import_inspected(
@@ -283,9 +337,19 @@ impl MotionCatalog {
             created_blob = true;
         }
         let id = format!("user.{}", Uuid::new_v4());
+        let analysis_status = if inspection
+            .warnings
+            .iter()
+            .any(|warning| warning.starts_with("missing_core_bones:"))
+        {
+            MotionAnalysisStatus::Failed
+        } else {
+            MotionAnalysisStatus::Ready
+        };
         let entry = MotionCatalogEntry {
             id,
             source: MotionSource::User,
+            analysis_status,
             protected: false,
             name: name.clone(),
             name_zh: name,
@@ -295,19 +359,25 @@ impl MotionCatalog {
             sha256: inspection.sha256.clone(),
             size_bytes: inspection.size_bytes,
             duration_ms: inspection.duration_ms,
-            category: request.category,
-            tags: vec![category_tag(request.category).into(), "user".into()],
-            playback_mode: request.playback_mode,
+            family: MotionFamily::Unknown,
+            tags: vec!["unknown".into(), "user".into()],
+            loop_mode: request.loop_mode,
+            derived_from_motion_id: None,
+            motion_role: None,
+            source_start_ms: None,
+            source_end_ms: None,
+            procedural_yaw_degrees: None,
             root_mode: request.root_mode,
-            channels: inspection.channels.clone(),
+            slot: MotionSlot::Action,
+            channel_mask: inspection.channels.clone(),
+            transition_profile_id: "unknown.conservative".into(),
+            fallback_motion_id: self.default_fallback_motion_id(),
             animated_bones: inspection.animated_bones.clone(),
             finger_bone_count: inspection.finger_bone_count,
             has_finger_motion: inspection.finger_bone_count > 0,
             has_expression: inspection.has_expression,
             has_look_at: inspection.has_look_at,
             mirrorable: true,
-            transition_in_ms: 220,
-            transition_out_ms: 260,
             source_project: "User".into(),
             source_paths: vec![inspection.original_file_name.clone()],
             warnings: inspection.warnings.clone(),
@@ -315,7 +385,9 @@ impl MotionCatalog {
         let mut next = self.state.clone();
         let new_id = entry.id.clone();
         next.entries.push(entry);
-        if let Some(region) = request.interaction_region {
+        if analysis_status == MotionAnalysisStatus::Failed {
+            next.disabled_motion_ids.insert(new_id.clone());
+        } else if let Some(region) = request.interaction_region {
             replace_binding(&mut next.bindings, default_binding_values(region, new_id));
         }
         if let Err(error) = self.commit_state(next) {
@@ -348,11 +420,13 @@ impl MotionCatalog {
         entry.name_zh = entry.name.clone();
         entry.description = validate_description(&request.description)?;
         entry.description_zh = entry.description.clone();
-        entry.category = request.category;
-        entry.playback_mode = request.playback_mode;
+        entry.family = request.family;
+        entry.loop_mode = request.loop_mode;
+        entry.slot = default_slot(request.family);
+        entry.transition_profile_id = default_profile_id(request.family).into();
         entry.root_mode = request.root_mode;
-        entry.tags.retain(|tag| !is_category_tag(tag));
-        entry.tags.insert(0, category_tag(request.category).into());
+        entry.tags.retain(|tag| !is_family_tag(tag));
+        entry.tags.insert(0, family_tag(request.family).into());
         self.commit_state(next)?;
         Ok(self.snapshot())
     }
@@ -401,11 +475,9 @@ impl MotionCatalog {
     ) -> Result<MotionCatalogSnapshot, MotionError> {
         let mut next = self.state.clone();
         if let Some(motion_id) = request.motion_id.as_ref() {
-            if !self
-                .all_entries()
-                .iter()
-                .any(|entry| entry.id == *motion_id)
-            {
+            if !self.all_entries().iter().any(|entry| {
+                entry.id == *motion_id && entry.analysis_status == MotionAnalysisStatus::Ready
+            }) {
                 return Err(MotionError::InvalidBinding);
             }
             let already_bound_to_region = next
@@ -467,12 +539,13 @@ impl MotionCatalog {
         &mut self,
         request: &MotionEnabledUpdateRequest,
     ) -> Result<MotionCatalogSnapshot, MotionError> {
-        if !self
+        let entry = self
             .all_entries()
-            .iter()
-            .any(|entry| entry.id == request.id)
-        {
-            return Err(MotionError::NotFound);
+            .into_iter()
+            .find(|entry| entry.id == request.id)
+            .ok_or(MotionError::NotFound)?;
+        if request.enabled && entry.analysis_status != MotionAnalysisStatus::Ready {
+            return Err(MotionError::AnalysisFailed);
         }
         let mut next = self.state.clone();
         if request.enabled {
@@ -505,6 +578,24 @@ impl MotionCatalog {
         let mut entries = self.builtin_entries.clone();
         entries.extend(self.state.entries.clone());
         entries
+    }
+
+    fn default_fallback_motion_id(&self) -> String {
+        self.builtin_entries
+            .iter()
+            .find(|entry| {
+                entry.name.eq_ignore_ascii_case("waiting")
+                    && entry.family == MotionFamily::Idle
+                    && entry.loop_mode == MotionLoopMode::Loop
+            })
+            .or_else(|| {
+                self.builtin_entries.iter().find(|entry| {
+                    entry.family == MotionFamily::Idle && entry.loop_mode == MotionLoopMode::Loop
+                })
+            })
+            .or_else(|| self.builtin_entries.first())
+            .map(|entry| entry.id.clone())
+            .unwrap_or_default()
     }
 
     fn sanitize_bindings(&mut self) {
@@ -618,6 +709,11 @@ pub fn inspect_motion(source: &Path) -> Result<InspectedMotion, MotionError> {
         ));
     }
     let duration_ms = parsed.duration_ms(animation)?;
+    parsed.validate_animation(animation)?;
+    let missing_core = missing_core_bones(&animated_bones);
+    if !missing_core.is_empty() {
+        warnings.push(format!("missing_core_bones:{}", missing_core.join(",")));
+    }
     Ok(InspectedMotion {
         original_file_name: source
             .file_name()
@@ -752,6 +848,147 @@ impl<'a> ParsedGlb<'a> {
         }
         Ok((duration * 1000.0).round().clamp(1.0, u32::MAX as f32) as u32)
     }
+
+    fn validate_animation(&self, animation: &Value) -> Result<(), MotionError> {
+        let samplers = animation
+            .get("samplers")
+            .and_then(Value::as_array)
+            .ok_or(MotionError::InvalidVrma)?;
+        for sampler in samplers {
+            let input = sampler
+                .get("input")
+                .and_then(Value::as_u64)
+                .ok_or(MotionError::InvalidVrma)?;
+            let output = sampler
+                .get("output")
+                .and_then(Value::as_u64)
+                .ok_or(MotionError::InvalidVrma)?;
+            let times = self.accessor_values(input as usize)?;
+            if times.is_empty()
+                || times
+                    .windows(2)
+                    .any(|pair| pair[0] > pair[1] || !pair[0].is_finite() || !pair[1].is_finite())
+            {
+                return Err(MotionError::InvalidVrma);
+            }
+            let values = self.accessor_values(output as usize)?;
+            if values.is_empty() || values.iter().any(|value| !value.is_finite()) {
+                return Err(MotionError::InvalidVrma);
+            }
+        }
+        Ok(())
+    }
+
+    fn accessor_values(&self, accessor_index: usize) -> Result<Vec<f32>, MotionError> {
+        let accessors = self
+            .json
+            .get("accessors")
+            .and_then(Value::as_array)
+            .ok_or(MotionError::InvalidVrma)?;
+        let views = self
+            .json
+            .get("bufferViews")
+            .and_then(Value::as_array)
+            .ok_or(MotionError::InvalidVrma)?;
+        let accessor = accessors
+            .get(accessor_index)
+            .ok_or(MotionError::InvalidVrma)?;
+        if accessor.get("componentType").and_then(Value::as_u64) != Some(5126) {
+            return Err(MotionError::InvalidVrma);
+        }
+        let components = match accessor.get("type").and_then(Value::as_str) {
+            Some("SCALAR") => 1_u64,
+            Some("VEC2") => 2,
+            Some("VEC3") => 3,
+            Some("VEC4") => 4,
+            _ => return Err(MotionError::InvalidVrma),
+        };
+        let view = views
+            .get(
+                accessor
+                    .get("bufferView")
+                    .and_then(Value::as_u64)
+                    .ok_or(MotionError::InvalidVrma)? as usize,
+            )
+            .ok_or(MotionError::InvalidVrma)?;
+        let start = view.get("byteOffset").and_then(Value::as_u64).unwrap_or(0)
+            + accessor
+                .get("byteOffset")
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
+        let element_bytes = components * 4;
+        let stride = view
+            .get("byteStride")
+            .and_then(Value::as_u64)
+            .unwrap_or(element_bytes);
+        if stride < element_bytes {
+            return Err(MotionError::InvalidVrma);
+        }
+        let count = accessor
+            .get("count")
+            .and_then(Value::as_u64)
+            .ok_or(MotionError::InvalidVrma)?;
+        let mut result = Vec::with_capacity(
+            usize::try_from(count.saturating_mul(components))
+                .map_err(|_| MotionError::InvalidVrma)?,
+        );
+        for element in 0..count {
+            for component in 0..components {
+                let offset = usize::try_from(start + element * stride + component * 4)
+                    .map_err(|_| MotionError::InvalidVrma)?;
+                let end = offset
+                    .checked_add(4)
+                    .filter(|end| *end <= self.bin.len())
+                    .ok_or(MotionError::InvalidVrma)?;
+                result.push(f32::from_le_bytes(
+                    self.bin[offset..end]
+                        .try_into()
+                        .map_err(|_| MotionError::InvalidVrma)?,
+                ));
+            }
+        }
+        Ok(result)
+    }
+}
+
+fn hydrate_derived_entries(entries: &mut [MotionCatalogEntry]) -> Result<(), MotionError> {
+    let sources: BTreeMap<_, _> = entries
+        .iter()
+        .filter(|entry| entry.derived_from_motion_id.is_none())
+        .map(|entry| (entry.id.clone(), entry.clone()))
+        .collect();
+    for entry in entries {
+        let Some(source_id) = entry.derived_from_motion_id.as_deref() else {
+            continue;
+        };
+        let source = sources.get(source_id).ok_or_else(|| {
+            MotionError::InvalidBuiltin(format!("{} has no source {source_id}", entry.id))
+        })?;
+        let start = entry.source_start_ms.unwrap_or(0);
+        let end = entry.source_end_ms.unwrap_or(source.duration_ms);
+        if start >= end || end > source.duration_ms || entry.duration_ms == 0 {
+            return Err(MotionError::InvalidBuiltin(format!(
+                "{} has an invalid source range",
+                entry.id
+            )));
+        }
+        entry.file_name.clone_from(&source.file_name);
+        entry.sha256.clone_from(&source.sha256);
+        entry.size_bytes = source.size_bytes;
+        entry.animated_bones.clone_from(&source.animated_bones);
+        entry.finger_bone_count = source.finger_bone_count;
+        entry.has_finger_motion = source.has_finger_motion;
+        entry.has_expression = source.has_expression;
+        entry.has_look_at = source.has_look_at;
+        entry.mirrorable = source.mirrorable;
+        entry.source_paths = source
+            .source_paths
+            .iter()
+            .cloned()
+            .chain([format!("derived:{}", entry.id)])
+            .collect();
+    }
+    Ok(())
 }
 
 fn validate_builtin_entries(
@@ -759,7 +996,7 @@ fn validate_builtin_entries(
     entries: &[MotionCatalogEntry],
 ) -> Result<(), MotionError> {
     let mut ids = BTreeSet::new();
-    let mut hashes = BTreeSet::new();
+    let mut hashes: BTreeMap<&str, Vec<&MotionCatalogEntry>> = BTreeMap::new();
     for entry in entries {
         if entry.source != MotionSource::Builtin || !entry.protected {
             return Err(MotionError::InvalidBuiltin(format!(
@@ -777,18 +1014,66 @@ fn validate_builtin_entries(
                 entry.id
             )));
         }
-        if !ids.insert(&entry.id) || !hashes.insert(&entry.sha256) {
+        if !ids.insert(&entry.id) {
             return Err(MotionError::InvalidBuiltin(format!(
-                "duplicate {}",
+                "duplicate motion id {}",
                 entry.id
             )));
         }
+        hashes.entry(&entry.sha256).or_default().push(entry);
         let path = root.join(&entry.file_name);
         if !path.is_file() {
             return Err(MotionError::InvalidBuiltin(format!(
                 "missing {}",
                 entry.file_name
             )));
+        }
+        if matches!(
+            entry.family,
+            MotionFamily::Idle | MotionFamily::Locomotion | MotionFamily::Recovery
+        ) {
+            let missing = missing_core_bones(&entry.animated_bones);
+            if !missing.is_empty() {
+                return Err(MotionError::InvalidBuiltin(format!(
+                    "{} misses core bones: {}",
+                    entry.id,
+                    missing.join(",")
+                )));
+            }
+        }
+    }
+    for (hash, shared_entries) in hashes {
+        if shared_entries.len() < 2 {
+            continue;
+        }
+        let canonical_entries: Vec<_> = shared_entries
+            .iter()
+            .copied()
+            .filter(|entry| entry.derived_from_motion_id.is_none())
+            .collect();
+        if canonical_entries.len() != 1 {
+            return Err(MotionError::InvalidBuiltin(format!(
+                "motion blob {hash} must have exactly one canonical entry"
+            )));
+        }
+        let canonical = canonical_entries[0];
+        for entry in shared_entries {
+            if entry.id == canonical.id {
+                continue;
+            }
+            let valid_derived_entry = entry.derived_from_motion_id.as_deref()
+                == Some(canonical.id.as_str())
+                && entry.file_name == canonical.file_name
+                && entry
+                    .warnings
+                    .iter()
+                    .any(|value| value == "derived_motion_segment");
+            if !valid_derived_entry {
+                return Err(MotionError::InvalidBuiltin(format!(
+                    "{} shares motion blob {hash} without deriving from {}",
+                    entry.id, canonical.id
+                )));
+            }
         }
     }
     Ok(())
@@ -882,6 +1167,21 @@ fn is_finger_bone(bone: &str) -> bool {
         .any(|finger| bone.contains(finger))
 }
 
+fn missing_core_bones(bones: &[String]) -> Vec<&'static str> {
+    [
+        "hips",
+        "spine",
+        "head",
+        "leftUpperArm",
+        "rightUpperArm",
+        "leftUpperLeg",
+        "rightUpperLeg",
+    ]
+    .into_iter()
+    .filter(|required| !bones.iter().any(|bone| bone == required))
+    .collect()
+}
+
 fn validate_name(value: &str) -> Result<String, MotionError> {
     let value = value.trim();
     if value.is_empty() || value.chars().count() > 80 {
@@ -898,18 +1198,138 @@ fn validate_description(value: &str) -> Result<String, MotionError> {
     Ok(value.to_owned())
 }
 
-fn category_tag(value: MotionCategory) -> &'static str {
+fn family_tag(value: MotionFamily) -> &'static str {
     match value {
-        MotionCategory::Idle => "idle",
-        MotionCategory::Reaction => "reaction",
-        MotionCategory::Gesture => "gesture",
-        MotionCategory::Speech => "speech",
-        MotionCategory::Locomotion => "locomotion",
-        MotionCategory::Performance => "performance",
+        MotionFamily::Idle => "idle",
+        MotionFamily::Reaction => "reaction",
+        MotionFamily::Gesture => "gesture",
+        MotionFamily::Speech => "speech",
+        MotionFamily::Locomotion => "locomotion",
+        MotionFamily::Performance => "performance",
+        MotionFamily::Recovery => "recovery",
+        MotionFamily::Unknown => "unknown",
     }
 }
 
-fn is_category_tag(value: &str) -> bool {
+fn default_slot(value: MotionFamily) -> MotionSlot {
+    match value {
+        MotionFamily::Idle => MotionSlot::Base,
+        MotionFamily::Locomotion => MotionSlot::Locomotion,
+        MotionFamily::Speech => MotionSlot::Speech,
+        _ => MotionSlot::Action,
+    }
+}
+
+fn default_profile_id(value: MotionFamily) -> &'static str {
+    match value {
+        MotionFamily::Idle => "idle.standard",
+        MotionFamily::Locomotion => "locomotion.contact",
+        MotionFamily::Speech => "speech.upper-body",
+        MotionFamily::Reaction => "reaction.responsive",
+        MotionFamily::Recovery => "recovery.fast",
+        MotionFamily::Unknown => "unknown.conservative",
+        _ => "action.standard",
+    }
+}
+
+fn default_transition_profiles() -> Vec<MotionTransitionProfile> {
+    [
+        (
+            "idle.standard",
+            MotionFamily::Idle,
+            180,
+            100,
+            240,
+            MotionInterruptPolicy::SafePoint,
+            None,
+        ),
+        (
+            "reaction.responsive",
+            MotionFamily::Reaction,
+            90,
+            55,
+            120,
+            MotionInterruptPolicy::SafePoint,
+            None,
+        ),
+        (
+            "action.standard",
+            MotionFamily::Gesture,
+            150,
+            80,
+            240,
+            MotionInterruptPolicy::SafePoint,
+            None,
+        ),
+        (
+            "speech.upper-body",
+            MotionFamily::Speech,
+            100,
+            60,
+            120,
+            MotionInterruptPolicy::SafePoint,
+            None,
+        ),
+        (
+            "locomotion.contact",
+            MotionFamily::Locomotion,
+            100,
+            70,
+            120,
+            MotionInterruptPolicy::SafePoint,
+            Some("locomotion.feet"),
+        ),
+        (
+            "recovery.fast",
+            MotionFamily::Recovery,
+            90,
+            55,
+            120,
+            MotionInterruptPolicy::Immediate,
+            None,
+        ),
+        (
+            "unknown.conservative",
+            MotionFamily::Unknown,
+            200,
+            120,
+            280,
+            MotionInterruptPolicy::SafePoint,
+            None,
+        ),
+    ]
+    .into_iter()
+    .map(
+        |(id, family, preferred, minimum, maximum, interrupt_policy, sync_group)| {
+            MotionTransitionProfile {
+                id: id.into(),
+                family,
+                preferred_duration_ms: preferred,
+                minimum_duration_ms: minimum,
+                maximum_duration_ms: maximum,
+                interrupt_policy,
+                blend_profile_id: "dead_blend.v1".into(),
+                sync_group: sync_group.map(str::to_owned),
+                entry_windows: vec![MotionTransitionWindow {
+                    start_ms: 0,
+                    end_ms: 120,
+                }],
+                exit_windows: Vec::new(),
+                channel_mask: vec![BehaviorChannel::FullBody],
+                inertial_half_lives: Some(hachimi_protocol::MotionInertialHalfLives {
+                    root_ms: 100,
+                    body_ms: 80,
+                    arms_ms: 65,
+                    look_at_ms: 60,
+                    expression_ms: 50,
+                }),
+            }
+        },
+    )
+    .collect()
+}
+
+fn is_family_tag(value: &str) -> bool {
     [
         "idle",
         "reaction",
@@ -917,16 +1337,38 @@ fn is_category_tag(value: &str) -> bool {
         "speech",
         "locomotion",
         "performance",
+        "recovery",
+        "unknown",
     ]
     .contains(&value)
 }
 
 fn atomic_json(path: &Path, value: &impl Serialize) -> Result<(), MotionError> {
     let bytes = serde_json::to_vec_pretty(value)?;
+    atomic_bytes(path, &bytes)
+}
+
+fn atomic_bytes(path: &Path, bytes: &[u8]) -> Result<(), MotionError> {
     let mut file = AtomicWriteFile::open(path)?;
     file.write_all(&bytes)?;
     file.flush()?;
     file.commit()?;
+    Ok(())
+}
+
+fn remove_legacy_motion_cache(v5_root: &Path) -> Result<(), MotionError> {
+    if v5_root.file_name().and_then(|value| value.to_str()) != Some("motions-v5") {
+        return Ok(());
+    }
+    let Some(parent) = v5_root.parent() else {
+        return Ok(());
+    };
+    let legacy = parent.join("motions-v4");
+    if legacy.is_dir() {
+        fs::remove_dir_all(legacy)?;
+    } else if legacy.exists() {
+        fs::remove_file(legacy)?;
+    }
     Ok(())
 }
 
@@ -945,19 +1387,21 @@ fn read_u32(bytes: &[u8], offset: usize) -> Result<u32, MotionError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use hachimi_protocol::{MotionPlaybackMode, MotionRootMode};
+    use hachimi_protocol::{MotionFamily, MotionLoopMode, MotionRootMode};
 
     #[test]
-    fn category_tags_are_complete() {
-        for category in [
-            MotionCategory::Idle,
-            MotionCategory::Reaction,
-            MotionCategory::Gesture,
-            MotionCategory::Speech,
-            MotionCategory::Locomotion,
-            MotionCategory::Performance,
+    fn family_tags_are_complete() {
+        for family in [
+            MotionFamily::Idle,
+            MotionFamily::Reaction,
+            MotionFamily::Gesture,
+            MotionFamily::Speech,
+            MotionFamily::Locomotion,
+            MotionFamily::Performance,
+            MotionFamily::Recovery,
+            MotionFamily::Unknown,
         ] {
-            assert!(is_category_tag(category_tag(category)));
+            assert!(is_family_tag(family_tag(family)));
         }
     }
 
@@ -972,10 +1416,16 @@ mod tests {
     fn bundled_catalog_loads_and_keeps_finger_metadata() {
         let root = tempfile::tempdir().expect("temporary catalog");
         let manifest = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../assets/avatar-motions-v4/catalog.json");
-        let catalog = MotionCatalog::load(root.path(), manifest).expect("V4 catalog");
+            .join("../../assets/avatar-motions-v5/catalog.json");
+        let catalog = MotionCatalog::load(root.path(), manifest).expect("V5 catalog");
         let snapshot = catalog.snapshot();
-        assert_eq!(snapshot.entries.len(), 156);
+        assert_eq!(snapshot.entries.len(), 93);
+        assert!(
+            snapshot
+                .entries
+                .iter()
+                .all(|entry| entry.family != MotionFamily::Locomotion)
+        );
         assert!(
             snapshot
                 .entries
@@ -989,14 +1439,33 @@ mod tests {
                 .any(|entry| !entry.has_finger_motion)
         );
         assert!(snapshot.bindings.is_empty());
-        for name in ["standard waiting", "photobooth peace sign"] {
-            let entry = snapshot
+        let waiting = snapshot
+            .entries
+            .iter()
+            .find(|entry| entry.name.eq_ignore_ascii_case("waiting"))
+            .expect("generic waiting motion");
+        assert_eq!(waiting.family, MotionFamily::Idle);
+        assert_eq!(waiting.loop_mode, MotionLoopMode::Loop);
+        assert!(waiting.finger_bone_count >= 28);
+        assert!(
+            snapshot
                 .entries
                 .iter()
-                .find(|entry| entry.name.eq_ignore_ascii_case(name))
-                .unwrap_or_else(|| panic!("missing {name}"));
-            assert!(entry.finger_bone_count >= 28, "{name} lost finger tracks");
-        }
+                .any(|entry| entry.name.eq_ignore_ascii_case("appearing"))
+        );
+        let recoveries: Vec<_> = snapshot
+            .entries
+            .iter()
+            .filter(|entry| entry.family == MotionFamily::Recovery)
+            .collect();
+        assert_eq!(recoveries.len(), 1);
+        assert_eq!(recoveries[0].name, "action recover to idle");
+        assert!(
+            snapshot
+                .entries
+                .iter()
+                .all(|entry| entry.fallback_motion_id == waiting.id)
+        );
     }
 
     #[test]
@@ -1010,11 +1479,61 @@ mod tests {
     }
 
     #[test]
+    fn failed_user_analysis_is_disabled_and_cannot_enter_runtime() {
+        let root = tempfile::tempdir().expect("temporary catalog");
+        let manifest = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../assets/avatar-motions-v5/catalog.json");
+        let mut catalog = MotionCatalog::load(root.path(), manifest).expect("V5 catalog");
+        let builtin_id = catalog.snapshot().entries[0].id.clone();
+        let source = catalog.asset_for(&builtin_id).expect("builtin asset").path;
+        let mut inspection = inspect_motion(&source).expect("inspect VRMA");
+        inspection
+            .warnings
+            .push("missing_core_bones:hips,spine,head".into());
+
+        let snapshot = catalog
+            .import_inspected(
+                &source,
+                &inspection,
+                &MotionImportCommitRequest {
+                    token: "failed-analysis".into(),
+                    name: "Incomplete motion".into(),
+                    description: "diagnostic only".into(),
+                    loop_mode: MotionLoopMode::Once,
+                    root_mode: MotionRootMode::InPlace,
+                    interaction_region: Some(InteractionRegion::Generic),
+                },
+            )
+            .expect("diagnostic import");
+        let entry = snapshot
+            .entries
+            .iter()
+            .find(|entry| entry.source == MotionSource::User)
+            .expect("failed user entry");
+        assert_eq!(entry.analysis_status, MotionAnalysisStatus::Failed);
+        assert!(snapshot.disabled_motion_ids.contains(&entry.id));
+        assert!(
+            !snapshot
+                .bindings
+                .iter()
+                .any(|binding| binding.motion_id == entry.id)
+        );
+        assert!(catalog.asset_for(&entry.id).is_none());
+        assert!(matches!(
+            catalog.set_motion_enabled(&MotionEnabledUpdateRequest {
+                id: entry.id.clone(),
+                enabled: true,
+            }),
+            Err(MotionError::AnalysisFailed)
+        ));
+    }
+
+    #[test]
     fn builtins_are_protected_and_user_delete_cleans_bindings() {
         let root = tempfile::tempdir().expect("temporary catalog");
         let manifest = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../assets/avatar-motions-v4/catalog.json");
-        let mut catalog = MotionCatalog::load(root.path(), manifest).expect("V4 catalog");
+            .join("../../assets/avatar-motions-v5/catalog.json");
+        let mut catalog = MotionCatalog::load(root.path(), manifest).expect("V5 catalog");
         let builtin_id = catalog.snapshot().entries[0].id.clone();
         assert!(matches!(
             catalog.delete_user(&builtin_id),
@@ -1031,8 +1550,7 @@ mod tests {
                     token: "test-token".into(),
                     name: "Imported Test".into(),
                     description: "delete cleanup".into(),
-                    category: MotionCategory::Gesture,
-                    playback_mode: MotionPlaybackMode::Once,
+                    loop_mode: MotionLoopMode::Once,
                     root_mode: MotionRootMode::InPlace,
                     interaction_region: Some(InteractionRegion::Generic),
                 },
@@ -1074,8 +1592,8 @@ mod tests {
     fn optional_import_binding_is_committed_with_the_user_motion() {
         let root = tempfile::tempdir().expect("temporary catalog");
         let manifest = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../assets/avatar-motions-v4/catalog.json");
-        let mut catalog = MotionCatalog::load(root.path(), manifest).expect("V4 catalog");
+            .join("../../assets/avatar-motions-v5/catalog.json");
+        let mut catalog = MotionCatalog::load(root.path(), manifest).expect("V5 catalog");
         let source = catalog
             .asset_for(&catalog.snapshot().entries[0].id)
             .expect("builtin asset")
@@ -1089,8 +1607,7 @@ mod tests {
                     token: "test-token".into(),
                     name: "用户填写名称".into(),
                     description: "user supplied description".into(),
-                    category: MotionCategory::Reaction,
-                    playback_mode: MotionPlaybackMode::Once,
+                    loop_mode: MotionLoopMode::Once,
                     root_mode: MotionRootMode::InPlace,
                     interaction_region: Some(InteractionRegion::Face),
                 },
@@ -1103,6 +1620,10 @@ mod tests {
             .expect("user entry");
         assert_eq!(user.name_zh, user.name);
         assert_eq!(user.description_zh, user.description);
+        assert_eq!(
+            user.fallback_motion_id,
+            "builtin.openmaiwaifu.waiting.3b2e83e2"
+        );
         assert_eq!(
             imported
                 .bindings
@@ -1117,8 +1638,8 @@ mod tests {
     fn import_without_binding_only_creates_the_user_motion() {
         let root = tempfile::tempdir().expect("temporary catalog");
         let manifest = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../assets/avatar-motions-v4/catalog.json");
-        let mut catalog = MotionCatalog::load(root.path(), manifest).expect("V4 catalog");
+            .join("../../assets/avatar-motions-v5/catalog.json");
+        let mut catalog = MotionCatalog::load(root.path(), manifest).expect("V5 catalog");
         let before = catalog.snapshot();
         let source = catalog
             .asset_for(&before.entries[0].id)
@@ -1133,8 +1654,7 @@ mod tests {
                     token: "test-token".into(),
                     name: "Unbound user motion".into(),
                     description: String::new(),
-                    category: MotionCategory::Gesture,
-                    playback_mode: MotionPlaybackMode::Once,
+                    loop_mode: MotionLoopMode::Once,
                     root_mode: MotionRootMode::InPlace,
                     interaction_region: None,
                 },
@@ -1149,8 +1669,8 @@ mod tests {
     fn region_updates_are_atomic_and_invalid_motion_ids_are_rejected() {
         let root = tempfile::tempdir().expect("temporary catalog");
         let manifest = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../assets/avatar-motions-v4/catalog.json");
-        let mut catalog = MotionCatalog::load(root.path(), manifest).expect("V4 catalog");
+            .join("../../assets/avatar-motions-v5/catalog.json");
+        let mut catalog = MotionCatalog::load(root.path(), manifest).expect("V5 catalog");
         let before = catalog.snapshot();
         let invalid_id = catalog.update_binding(&InteractionMotionBindingUpdateRequest {
             region: InteractionRegion::Face,
@@ -1190,8 +1710,8 @@ mod tests {
     fn an_intentionally_empty_binding_document_stays_unbound_after_reload() {
         let root = tempfile::tempdir().expect("temporary catalog");
         let manifest = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../assets/avatar-motions-v4/catalog.json");
-        let mut catalog = MotionCatalog::load(root.path(), &manifest).expect("V4 catalog");
+            .join("../../assets/avatar-motions-v5/catalog.json");
+        let mut catalog = MotionCatalog::load(root.path(), &manifest).expect("V5 catalog");
         let regions: Vec<_> = catalog
             .snapshot()
             .bindings
@@ -1211,7 +1731,7 @@ mod tests {
         assert!(catalog.snapshot().bindings.is_empty());
         drop(catalog);
 
-        let reloaded = MotionCatalog::load(root.path(), manifest).expect("reload V4 catalog");
+        let reloaded = MotionCatalog::load(root.path(), manifest).expect("reload V5 catalog");
         assert!(reloaded.snapshot().bindings.is_empty());
     }
 
@@ -1219,8 +1739,8 @@ mod tests {
     fn disabled_motion_ids_persist_and_clear_all_related_bindings() {
         let root = tempfile::tempdir().expect("temporary catalog");
         let manifest = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../assets/avatar-motions-v4/catalog.json");
-        let mut catalog = MotionCatalog::load(root.path(), &manifest).expect("V4 catalog");
+            .join("../../assets/avatar-motions-v5/catalog.json");
+        let mut catalog = MotionCatalog::load(root.path(), &manifest).expect("V5 catalog");
         let motion_id = catalog.snapshot().entries[0].id.clone();
         catalog
             .update_binding(&InteractionMotionBindingUpdateRequest {
@@ -1255,7 +1775,7 @@ mod tests {
         ));
         drop(catalog);
 
-        let mut reloaded = MotionCatalog::load(root.path(), manifest).expect("reload V4 catalog");
+        let mut reloaded = MotionCatalog::load(root.path(), manifest).expect("reload V5 catalog");
         assert_eq!(
             reloaded.snapshot().disabled_motion_ids.as_slice(),
             std::slice::from_ref(&motion_id)
@@ -1277,8 +1797,8 @@ mod tests {
     fn failed_state_write_rolls_back_import_and_new_blob() {
         let root = tempfile::tempdir().expect("temporary catalog");
         let manifest = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../assets/avatar-motions-v4/catalog.json");
-        let mut catalog = MotionCatalog::load(root.path(), manifest).expect("V4 catalog");
+            .join("../../assets/avatar-motions-v5/catalog.json");
+        let mut catalog = MotionCatalog::load(root.path(), manifest).expect("V5 catalog");
         let before = catalog.snapshot();
         let source = catalog
             .asset_for(&before.entries[0].id)
@@ -1295,8 +1815,7 @@ mod tests {
                 token: "test-token".into(),
                 name: "Rollback".into(),
                 description: String::new(),
-                category: MotionCategory::Gesture,
-                playback_mode: MotionPlaybackMode::Once,
+                loop_mode: MotionLoopMode::Once,
                 root_mode: MotionRootMode::InPlace,
                 interaction_region: None,
             },
@@ -1308,22 +1827,27 @@ mod tests {
     }
 
     #[test]
-    fn v3_storage_does_not_read_or_delete_v2_motion_data() {
+    fn v5_storage_deletes_v4_motion_data_and_persists_feature_indexes() {
         let directory = tempfile::tempdir().expect("temporary data root");
-        let legacy = directory.path().join("motions-v2");
+        let legacy = directory.path().join("motions-v4");
         fs::create_dir_all(&legacy).expect("legacy directory");
         let sentinel = legacy.join("catalog.json");
         fs::write(&sentinel, b"legacy motion data").expect("legacy sentinel");
         let manifest = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../assets/avatar-motions-v4/catalog.json");
+            .join("../../assets/avatar-motions-v5/catalog.json");
 
-        let catalog = MotionCatalog::load(directory.path().join("motions-v3"), manifest)
-            .expect("fresh V3 catalog");
+        let catalog = MotionCatalog::load(directory.path().join("motions-v5"), manifest)
+            .expect("fresh V5 catalog");
 
         assert!(catalog.snapshot().bindings.is_empty());
+        assert!(!legacy.exists());
+        let key = "hips,spine,head:asset-sha:v1";
+        catalog
+            .write_feature_index(key, r#"{"cacheKey":"test"}"#)
+            .expect("persist feature index");
         assert_eq!(
-            fs::read(&sentinel).expect("legacy data remains"),
-            b"legacy motion data"
+            catalog.read_feature_index(key).expect("read feature index"),
+            Some(r#"{"cacheKey":"test"}"#.into())
         );
     }
 }

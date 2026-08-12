@@ -4,5 +4,7 @@ export * from "./foot-contact-analyzer";
 export * from "./motion-asset-library";
 export * from "./motion-composer";
 export * from "./motion-semantic-selector";
+export * from "./pose-continuity";
 export * from "./pose-utils";
 export * from "./stage-locomotion";
+export * from "./graph/index";

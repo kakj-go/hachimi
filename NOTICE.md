@@ -16,7 +16,7 @@ the Hachimi source code. The fixed source, SHA-256, and license URL are recorded
 in assets/avatar-default/2639776812528692620/manifest.json.
 
 In the source tree, notices for bundled VRMA motions are stored in
-assets/avatar-motions-v4/notices, and notices for speech models, sherpa-onnx,
+assets/avatar-motions-v5/notices, and notices for speech models, sherpa-onnx,
 ONNX Runtime, and DirectML are stored in
 apps/desktop/src-tauri/resources/ai-models/THIRD-PARTY-NOTICES.md. Binary
 packages include the same notices and license files under their resources

@@ -141,6 +141,8 @@ import type {
   MotionBindingResetRequest,
   MotionCatalogSnapshot,
   MotionEnabledUpdateRequest,
+  MotionFeatureCacheReadRequest,
+  MotionFeatureCacheWriteRequest,
   MotionImportCommitRequest,
   MotionImportInspection,
   MotionMetadataUpdateRequest,
@@ -695,6 +697,10 @@ export const commands = {
     invoke<MotionCatalogSnapshot>("reset_motion_binding", { request }),
   getMotionRuntimeAsset: (id: string) =>
     invoke<MotionRuntimeAsset | null>("get_motion_runtime_asset", { request: { id } }),
+  readMotionFeatureIndex: (request: MotionFeatureCacheReadRequest) =>
+    invoke<string | null>("read_motion_feature_index", { request }),
+  writeMotionFeatureIndex: (request: MotionFeatureCacheWriteRequest) =>
+    invoke<void>("write_motion_feature_index", { request }),
   startPetTurn: (request: PetTurnRequest) => invoke<void>("start_pet_turn", { request }),
   recoverPetTurn: (runId: string, sessionId: SessionId, agentRunId: RunId) =>
     invoke<PetTurnEvent | null>("recover_pet_turn", { runId, sessionId, agentRunId }),

@@ -22,6 +22,7 @@ export const config = {
         resolve("scripts/desktop-e2e/specs/extensions-settings.e2e.mjs"),
         resolve("scripts/desktop-e2e/specs/host-integrations.e2e.mjs"),
         resolve("scripts/desktop-e2e/specs/task-center.e2e.mjs"),
+        resolve("scripts/desktop-e2e/specs/avatar-motion-v5.e2e.mjs"),
       ],
   maxInstances: 1,
   capabilities: [

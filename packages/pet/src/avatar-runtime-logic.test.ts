@@ -1,12 +1,15 @@
 import { describe, expect, it } from "vitest";
 import {
+  AMBIENT_MOTION_MAX_DELAY_MS,
+  AMBIENT_MOTION_MIN_DELAY_MS,
+  ambientMotionDelayMs,
   classifyRelativeHit,
   isPlaybackOlder,
   speechReleaseEnvelope,
   idleMotionWeight,
-  canStartQueuedInteraction,
+  rememberAmbientMotion,
   selectAmbientIdle,
-  selectCoolIdle,
+  selectWaitingIdle,
   selectWeightedIdle,
 } from "./avatar-runtime-logic";
 
@@ -48,24 +51,34 @@ describe("avatar runtime decisions", () => {
     expect(selectWeightedIdle([calm, active], 0.95, 0.99)).toBe(active);
   });
 
-  it("keeps cool waiting as the permanent base idle", () => {
+  it("uses the generic waiting motion as the permanent base idle", () => {
     const standard = { id: "standard", name: "standard waiting" } as never;
-    const shy = { id: "shy", name: "shy waiting" } as never;
+    const waiting = { id: "waiting", name: "waiting" } as never;
     const cool = { id: "cool", name: "cool waiting" } as never;
-    expect(selectCoolIdle([standard, shy, cool])).toBe(cool);
+    expect(selectWaitingIdle([standard, waiting, cool])).toBe(waiting);
+    expect(selectWaitingIdle([standard, cool])).toBeUndefined();
   });
 
-  it("keeps shy and cool base idles out of ambient motion selection", () => {
-    const shy = { id: "shy", name: "shy waiting" } as never;
-    const cool = { id: "cool", name: "cool waiting" } as never;
-    const calm = { id: "calm", name: "ladylike waiting" } as never;
-    const active = { id: "active", name: "energetic waiting" } as never;
-    expect(selectAmbientIdle([shy, cool, calm, active], "calm", 0.8, 0)).toBe(active);
+  it("selects only one-shot ambient actions and avoids recent motions", () => {
+    const waiting = { id: "waiting", name: "waiting", loopMode: "loop" } as never;
+    const happy = { id: "happy", name: "happy", loopMode: "once" } as never;
+    const laughing = { id: "laughing", name: "laughing", loopMode: "once" } as never;
+    const stretching = { id: "stretching", name: "stretching", loopMode: "once" } as never;
+    expect(
+      selectAmbientIdle([waiting, happy, laughing, stretching], ["happy", "laughing"], 0.8, 0),
+    ).toBe(stretching);
+    expect(selectAmbientIdle([waiting], [], 0.5, 0)).toBeUndefined();
   });
 
-  it("holds queued interaction until the foreground finishes and cool idle settles", () => {
-    expect(canStartQueuedInteraction(1_000, 900, 950, true)).toBe(false);
-    expect(canStartQueuedInteraction(1_000, 900, 1_100, false)).toBe(false);
-    expect(canStartQueuedInteraction(1_100, 900, 1_100, false)).toBe(true);
+  it("randomizes ambient delays between 12 and 25 seconds", () => {
+    expect(ambientMotionDelayMs(0)).toBe(AMBIENT_MOTION_MIN_DELAY_MS);
+    expect(ambientMotionDelayMs(0.5)).toBe(18_500);
+    expect(ambientMotionDelayMs(1)).toBe(AMBIENT_MOTION_MAX_DELAY_MS);
+  });
+
+  it("remembers up to three motions without exhausting the candidate pool", () => {
+    expect(rememberAmbientMotion([], "only", 1)).toEqual([]);
+    expect(rememberAmbientMotion(["a", "b"], "c", 3)).toEqual(["b", "c"]);
+    expect(rememberAmbientMotion(["a", "b", "c"], "d", 5)).toEqual(["b", "c", "d"]);
   });
 });

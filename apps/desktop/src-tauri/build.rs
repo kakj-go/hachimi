@@ -302,20 +302,29 @@ fn verify_motion_catalog(root: &Path) {
     println!("cargo:rerun-if-changed={}", manifest_path.display());
     let bytes = std::fs::read(&manifest_path).unwrap_or_else(|error| {
         panic!(
-            "Avatar Motion Runtime V4 catalog is missing: {}: {error}",
+            "Avatar Motion Runtime V5 catalog is missing: {}: {error}",
             manifest_path.display()
         )
     });
     let manifest: serde_json::Value = serde_json::from_slice(&bytes)
-        .unwrap_or_else(|error| panic!("V4 motion catalog is invalid: {error}"));
-    assert_eq!(manifest["schemaVersion"].as_u64(), Some(1));
+        .unwrap_or_else(|error| panic!("V5 motion catalog is invalid: {error}"));
+    assert_eq!(manifest["schemaVersion"].as_u64(), Some(2));
+    assert!(
+        manifest["transitionProfiles"]
+            .as_array()
+            .is_some_and(|profiles| !profiles.is_empty()),
+        "V5 catalog must contain transition profiles"
+    );
     let entries = manifest["entries"]
         .as_array()
-        .expect("V4 catalog must contain entries");
-    assert!(!entries.is_empty(), "V4 catalog must not be empty");
-    let mut hashes = std::collections::HashSet::new();
+        .expect("V5 catalog must contain entries");
+    assert!(!entries.is_empty(), "V5 catalog must not be empty");
+    let mut ids = std::collections::HashSet::new();
+    let mut hash_entries =
+        std::collections::HashMap::<String, Vec<(String, String, Option<String>)>>::new();
     for entry in entries {
         let id = entry["id"].as_str().expect("motion id");
+        assert!(ids.insert(id.to_owned()), "duplicate motion id: {id}");
         assert!(
             id.starts_with("builtin."),
             "invalid built-in motion id: {id}"
@@ -331,10 +340,14 @@ fn verify_motion_catalog(root: &Path) {
         println!("cargo:rerun-if-changed={}", path.display());
         let expected_hash = entry["sha256"].as_str().expect("motion SHA-256");
         assert_eq!(expected_hash.len(), 64, "motion SHA-256 length");
-        assert!(
-            hashes.insert(expected_hash),
-            "duplicate catalog SHA-256: {expected_hash}"
-        );
+        hash_entries
+            .entry(expected_hash.to_owned())
+            .or_default()
+            .push((
+                id.to_owned(),
+                file_name.to_owned(),
+                entry["derivedFromMotionId"].as_str().map(str::to_owned),
+            ));
         assert!(
             sha256_file(&path).eq_ignore_ascii_case(expected_hash),
             "motion SHA-256 mismatch: {}",
@@ -365,6 +378,35 @@ fn verify_motion_catalog(root: &Path) {
                 .as_array()
                 .is_some_and(|value| !value.is_empty())
         );
+    }
+    for (hash, shared_entries) in hash_entries {
+        if shared_entries.len() < 2 {
+            continue;
+        }
+        let canonical_entries: Vec<_> = shared_entries
+            .iter()
+            .filter(|(_, _, source_id)| source_id.is_none())
+            .collect();
+        assert_eq!(
+            canonical_entries.len(),
+            1,
+            "motion blob {hash} must have exactly one canonical entry"
+        );
+        let (canonical_id, canonical_file, _) = canonical_entries[0];
+        for (id, file_name, source_id) in &shared_entries {
+            if id == canonical_id {
+                continue;
+            }
+            assert_eq!(
+                source_id.as_deref(),
+                Some(canonical_id.as_str()),
+                "motion {id} shares blob {hash} without deriving from {canonical_id}"
+            );
+            assert_eq!(
+                file_name, canonical_file,
+                "derived motion {id} maps blob {hash} to a different file"
+            );
+        }
     }
 }
 
@@ -421,7 +463,7 @@ fn main() {
     println!(
         "cargo:rerun-if-changed=resources/native/sherpa-onnx-1.13.4-directml/windows-x64/manifest.json"
     );
-    verify_motion_catalog(Path::new("../../../assets/avatar-motions-v4"));
+    verify_motion_catalog(Path::new("../../../assets/avatar-motions-v5"));
     verify_default_avatar_manifest(Path::new(
         "../../../assets/avatar-default/2639776812528692620/manifest.json",
     ));

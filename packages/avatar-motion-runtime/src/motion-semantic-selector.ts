@@ -1,7 +1,7 @@
-import type { MotionCatalogEntry, MotionCategory } from "@hachimi/contracts";
+import type { MotionCatalogEntry, MotionFamily } from "@hachimi/contracts";
 
 export interface MotionSemanticIntent {
-  category: MotionCategory;
+  family: MotionFamily;
   tags?: readonly string[];
   preferredNames?: readonly string[];
   requireFingerMotion?: boolean;
@@ -20,7 +20,7 @@ export function selectMotionForIntent(
   const candidates = entries
     .filter(
       (entry) =>
-        entry.category === intent.category &&
+        entry.family === intent.family &&
         (!intent.requireFingerMotion || entry.hasFingerMotion),
     )
     .map((entry) => {

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { motionFrameHealthy } from "./motion-lab-runtime";
+import { motionFrameHealthy, transitionPeaksAccepted } from "./motion-lab-runtime";
 
 describe("Motion Library Lab diagnostics", () => {
   it("rejects invalid solve frames", () => {
@@ -35,6 +35,30 @@ describe("Motion Library Lab diagnostics", () => {
       motionFrameHealthy({
         ...frame,
         rootPosition: [Number.NaN, 0, 0],
+      }),
+    ).toBe(false);
+  });
+
+  it("applies the V5 transition admission thresholds and rejects non-finite peaks", () => {
+    expect(
+      transitionPeaksAccepted({
+        peakBoneStepDegrees: 12,
+        peakRootStepNormalized: 0.005,
+        peakLookAtStepDegrees: 4,
+      }),
+    ).toBe(true);
+    expect(
+      transitionPeaksAccepted({
+        peakBoneStepDegrees: 12.01,
+        peakRootStepNormalized: 0.005,
+        peakLookAtStepDegrees: 4,
+      }),
+    ).toBe(false);
+    expect(
+      transitionPeaksAccepted({
+        peakBoneStepDegrees: Number.NaN,
+        peakRootStepNormalized: 0,
+        peakLookAtStepDegrees: 0,
       }),
     ).toBe(false);
   });

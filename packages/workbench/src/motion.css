@@ -1,4 +1,4 @@
-/* Avatar Motion Runtime V4 library and Motion Lab */
+/* Avatar Motion Runtime V5 library and Motion Lab */
 .motion-binding-list {
   display: grid;
   gap: 12px;
@@ -224,6 +224,67 @@
 
 .motion-lab-pet-test output {
   color: var(--color-text-muted);
+}
+
+.motion-lab-matrix {
+  min-width: 0;
+  display: grid;
+  gap: 8px;
+  padding-block: 10px;
+  border-block: 1px solid var(--color-border-muted);
+}
+
+.motion-lab-matrix-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.motion-lab-matrix-heading h2,
+.motion-lab-matrix-heading p {
+  margin: 0;
+}
+
+.motion-lab-matrix-heading p {
+  margin-top: 2px;
+  color: var(--color-text-faint);
+  font-family: var(--font-family-code);
+  font-size: var(--font-xs);
+}
+
+.motion-lab-matrix-scroll {
+  max-height: 240px;
+  overflow: auto;
+  border: 1px solid var(--color-border-muted);
+  border-radius: var(--radius-sm);
+}
+
+.motion-lab-matrix table {
+  width: 100%;
+  border-collapse: collapse;
+  font-family: var(--font-family-code);
+  font-size: var(--font-xs);
+  white-space: nowrap;
+}
+
+.motion-lab-matrix th,
+.motion-lab-matrix td {
+  padding: 5px 6px;
+  border-bottom: 1px solid var(--color-border-muted);
+  text-align: left;
+}
+
+.motion-lab-matrix th {
+  position: sticky;
+  top: 0;
+  background: var(--color-bg-elevated);
+  color: var(--color-text-faint);
+}
+
+.motion-lab-matrix tr.failed td,
+.motion-gate-failed {
+  color: var(--color-danger-text);
 }
 
 .motion-lab-tags {

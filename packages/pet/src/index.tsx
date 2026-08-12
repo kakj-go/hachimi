@@ -5,7 +5,7 @@ import {
   type AppSettings,
   type ApprovalRequestRecord,
   type BootstrapState,
-  type ClipMotionRequest,
+  type MotionIntentRequest,
   type InteractiveRegionsUpdate,
   type InteractionMotionPreviewRequest,
   type MotionCatalogSnapshot,
@@ -585,8 +585,8 @@ function DesktopPet() {
       listen<MotionCatalogSnapshot>("motion:catalog-changed", ({ payload }) => {
         avatarRenderer?.setMotionCatalog(payload);
       }),
-      listen<ClipMotionRequest>("motion:clip-request", ({ payload }) => {
-        avatarRenderer?.playClipMotion(payload);
+      listen<MotionIntentRequest>("motion:intent-request", ({ payload }) => {
+        avatarRenderer?.playMotionIntent(payload);
       }),
       listen<RuntimeControllerRequest>("motion:controller-request", ({ payload }) => {
         avatarRenderer?.applyRuntimeController(payload);

@@ -2,9 +2,9 @@ import type { MotionCatalogEntry } from "@hachimi/contracts";
 import { describe, expect, it } from "vitest";
 import {
   INTERACTION_REGIONS,
-  MOTION_CATEGORIES,
+  MOTION_FAMILIES,
   interactionRegionLabel,
-  motionCategoryLabel,
+  motionFamilyLabel,
   motionDescription,
   motionName,
 } from "./motion-localization";
@@ -25,9 +25,9 @@ describe("motion settings localization", () => {
   });
 
   it("provides labels for every category and interaction region", () => {
-    for (const category of MOTION_CATEGORIES) {
-      expect(motionCategoryLabel(category, "zh-CN")).not.toBe(category);
-      expect(motionCategoryLabel(category, "en-US")).not.toBe("");
+    for (const family of MOTION_FAMILIES) {
+      expect(motionFamilyLabel(family, "zh-CN")).not.toBe(family);
+      expect(motionFamilyLabel(family, "en-US")).not.toBe("");
     }
     expect(INTERACTION_REGIONS).toHaveLength(13);
     for (const region of INTERACTION_REGIONS) {

@@ -1,6 +1,9 @@
 import type { InteractionRegion } from "@hachimi/contracts";
 import type { MotionCatalogEntry } from "@hachimi/contracts";
 
+export const AMBIENT_MOTION_MIN_DELAY_MS = 12_000;
+export const AMBIENT_MOTION_MAX_DELAY_MS = 25_000;
+
 export function classifyRelativeHit(normalizedX: number, normalizedY: number): InteractionRegion {
   const side = normalizedX < 0 ? "left" : "right";
   const absoluteX = Math.abs(normalizedX);
@@ -53,33 +56,42 @@ export function selectWeightedIdle(
   return entries.at(-1);
 }
 
-export function selectCoolIdle(
+export function selectWaitingIdle(
   entries: readonly MotionCatalogEntry[],
 ): MotionCatalogEntry | undefined {
-  return entries.find((entry) => /cool.?waiting/i.test(entry.name)) ?? entries[0];
+  return entries.find((entry) => entry.name.trim().toLowerCase() === "waiting");
 }
 
 export function selectAmbientIdle(
   entries: readonly MotionCatalogEntry[],
-  lastMotionId: string | undefined,
+  recentMotionIds: readonly string[],
   energy: number,
   random: number,
 ): MotionCatalogEntry | undefined {
-  const alternatives = entries.filter(
-    (entry) => !/(?:shy|cool).?waiting/i.test(entry.name) && entry.id !== lastMotionId,
-  );
+  const oneShotEntries = entries.filter((entry) => entry.loopMode === "once");
+  const recent = new Set(recentMotionIds);
+  const alternatives = oneShotEntries.filter((entry) => !recent.has(entry.id));
   const pool =
     alternatives.length > 0
       ? alternatives
-      : entries.filter((entry) => !/(?:shy|cool).?waiting/i.test(entry.name));
+      : oneShotEntries.filter((entry) => entry.id !== recentMotionIds.at(-1));
   return selectWeightedIdle(pool, energy, random);
 }
 
-export function canStartQueuedInteraction(
-  now: number,
-  executeAt: number,
-  idleReturnReadyAt: number,
-  foregroundActive: boolean,
-): boolean {
-  return !foregroundActive && now >= executeAt && now >= idleReturnReadyAt;
+export function ambientMotionDelayMs(random: number): number {
+  const normalized = Math.min(Math.max(Number.isFinite(random) ? random : 0, 0), 1);
+  return Math.round(
+    AMBIENT_MOTION_MIN_DELAY_MS +
+      normalized * (AMBIENT_MOTION_MAX_DELAY_MS - AMBIENT_MOTION_MIN_DELAY_MS),
+  );
+}
+
+export function rememberAmbientMotion(
+  history: readonly string[],
+  motionId: string,
+  candidateCount: number,
+): string[] {
+  const capacity = Math.min(3, Math.max(Math.floor(candidateCount) - 1, 0));
+  if (capacity === 0) return [];
+  return [...history.filter((id) => id !== motionId), motionId].slice(-capacity);
 }

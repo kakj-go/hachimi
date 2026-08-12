@@ -11,6 +11,7 @@ test("release source summary is bounded to registered public provenance", () => 
   const summary = buildSourceSummary(workspaceRoot);
   assert.equal(summary.schemaVersion, 1);
   assert.deepEqual(Object.keys(summary.registries).sort(), [
+    "avatarMotion",
     "channels",
     "enterprise",
     "forge",
@@ -24,6 +25,14 @@ test("release source summary is bounded to registered public provenance", () => 
         assert.match(source.repository, /^https:\/\/github\.com\//);
         assert.match(source.commit, /^[a-f0-9]{40}$/);
         assert.ok(source.files.length > 0);
+      }
+      continue;
+    }
+    if (area === "avatarMotion") {
+      assert.ok(registry.sources.length > 0);
+      for (const source of registry.sources) {
+        assert.match(source.canonicalUrl, /^https:\/\//);
+        assert.ok(source.implementationStatus.length > 0);
       }
       continue;
     }

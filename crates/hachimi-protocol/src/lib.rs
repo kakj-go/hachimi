@@ -2,6 +2,7 @@
 
 mod agent;
 mod control;
+mod motion;
 mod provider;
 mod settings;
 mod transport;
@@ -9,6 +10,7 @@ mod voice;
 mod workspace;
 
 pub use control::ControlMethod;
+pub use motion::*;
 pub use provider::*;
 
 pub use agent::*;
@@ -673,23 +675,13 @@ pub enum MotionSource {
     User,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, Type)]
 #[serde(rename_all = "snake_case")]
-pub enum MotionCategory {
-    Idle,
-    Reaction,
-    Gesture,
-    Speech,
-    Locomotion,
-    Performance,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type)]
-#[serde(rename_all = "snake_case")]
-pub enum MotionPlaybackMode {
-    Once,
-    Loop,
-    Hold,
+pub enum MotionAnalysisStatus {
+    Pending,
+    #[default]
+    Ready,
+    Failed,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type)]
@@ -738,6 +730,8 @@ pub struct InteractionMotionPreviewRequest {
 pub struct MotionCatalogEntry {
     pub id: MotionAssetId,
     pub source: MotionSource,
+    #[serde(default)]
+    pub analysis_status: MotionAnalysisStatus,
     pub protected: bool,
     pub name: String,
     #[serde(default)]
@@ -749,19 +743,30 @@ pub struct MotionCatalogEntry {
     pub sha256: String,
     pub size_bytes: u32,
     pub duration_ms: u32,
-    pub category: MotionCategory,
+    pub family: MotionFamily,
     pub tags: Vec<String>,
-    pub playback_mode: MotionPlaybackMode,
+    pub loop_mode: MotionLoopMode,
+    #[serde(default)]
+    pub derived_from_motion_id: Option<MotionAssetId>,
+    #[serde(default)]
+    pub motion_role: Option<MotionRole>,
+    #[serde(default)]
+    pub source_start_ms: Option<u32>,
+    #[serde(default)]
+    pub source_end_ms: Option<u32>,
+    #[serde(default)]
+    pub procedural_yaw_degrees: Option<i16>,
     pub root_mode: MotionRootMode,
-    pub channels: Vec<BehaviorChannel>,
+    pub slot: MotionSlot,
+    pub channel_mask: Vec<BehaviorChannel>,
+    pub transition_profile_id: String,
+    pub fallback_motion_id: MotionAssetId,
     pub animated_bones: Vec<String>,
     pub finger_bone_count: u16,
     pub has_finger_motion: bool,
     pub has_expression: bool,
     pub has_look_at: bool,
     pub mirrorable: bool,
-    pub transition_in_ms: u16,
-    pub transition_out_ms: u16,
     pub source_project: String,
     pub source_paths: Vec<String>,
     #[serde(default)]
@@ -772,6 +777,7 @@ pub struct MotionCatalogEntry {
 #[serde(rename_all = "camelCase")]
 pub struct MotionCatalogSnapshot {
     pub entries: Vec<MotionCatalogEntry>,
+    pub transition_profiles: Vec<MotionTransitionProfile>,
     pub bindings: Vec<InteractionMotionBinding>,
     pub disabled_motion_ids: Vec<MotionAssetId>,
 }
@@ -797,8 +803,7 @@ pub struct MotionImportCommitRequest {
     pub token: String,
     pub name: String,
     pub description: String,
-    pub category: MotionCategory,
-    pub playback_mode: MotionPlaybackMode,
+    pub loop_mode: MotionLoopMode,
     pub root_mode: MotionRootMode,
     #[serde(default)]
     pub interaction_region: Option<InteractionRegion>,
@@ -810,8 +815,8 @@ pub struct MotionMetadataUpdateRequest {
     pub id: MotionAssetId,
     pub name: String,
     pub description: String,
-    pub category: MotionCategory,
-    pub playback_mode: MotionPlaybackMode,
+    pub family: MotionFamily,
+    pub loop_mode: MotionLoopMode,
     pub root_mode: MotionRootMode,
 }
 
@@ -859,17 +864,6 @@ pub struct MotionChannelWeight {
     pub channel: BehaviorChannel,
     /// Semantic channel weight in permille, clamped by consumers to 0..=1000.
     pub weight: u16,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
-#[serde(rename_all = "camelCase")]
-pub struct ClipMotionRequest {
-    pub request_id: String,
-    pub motion_id: MotionAssetId,
-    pub active: bool,
-    pub priority: u16,
-    pub mirror: bool,
-    pub channel_weights: Vec<MotionChannelWeight>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type)]
@@ -1867,12 +1861,19 @@ pub fn registered_types() -> specta::Types {
         .register::<AvatarCompatibility>()
         .register::<BehaviorChannel>()
         .register::<MotionSource>()
-        .register::<MotionCategory>()
-        .register::<MotionPlaybackMode>()
+        .register::<MotionAnalysisStatus>()
+        .register::<MotionFamily>()
+        .register::<MotionLoopMode>()
+        .register::<MotionRole>()
+        .register::<MotionSlot>()
+        .register::<MotionInterruptPolicy>()
         .register::<MotionRootMode>()
         .register::<InteractionRegion>()
         .register::<InteractionMotionBinding>()
         .register::<InteractionMotionPreviewRequest>()
+        .register::<MotionTransitionWindow>()
+        .register::<MotionInertialHalfLives>()
+        .register::<MotionTransitionProfile>()
         .register::<MotionCatalogEntry>()
         .register::<MotionCatalogSnapshot>()
         .register::<MotionImportInspection>()
@@ -1884,7 +1885,10 @@ pub fn registered_types() -> specta::Types {
         .register::<MotionBindingResetRequest>()
         .register::<MotionRuntimeAsset>()
         .register::<MotionChannelWeight>()
-        .register::<ClipMotionRequest>()
+        .register::<MotionLocomotionIntent>()
+        .register::<MotionIntentRequest>()
+        .register::<MotionFeatureCacheReadRequest>()
+        .register::<MotionFeatureCacheWriteRequest>()
         .register::<RuntimeControllerKind>()
         .register::<RuntimeControllerRequest>()
         .register::<AvatarCapability>()

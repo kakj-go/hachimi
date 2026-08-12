@@ -38,7 +38,7 @@ pub(super) fn load_motion_catalog(
     data_dir: &Path,
     supervisor: &RuntimeSupervisor,
 ) -> Result<MotionCatalog, MotionError> {
-    let motion_root = data_dir.join("motions-v3");
+    let motion_root = data_dir.join("motions-v5");
     MotionCatalog::load(&motion_root, builtin_catalog).inspect(|_| {
         supervisor.replace_internal_resource_issues("motion_catalog", std::iter::empty::<String>());
     }).or_else(|error| {
@@ -61,9 +61,9 @@ pub(super) fn stage_optional_resources<R: Runtime>(
 ) -> OptionalResourceLayout {
     let motion_source = resolve_or_development(
         app,
-        "resources/avatar-motions-v4/catalog.json",
+        "resources/avatar-motions-v5/catalog.json",
         Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../../assets/avatar-motions-v4/catalog.json"),
+            .join("../../../assets/avatar-motions-v5/catalog.json"),
     );
     let speech_source = resolve_or_development(
         app,
@@ -78,7 +78,7 @@ pub(super) fn stage_optional_resources<R: Runtime>(
             .join("resources/ai-models/text-to-speech/vits-melo-zh-en/manifest.json"),
     );
     let root = data_dir.join("runtime-assets");
-    let motion_target = root.join("avatar-motions-v4/catalog.json");
+    let motion_target = root.join("avatar-motions-v5/catalog.json");
     let speech_target = root.join("speech-to-text/sensevoice-small/manifest.json");
     let voice_target = root.join("text-to-speech/vits-melo-zh-en/manifest.json");
     let mut issues = Vec::new();

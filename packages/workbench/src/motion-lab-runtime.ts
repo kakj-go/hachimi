@@ -1,15 +1,25 @@
-import { commands, type AvatarRuntimeAsset, type MotionCatalogEntry } from "@hachimi/contracts";
+import {
+  commands,
+  type AvatarRuntimeAsset,
+  type MotionCatalogEntry,
+  type MotionTransitionProfile,
+} from "@hachimi/contracts";
 import {
   AvatarConstraintPipeline,
   FootContactAnalyzer,
+  FullPoseInertializer,
   MotionAssetLibrary,
   VRM_HUMANOID_BONES,
   runtimeBoneName,
   measureMotionPoseSeam,
+  nearestFeatureFrame,
+  TransitionPlanner,
   deepDisposeAvatarRoot,
   loadAvatarWithDomTextures,
+  limitPoseStep,
   type AvatarConstraintDiagnostics,
   type FootSoleOffsets,
+  type MotionFeatureFrame,
 } from "@hachimi/avatar-motion-runtime";
 import { VRMLoaderPlugin, VRMUtils, type VRM } from "@pixiv/three-vrm";
 import { VRMAnimationLoaderPlugin } from "@pixiv/three-vrm-animation";
@@ -60,6 +70,31 @@ export interface MotionLabFrame {
   contactTimeline: string;
 }
 
+export interface MotionTransitionDiagnostic {
+  sourceTimeMs: number;
+  entryTimeMs: number;
+  durationMs: number;
+  forced: boolean;
+  totalCost: number;
+  poseCost: number;
+  velocityCost: number;
+  footContactCost: number;
+  rootCost: number;
+  sourceFootContact: string;
+  targetFootContact: string;
+  sourceBoneCount: number;
+  targetBoneCount: number;
+  peakBoneStepDegrees: number;
+  peakRootStepNormalized: number;
+  peakLookAtStepDegrees: number;
+  accepted: boolean;
+}
+
+export interface MotionTransitionMatrixCell extends MotionTransitionDiagnostic {
+  sourceMotionId: string;
+  targetMotionId: string;
+}
+
 type FrameListener = (frame: MotionLabFrame) => void;
 export type MotionRuntimeVisualMode = "preview" | "diagnostics";
 
@@ -72,6 +107,8 @@ export class MotionLabRuntime {
   private readonly motionLibrary: MotionAssetLibrary;
   private readonly constraints = new AvatarConstraintPipeline();
   private readonly footContacts = new FootContactAnalyzer();
+  private readonly transitionPlanner = new TransitionPlanner();
+  private readonly transitionProfiles = new Map<string, MotionTransitionProfile>();
   private readonly clock = new Clock();
   private readonly resizeObserver: ResizeObserver;
   private frameRequest = 0;
@@ -112,8 +149,14 @@ export class MotionLabRuntime {
     this.container.append(this.renderer.domElement);
     this.loader.register((parser) => new VRMLoaderPlugin(parser));
     this.motionLoader.register((parser) => new VRMAnimationLoaderPlugin(parser));
-    this.motionLibrary = new MotionAssetLibrary(this.motionLoader, (id) =>
-      commands.getMotionRuntimeAsset(id),
+    this.motionLibrary = new MotionAssetLibrary(
+      this.motionLoader,
+      (id) => commands.getMotionRuntimeAsset(id),
+      {
+        read: (cacheKey) => commands.readMotionFeatureIndex({ cacheKey }),
+        write: (cacheKey, payload) =>
+          commands.writeMotionFeatureIndex({ cacheKey, payload }),
+      },
     );
     this.scene.add(new AmbientLight(0xffffff, 0.7));
     this.scene.add(new HemisphereLight(0xf2f0ff, 0x554b68, 0.9));
@@ -143,8 +186,83 @@ export class MotionLabRuntime {
     return this.options.visualMode ?? "diagnostics";
   }
 
-  setCatalog(entries: readonly MotionCatalogEntry[]): void {
+  setCatalog(
+    entries: readonly MotionCatalogEntry[],
+    profiles: readonly MotionTransitionProfile[] = [],
+  ): void {
     this.motionLibrary.setCatalog(entries);
+    this.transitionProfiles.clear();
+    for (const profile of profiles) this.transitionProfiles.set(profile.id, profile);
+  }
+
+  async analyzeTransition(
+    source: MotionCatalogEntry,
+    target: MotionCatalogEntry,
+  ): Promise<MotionTransitionDiagnostic> {
+    if (!this.vrm) throw new Error("Load an avatar before transition analysis");
+    const sourceProfile = this.transitionProfiles.get(source.transitionProfileId);
+    const targetProfile = this.transitionProfiles.get(target.transitionProfileId);
+    if (!sourceProfile || !targetProfile) throw new Error("Motion transition profile is missing");
+    await Promise.all([
+      this.motionLibrary.prepare(this.vrm, source.id),
+      this.motionLibrary.prepare(this.vrm, target.id),
+    ]);
+    const [sourceIndex, targetIndex] = await Promise.all([
+      this.motionLibrary.prepareFeatureIndex(this.vrm, source.id, sourceProfile),
+      this.motionLibrary.prepareFeatureIndex(this.vrm, target.id, targetProfile),
+    ]);
+    if (!sourceIndex || !targetIndex) throw new Error("Motion feature analysis failed");
+    const sourceFrame = nearestFeatureFrame(sourceIndex, this.timeMs);
+    const plan = this.transitionPlanner.plan(
+      sourceFrame,
+      targetIndex,
+      targetProfile,
+      targetProfile.interruptPolicy,
+    );
+    const targetFrame = nearestFeatureFrame(targetIndex, plan.targetTimeMs);
+    const peaks = simulateTransitionPeaks(
+      sourceFrame,
+      targetFrame,
+      targetProfile,
+      this.avatarHeight,
+    );
+    return {
+      sourceTimeMs: sourceFrame.timeMs,
+      entryTimeMs: plan.targetTimeMs,
+      durationMs: plan.durationMs,
+      forced: plan.forced,
+      totalCost: plan.cost,
+      poseCost: plan.costs.pose,
+      velocityCost: plan.costs.velocity,
+      footContactCost: plan.costs.footContact,
+      rootCost: plan.costs.root,
+      sourceFootContact: sourceFrame.footContact,
+      targetFootContact: targetFrame.footContact,
+      sourceBoneCount: sourceFrame.pose.rotations.size,
+      targetBoneCount: targetFrame.pose.rotations.size,
+      ...peaks,
+      accepted: transitionPeaksAccepted(peaks),
+    };
+  }
+
+  async analyzeTransitionMatrix(
+    entries: readonly MotionCatalogEntry[],
+    onProgress?: (completed: number, total: number) => void,
+  ): Promise<MotionTransitionMatrixCell[]> {
+    const cells: MotionTransitionMatrixCell[] = [];
+    const total = entries.length * Math.max(entries.length - 1, 0);
+    for (const source of entries) {
+      for (const target of entries) {
+        if (source.id === target.id) continue;
+        cells.push({
+          sourceMotionId: source.id,
+          targetMotionId: target.id,
+          ...(await this.analyzeTransition(source, target)),
+        });
+        onProgress?.(cells.length, total);
+      }
+    }
+    return cells;
   }
 
   async loadAvatar(asset: AvatarRuntimeAsset): Promise<void> {
@@ -263,7 +381,7 @@ export class MotionLabRuntime {
     const entry = this.motion;
     if (this.playing && entry) {
       this.timeMs += delta * 1_000 * this.speed;
-      if (entry.playbackMode === "loop" && entry.durationMs > 0) this.timeMs %= entry.durationMs;
+      if (entry.loopMode === "loop" && entry.durationMs > 0) this.timeMs %= entry.durationMs;
       else this.timeMs = Math.min(this.timeMs, entry.durationMs);
     }
     const started = performance.now();
@@ -320,7 +438,7 @@ export class MotionLabRuntime {
           this.vrm.lookAt.yaw = sample.lookAt.yawDegrees;
           this.vrm.lookAt.pitch = sample.lookAt.pitchDegrees;
         }
-        if (entry?.playbackMode === "loop") {
+        if (entry?.loopMode === "loop") {
           const start = this.motionLibrary.sample(this.vrm, entry.id, 0, this.mirror);
           const end = this.motionLibrary.sample(
             this.vrm,
@@ -420,6 +538,52 @@ export function motionFrameHealthy(frame: MotionLabFrame): boolean {
     }
     return true;
   });
+}
+
+export function transitionPeaksAccepted(peaks: {
+  peakBoneStepDegrees: number;
+  peakRootStepNormalized: number;
+  peakLookAtStepDegrees: number;
+}): boolean {
+  return (
+    Number.isFinite(peaks.peakBoneStepDegrees) &&
+    Number.isFinite(peaks.peakRootStepNormalized) &&
+    Number.isFinite(peaks.peakLookAtStepDegrees) &&
+    peaks.peakBoneStepDegrees <= 12.001 &&
+    peaks.peakRootStepNormalized <= 0.00501 &&
+    peaks.peakLookAtStepDegrees <= 4.001
+  );
+}
+
+function simulateTransitionPeaks(
+  source: MotionFeatureFrame,
+  target: MotionFeatureFrame,
+  profile: MotionTransitionProfile,
+  avatarHeight: number,
+) {
+  const inertializer = new FullPoseInertializer();
+  inertializer.capture(source.pose, target.pose, source.velocity, target.velocity);
+  const configured = profile.inertialHalfLives;
+  const halfLives = {
+    root: (configured?.rootMs ?? 100) / 1_000,
+    body: (configured?.bodyMs ?? 80) / 1_000,
+    arms: (configured?.armsMs ?? 65) / 1_000,
+    lookAt: (configured?.lookAtMs ?? 60) / 1_000,
+    expression: (configured?.expressionMs ?? 50) / 1_000,
+  };
+  let previous = source.pose;
+  let peakBoneStepDegrees = 0;
+  let peakRootStepNormalized = 0;
+  let peakLookAtStepDegrees = 0;
+  for (let frame = 0; frame < 30; frame += 1) {
+    const current = inertializer.apply(target.pose, 1 / 60, halfLives);
+    const step = limitPoseStep(current, previous, avatarHeight);
+    peakBoneStepDegrees = Math.max(peakBoneStepDegrees, step.boneDegrees);
+    peakRootStepNormalized = Math.max(peakRootStepNormalized, step.rootHeightRatio);
+    peakLookAtStepDegrees = Math.max(peakLookAtStepDegrees, step.lookAtDegrees);
+    previous = current;
+  }
+  return { peakBoneStepDegrees, peakRootStepNormalized, peakLookAtStepDegrees };
 }
 
 function emptyConstraintDiagnostics(): AvatarConstraintDiagnostics {

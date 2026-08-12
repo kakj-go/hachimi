@@ -323,6 +323,7 @@ export function collectSourceRegistryDigests(workspaceRoot) {
     forge: "docs/references/forge/registry.json",
     enterprise: "docs/references/enterprise/registry.json",
     channels: "docs/references/channels/registry.json",
+    avatarMotion: "docs/references/avatar-motion/registry.json",
   };
   return Object.fromEntries(
     Object.entries(entries).map(([key, relative]) => [

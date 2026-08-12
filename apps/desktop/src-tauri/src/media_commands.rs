@@ -757,6 +757,42 @@ pub(super) fn get_motion_runtime_asset(
         }))
 }
 
+#[tauri::command]
+pub(super) fn read_motion_feature_index(
+    window: WebviewWindow,
+    state: State<'_, DesktopState>,
+    request: MotionFeatureCacheReadRequest,
+) -> Result<Option<String>, CommandError> {
+    match window.label() {
+        "pet" => state.authorize(&window, ControlMethod::MotionRuntime)?,
+        "workbench" => state.authorize(&window, ControlMethod::MotionRead)?,
+        _ => return Err(CommandError::new("unknown_window", "不允许的窗口")),
+    };
+    state
+        .motion_catalog
+        .read()
+        .read_feature_index(&request.cache_key)
+        .map_err(|error| CommandError::operation("motion_feature_cache_read_failed", error))
+}
+
+#[tauri::command]
+pub(super) fn write_motion_feature_index(
+    window: WebviewWindow,
+    state: State<'_, DesktopState>,
+    request: MotionFeatureCacheWriteRequest,
+) -> Result<(), CommandError> {
+    match window.label() {
+        "pet" => state.authorize(&window, ControlMethod::MotionRuntime)?,
+        "workbench" => state.authorize(&window, ControlMethod::MotionRead)?,
+        _ => return Err(CommandError::new("unknown_window", "不允许的窗口")),
+    };
+    state
+        .motion_catalog
+        .read()
+        .write_feature_index(&request.cache_key, &request.payload)
+        .map_err(|error| CommandError::operation("motion_feature_cache_write_failed", error))
+}
+
 pub(super) fn profile_supports_pet_voice(profile: &AvatarAdaptationProfile) -> bool {
     !matches!(profile.lip_sync, LipSyncCapability::None)
 }

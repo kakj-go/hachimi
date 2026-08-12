@@ -1,5 +1,6 @@
 import { expect, test, type Page } from "@playwright/test";
 import AxeBuilder from "@axe-core/playwright";
+import type { MotionImportCommitRequest } from "../../../contracts/src/generated";
 import { resolve } from "node:path";
 import {
   appearance,
@@ -691,14 +692,7 @@ export async function installTauriMocks(
             };
           }
           if (command === "commit_motion_import") {
-            const request = args.request as {
-              name: string;
-              description: string;
-              category: string;
-              playbackMode: string;
-              rootMode: string;
-              interactionRegion: string | null;
-            };
+            const request = args.request as MotionImportCommitRequest;
             motions = {
               ...motions,
               entries: [
@@ -712,9 +706,13 @@ export async function installTauriMocks(
                   nameZh: request.name,
                   description: request.description,
                   descriptionZh: request.description,
-                  category: request.category,
-                  playbackMode: request.playbackMode,
+                  family: "unknown",
+                  loopMode: request.loopMode,
                   rootMode: request.rootMode,
+                  slot: "action",
+                  channelMask: ["full_body"],
+                  transitionProfileId: "unknown.conservative",
+                  fallbackMotionId: motionEntry.id,
                   sourceProject: "User",
                 },
               ],

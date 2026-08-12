@@ -1,0 +1,85 @@
+{
+  "schemaVersion": 1,
+  "sources": [
+    {
+      "id": "clawatar-e7c40f1",
+      "name": "Clawatar",
+      "kind": "repository",
+      "version": "e7c40f1a7b4526c854d5219fbd18225f9504e10f",
+      "canonicalUrl": "https://github.com/Dongping-Chen/Clawatar",
+      "license": "repository license and per-asset notices",
+      "classification": "motion assets and dynamic transition reference",
+      "implementationStatus": "implemented: pinned VRMA assets; adapted: live-pose transition selection"
+    },
+    {
+      "id": "openmaiwaifu-fb2fbc1",
+      "name": "OpenMaiWaifu",
+      "kind": "repository",
+      "version": "fb2fbc1a1d56c6f63a8d2df367b978b2be7a4580",
+      "canonicalUrl": "https://github.com/buyve/OpenMaiWaifu",
+      "license": "repository license and per-asset notices",
+      "classification": "motion assets and layered-animation reference",
+      "implementationStatus": "implemented: pinned idle/reaction/walk assets; adapted: base/locomotion/speech/action slots"
+    },
+    {
+      "id": "chatvrm-b542aa0",
+      "name": "ChatVRM",
+      "kind": "repository",
+      "version": "b542aa00e19dccf9fc48ba340cf7eee011d2329a",
+      "canonicalUrl": "https://github.com/pixiv/ChatVRM",
+      "license": "MIT",
+      "classification": "VRM animation playback comparison",
+      "implementationStatus": "reference only: direct action.play behavior was evaluated and not adopted"
+    },
+    {
+      "id": "vrm-desktop-9d0c7a3",
+      "name": "vrm-desktop",
+      "kind": "repository",
+      "version": "9d0c7a393cdb5268019ec7c86c684eabef5fd024",
+      "canonicalUrl": "https://github.com/blck-snwmn/vrm-desktop",
+      "license": "repository license",
+      "classification": "crossfade comparison",
+      "implementationStatus": "reference only: fixed 0.5s crossfade was evaluated and not adopted"
+    },
+    {
+      "id": "three-0.185.1",
+      "name": "Three.js",
+      "kind": "dependency",
+      "version": "0.185.1",
+      "canonicalUrl": "https://github.com/mrdoob/three.js/releases/tag/r185",
+      "license": "MIT",
+      "classification": "rendering and quaternion math dependency",
+      "implementationStatus": "implemented"
+    },
+    {
+      "id": "three-vrm-3.5.5",
+      "name": "three-vrm",
+      "kind": "dependency",
+      "version": "3.5.5",
+      "canonicalUrl": "https://github.com/pixiv/three-vrm/releases/tag/v3.5.5",
+      "license": "MIT",
+      "classification": "VRM and VRMA runtime dependency",
+      "implementationStatus": "implemented"
+    },
+    {
+      "id": "vrma-1.0",
+      "name": "VRM Animation 1.0",
+      "kind": "specification",
+      "version": "1.0",
+      "canonicalUrl": "https://github.com/vrm-c/vrm-specification/tree/master/specification/VRMC_vrm_animation-1.0",
+      "license": "CC0-1.0",
+      "classification": "animation asset format",
+      "implementationStatus": "implemented"
+    },
+    {
+      "id": "unreal-engine-5.8-animation",
+      "name": "Unreal Engine animation concepts",
+      "kind": "documentation",
+      "version": "5.8",
+      "canonicalUrl": "https://dev.epicgames.com/documentation/en-us/unreal-engine/inertialization-in-unreal-engine",
+      "license": "documentation terms",
+      "classification": "inertialization, sync groups, pose search reference",
+      "implementationStatus": "adapted: dead blending and sync metadata; not adopted: full Motion Matching"
+    }
+  ]
+}

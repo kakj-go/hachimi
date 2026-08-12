@@ -19,6 +19,26 @@ const EXPRESSION_LAYER_ORDER: readonly ExpressionLayer[] = [
 ];
 const EMOTIONS = new Set(["happy", "relaxed", "sad", "angry", "surprised"]);
 
+export const CURSOR_GAZE_PROFILE = {
+  yawDegrees: 32,
+  pitchDegrees: 20,
+  yawDeadZone: 0.04,
+  pitchDeadZone: 0.04,
+  attentionMs: 425,
+  targetPitchMinDegrees: -18,
+  eyeYawDegrees: 28,
+  eyePitchMinDegrees: -14,
+  eyePitchMaxDegrees: 18,
+  headYawShare: 0.75,
+  headPitchShare: 0.65,
+  headFollowDelayMs: 40,
+  headDamping: 10,
+  chestThresholdDegrees: 14,
+  chestYawShare: 0.25,
+  chestFollowDelayMs: 120,
+  chestDamping: 4.5,
+} as const;
+
 /**
  * Frame-local four-layer expression stack. VRM's ExpressionManager applies each expression's
  * overrideBlink/overrideLookAt/overrideMouth metadata after these semantic weights are resolved.
@@ -106,8 +126,16 @@ export class FaceGazeRuntime {
       this.secondBlinkAt = -1;
     }
     if (attention) {
-      this.targetYaw = MathUtils.clamp(attention.yaw, -28, 28);
-      this.targetPitch = MathUtils.clamp(attention.pitch, -14, 18);
+      this.targetYaw = MathUtils.clamp(
+        attention.yaw,
+        -CURSOR_GAZE_PROFILE.yawDegrees,
+        CURSOR_GAZE_PROFILE.yawDegrees,
+      );
+      this.targetPitch = MathUtils.clamp(
+        attention.pitch,
+        CURSOR_GAZE_PROFILE.targetPitchMinDegrees,
+        CURSOR_GAZE_PROFILE.pitchDegrees,
+      );
     } else if (
       nowMs >= this.attentionUntil &&
       this.random() <
@@ -130,16 +158,49 @@ export class FaceGazeRuntime {
         10,
       );
     }
-    this.eyeYaw = damp(this.eyeYaw, this.targetYaw, 18, deltaSeconds);
-    this.eyePitch = damp(this.eyePitch, this.targetPitch, 18, deltaSeconds);
-    const headYawTarget = nowMs >= this.headFollowAfter ? this.targetYaw * 0.55 : this.headYaw;
+    const eyeYawTarget = MathUtils.clamp(
+      this.targetYaw,
+      -CURSOR_GAZE_PROFILE.eyeYawDegrees,
+      CURSOR_GAZE_PROFILE.eyeYawDegrees,
+    );
+    const eyePitchTarget = MathUtils.clamp(
+      this.targetPitch,
+      CURSOR_GAZE_PROFILE.eyePitchMinDegrees,
+      CURSOR_GAZE_PROFILE.eyePitchMaxDegrees,
+    );
+    this.eyeYaw = damp(this.eyeYaw, eyeYawTarget, 18, deltaSeconds);
+    this.eyePitch = damp(this.eyePitch, eyePitchTarget, 18, deltaSeconds);
+    const headYawTarget =
+      nowMs >= this.headFollowAfter
+        ? this.targetYaw * CURSOR_GAZE_PROFILE.headYawShare
+        : this.headYaw;
     const headPitchTarget =
-      nowMs >= this.headFollowAfter ? this.targetPitch * 0.45 : this.headPitch;
-    this.headYaw = damp(this.headYaw, headYawTarget, 6.5, deltaSeconds);
-    this.headPitch = damp(this.headPitch, headPitchTarget, 6, deltaSeconds);
+      nowMs >= this.headFollowAfter
+        ? this.targetPitch * CURSOR_GAZE_PROFILE.headPitchShare
+        : this.headPitch;
+    this.headYaw = damp(
+      this.headYaw,
+      headYawTarget,
+      CURSOR_GAZE_PROFILE.headDamping,
+      deltaSeconds,
+    );
+    this.headPitch = damp(
+      this.headPitch,
+      headPitchTarget,
+      CURSOR_GAZE_PROFILE.headDamping,
+      deltaSeconds,
+    );
     const chestTarget =
-      nowMs >= this.chestFollowAfter && Math.abs(this.targetYaw) > 18 ? this.targetYaw * 0.18 : 0;
-    this.chestYaw = damp(this.chestYaw, chestTarget, 2.8, deltaSeconds);
+      nowMs >= this.chestFollowAfter &&
+      Math.abs(this.targetYaw) > CURSOR_GAZE_PROFILE.chestThresholdDegrees
+        ? this.targetYaw * CURSOR_GAZE_PROFILE.chestYawShare
+        : 0;
+    this.chestYaw = damp(
+      this.chestYaw,
+      chestTarget,
+      CURSOR_GAZE_PROFILE.chestDamping,
+      deltaSeconds,
+    );
     const blinkElapsed = nowMs - this.blinkStartedAt;
     const blink =
       blinkElapsed >= 0 && blinkElapsed <= 170 ? Math.sin((blinkElapsed / 170) * Math.PI) : 0;
@@ -157,23 +218,42 @@ export class FaceGazeRuntime {
     const rapidShift =
       Math.abs(yaw - this.targetYaw) > 18 || Math.abs(pitch - this.targetPitch) > 10;
     const acquiringTarget = nowMs >= this.attentionUntil;
-    this.targetYaw = MathUtils.clamp(yaw, -28, 28);
-    this.targetPitch = MathUtils.clamp(pitch, -14, 18);
+    this.targetYaw = MathUtils.clamp(
+      yaw,
+      -CURSOR_GAZE_PROFILE.yawDegrees,
+      CURSOR_GAZE_PROFILE.yawDegrees,
+    );
+    this.targetPitch = MathUtils.clamp(
+      pitch,
+      CURSOR_GAZE_PROFILE.targetPitchMinDegrees,
+      CURSOR_GAZE_PROFILE.pitchDegrees,
+    );
     this.attentionUntil = nowMs + Math.max(durationMs, 0);
     if (rapidShift || acquiringTarget) {
-      this.headFollowAfter = nowMs + 80;
-      this.chestFollowAfter = nowMs + 160;
+      this.headFollowAfter = nowMs + CURSOR_GAZE_PROFILE.headFollowDelayMs;
+      this.chestFollowAfter = nowMs + CURSOR_GAZE_PROFILE.chestFollowDelayMs;
     }
     if (rapidShift)
       this.nextBlinkAt = Math.min(this.nextBlinkAt || Number.POSITIVE_INFINITY, nowMs + 90);
+  }
+
+  attendCursor(rawYaw: number, rawPitch: number, nowMs: number): void {
+    const yaw = Math.abs(rawYaw) < CURSOR_GAZE_PROFILE.yawDeadZone ? 0 : rawYaw;
+    const pitch = Math.abs(rawPitch) < CURSOR_GAZE_PROFILE.pitchDeadZone ? 0 : rawPitch;
+    this.attend(
+      yaw * CURSOR_GAZE_PROFILE.yawDegrees,
+      pitch * CURSOR_GAZE_PROFILE.pitchDegrees,
+      nowMs,
+      CURSOR_GAZE_PROFILE.attentionMs,
+    );
   }
 
   releaseAttention(nowMs: number): void {
     this.targetYaw = 0;
     this.targetPitch = 0;
     this.attentionUntil = nowMs + 700;
-    this.headFollowAfter = nowMs + 80;
-    this.chestFollowAfter = nowMs + 160;
+    this.headFollowAfter = nowMs + CURSOR_GAZE_PROFILE.headFollowDelayMs;
+    this.chestFollowAfter = nowMs + CURSOR_GAZE_PROFILE.chestFollowDelayMs;
   }
 
   setContext(context: {

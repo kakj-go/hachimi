@@ -1,19 +1,21 @@
 import type {
   InteractionRegion,
   MotionCatalogEntry,
-  MotionCategory,
-  MotionPlaybackMode,
+  MotionFamily,
+  MotionLoopMode,
   MotionRootMode,
 } from "@hachimi/contracts";
 import type { AppLocale } from "@hachimi/i18n";
 
-export const MOTION_CATEGORIES: readonly MotionCategory[] = [
+export const MOTION_FAMILIES: readonly MotionFamily[] = [
   "idle",
   "reaction",
   "gesture",
   "speech",
   "locomotion",
   "performance",
+  "recovery",
+  "unknown",
 ];
 
 export const INTERACTION_REGIONS: readonly InteractionRegion[] = [
@@ -32,16 +34,18 @@ export const INTERACTION_REGIONS: readonly InteractionRegion[] = [
   "generic",
 ];
 
-const categoryLabels: Record<MotionCategory, readonly [string, string]> = {
+const familyLabels: Record<MotionFamily, readonly [string, string]> = {
   idle: ["待机", "Idle"],
   reaction: ["互动反应", "Reaction"],
   gesture: ["手势", "Gesture"],
   speech: ["说话动作", "Speaking"],
   locomotion: ["移动", "Locomotion"],
   performance: ["表演", "Performance"],
+  recovery: ["恢复", "Recovery"],
+  unknown: ["待分析", "Unclassified"],
 };
 
-const playbackLabels: Record<MotionPlaybackMode, readonly [string, string]> = {
+const loopLabels: Record<MotionLoopMode, readonly [string, string]> = {
   once: ["单次", "Once"],
   loop: ["循环", "Loop"],
   hold: ["保持", "Hold"],
@@ -81,12 +85,12 @@ export function motionDescription(entry: MotionCatalogEntry, locale: AppLocale):
   return locale === "zh-CN" ? entry.descriptionZh?.trim() || entry.description : entry.description;
 }
 
-export function motionCategoryLabel(value: MotionCategory, locale: AppLocale): string {
-  return localized(categoryLabels[value], locale);
+export function motionFamilyLabel(value: MotionFamily, locale: AppLocale): string {
+  return localized(familyLabels[value], locale);
 }
 
-export function motionPlaybackLabel(value: MotionPlaybackMode, locale: AppLocale): string {
-  return localized(playbackLabels[value], locale);
+export function motionLoopLabel(value: MotionLoopMode, locale: AppLocale): string {
+  return localized(loopLabels[value], locale);
 }
 
 export function motionRootLabel(value: MotionRootMode, locale: AppLocale): string {

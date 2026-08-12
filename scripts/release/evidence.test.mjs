@@ -349,7 +349,8 @@ test("candidate verifier hashes downloaded files instead of trusting the manifes
   mkdirSync(join(root, "docs", "references", "forge"), { recursive: true });
   mkdirSync(join(root, "docs", "references", "enterprise"), { recursive: true });
   mkdirSync(join(root, "docs", "references", "channels"), { recursive: true });
-  for (const area of ["openai", "forge", "enterprise", "channels"]) {
+  mkdirSync(join(root, "docs", "references", "avatar-motion"), { recursive: true });
+  for (const area of ["openai", "forge", "enterprise", "channels", "avatar-motion"]) {
     writeFileSync(join(root, "docs", "references", area, "registry.json"), `{"area":"${area}"}`);
   }
   writeFileSync(join(root, "LICENSE"), "license");
@@ -368,8 +369,8 @@ test("candidate verifier hashes downloaded files instead of trusting the manifes
       sha256: sha256Bytes(readFileSync(path)),
     })),
     sourceRegistrySha256: Object.fromEntries(
-      ["openai", "forge", "enterprise", "channels"].map((area) => [
-        area,
+      ["openai", "forge", "enterprise", "channels", "avatar-motion"].map((area) => [
+        area === "avatar-motion" ? "avatarMotion" : area,
         sha256Bytes(readFileSync(join(root, "docs", "references", area, "registry.json"))),
       ]),
     ),
