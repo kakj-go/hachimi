@@ -27,11 +27,11 @@ Windows 安装包目前未进行代码签名，安装时系统可能显示安全
   <img src="docs/images/模型.png" width="420" alt="Hachimi 3D 桌宠与模型" />
 </p>
 
-### 定时任务
+### 外观设置
 
-任务中心支持一次性、周期、Cron 和事件触发任务，并显示权限、运行状态、历史记录和需要处理的任务。
+目前内置 5 种不同二次元 ui 风格
 
-![Hachimi 任务中心](docs/images/任务.png)
+![Hachimi 外观](docs/images/外观.png)
 
 ### 权限与设置
 
