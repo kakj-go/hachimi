@@ -5,11 +5,11 @@ import {
   type AppSettings,
   type BootstrapState,
   type Locale,
-  type ThemeMode as ContractThemeMode,
 } from "@hachimi/contracts";
 import { I18nProvider, useI18n, type AppLocale } from "@hachimi/i18n";
 import {
   Badge,
+  BUILTIN_THEMES,
   NativeSelect,
   SettingsRow,
   SettingsSection,
@@ -18,9 +18,8 @@ import {
   AppearanceProvider,
   useTheme,
   type TabDefinition,
-  type ThemeMode,
 } from "@hachimi/ui";
-import { Show, createMemo, createSignal, onCleanup, onMount } from "solid-js";
+import { For, Show, createMemo, createSignal, onCleanup, onMount } from "solid-js";
 import "./settings.css";
 
 type SettingsTab = "general" | "llm" | "avatar" | "voice";
@@ -38,6 +37,7 @@ function Placeholder(props: { text: string; phase: string }) {
 
 function SettingsContent(props: {
   settings: AppSettings;
+  onThemeChange: (themeId: string) => void;
   onAlwaysOnTopChange: (enabled: boolean) => Promise<void>;
 }) {
   const i18n = useI18n();
@@ -55,12 +55,15 @@ function SettingsContent(props: {
               <NativeSelect
                 label={i18n.t("settings.theme")}
                 aria-label={i18n.t("settings.theme")}
-                value={theme.mode()}
-                onChange={(event) => theme.setMode(event.currentTarget.value as ThemeMode)}
+                value={theme.profile().id}
+                onChange={(event) => {
+                  theme.setTheme(event.currentTarget.value);
+                  props.onThemeChange(event.currentTarget.value);
+                }}
               >
-                <option value="system">{i18n.t("settings.theme.system")}</option>
-                <option value="light">{i18n.t("settings.theme.light")}</option>
-                <option value="dark">{i18n.t("settings.theme.dark")}</option>
+                <For each={[...BUILTIN_THEMES]}>
+                  {(profile) => <option value={profile.id}>{profile.name}</option>}
+                </For>
               </NativeSelect>
             </SettingsRow>
             <SettingsRow label={i18n.t("settings.language")}>
@@ -170,17 +173,22 @@ function LoadedSettings(props: {
 
   return (
     <AppearanceProvider
-      initialMode={props.bootstrap.theme as ThemeMode}
       initialAppearance={props.bootstrap.appearance}
-      mode={settings().theme as ThemeMode}
       appearance={settings().appearance}
-      onModeChange={(theme) => void persist({ theme: theme as ContractThemeMode })}
     >
       <I18nProvider
         initialLocale={props.bootstrap.locale as AppLocale}
         onLocaleChange={(locale) => void persist({ locale: locale as Locale })}
       >
-        <SettingsContent settings={settings()} onAlwaysOnTopChange={changeAlwaysOnTop} />
+        <SettingsContent
+          settings={settings()}
+          onThemeChange={(themeId) =>
+            void persist({
+              appearance: { ...settings().appearance, activeThemeId: themeId },
+            })
+          }
+          onAlwaysOnTopChange={changeAlwaysOnTop}
+        />
       </I18nProvider>
     </AppearanceProvider>
   );

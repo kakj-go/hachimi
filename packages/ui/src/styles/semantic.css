@@ -15,7 +15,7 @@
     --color-bg-qr: #ffffff;
     --color-text-base: var(--appearance-foreground, #202126);
     --color-text-muted: var(--appearance-muted, #67686d);
-    --color-text-faint: color-mix(in srgb, var(--color-text-base) 64%, var(--color-bg-base));
+    --color-text-faint: color-mix(in srgb, var(--color-text-base) 75%, var(--color-bg-base));
     --color-text-inverse: var(--appearance-accent-foreground, #ffffff);
     --color-border-muted: var(
       --appearance-border-muted,
@@ -48,7 +48,7 @@
     --color-bg-accent: var(--appearance-accent, #2ea8ff);
     --color-text-base: var(--appearance-foreground, #f1f1f3);
     --color-text-muted: var(--appearance-muted, #aaa8af);
-    --color-text-faint: color-mix(in srgb, var(--color-text-base) 52%, var(--color-bg-base));
+    --color-text-faint: color-mix(in srgb, var(--color-text-base) 56%, var(--color-bg-base));
     --color-text-inverse: var(--appearance-accent-foreground, #000000);
     --color-border-muted: var(
       --appearance-border-muted,

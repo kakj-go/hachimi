@@ -28,11 +28,11 @@ export type AgentWorkspaceOwner = { kind: "session"; session_id: SessionId } | {
 
 export type AgentWorkspaceStatus = "ready" | "unavailable";
 
-export type AppSettings = { schemaVersion: number, theme: ThemeMode, locale: Locale, alwaysOnTop: boolean, petPlacement: WindowPlacementV1 | null, llm: LlmSettings, voice: VoiceSettings, appearance: AppearanceConfig, /** Enables developer-only Workbench surfaces after restart without changing schema 7. */ developerMode?: boolean, };
+export type AppSettings = { schemaVersion: number, locale: Locale, alwaysOnTop: boolean, petPlacement: WindowPlacementV1 | null, llm: LlmSettings, voice: VoiceSettings, appearance: AppearanceConfig, /** Enables developer-only Workbench surfaces after restart without changing schema 7. */ developerMode?: boolean, };
 
-export type AppearanceConfig = { lightThemeId: string, darkThemeId: string, themes: ThemeProfile[], preferences: AppearancePreferences, };
+export type AppearanceConfig = { activeThemeId: string, preferences: AppearancePreferences, };
 
-export type AppearancePreferences = { pointerCursor: boolean, reducedMotion: ReducedMotion, uiFontSize: number, codeFontSize: number, diffMarkers: DiffMarkerMode, density: UiDensity, };
+export type AppearancePreferences = { pointerCursor: boolean, reducedMotion: ReducedMotion, uiFontSize: number, codeFontSize: number, diffMarkers: DiffMarkerMode, density: UiDensity, uiFont: string, codeFont: string, translucentSidebar: boolean, contrast: number, };
 
 export type ApprovalDecisionRequest = { approvalId: ApprovalId, decision: ApprovalStatus, expectedRunId: RunId, expectedGeneration: number, };
 
@@ -106,7 +106,7 @@ export type BehaviorChannel = "root" | "locomotion" | "full_body" | "lower_body"
 
 export type BehaviorMode = "default" | "plan";
 
-export type BootstrapState = { protocolVersion: number, windowKind: WindowKind, locale: Locale, theme: ThemeMode, appearance: AppearanceConfig, alwaysOnTop: boolean, featureFlags: FeatureFlags, };
+export type BootstrapState = { protocolVersion: number, windowKind: WindowKind, locale: Locale, appearance: AppearanceConfig, alwaysOnTop: boolean, featureFlags: FeatureFlags, };
 
 export type BrowserAction = { kind: "navigate"; url: string } | { kind: "back" } | { kind: "forward" } | { kind: "reload"; ignore_cache?: boolean } | { kind: "stop" } | { kind: "click"; selector: string } | { kind: "hover"; selector: string } | { kind: "double_click"; selector: string } | { kind: "scroll"; selector: string | null; delta_x: number; delta_y: number } | { kind: "drag_drop"; source_selector: string; target_selector: string } | { kind: "clear"; selector: string } | { kind: "fill"; selector: string; text: string } | { kind: "select_option"; selector: string; value: string } | { kind: "press_keys"; keys: string[] } | { kind: "wait_for"; selector: string | null; state: BrowserWaitState; timeout_ms: number } | { kind: "tab_list" } | { kind: "tab_new"; url: string | null } | { kind: "tab_switch"; tab_id: string } | { kind: "tab_close"; tab_id: string } | { kind: "type_text"; selector: string; text: string } | { kind: "upload"; selector: string; file_token: string } | { kind: "download"; selector: string; allow_unknown_type?: boolean } | { kind: "read_storage" } | { kind: "write_storage"; entries: unknown } | { kind: "cdp"; method: string; params: unknown };
 
@@ -1262,11 +1262,7 @@ export type TaskRunStatus = "queued" | "preparing" | "running" | "needs_attentio
 
 export type TaskRunTrigger = "scheduled" | "manual" | "retry" | "catch_up" | "event";
 
-export type ThemeMode = "light" | "dark" | "system";
-
-export type ThemeProfile = { id: string, name: string, scheme: ThemeScheme, builtin: boolean, accent: string, background: string, foreground: string, uiFont: string, codeFont: string, translucentSidebar: boolean, contrast: number, };
-
-export type ThemeProfileDocument = { format: string, version: number, profile: ThemeProfile, };
+export type ThemeProfile = { id: string, name: string, scheme: ThemeScheme, accent: string, background: string, foreground: string, };
 
 export type ThemeScheme = "light" | "dark";
 

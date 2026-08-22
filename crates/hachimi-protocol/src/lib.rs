@@ -19,27 +19,13 @@ pub use transport::*;
 pub use voice::*;
 pub use workspace::*;
 
-use std::collections::BTreeSet;
-
 use hachimi_core::{FeatureFlags, RuntimeFeatureSet, WindowKind};
 use serde::{Deserialize, Serialize};
 use specta::Type;
 
 pub const CONTROL_PROTOCOL_VERSION: u32 = 31;
 pub const PLUGIN_UI_BRIDGE_PROTOCOL_VERSION: u32 = 1;
-pub const SETTINGS_SCHEMA_VERSION: u32 = 8;
-pub const THEME_PROFILE_FORMAT: &str = "hachimi-theme";
-pub const THEME_PROFILE_FORMAT_VERSION: u32 = 1;
-pub const MAX_THEME_PROFILES: usize = 32;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type, Default)]
-#[serde(rename_all = "snake_case")]
-pub enum ThemeMode {
-    Light,
-    Dark,
-    #[default]
-    System,
-}
+pub const SETTINGS_SCHEMA_VERSION: u32 = 9;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type)]
 #[serde(rename_all = "snake_case")]
@@ -80,18 +66,12 @@ pub struct ThemeProfile {
     pub id: String,
     pub name: String,
     pub scheme: ThemeScheme,
-    pub builtin: bool,
     pub accent: String,
     pub background: String,
     pub foreground: String,
-    pub ui_font: String,
-    pub code_font: String,
-    pub translucent_sidebar: bool,
-    pub contrast: u8,
 }
 
 impl ThemeProfile {
-    #[allow(clippy::too_many_arguments)]
     fn builtin(
         id: &str,
         name: &str,
@@ -99,217 +79,25 @@ impl ThemeProfile {
         accent: &str,
         background: &str,
         foreground: &str,
-        translucent_sidebar: bool,
-        contrast: u8,
     ) -> Self {
         Self {
             id: id.into(),
             name: name.into(),
             scheme,
-            builtin: true,
             accent: accent.into(),
             background: background.into(),
             foreground: foreground.into(),
-            ui_font: "Inter, \"Noto Sans SC\", \"Segoe UI\", system-ui, sans-serif".into(),
-            code_font: "\"JetBrains Mono\", \"Cascadia Code\", monospace".into(),
-            translucent_sidebar,
-            contrast,
         }
-    }
-
-    #[must_use]
-    pub fn codex_light() -> Self {
-        Self::builtin(
-            "codex-light",
-            "Quiet Graphite Light",
-            ThemeScheme::Light,
-            "#4358C5",
-            "#F8F7F3",
-            "#24272D",
-            true,
-            54,
-        )
-    }
-
-    #[must_use]
-    pub fn codex_dark() -> Self {
-        Self::builtin(
-            "codex-dark",
-            "Quiet Graphite",
-            ThemeScheme::Dark,
-            "#7062D5",
-            "#111316",
-            "#F1F3F5",
-            true,
-            60,
-        )
     }
 
     #[must_use]
     pub fn builtin_profiles() -> Vec<Self> {
         vec![
-            Self::codex_light(),
-            Self::codex_dark(),
-            Self::builtin(
-                "catppuccin-light",
-                "Catppuccin Latte",
-                ThemeScheme::Light,
-                "#8839EF",
-                "#EFF1F5",
-                "#4C4F69",
-                true,
-                52,
-            ),
-            Self::builtin(
-                "catppuccin-dark",
-                "Catppuccin Mocha",
-                ThemeScheme::Dark,
-                "#CBA6F7",
-                "#1E1E2E",
-                "#CDD6F4",
-                true,
-                62,
-            ),
-            Self::builtin(
-                "github-light",
-                "GitHub Light",
-                ThemeScheme::Light,
-                "#0969DA",
-                "#FFFFFF",
-                "#1F2328",
-                false,
-                55,
-            ),
-            Self::builtin(
-                "github-dark",
-                "GitHub Dark",
-                ThemeScheme::Dark,
-                "#2F81F7",
-                "#0D1117",
-                "#E6EDF3",
-                false,
-                64,
-            ),
-            Self::builtin(
-                "gruvbox-light",
-                "Gruvbox Light",
-                ThemeScheme::Light,
-                "#D65D0E",
-                "#FBF1C7",
-                "#3C3836",
-                true,
-                58,
-            ),
-            Self::builtin(
-                "gruvbox-dark",
-                "Gruvbox Dark",
-                ThemeScheme::Dark,
-                "#FABD2F",
-                "#282828",
-                "#EBDBB2",
-                true,
-                62,
-            ),
-            Self::builtin(
-                "everforest-light",
-                "Everforest Light",
-                ThemeScheme::Light,
-                "#8DA101",
-                "#FDF6E3",
-                "#5C6A72",
-                true,
-                52,
-            ),
-            Self::builtin(
-                "everforest-dark",
-                "Everforest Dark",
-                ThemeScheme::Dark,
-                "#A7C080",
-                "#2D353B",
-                "#D3C6AA",
-                true,
-                58,
-            ),
-            Self::builtin(
-                "linear-light",
-                "Linear Light",
-                ThemeScheme::Light,
-                "#5E6AD2",
-                "#F7F8FA",
-                "#1F232B",
-                true,
-                60,
-            ),
-            Self::builtin(
-                "linear-dark",
-                "Linear Dark",
-                ThemeScheme::Dark,
-                "#7C85F6",
-                "#111318",
-                "#F3F4F6",
-                true,
-                68,
-            ),
-            Self::builtin(
-                "notion-light",
-                "Notion Light",
-                ThemeScheme::Light,
-                "#37352F",
-                "#FFFFFF",
-                "#37352F",
-                false,
-                48,
-            ),
-            Self::builtin(
-                "notion-dark",
-                "Notion Dark",
-                ThemeScheme::Dark,
-                "#D3D1CB",
-                "#191919",
-                "#EDECE9",
-                false,
-                52,
-            ),
-            Self::builtin(
-                "one-light",
-                "One Light",
-                ThemeScheme::Light,
-                "#4078F2",
-                "#FAFAFA",
-                "#383A42",
-                true,
-                56,
-            ),
-            Self::builtin(
-                "one-dark",
-                "One Dark",
-                ThemeScheme::Dark,
-                "#61AFEF",
-                "#282C34",
-                "#ABB2BF",
-                true,
-                60,
-            ),
-            Self::builtin(
-                "absolutely-light",
-                "Absolutely Light",
-                ThemeScheme::Light,
-                "#D2694B",
-                "#FFF9F5",
-                "#382F2A",
-                true,
-                54,
-            ),
-            Self::builtin(
-                "absolutely-dark",
-                "Absolutely Dark",
-                ThemeScheme::Dark,
-                "#FF9E64",
-                "#1A1718",
-                "#F4EDEB",
-                true,
-                66,
-            ),
+            Self::builtin("px", "像素物语", ThemeScheme::Dark, "#FF6BA0", "#171030", "#F4EFFF"),
+            Self::builtin("crm", "奶油手帐", ThemeScheme::Light, "#FF8FAB", "#FDF3EA", "#5C4A44"),
+            Self::builtin("nya", "黑猫夜行", ThemeScheme::Dark, "#FFB64D", "#161110", "#F7EAD9"),
+            Self::builtin("tora", "橘猫咖啡", ThemeScheme::Light, "#FF8C2E", "#FFF4E6", "#5B3D24"),
+            Self::builtin("maho", "魔法星辰", ThemeScheme::Light, "#FF7AD9", "#F2EAFB", "#5A4666"),
         ]
     }
 
@@ -343,15 +131,6 @@ impl ThemeProfile {
                 return Err(format!("{label} must be a #RRGGBB color"));
             }
         }
-        if self.ui_font.trim().is_empty() || self.ui_font.chars().count() > 256 {
-            return Err("UI font stack must contain 1-256 characters".into());
-        }
-        if self.code_font.trim().is_empty() || self.code_font.chars().count() > 256 {
-            return Err("code font stack must contain 1-256 characters".into());
-        }
-        if self.contrast > 100 {
-            return Err("theme contrast must be between 0 and 100".into());
-        }
         Ok(())
     }
 }
@@ -373,6 +152,10 @@ pub struct AppearancePreferences {
     pub diff_markers: DiffMarkerMode,
     #[serde(default)]
     pub density: UiDensity,
+    pub ui_font: String,
+    pub code_font: String,
+    pub translucent_sidebar: bool,
+    pub contrast: u8,
 }
 
 impl Default for AppearancePreferences {
@@ -384,6 +167,10 @@ impl Default for AppearancePreferences {
             code_font_size: 12,
             diff_markers: DiffMarkerMode::Color,
             density: UiDensity::Default,
+            ui_font: "Inter, \"Noto Sans SC\", \"Segoe UI\", system-ui, sans-serif".into(),
+            code_font: "\"JetBrains Mono\", \"Cascadia Code\", monospace".into(),
+            translucent_sidebar: true,
+            contrast: 60,
         }
     }
 }
@@ -396,6 +183,15 @@ impl AppearancePreferences {
         if !(10..=20).contains(&self.code_font_size) {
             return Err("code font size must be between 10 and 20".into());
         }
+        if self.ui_font.trim().is_empty() || self.ui_font.chars().count() > 256 {
+            return Err("UI font stack must contain 1-256 characters".into());
+        }
+        if self.code_font.trim().is_empty() || self.code_font.chars().count() > 256 {
+            return Err("code font stack must contain 1-256 characters".into());
+        }
+        if self.contrast > 100 {
+            return Err("theme contrast must be between 0 and 100".into());
+        }
         Ok(())
     }
 }
@@ -403,147 +199,33 @@ impl AppearancePreferences {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct AppearanceConfig {
-    pub light_theme_id: String,
-    pub dark_theme_id: String,
-    pub themes: Vec<ThemeProfile>,
+    pub active_theme_id: String,
     pub preferences: AppearancePreferences,
 }
 
 impl Default for AppearanceConfig {
     fn default() -> Self {
         Self {
-            light_theme_id: "codex-light".into(),
-            dark_theme_id: "codex-dark".into(),
-            themes: ThemeProfile::builtin_profiles(),
+            active_theme_id: "nya".into(),
             preferences: AppearancePreferences::default(),
         }
     }
 }
 
 impl AppearanceConfig {
-    pub fn merge_missing_builtin_profiles(&mut self) -> bool {
-        let mut changed = false;
-        for profile in &mut self.themes {
-            let replacement = match profile.id.as_str() {
-                "codex-light"
-                    if profile.builtin
-                        && profile.accent.eq_ignore_ascii_case("#1677D2")
-                        && profile.background.eq_ignore_ascii_case("#F5F4F7")
-                        && profile.foreground.eq_ignore_ascii_case("#202126") =>
-                {
-                    Some(ThemeProfile::codex_light())
-                }
-                "codex-dark"
-                    if profile.builtin
-                        && profile.accent.eq_ignore_ascii_case("#2EA8FF")
-                        && profile.background.eq_ignore_ascii_case("#151616")
-                        && profile.foreground.eq_ignore_ascii_case("#F1F1F3") =>
-                {
-                    Some(ThemeProfile::codex_dark())
-                }
-                _ => None,
-            };
-            if let Some(replacement) = replacement {
-                *profile = replacement;
-                changed = true;
-            }
-        }
-        for profile in ThemeProfile::builtin_profiles() {
-            if self.themes.len() >= MAX_THEME_PROFILES {
-                break;
-            }
-            if self.themes.iter().all(|current| current.id != profile.id) {
-                self.themes.push(profile);
-                changed = true;
-            }
-        }
-        changed
-    }
-
     #[must_use]
-    pub fn selected_id(&self, scheme: ThemeScheme) -> &str {
-        match scheme {
-            ThemeScheme::Light => &self.light_theme_id,
-            ThemeScheme::Dark => &self.dark_theme_id,
-        }
-    }
-
-    pub fn set_selected_id(&mut self, scheme: ThemeScheme, id: String) {
-        match scheme {
-            ThemeScheme::Light => self.light_theme_id = id,
-            ThemeScheme::Dark => self.dark_theme_id = id,
-        }
-    }
-
-    #[must_use]
-    pub fn profile(&self, id: &str) -> Option<&ThemeProfile> {
-        self.themes.iter().find(|profile| profile.id == id)
+    pub fn active_profile(&self) -> Option<ThemeProfile> {
+        ThemeProfile::builtin_by_id(&self.active_theme_id)
     }
 
     pub fn validate(&self) -> Result<(), String> {
-        if self.themes.is_empty() || self.themes.len() > MAX_THEME_PROFILES {
+        if self.active_profile().is_none() {
             return Err(format!(
-                "appearance must contain between 1 and {MAX_THEME_PROFILES} themes"
+                "active theme is not a built-in theme: {}",
+                self.active_theme_id
             ));
         }
-        let mut ids = BTreeSet::new();
-        for profile in &self.themes {
-            profile.validate()?;
-            if !ids.insert(profile.id.as_str()) {
-                return Err(format!("duplicate theme id: {}", profile.id));
-            }
-        }
-        for (id, scheme) in [
-            ("codex-light", ThemeScheme::Light),
-            ("codex-dark", ThemeScheme::Dark),
-        ] {
-            let Some(profile) = self.profile(id) else {
-                return Err(format!("missing built-in theme: {id}"));
-            };
-            if !profile.builtin || profile.scheme != scheme {
-                return Err(format!("invalid built-in theme identity: {id}"));
-            }
-        }
-        for (scheme, selected_id) in [
-            (ThemeScheme::Light, self.light_theme_id.as_str()),
-            (ThemeScheme::Dark, self.dark_theme_id.as_str()),
-        ] {
-            let Some(profile) = self.profile(selected_id) else {
-                return Err(format!("selected theme does not exist: {selected_id}"));
-            };
-            if profile.scheme != scheme {
-                return Err(format!(
-                    "selected theme has the wrong color scheme: {selected_id}"
-                ));
-            }
-        }
         self.preferences.validate()
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
-#[serde(rename_all = "camelCase")]
-pub struct ThemeProfileDocument {
-    pub format: String,
-    pub version: u32,
-    pub profile: ThemeProfile,
-}
-
-impl ThemeProfileDocument {
-    #[must_use]
-    pub fn new(profile: ThemeProfile) -> Self {
-        Self {
-            format: THEME_PROFILE_FORMAT.into(),
-            version: THEME_PROFILE_FORMAT_VERSION,
-            profile,
-        }
-    }
-
-    pub fn validate(&self) -> Result<(), String> {
-        if self.format != THEME_PROFILE_FORMAT || self.version != THEME_PROFILE_FORMAT_VERSION {
-            return Err("unsupported Hachimi theme format".into());
-        }
-        self.profile.validate()
     }
 }
 
@@ -1233,7 +915,6 @@ pub struct WindowPlacementV1 {
 #[serde(rename_all = "camelCase")]
 pub struct AppSettings {
     pub schema_version: u32,
-    pub theme: ThemeMode,
     pub locale: Locale,
     pub always_on_top: bool,
     pub pet_placement: Option<WindowPlacementV1>,
@@ -1249,7 +930,6 @@ impl Default for AppSettings {
     fn default() -> Self {
         Self {
             schema_version: SETTINGS_SCHEMA_VERSION,
-            theme: ThemeMode::System,
             locale: Locale::ZhCn,
             always_on_top: true,
             pet_placement: None,
@@ -1267,7 +947,6 @@ pub struct BootstrapState {
     pub protocol_version: u32,
     pub window_kind: WindowKind,
     pub locale: Locale,
-    pub theme: ThemeMode,
     pub appearance: AppearanceConfig,
     pub always_on_top: bool,
     pub feature_flags: FeatureFlags,
@@ -1838,7 +1517,6 @@ pub fn registered_types() -> specta::Types {
         .register::<PlanSkipRequest>()
         .register::<WorkbenchPlanAcceptanceSnapshot>()
         .register::<WorkbenchPlanSkipSnapshot>()
-        .register::<ThemeMode>()
         .register::<ThemeScheme>()
         .register::<ReducedMotion>()
         .register::<DiffMarkerMode>()
@@ -1846,7 +1524,6 @@ pub fn registered_types() -> specta::Types {
         .register::<ThemeProfile>()
         .register::<AppearancePreferences>()
         .register::<AppearanceConfig>()
-        .register::<ThemeProfileDocument>()
         .register::<Locale>()
         .register::<WorkbenchRoute>()
         .register::<LlmSettings>()

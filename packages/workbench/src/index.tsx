@@ -3,7 +3,6 @@ import {
   commandFailure,
   commands,
   type AppSettings,
-  type AppearanceConfig,
   type BootstrapState,
   type DiagnosticsPaths,
   type LlmSettingsInput,
@@ -13,12 +12,6 @@ import {
   type ReasoningSummaryMode,
   type StructuredOutputMode,
   type Locale,
-  type DiffMarkerMode,
-  type ReducedMotion,
-  type ThemeProfile,
-  type ThemeScheme,
-  type ThemeMode as ContractThemeMode,
-  type UiDensity,
   type WorkbenchRoute,
 } from "@hachimi/contracts";
 import { I18nProvider, useI18n, type AppLocale } from "@hachimi/i18n";
@@ -32,19 +25,14 @@ import {
   Bot,
   Box,
   Button,
-  ColorField,
   Copy,
   Dialog,
-  DEFAULT_CODE_FONT,
-  DEFAULT_UI_FONT,
   Dropdown,
   Globe,
   FolderOpen,
   Maximize2,
   Minus,
   Monitor,
-  MoreHorizontal,
-  Moon,
   NumberField,
   PageHeading,
   Palette,
@@ -53,9 +41,7 @@ import {
   Plug,
   Plus,
   Puzzle,
-  RangeField,
   SearchField,
-  SegmentedControl,
   SelectField,
   Sidebar,
   SettingsCard,
@@ -63,28 +49,18 @@ import {
   SettingsRow,
   SettingsSection,
   StatusBanner,
-  Sun,
   Switch as Toggle,
   TextField,
-  ThemeCard,
   TitleBar,
-  Toast,
   Trash2,
-  Upload,
   Volume2,
   X,
-  contrastRatio,
-  isHexColor,
-  selectedTheme,
-  useTheme,
-  type ThemeMode,
 } from "@hachimi/ui";
 import {
   For,
   Match,
   Show,
   Switch,
-  createEffect,
   createMemo,
   createSignal,
   onCleanup,
@@ -107,7 +83,7 @@ import "./host-domain-settings.css";
 import "./host-inspectors.css";
 import "./platform-integrations-settings.css";
 import "./runtime-health.css";
-import { createSerializedAutosave, type AutosaveStatus } from "./appearance-save";
+import { AppearanceSettings } from "./settings-appearance";
 import { HomePage } from "./home";
 import { MotionLabPage } from "./motion-lab";
 import { MotionSettingsPage } from "./motion-settings";
@@ -337,85 +313,6 @@ function WindowChrome(props: {
 }
 
 const settingsRoutes: readonly WorkbenchRoute[] = SETTINGS_ROUTES;
-
-const UI_FONT_OPTIONS = [
-  { value: DEFAULT_UI_FONT, label: "Inter", accent: "#1677D2" },
-  {
-    value: '"Segoe UI", "Microsoft YaHei UI", system-ui, sans-serif',
-    label: "Segoe UI",
-    accent: "#2563EB",
-  },
-  {
-    value: '"Microsoft YaHei UI", "Microsoft YaHei", sans-serif',
-    label: "Microsoft YaHei",
-    accent: "#0891B2",
-  },
-  {
-    value: '"Noto Sans SC", "Microsoft YaHei UI", sans-serif',
-    label: "Noto Sans SC",
-    accent: "#7C3AED",
-  },
-  { value: "Arial, Helvetica, sans-serif", label: "Arial", accent: "#D2694B" },
-] as const;
-
-const CODE_FONT_OPTIONS = [
-  { value: DEFAULT_CODE_FONT, label: "JetBrains Mono", accent: "#7C3AED" },
-  {
-    value: '"Cascadia Code", "Cascadia Mono", Consolas, monospace',
-    label: "Cascadia Code",
-    accent: "#1677D2",
-  },
-  { value: "Consolas, monospace", label: "Consolas", accent: "#0891B2" },
-  {
-    value: '"Fira Code", "Cascadia Code", Consolas, monospace',
-    label: "Fira Code",
-    accent: "#D2694B",
-  },
-  {
-    value: '"Source Code Pro", "Cascadia Code", Consolas, monospace',
-    label: "Source Code Pro",
-    accent: "#8DA101",
-  },
-  {
-    value: '"IBM Plex Mono", "Cascadia Code", Consolas, monospace',
-    label: "IBM Plex Mono",
-    accent: "#5E6AD2",
-  },
-] as const;
-
-function fontSelectOptions(
-  presets: readonly { value: string; label: string; accent: string }[],
-  current: string,
-) {
-  const options = presets.map((preset) => ({
-    value: preset.value,
-    label: preset.label,
-    preview: {
-      accent: preset.accent,
-      background: "#F8F8FA",
-      foreground: "#202126",
-      fontFamily: preset.value,
-    },
-  }));
-  if (options.some((option) => option.value === current)) return options;
-  return [
-    {
-      value: current,
-      label: current,
-      preview: {
-        accent: "#2EA8FF",
-        background: "#F8F8FA",
-        foreground: "#202126",
-        fontFamily: current,
-      },
-    },
-    ...options,
-  ];
-}
-
-function themeProfileLabel(profile: ThemeProfile): string {
-  return profile.builtin ? profile.name.replace(/ (Light|Dark|Latte|Mocha)$/, "") : profile.name;
-}
 
 function SettingsShell(props: {
   route: WorkbenchRoute;
@@ -869,650 +766,6 @@ function DiagnosticsSettings(props: {
   );
 }
 
-function AppearanceSettings(props: {
-  settings: AppSettings;
-  setSettings: (settings: AppSettings) => void;
-  fail: (message: string) => void;
-}) {
-  const i18n = useI18n();
-  const theme = useTheme();
-  const modes = createMemo(() => [
-    {
-      value: "system" as const,
-      label: i18n.t("settings.theme.system"),
-      icon: <Monitor size={17} />,
-    },
-    { value: "light" as const, label: i18n.t("settings.theme.light"), icon: <Sun size={17} /> },
-    { value: "dark" as const, label: i18n.t("settings.theme.dark"), icon: <Moon size={17} /> },
-  ]);
-  const lightPreview = () => selectedTheme(props.settings.appearance, "light");
-  const darkPreview = () => selectedTheme(props.settings.appearance, "dark");
-  const previewStyle = () => ({
-    "--preview-light-background": lightPreview().background,
-    "--preview-light-foreground": lightPreview().foreground,
-    "--preview-light-accent": lightPreview().accent,
-    "--preview-dark-background": darkPreview().background,
-    "--preview-dark-foreground": darkPreview().foreground,
-    "--preview-dark-accent": darkPreview().accent,
-  });
-  const [toast, setToast] = createSignal<{ tone: "success" | "danger"; text: string }>();
-  const [saveStatus, setSaveStatus] = createSignal<AutosaveStatus>("idle");
-  const [pendingThemeAction, setPendingThemeAction] = createSignal<{
-    action: "reset" | "delete";
-    profile: ThemeProfile;
-  }>();
-  let toastTimer: ReturnType<typeof setTimeout> | undefined;
-  const notify = (tone: "success" | "danger", text: string) => {
-    if (toastTimer) clearTimeout(toastTimer);
-    setToast({ tone, text });
-    toastTimer = setTimeout(() => setToast(undefined), 2600);
-  };
-  const autosave = createSerializedAutosave<AppSettings>({
-    initial: untrack(() => props.settings),
-    save: commands.updateSettings,
-    onConfirmed: (value) => props.setSettings(value),
-    onRollback: (confirmed, error) => {
-      props.setSettings(confirmed);
-      theme.setMode(confirmed.theme as ThemeMode);
-      theme.setAppearance(confirmed.appearance);
-      const message = commandFailure(error).message;
-      notify("danger", message);
-      props.fail(message);
-    },
-    onStatusChange: setSaveStatus,
-  });
-  createEffect(() => autosave.accept(props.settings));
-  onCleanup(() => {
-    if (toastTimer) clearTimeout(toastTimer);
-    autosave.dispose();
-  });
-
-  function persist(next: AppSettings, immediate = false) {
-    autosave.schedule(next, immediate);
-    props.setSettings(next);
-    theme.setAppearance(next.appearance);
-  }
-
-  function choose(mode: ThemeMode) {
-    theme.setMode(mode);
-    persist({ ...props.settings, theme: mode as ContractThemeMode }, true);
-  }
-
-  function updateAppearance(
-    transform: (appearance: AppearanceConfig) => AppearanceConfig,
-    immediate = false,
-  ) {
-    persist({ ...props.settings, appearance: transform(props.settings.appearance) }, immediate);
-  }
-
-  function updateProfile(
-    scheme: ThemeScheme,
-    profileId: string,
-    patch: Partial<ThemeProfile>,
-    immediate = false,
-  ) {
-    const appearance = {
-      ...props.settings.appearance,
-      themes: props.settings.appearance.themes.map((profile) =>
-        profile.id === profileId ? { ...profile, ...patch } : profile,
-      ),
-    };
-    theme.setMode(scheme);
-    persist(
-      {
-        ...props.settings,
-        theme: scheme as ContractThemeMode,
-        appearance,
-      },
-      immediate,
-    );
-  }
-
-  function selectThemeProfile(scheme: ThemeScheme, id: string) {
-    const appearance = {
-      ...props.settings.appearance,
-      ...(scheme === "light" ? { lightThemeId: id } : { darkThemeId: id }),
-    };
-    theme.setMode(scheme);
-    persist(
-      {
-        ...props.settings,
-        theme: scheme as ContractThemeMode,
-        appearance,
-      },
-      true,
-    );
-  }
-
-  async function runThemeCommand(action: "import" | "copy" | "reset" | "delete", value: string) {
-    try {
-      await autosave.flush();
-      if (action === "copy") {
-        await commands.copyThemeProfile(value);
-        notify("success", i18n.t("settings.appearance.copied"));
-        return;
-      }
-      const next =
-        action === "import"
-          ? await commands.importThemeProfile(value as ThemeScheme)
-          : action === "reset"
-            ? await commands.resetThemeProfile(value)
-            : await commands.deleteThemeProfile(value);
-      if (next) {
-        props.setSettings(next);
-        theme.setAppearance(next.appearance);
-        autosave.accept(next);
-        notify(
-          "success",
-          action === "import" ? i18n.t("settings.appearance.imported") : i18n.t("settings.saved"),
-        );
-      }
-    } catch (error) {
-      const message = commandFailure(error).message;
-      notify("danger", message);
-      props.fail(message);
-    }
-  }
-  return (
-    <div class="settings-page settings-page-demo appearance-page">
-      <PageHeading
-        class="settings-page-heading"
-        title={i18n.t("settings.appearance")}
-        description={i18n.t("settings.appearance.description")}
-        badge={
-          saveStatus() === "pending"
-            ? i18n.t("settings.appearance.savePending")
-            : saveStatus() === "saving"
-              ? i18n.t("settings.appearance.saving")
-              : saveStatus() === "saved"
-                ? i18n.t("settings.appearance.saved")
-                : saveStatus() === "error"
-                  ? i18n.t("settings.appearance.saveFailed")
-                  : undefined
-        }
-        badgeTone={
-          saveStatus() === "error" ? "danger" : saveStatus() === "saved" ? "success" : "neutral"
-        }
-      />
-      <SettingsSection title={i18n.t("settings.theme")}>
-        <div class="theme-layout">
-          <div class="theme-picker">
-            <div class="appearance-mode-grid" role="group" aria-label={i18n.t("settings.theme")}>
-              <For each={modes()}>
-                {(item) => (
-                  <ThemeCard
-                    class="appearance-mode-card"
-                    selected={theme.mode() === item.value}
-                    label={item.label}
-                    previewClass={[
-                      "appearance-mode-preview",
-                      "theme-thumbnail",
-                      "appearance-mode-" + item.value,
-                      "thumbnail-" + item.value,
-                    ].join(" ")}
-                    previewStyle={previewStyle()}
-                    preview={
-                      <>
-                        <span />
-                        <span />
-                        <span />
-                      </>
-                    }
-                    onClick={() => void choose(item.value)}
-                  />
-                )}
-              </For>
-            </div>
-            <div class="theme-profile">
-              <span>
-                {i18n.t("settings.appearance.themeProfile")} <strong>{theme.profile().name}</strong>
-              </span>
-              <div class="accent-picker" aria-label={i18n.t("settings.appearance.accent")}>
-                <For each={[theme.profile().accent, "#3573C8", "#307A67"]}>
-                  {(accent) => (
-                    <Button
-                      class="accent-chip"
-                      classList={{
-                        selected: accent.toUpperCase() === theme.profile().accent.toUpperCase(),
-                      }}
-                      data-chip-color={accent}
-                      type="button"
-                      aria-label={accent}
-                      onClick={() =>
-                        updateProfile(theme.resolved(), theme.profile().id, { accent }, true)
-                      }
-                    />
-                  )}
-                </For>
-              </div>
-            </div>
-          </div>
-          <aside class="live-preview-card">
-            <header class="preview-header">
-              <strong>{i18n.locale() === "zh-CN" ? "实时预览" : "Live preview"}</strong>
-              <span>
-                {theme.resolved() === "dark"
-                  ? i18n.t("settings.theme.dark")
-                  : i18n.t("settings.theme.light")}
-                {" · "}
-                {props.settings.appearance.preferences.density === "compact"
-                  ? i18n.t("settings.appearance.densityCompact")
-                  : props.settings.appearance.preferences.density === "comfortable"
-                    ? i18n.t("settings.appearance.densityComfortable")
-                    : i18n.t("settings.appearance.densityDefault")}
-              </span>
-            </header>
-            <div class="workbench-preview">
-              <div class="preview-sidebar">
-                <span class="preview-mark">H</span>
-                <i />
-                <i />
-                <i />
-              </div>
-              <div class="preview-content">
-                <div class="preview-copy">
-                  <i />
-                  <i />
-                  <i />
-                </div>
-                <div class="preview-composer" />
-              </div>
-            </div>
-          </aside>
-        </div>
-      </SettingsSection>
-      <SettingsSection title={i18n.t("settings.appearance.diffPreview")}>
-        <div class="diff-preview" aria-label={i18n.t("settings.appearance.diffPreview")}>
-          <div
-            class="diff-preview-pane light"
-            data-preview-background={lightPreview().background}
-            data-preview-foreground={lightPreview().foreground}
-          >
-            <span>src/theme.ts</span>
-            <code>
-              <i>-</i> color: #766cf7;
-            </code>
-            <code>
-              <b>+</b> color: #2ea8ff;
-            </code>
-          </div>
-          <div
-            class="diff-preview-pane dark"
-            data-preview-background={darkPreview().background}
-            data-preview-foreground={darkPreview().foreground}
-          >
-            <span>src/theme.ts</span>
-            <code>
-              <i>-</i> color: #766cf7;
-            </code>
-            <code>
-              <b>+</b> color: #2ea8ff;
-            </code>
-          </div>
-        </div>
-      </SettingsSection>
-      <For each={["light", "dark"] as const}>
-        {(scheme) => {
-          const selectedId = () =>
-            scheme === "light"
-              ? props.settings.appearance.lightThemeId
-              : props.settings.appearance.darkThemeId;
-          const profile = () =>
-            props.settings.appearance.themes.find((item) => item.id === selectedId())!;
-          return (
-            <ThemeProfileEditor
-              scheme={scheme}
-              appearance={props.settings.appearance}
-              profile={profile()}
-              onSelect={(id) => selectThemeProfile(scheme, id)}
-              onUpdate={(patch, immediate) => updateProfile(scheme, profile().id, patch, immediate)}
-              onImport={() => void runThemeCommand("import", scheme)}
-              onCopy={() => void runThemeCommand("copy", profile().id)}
-              onReset={() => setPendingThemeAction({ action: "reset", profile: profile() })}
-              onDelete={() => setPendingThemeAction({ action: "delete", profile: profile() })}
-            />
-          );
-        }}
-      </For>
-      <SettingsSection title={i18n.t("settings.appearance.preferences")}>
-        <SettingsCard class="settings-card appearance-preferences">
-          <SettingsRow label={i18n.t("settings.appearance.pointer")}>
-            <Toggle
-              checked={props.settings.appearance.preferences.pointerCursor}
-              label={i18n.t("settings.appearance.pointer")}
-              onChange={(pointerCursor) =>
-                updateAppearance(
-                  (appearance) => ({
-                    ...appearance,
-                    preferences: { ...appearance.preferences, pointerCursor },
-                  }),
-                  true,
-                )
-              }
-            />
-          </SettingsRow>
-          <SettingsRow label={i18n.t("settings.appearance.motion")}>
-            <SelectField
-              label={i18n.t("settings.appearance.motion")}
-              value={props.settings.appearance.preferences.reducedMotion}
-              options={[
-                { value: "system", label: i18n.t("settings.theme.system") },
-                { value: "on", label: i18n.t("common.enabled") },
-                { value: "off", label: i18n.t("common.disabled") },
-              ]}
-              onChange={(reducedMotion) =>
-                updateAppearance(
-                  (appearance) => ({
-                    ...appearance,
-                    preferences: {
-                      ...appearance.preferences,
-                      reducedMotion: reducedMotion as ReducedMotion,
-                    },
-                  }),
-                  true,
-                )
-              }
-            />
-          </SettingsRow>
-          <SettingsRow label={i18n.t("settings.appearance.density")}>
-            <SegmentedControl<UiDensity>
-              label={i18n.t("settings.appearance.density")}
-              value={props.settings.appearance.preferences.density ?? "default"}
-              options={[
-                {
-                  value: "compact",
-                  label: i18n.t("settings.appearance.densityCompact"),
-                },
-                {
-                  value: "default",
-                  label: i18n.t("settings.appearance.densityDefault"),
-                },
-                {
-                  value: "comfortable",
-                  label: i18n.t("settings.appearance.densityComfortable"),
-                },
-              ]}
-              onChange={(density) =>
-                updateAppearance(
-                  (appearance) => ({
-                    ...appearance,
-                    preferences: { ...appearance.preferences, density },
-                  }),
-                  true,
-                )
-              }
-            />
-          </SettingsRow>
-          <SettingsRow label={i18n.t("settings.appearance.uiSize")}>
-            <RangeField
-              label={i18n.t("settings.appearance.uiSize")}
-              value={props.settings.appearance.preferences.uiFontSize}
-              min={12}
-              max={20}
-              unit="px"
-              onInput={(uiFontSize) =>
-                updateAppearance((appearance) => ({
-                  ...appearance,
-                  preferences: { ...appearance.preferences, uiFontSize },
-                }))
-              }
-              onCommit={(uiFontSize) =>
-                updateAppearance(
-                  (appearance) => ({
-                    ...appearance,
-                    preferences: { ...appearance.preferences, uiFontSize },
-                  }),
-                  true,
-                )
-              }
-            />
-          </SettingsRow>
-          <SettingsRow label={i18n.t("settings.appearance.codeSize")}>
-            <RangeField
-              label={i18n.t("settings.appearance.codeSize")}
-              value={props.settings.appearance.preferences.codeFontSize}
-              min={10}
-              max={20}
-              unit="px"
-              onInput={(codeFontSize) =>
-                updateAppearance((appearance) => ({
-                  ...appearance,
-                  preferences: { ...appearance.preferences, codeFontSize },
-                }))
-              }
-              onCommit={(codeFontSize) =>
-                updateAppearance(
-                  (appearance) => ({
-                    ...appearance,
-                    preferences: { ...appearance.preferences, codeFontSize },
-                  }),
-                  true,
-                )
-              }
-            />
-          </SettingsRow>
-          <SettingsRow label={i18n.t("settings.appearance.diffMarkers")}>
-            <SegmentedControl<DiffMarkerMode>
-              label={i18n.t("settings.appearance.diffMarkers")}
-              value={props.settings.appearance.preferences.diffMarkers}
-              options={[
-                { value: "color", label: i18n.t("settings.appearance.diffColor") },
-                { value: "signs", label: i18n.t("settings.appearance.diffSigns") },
-              ]}
-              onChange={(diffMarkers) =>
-                updateAppearance(
-                  (appearance) => ({
-                    ...appearance,
-                    preferences: { ...appearance.preferences, diffMarkers },
-                  }),
-                  true,
-                )
-              }
-            />
-          </SettingsRow>
-        </SettingsCard>
-      </SettingsSection>
-      <Toast open={Boolean(toast())} tone={toast()?.tone} onClose={() => setToast(undefined)}>
-        {toast()?.text}
-      </Toast>
-      <Dialog
-        open={Boolean(pendingThemeAction())}
-        title={
-          pendingThemeAction()?.action === "delete"
-            ? i18n.t("settings.appearance.deleteTitle")
-            : i18n.t("settings.appearance.resetTitle")
-        }
-        description={i18n
-          .t(
-            pendingThemeAction()?.action === "delete"
-              ? "settings.appearance.deleteConfirm"
-              : "settings.appearance.resetConfirm",
-          )
-          .replace("{name}", pendingThemeAction()?.profile.name ?? "")}
-        onOpenChange={(open) => {
-          if (!open) setPendingThemeAction(undefined);
-        }}
-      >
-        <div class="dialog-actions">
-          <Button variant="ghost" onClick={() => setPendingThemeAction(undefined)}>
-            {i18n.t("common.cancel")}
-          </Button>
-          <Button
-            variant={pendingThemeAction()?.action === "delete" ? "danger" : "primary"}
-            onClick={() => {
-              const pending = pendingThemeAction();
-              if (!pending) return;
-              setPendingThemeAction(undefined);
-              void runThemeCommand(pending.action, pending.profile.id);
-            }}
-          >
-            {i18n.t("common.confirm")}
-          </Button>
-        </div>
-      </Dialog>
-    </div>
-  );
-}
-
-function ThemeProfileEditor(props: {
-  scheme: ThemeScheme;
-  appearance: AppearanceConfig;
-  profile: ThemeProfile;
-  onSelect: (id: string) => void;
-  onUpdate: (patch: Partial<ThemeProfile>, immediate?: boolean) => void;
-  onImport: () => void;
-  onCopy: () => void;
-  onReset: () => void;
-  onDelete: () => void;
-}) {
-  const i18n = useI18n();
-  const [colorError, setColorError] = createSignal<"accent" | "background" | "foreground">();
-  const warning = () => contrastRatio(props.profile.background, props.profile.foreground) < 4.5;
-  const setColor = (key: "accent" | "background" | "foreground", value: string) => {
-    const normalized = value.toUpperCase();
-    if (!isHexColor(normalized)) {
-      setColorError(key);
-      return;
-    }
-    setColorError(undefined);
-    props.onUpdate({ [key]: normalized });
-  };
-  return (
-    <SettingsSection
-      title={
-        props.scheme === "light"
-          ? i18n.t("settings.appearance.lightTheme")
-          : i18n.t("settings.appearance.darkTheme")
-      }
-    >
-      <SettingsCard class="theme-profile-card theme-picker">
-        <div class="theme-profile-toolbar">
-          <SelectField
-            label={i18n.t("settings.appearance.themeProfile")}
-            value={props.profile.id}
-            options={props.appearance.themes
-              .filter((profile) => profile.scheme === props.scheme)
-              .map((profile) => ({
-                value: profile.id,
-                label: themeProfileLabel(profile),
-                preview: {
-                  accent: profile.accent,
-                  background: profile.background,
-                  foreground: profile.foreground,
-                  fontFamily: profile.uiFont,
-                },
-              }))}
-            onChange={props.onSelect}
-          />
-          <div class="theme-profile-actions">
-            <Button size="small" onClick={props.onImport}>
-              <Upload size={14} /> {i18n.t("common.import")}
-            </Button>
-            <Button size="small" onClick={props.onCopy}>
-              <Copy size={14} /> {i18n.t("settings.appearance.copy")}
-            </Button>
-            <Dropdown
-              label={i18n.t("settings.appearance.themeMenu")}
-              actions={[
-                {
-                  id: "reset",
-                  label: i18n.t("settings.appearance.reset"),
-                  disabled: !props.profile.builtin,
-                },
-                {
-                  id: "delete",
-                  label: i18n.t("common.delete"),
-                  danger: true,
-                  disabled: props.profile.builtin,
-                  separatorBefore: true,
-                },
-              ]}
-              onSelect={(action) => (action === "reset" ? props.onReset() : props.onDelete())}
-            >
-              <MoreHorizontal size={17} />
-            </Dropdown>
-          </div>
-        </div>
-        <div class="appearance-color-rows">
-          <SettingsRow label={i18n.t("settings.appearance.accent")}>
-            <ColorField
-              label={i18n.t("settings.appearance.accent")}
-              value={props.profile.accent}
-              error={
-                colorError() === "accent" ? i18n.t("settings.appearance.invalidColor") : undefined
-              }
-              onInput={(value) => setColor("accent", value)}
-            />
-          </SettingsRow>
-          <SettingsRow label={i18n.t("settings.appearance.background")}>
-            <ColorField
-              label={i18n.t("settings.appearance.background")}
-              value={props.profile.background}
-              error={
-                colorError() === "background"
-                  ? i18n.t("settings.appearance.invalidColor")
-                  : undefined
-              }
-              onInput={(value) => setColor("background", value)}
-            />
-          </SettingsRow>
-          <SettingsRow label={i18n.t("settings.appearance.foreground")}>
-            <ColorField
-              label={i18n.t("settings.appearance.foreground")}
-              value={props.profile.foreground}
-              error={
-                colorError() === "foreground"
-                  ? i18n.t("settings.appearance.invalidColor")
-                  : undefined
-              }
-              onInput={(value) => setColor("foreground", value)}
-            />
-          </SettingsRow>
-        </div>
-        <Show when={warning()}>
-          <div class="contrast-warning" role="status">
-            <AlertTriangle size={16} /> {i18n.t("settings.appearance.contrastWarning")}
-          </div>
-        </Show>
-        <SettingsRow label={i18n.t("settings.appearance.uiFont")}>
-          <SelectField
-            label={i18n.t("settings.appearance.uiFont")}
-            value={props.profile.uiFont}
-            options={fontSelectOptions(UI_FONT_OPTIONS, props.profile.uiFont)}
-            onChange={(uiFont) => props.onUpdate({ uiFont }, true)}
-          />
-        </SettingsRow>
-        <SettingsRow label={i18n.t("settings.appearance.codeFont")}>
-          <SelectField
-            label={i18n.t("settings.appearance.codeFont")}
-            value={props.profile.codeFont}
-            options={fontSelectOptions(CODE_FONT_OPTIONS, props.profile.codeFont)}
-            onChange={(codeFont) => props.onUpdate({ codeFont }, true)}
-          />
-        </SettingsRow>
-        <SettingsRow label={i18n.t("settings.appearance.translucentSidebar")}>
-          <Toggle
-            checked={props.profile.translucentSidebar}
-            label={i18n.t("settings.appearance.translucentSidebar")}
-            onChange={(translucentSidebar) => props.onUpdate({ translucentSidebar }, true)}
-          />
-        </SettingsRow>
-        <SettingsRow label={i18n.t("settings.appearance.contrast")}>
-          <RangeField
-            label={i18n.t("settings.appearance.contrast")}
-            value={props.profile.contrast}
-            min={0}
-            max={100}
-            unit="%"
-            onInput={(contrast) => props.onUpdate({ contrast })}
-            onCommit={(contrast) => props.onUpdate({ contrast }, true)}
-          />
-        </SettingsRow>
-      </SettingsCard>
-    </SettingsSection>
-  );
-}
-
 function LlmSettingsPage(props: {
   providerExtensionsEnabled: boolean;
   providerRemoteContextEnabled: boolean;
@@ -1877,9 +1130,7 @@ function LoadedWorkbench(props: {
   });
   return (
     <AppearanceProvider
-      initialMode={props.bootstrap.theme as ThemeMode}
       initialAppearance={props.bootstrap.appearance}
-      mode={settings().theme as ThemeMode}
       appearance={settings().appearance}
     >
       <I18nProvider initialLocale={props.bootstrap.locale as AppLocale}>

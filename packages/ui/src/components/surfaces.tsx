@@ -223,7 +223,7 @@ export function ThemeCard(props: ThemeCardProps) {
       aria-busy={local.loading || undefined}
       aria-invalid={local.invalid || undefined}
       disabled={rest.disabled || local.loading}
-      aria-pressed={local.selected}
+      aria-pressed={rest.role === "radio" ? undefined : local.selected}
       {...rest}
     >
       <span

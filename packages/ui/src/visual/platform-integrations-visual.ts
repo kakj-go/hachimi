@@ -10,7 +10,7 @@ export async function assertPlatformIntegrationsVisualMatrix(page: Page) {
   for (const scheme of ["dark", "light"] as const) {
     if (scheme === "light") {
       await page.locator(".settings-nav").getByRole("button", { name: "外观" }).click();
-      await page.getByRole("button", { name: "浅色", exact: true }).click();
+      await page.getByRole("radio", { name: /奶油手帐/ }).click();
       await page.locator(".settings-nav").getByRole("button", { name: "平台集成" }).click();
     }
     await expect(page.locator("html")).toHaveAttribute("data-color-scheme", scheme);

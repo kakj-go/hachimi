@@ -5,7 +5,6 @@ type InstallTauriMocks = (
   withComposerData?: boolean,
   schedulerEnabled?: boolean,
   withSessionData?: boolean,
-  themeMode?: "light" | "dark" | "system",
   gateMode?: "approval" | "plan" | "user_input",
 ) => Promise<void>;
 

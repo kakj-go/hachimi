@@ -25,8 +25,8 @@ use std::{
 
 use atomic_write_file::AtomicWriteFile;
 use hachimi_protocol::{
-    AppSettings, AppearanceConfig, LlmSettings, Locale, SETTINGS_SCHEMA_VERSION, ThemeMode,
-    VoiceSettings, WindowPlacementV1,
+    AppSettings, AppearanceConfig, LlmSettings, Locale, SETTINGS_SCHEMA_VERSION, VoiceSettings,
+    WindowPlacementV1,
 };
 use serde::Deserialize;
 use thiserror::Error;
@@ -52,7 +52,6 @@ pub struct SettingsStore {
 #[serde(rename_all = "camelCase")]
 struct AppSettingsV1 {
     schema_version: u32,
-    theme: ThemeMode,
     locale: Locale,
     always_on_top: bool,
     pet_placement: Option<WindowPlacementV1>,
@@ -62,7 +61,6 @@ struct AppSettingsV1 {
 #[serde(rename_all = "camelCase")]
 struct AppSettingsV2 {
     schema_version: u32,
-    theme: ThemeMode,
     locale: Locale,
     always_on_top: bool,
     pet_placement: Option<WindowPlacementV1>,
@@ -73,7 +71,6 @@ struct AppSettingsV2 {
 #[serde(rename_all = "camelCase")]
 struct AppSettingsV3 {
     schema_version: u32,
-    theme: ThemeMode,
     locale: Locale,
     always_on_top: bool,
     pet_placement: Option<WindowPlacementV1>,
@@ -90,7 +87,6 @@ struct VoiceSettingsV3 {
 #[serde(rename_all = "camelCase")]
 struct AppSettingsV4 {
     schema_version: u32,
-    theme: ThemeMode,
     locale: Locale,
     always_on_top: bool,
     pet_placement: Option<WindowPlacementV1>,
@@ -102,13 +98,11 @@ struct AppSettingsV4 {
 #[serde(rename_all = "camelCase")]
 struct AppSettingsV5 {
     schema_version: u32,
-    theme: ThemeMode,
     locale: Locale,
     always_on_top: bool,
     pet_placement: Option<WindowPlacementV1>,
     llm: LlmSettings,
     voice: VoiceSettingsV5,
-    appearance: AppearanceConfig,
 }
 
 #[derive(Debug, Deserialize)]
@@ -122,14 +116,27 @@ struct VoiceSettingsV5 {
 #[serde(rename_all = "camelCase")]
 struct AppSettingsV6 {
     schema_version: u32,
-    theme: ThemeMode,
     locale: Locale,
     always_on_top: bool,
     pet_placement: Option<WindowPlacementV1>,
     llm: LlmSettings,
     #[allow(dead_code)]
     voice: serde_json::Value,
-    appearance: AppearanceConfig,
+}
+
+/// Schema 7/8 settings. The legacy `theme` mode and custom-theme `appearance`
+/// fields are dropped on migration in favor of the built-in theme defaults.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AppSettingsV8 {
+    schema_version: u32,
+    locale: Locale,
+    always_on_top: bool,
+    pet_placement: Option<WindowPlacementV1>,
+    llm: LlmSettings,
+    voice: VoiceSettings,
+    #[serde(default)]
+    developer_mode: bool,
 }
 
 impl SettingsStore {
@@ -162,8 +169,7 @@ impl SettingsStore {
         match u32::try_from(schema_version).unwrap_or(u32::MAX) {
             SETTINGS_SCHEMA_VERSION => match serde_json::from_value::<AppSettings>(value) {
                 Ok(mut settings) if settings.appearance.validate().is_ok() => {
-                    let defaults_upgraded = settings.llm.upgrade_legacy_defaults();
-                    if defaults_upgraded || settings.appearance.merge_missing_builtin_profiles() {
+                    if settings.llm.upgrade_legacy_defaults() {
                         self.save(&settings)?;
                     }
                     Ok(settings)
@@ -178,7 +184,6 @@ impl SettingsStore {
                 };
                 let migrated = AppSettings {
                     schema_version: SETTINGS_SCHEMA_VERSION,
-                    theme: old.theme,
                     locale: old.locale,
                     always_on_top: old.always_on_top,
                     pet_placement: old.pet_placement,
@@ -197,7 +202,6 @@ impl SettingsStore {
                 };
                 let migrated = AppSettings {
                     schema_version: SETTINGS_SCHEMA_VERSION,
-                    theme: old.theme,
                     locale: old.locale,
                     always_on_top: old.always_on_top,
                     pet_placement: old.pet_placement,
@@ -216,7 +220,6 @@ impl SettingsStore {
                 };
                 let migrated = AppSettings {
                     schema_version: SETTINGS_SCHEMA_VERSION,
-                    theme: old.theme,
                     locale: old.locale,
                     always_on_top: old.always_on_top,
                     pet_placement: old.pet_placement,
@@ -239,7 +242,6 @@ impl SettingsStore {
                 };
                 let migrated = AppSettings {
                     schema_version: SETTINGS_SCHEMA_VERSION,
-                    theme: old.theme,
                     locale: old.locale,
                     always_on_top: old.always_on_top,
                     pet_placement: old.pet_placement,
@@ -258,7 +260,6 @@ impl SettingsStore {
                 };
                 let migrated = AppSettings {
                     schema_version: SETTINGS_SCHEMA_VERSION,
-                    theme: old.theme,
                     locale: old.locale,
                     always_on_top: old.always_on_top,
                     pet_placement: old.pet_placement,
@@ -268,7 +269,7 @@ impl SettingsStore {
                         speed_percent: old.voice.speed_percent.clamp(50, 200),
                         ..VoiceSettings::default()
                     },
-                    appearance: old.appearance,
+                    appearance: AppearanceConfig::default(),
                     developer_mode: false,
                 };
                 self.save(&migrated)?;
@@ -281,14 +282,31 @@ impl SettingsStore {
                 };
                 let migrated = AppSettings {
                     schema_version: SETTINGS_SCHEMA_VERSION,
-                    theme: old.theme,
                     locale: old.locale,
                     always_on_top: old.always_on_top,
                     pet_placement: old.pet_placement,
                     llm: old.llm,
                     voice: VoiceSettings::default(),
-                    appearance: old.appearance,
+                    appearance: AppearanceConfig::default(),
                     developer_mode: false,
+                };
+                self.save(&migrated)?;
+                Ok(migrated)
+            }
+            7 | 8 => {
+                let old: AppSettingsV8 = match serde_json::from_value::<AppSettingsV8>(value) {
+                    Ok(settings) if matches!(settings.schema_version, 7 | 8) => settings,
+                    _ => return self.recover_corrupt(&bytes),
+                };
+                let migrated = AppSettings {
+                    schema_version: SETTINGS_SCHEMA_VERSION,
+                    locale: old.locale,
+                    always_on_top: old.always_on_top,
+                    pet_placement: old.pet_placement,
+                    llm: old.llm,
+                    voice: old.voice,
+                    appearance: AppearanceConfig::default(),
+                    developer_mode: old.developer_mode,
                 };
                 self.save(&migrated)?;
                 Ok(migrated)
@@ -357,29 +375,6 @@ mod tests {
     }
 
     #[test]
-    fn enriches_existing_schema_five_settings_with_new_builtin_themes() {
-        let directory = tempfile::tempdir().expect("tempdir");
-        let store = SettingsStore::new(directory.path().join("settings.json"));
-        let mut settings = AppSettings::default();
-        settings
-            .appearance
-            .themes
-            .retain(|profile| profile.id.starts_with("codex-"));
-        settings.appearance.themes[0].accent = "#123456".into();
-        store
-            .save(&settings)
-            .expect("save old schema five appearance");
-
-        let loaded = store.load().expect("load enriched settings");
-        assert_eq!(loaded.appearance.themes.len(), 18);
-        assert_eq!(
-            loaded.appearance.profile("codex-light").unwrap().accent,
-            "#123456"
-        );
-        assert!(loaded.appearance.profile("everforest-dark").is_some());
-    }
-
-    #[test]
     fn corrupt_settings_are_backed_up_and_defaulted() {
         let directory = tempfile::tempdir().expect("tempdir");
         let path = directory.path().join("settings.json");
@@ -426,7 +421,6 @@ mod tests {
         .expect("seed v1");
         let settings = SettingsStore::new(&path).load().expect("migrate");
         assert_eq!(settings.schema_version, SETTINGS_SCHEMA_VERSION);
-        assert_eq!(settings.theme, ThemeMode::Dark);
         assert_eq!(settings.locale, Locale::EnUs);
         assert!(!settings.always_on_top);
         assert_eq!(settings.llm, LlmSettings::default());
@@ -516,7 +510,6 @@ mod tests {
         .expect("seed v4");
         let settings = SettingsStore::new(&path).load().expect("migrate");
         assert_eq!(settings.schema_version, SETTINGS_SCHEMA_VERSION);
-        assert_eq!(settings.theme, ThemeMode::Light);
         assert_eq!(settings.llm.model_name, "demo-v4");
         assert_eq!(settings.voice.speed_percent, 105);
         assert_eq!(settings.appearance, AppearanceConfig::default());
@@ -580,7 +573,6 @@ mod tests {
         fs::write(&path, serde_json::to_vec_pretty(&old).expect("json")).expect("seed v6");
         let settings = SettingsStore::new(&path).load().expect("migrate");
         assert_eq!(settings.schema_version, SETTINGS_SCHEMA_VERSION);
-        assert_eq!(settings.theme, ThemeMode::Light);
         assert_eq!(settings.locale, Locale::EnUs);
         assert_eq!(settings.llm.model_name, "preserved-model");
         assert_eq!(settings.voice, VoiceSettings::default());
@@ -592,12 +584,52 @@ mod tests {
         let directory = tempfile::tempdir().expect("tempdir");
         let store = SettingsStore::new(directory.path().join("settings.json"));
         let mut settings = AppSettings::default();
-        settings.appearance.themes[0].foreground = "not-a-color".into();
+        settings.appearance.active_theme_id = "not-a-builtin-theme".into();
         assert!(matches!(
             store.save(&settings),
             Err(StorageError::InvalidSettings(_))
         ));
         assert!(!store.path().exists());
+    }
+
+    #[test]
+    fn migrates_v8_and_resets_theme_and_appearance() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let path = directory.path().join("settings.json");
+        let old = serde_json::json!({
+            "schemaVersion": 8,
+            "theme": "dark",
+            "locale": "en-US",
+            "alwaysOnTop": false,
+            "petPlacement": null,
+            "llm": {
+                "baseUrl": "https://example.test/v1",
+                "modelName": "preserved-model",
+                "maxInputTokens": 1234,
+                "maxOutputTokens": 321
+            },
+            "voice": VoiceSettings::default(),
+            "appearance": {
+                "lightThemeId": "codex-light",
+                "darkThemeId": "codex-dark",
+                "themes": [],
+                "preferences": { "ignored": true }
+            },
+            "developerMode": true
+        });
+        fs::write(&path, serde_json::to_vec_pretty(&old).expect("json")).expect("seed v8");
+        let settings = SettingsStore::new(&path).load().expect("migrate");
+        assert_eq!(settings.schema_version, SETTINGS_SCHEMA_VERSION);
+        assert_eq!(settings.locale, Locale::EnUs);
+        assert_eq!(settings.llm.model_name, "preserved-model");
+        assert_eq!(settings.appearance, AppearanceConfig::default());
+        assert!(settings.developer_mode);
+
+        let rewritten: serde_json::Value =
+            serde_json::from_slice(&fs::read(path).expect("read migrated")).expect("json");
+        assert_eq!(rewritten["schemaVersion"], SETTINGS_SCHEMA_VERSION);
+        assert!(rewritten.get("theme").is_none());
+        assert_eq!(rewritten["appearance"]["activeThemeId"], "nya");
     }
 
     #[test]

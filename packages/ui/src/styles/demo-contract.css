@@ -6,6 +6,7 @@
 @import "../../../../docs/ui-style-demos/demo-settings.css";
 @import "../../../../docs/ui-style-demos/component-gallery.css";
 @import "../../../../docs/ui-style-demos/component-composer.css";
+@import "../../../../docs/ui-style-demos/theme-decorations.css";
 
 /* Bridge the static demo token names to the typed Solid component tokens. */
 html[data-color-scheme] {

@@ -17,5 +17,7 @@
 - `component-composer.css`：Composer、附件、上下文和审批控件。
 - `demo-settings.css`：完整设置页面结构。
 - `demo-appearance.js`：主题、强调色、密度和动效偏好的跨页面同步。
+- `theme-decorations.css`：五套二次元主题（px/crm/nya/tora/maho）的纯增量装饰层，按 `html[data-appearance-theme]` 激活。
+- `theme-deco-fonts.css` + `fonts/`：装饰层用到的本地化显示字体（ZCOOL KuaiLe / Press Start 2P，woff2 分包）。
 
 正式前端与 Demo 出现差异时，以本目录渲染结果为准。

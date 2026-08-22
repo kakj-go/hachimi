@@ -28,7 +28,6 @@ import {
   Volume2,
   VolumeX,
   useTheme,
-  type ThemeMode,
 } from "@hachimi/ui";
 import { For, Show, createMemo, createSignal, onCleanup, onMount } from "solid-js";
 import { AvatarRuntime } from "./avatar-runtime";
@@ -561,7 +560,6 @@ function DesktopPet() {
     void Promise.all([
       listen<AppSettings>("settings-changed", ({ payload }) => {
         setMutedValue(payload.voice.muted);
-        theme.setMode(payload.theme as ThemeMode);
         theme.setAppearance(payload.appearance);
         i18n.setLocale(payload.locale as AppLocale);
       }),
@@ -900,10 +898,7 @@ export function PetApp() {
   return (
     <Show when={bootstrap()} fallback={<div class="pet-speech">{failure()}</div>}>
       {(state) => (
-        <AppearanceProvider
-          initialMode={state().theme as ThemeMode}
-          initialAppearance={state().appearance}
-        >
+        <AppearanceProvider initialAppearance={state().appearance}>
           <I18nProvider initialLocale={state().locale as AppLocale}>
             <DesktopPet />
           </I18nProvider>

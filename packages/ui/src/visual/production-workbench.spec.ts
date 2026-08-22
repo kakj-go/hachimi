@@ -27,7 +27,6 @@ export async function installTauriMocks(
   withComposerData = false,
   schedulerEnabled = false,
   withSessionData = false,
-  themeMode: "light" | "dark" | "system" = "dark",
   gateMode: "approval" | "plan" | "user_input" = "approval",
 ) {
   await page.addInitScript(
@@ -48,11 +47,10 @@ export async function installTauriMocks(
       withComposerData,
       schedulerEnabled,
       withSessionData,
-      themeMode,
       gateMode,
     }) => {
-      type MockSettings = Omit<typeof initialSettings, "theme"> & { theme: typeof themeMode };
-      let settings: MockSettings = { ...initialSettings, theme: themeMode };
+      type MockSettings = typeof initialSettings;
+      let settings: MockSettings = { ...initialSettings };
       let voiceRuntime = structuredClone(runtimeMocks.voiceRuntime);
       let speechRecognition = structuredClone(runtimeMocks.speechRecognition);
       let voices = structuredClone(runtimeMocks.voices);
@@ -552,7 +550,6 @@ export async function installTauriMocks(
               protocolVersion: 31,
               windowKind: "workbench",
               locale: "zh-CN",
-              theme: themeMode,
               appearance,
               alwaysOnTop: true,
               featureFlags: {
@@ -588,66 +585,6 @@ export async function installTauriMocks(
               throw new Error("mock settings write failed");
             }
             settings = args.settings as MockSettings;
-            return settings;
-          }
-          if (command === "import_theme_profile") {
-            const scheme = args.scheme as "light" | "dark";
-            const id = `imported-${scheme}`;
-            const source = settings.appearance.themes.find((profile) => profile.scheme === scheme)!;
-            const imported = {
-              ...source,
-              id,
-              name: `Imported ${scheme}`,
-              builtin: false,
-              accent: scheme === "light" ? "#7C3AED" : "#22C55E",
-            };
-            settings = {
-              ...settings,
-              appearance: {
-                ...settings.appearance,
-                ...(scheme === "light" ? { lightThemeId: id } : { darkThemeId: id }),
-                themes: [
-                  ...settings.appearance.themes.filter((profile) => profile.id !== id),
-                  imported,
-                ],
-              },
-            };
-            return settings;
-          }
-          if (command === "copy_theme_profile") return null;
-          if (command === "reset_theme_profile") {
-            const profileId = args.profileId as string;
-            settings = {
-              ...settings,
-              appearance: {
-                ...settings.appearance,
-                themes: settings.appearance.themes.map((profile) => {
-                  if (profile.id !== profileId) return profile;
-                  return appearance.themes.find((item) => item.id === profileId) ?? profile;
-                }),
-              },
-            };
-            return settings;
-          }
-          if (command === "delete_theme_profile") {
-            const profileId = args.profileId as string;
-            const profile = settings.appearance.themes.find((item) => item.id === profileId);
-            if (!profile || profile.builtin) throw new Error("Built-in themes cannot be deleted");
-            settings = {
-              ...settings,
-              appearance: {
-                ...settings.appearance,
-                lightThemeId:
-                  settings.appearance.lightThemeId === profileId
-                    ? "codex-light"
-                    : settings.appearance.lightThemeId,
-                darkThemeId:
-                  settings.appearance.darkThemeId === profileId
-                    ? "codex-dark"
-                    : settings.appearance.darkThemeId,
-                themes: settings.appearance.themes.filter((item) => item.id !== profileId),
-              },
-            };
             return settings;
           }
           if (command === "set_always_on_top") {
@@ -1006,7 +943,6 @@ export async function installTauriMocks(
       withComposerData,
       schedulerEnabled,
       withSessionData,
-      themeMode,
       gateMode,
     },
   );
@@ -1176,7 +1112,7 @@ for (const viewport of [
     await expect(page.getByTestId("workbench-pin-summary")).toHaveCount(0);
     await expect(page.locator('[data-component="composer"]')).toHaveCSS(
       "background-color",
-      "rgb(32, 36, 42)",
+      "rgb(42, 37, 34)",
     );
     const composerHeight = await page
       .locator('[data-component="composer"]')
@@ -1197,19 +1133,17 @@ for (const viewport of [
     });
   });
 }
-for (const systemScheme of ["light", "dark"] as const) {
-  test(`production system appearance ${systemScheme}`, async ({ page }) => {
-    await page.setViewportSize({ width: 1024, height: 768 });
-    await page.emulateMedia({ colorScheme: systemScheme });
-    await installTauriMocks(page, false, false, false, "system");
-    await page.goto("http://127.0.0.1:1420/workbench.html?route=home");
-    await expect(page.locator("html")).toHaveAttribute("data-color-scheme", systemScheme);
-    await expect(page.locator('[data-component="title-bar"]')).toBeVisible();
-    await expect(page).toHaveScreenshot(`production-home-system-${systemScheme}-1024x768.png`, {
-      animations: "disabled",
-    });
+test("production default appearance applies the built-in theme", async ({ page }) => {
+  await page.setViewportSize({ width: 1024, height: 768 });
+  await installTauriMocks(page);
+  await page.goto("http://127.0.0.1:1420/workbench.html?route=home");
+  await expect(page.locator("html")).toHaveAttribute("data-appearance-theme", "nya");
+  await expect(page.locator("html")).toHaveAttribute("data-color-scheme", "dark");
+  await expect(page.locator('[data-component="title-bar"]')).toBeVisible();
+  await expect(page).toHaveScreenshot("production-home-default-theme-1024x768.png", {
+    animations: "disabled",
   });
-}
+});
 test("production title bar and project rows preserve their desktop alignment and actions", async ({
   page,
 }) => {
@@ -1357,7 +1291,7 @@ test("production plan confirmation replaces the composer with a compact revision
 }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
   await page.clock.setFixedTime(new Date("2026-07-26T15:00:00.000Z"));
-  await installTauriMocks(page, true, false, true, "dark", "plan");
+  await installTauriMocks(page, true, false, true, "plan");
   await page.goto("http://127.0.0.1:1420/workbench.html?route=home");
   await page.getByTestId("project-select-project-hachimi").click();
   await page.getByTestId("session-select-session-ui-unification").click();
@@ -1384,7 +1318,7 @@ test("production UserInput questions replace the composer with direct choices", 
 }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
   await page.clock.setFixedTime(new Date("2026-07-26T15:00:00.000Z"));
-  await installTauriMocks(page, true, false, true, "dark", "user_input");
+  await installTauriMocks(page, true, false, true, "user_input");
   await page.goto("http://127.0.0.1:1420/workbench.html?route=home");
   await page.getByTestId("project-select-project-hachimi").click();
   await page.getByTestId("session-select-session-ui-unification").click();
@@ -1438,7 +1372,7 @@ for (const viewport of [
     await page.setViewportSize(viewport);
     await installTauriMocks(page);
     await page.goto("http://127.0.0.1:1420/workbench.html?route=settings/appearance");
-    await expect(page.getByRole("heading", { name: "外观", exact: true })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "外观" })).toBeVisible();
     if (viewport.width > 760) {
       await expect(page.locator(".settings-sidebar")).toHaveCSS(
         "width",
@@ -1447,9 +1381,10 @@ for (const viewport of [
     } else {
       await expect(page.locator(".settings-sidebar")).toBeHidden();
     }
-    const accentChip = page.locator(".accent-chip").first();
-    await expect(accentChip).toHaveCSS("height", "24px");
-    await expect(accentChip).toHaveCSS("background-color", "rgb(112, 98, 213)");
+    await expect(page.locator(".theme-option-card")).toHaveCount(5);
+    await expect(page.locator('.theme-option-card[data-state="selected"]')).toContainText(
+      "黑猫夜行",
+    );
     expect(
       await page
         .locator(".settings-main")
@@ -1461,31 +1396,32 @@ for (const viewport of [
   });
 }
 
-test("production theme dropdown matches the compact floating style", async ({ page }) => {
+test("production font dropdown matches the compact floating style", async ({ page }) => {
   await page.setViewportSize({ width: 1855, height: 1343 });
   await installTauriMocks(page);
   await page.goto("http://127.0.0.1:1420/workbench.html?route=settings/appearance");
-  const lightEditor = page.locator(".theme-profile-card").nth(0);
-  await lightEditor.locator('[data-component="select-trigger"]').nth(0).click();
-  await expect(page.getByRole("option")).toHaveCount(9);
+  const uiFontRow = page.locator('[data-component="settings-row"]', { hasText: "界面字体栈" });
+  await uiFontRow.locator('[data-component="select-trigger"]').click();
+  await expect(page.getByRole("option")).toHaveCount(5);
   const contentBox = await page.locator('[data-component="select-content"]').boundingBox();
   const firstOptionBox = await page.getByRole("option").first().boundingBox();
   expect(contentBox).not.toBeNull();
   expect(firstOptionBox).not.toBeNull();
   expect(firstOptionBox!.x - contentBox!.x).toBeLessThan(16);
-  await expect(page).toHaveScreenshot("production-theme-dropdown-1855x1343.png", {
+  await expect(page).toHaveScreenshot("production-font-dropdown-1855x1343.png", {
     animations: "disabled",
   });
 });
 
-test("production navigation and theme mode remain interactive", async ({ page }) => {
+test("production navigation and theme switching remain interactive", async ({ page }) => {
   await installTauriMocks(page);
   await page.goto("http://127.0.0.1:1420/workbench.html?route=home");
   await page.getByTestId("workbench-open-settings").click();
   await page.getByTestId("settings-nav-llm").click();
   await expect(page.getByRole("heading", { name: "大语言模型" })).toBeVisible();
   await page.getByRole("button", { name: "外观" }).click();
-  await page.getByRole("button", { name: "浅色" }).click();
+  await page.getByRole("radio", { name: /奶油手帐/ }).click();
+  await expect(page.locator("html")).toHaveAttribute("data-appearance-theme", "crm");
   await expect(page.locator("html")).toHaveAttribute("data-color-scheme", "light");
 });
 
@@ -1548,7 +1484,9 @@ test("appearance controls update runtime tokens and support wheel and keyboard",
     .click();
   await expect(root).toHaveAttribute("data-pointer-cursor", "on");
 
-  const motion = page.locator(".appearance-preferences [data-component=select-trigger]");
+  const motion = page
+    .locator('[data-component="settings-row"]', { hasText: "减少动态效果" })
+    .locator('[data-component="select-trigger"]');
   await motion.click();
   await page.getByRole("option", { name: "已启用" }).click();
   await expect(root).toHaveAttribute("data-reduced-motion", "on");
@@ -1563,22 +1501,21 @@ test("appearance controls update runtime tokens and support wheel and keyboard",
   await page.getByRole("button", { name: "+/-", exact: true }).click();
   await expect(root).toHaveAttribute("data-diff-markers", "signs");
 
-  const sidebarSwitches = page
+  const sidebarSwitch = page
     .locator('[data-component="settings-row"]', { hasText: "半透明侧栏" })
     .locator('[data-component="switch-root"]');
   const sidebar = page.locator(".settings-sidebar");
   const translucentBackground = await sidebar.evaluate(
     (element) => getComputedStyle(element).backgroundColor,
   );
-  await sidebarSwitches.nth(1).click();
+  await sidebarSwitch.click();
   await expect(root).toHaveAttribute("data-translucent-sidebar", "off");
   await expect
     .poll(() => sidebar.evaluate((element) => getComputedStyle(element).backgroundColor))
     .not.toBe(translucentBackground);
 
-  const darkEditor = page.locator(".theme-profile-card").nth(1);
-  const contrast = darkEditor
-    .locator('[data-component="range-field"]', { hasText: "界面对比度" })
+  const contrast = page
+    .locator('.appearance-preferences [data-component="range-field"]', { hasText: "界面对比度" })
     .locator('[data-component="range-thumb"]');
   const panelBefore = await root.evaluate((element) =>
     element.style.getPropertyValue("--appearance-panel"),
@@ -1589,36 +1526,26 @@ test("appearance controls update runtime tokens and support wheel and keyboard",
     .poll(() => root.evaluate((element) => element.style.getPropertyValue("--appearance-panel")))
     .not.toBe(panelBefore);
   await expect(root).toHaveCSS("--appearance-contrast", "100");
-
-  const darkBackground = darkEditor.locator('input[type="text"][aria-label="背景色"]');
-  const darkForeground = darkEditor.locator('input[type="text"][aria-label="前景色"]');
-  await darkBackground.fill("#101010");
-  await darkForeground.fill("#111111");
-  await expect(page.getByText(/WCAG AA 4\.5:1/)).toBeVisible();
-  await expect(root).toHaveCSS("--appearance-background", "#101010");
-  await expect(root).toHaveCSS("--appearance-foreground", "#111111");
-  await expect(page.getByText("已保存", { exact: true })).toBeVisible();
+  await expect(
+    page.locator('[data-component="badge"]', { hasText: "已保存" }),
+  ).toBeVisible();
 });
 
 test("built-in themes and font presets switch the complete interface", async ({ page }) => {
   await installTauriMocks(page);
   await page.goto("http://127.0.0.1:1420/workbench.html?route=settings/appearance");
   const root = page.locator("html");
-  const lightEditor = page.locator(".theme-profile-card").nth(0);
 
-  await lightEditor.locator('[data-component="select-trigger"]').nth(0).click();
-  await expect(page.getByRole("option")).toHaveCount(9);
-  await page.keyboard.press("Escape");
-  const darkEditor = page.locator(".theme-profile-card").nth(1);
-  await darkEditor.locator('[data-component="select-trigger"]').nth(0).click();
-  await expect(page.getByRole("option")).toHaveCount(9);
-  await page.keyboard.press("Escape");
-  await lightEditor.locator('[data-component="select-trigger"]').nth(0).click();
-  await page.getByRole("option", { name: "Catppuccin" }).click();
+  const themeCards = page.locator(".theme-option-card");
+  await expect(themeCards).toHaveCount(5);
+  await expect(page.locator('.theme-option-card[data-state="selected"]')).toContainText("黑猫夜行");
+  await page.getByRole("radio", { name: /奶油手帐/ }).click();
+  await expect(root).toHaveAttribute("data-appearance-theme", "crm");
   await expect(root).toHaveAttribute("data-color-scheme", "light");
-  await expect(root).toHaveCSS("--appearance-background", "#EFF1F5");
+  await expect(root).toHaveCSS("--appearance-background", "#FDF3EA");
 
-  const uiFontRow = lightEditor.locator('[data-component="settings-row"]', {
+  const preferences = page.locator(".appearance-preferences");
+  const uiFontRow = preferences.locator('[data-component="settings-row"]', {
     hasText: "界面字体栈",
   });
   await uiFontRow.locator('[data-component="select-trigger"]').click();
@@ -1627,7 +1554,7 @@ test("built-in themes and font presets switch the complete interface", async ({ 
     .poll(() => root.evaluate((element) => element.style.getPropertyValue("--font-ui")))
     .toContain("Microsoft YaHei");
 
-  const codeFontRow = lightEditor.locator('[data-component="settings-row"]', {
+  const codeFontRow = preferences.locator('[data-component="settings-row"]', {
     hasText: "代码字体栈",
   });
   await codeFontRow.locator('[data-component="select-trigger"]').click();
@@ -1635,73 +1562,6 @@ test("built-in themes and font presets switch the complete interface", async ({ 
   await expect
     .poll(() => root.evaluate((element) => element.style.getPropertyValue("--font-code")))
     .toBe("Consolas, monospace");
-});
-
-test("theme import, copy, delete, and built-in reset complete through native commands", async ({
-  page,
-}) => {
-  await installTauriMocks(page);
-  await page.goto("http://127.0.0.1:1420/workbench.html?route=settings/appearance");
-  const editors = page.locator(".theme-profile-card");
-  const lightEditor = editors.nth(0);
-
-  await lightEditor.getByRole("button", { name: "导入" }).click();
-  await expect(lightEditor.locator('[data-component="select-trigger"]').nth(0)).toContainText(
-    "Imported light",
-  );
-  await lightEditor.getByRole("button", { name: "复制 JSON" }).click();
-  await expect(page.getByText("主题 JSON 已复制到系统剪贴板。")).toBeVisible();
-
-  await lightEditor.getByRole("button", { name: "主题操作" }).click();
-  await page.getByRole("menuitem", { name: "删除" }).click();
-  await expect(page.getByRole("dialog", { name: "删除自定义主题" })).toBeVisible();
-  await page.getByRole("dialog").getByRole("button", { name: "确认" }).click();
-  await expect(lightEditor.locator('[data-component="select-trigger"]').nth(0)).toContainText(
-    "Quiet Graphite",
-  );
-
-  const darkEditor = editors.nth(1);
-  const darkAccent = darkEditor.locator('input[type="text"][aria-label="强调色"]');
-  await darkAccent.fill("#FF0000");
-  await expect
-    .poll(() =>
-      page.evaluate(() =>
-        (
-          window as unknown as Window & {
-            __HACHIMI_TEST_CALLS__: Array<{
-              command: string;
-              args: { settings?: { appearance?: { themes?: Array<{ accent?: string }> } } };
-            }>;
-          }
-        ).__HACHIMI_TEST_CALLS__.some(
-          (call) =>
-            call.command === "update_settings" &&
-            call.args.settings?.appearance?.themes?.some((profile) => profile.accent === "#FF0000"),
-        ),
-      ),
-    )
-    .toBe(true);
-  await darkEditor.getByRole("button", { name: "主题操作" }).click();
-  await page.getByRole("menuitem", { name: "恢复默认" }).click();
-  await expect(page.getByRole("dialog", { name: "恢复内置主题" })).toBeVisible();
-  await page.getByRole("dialog").getByRole("button", { name: "确认" }).click();
-  await expect(darkAccent).toHaveValue("#7062D5");
-
-  const commands = await page.evaluate(() =>
-    (
-      window as unknown as Window & {
-        __HACHIMI_TEST_CALLS__: Array<{ command: string }>;
-      }
-    ).__HACHIMI_TEST_CALLS__.map((call) => call.command),
-  );
-  expect(commands).toEqual(
-    expect.arrayContaining([
-      "import_theme_profile",
-      "copy_theme_profile",
-      "delete_theme_profile",
-      "reset_theme_profile",
-    ]),
-  );
 });
 
 test("appearance save failures roll the preview back to the confirmed settings", async ({
@@ -1774,10 +1634,10 @@ test("model, voice, and pet settings use their live command-backed controls", as
   await expect(page.locator(".avatar-card-preview canvas")).toHaveCount(2);
 
   await page.goto("http://127.0.0.1:1420/workbench.html?route=settings/motion");
-  await expect(page.getByRole("heading", { name: "交互", exact: true })).toBeVisible();
-  await expect(page.getByText("标准待机", { exact: true }).first()).toBeVisible();
+  await expect(page.getByRole("heading", { name: "交互" })).toBeVisible();
+  await expect(page.getByText("可爱待机", { exact: true }).first()).toBeVisible();
   await expect(page.locator(".motion-preview-stage canvas")).toHaveCount(1);
-  const builtinMotion = page.locator(".motion-entry-card", { hasText: "标准待机" });
+  const builtinMotion = page.locator(".motion-entry-card", { hasText: "可爱待机" });
   await expect(builtinMotion.getByText("内置锁定", { exact: true })).toBeVisible();
   await expect(builtinMotion.getByRole("button", { name: "删除" })).toHaveCount(0);
   await page.getByRole("button", { name: "上传 VRMA" }).click();
@@ -1820,9 +1680,9 @@ test("motion settings keep one motion per region and import an optional binding"
   await page
     .locator('[data-component="select-content"]')
     .last()
-    .locator('[data-component="select-item"]', { hasText: "标准待机" })
+    .locator('[data-component="select-item"]', { hasText: "可爱待机" })
     .click();
-  await expect(page.getByText("标准待机", { exact: true }).first()).toBeVisible();
+  await expect(page.getByText("可爱待机", { exact: true }).first()).toBeVisible();
   await page.getByRole("button", { name: "恢复此区域默认" }).click();
 
   await page.getByRole("tab", { name: "动作" }).click();
@@ -1892,7 +1752,7 @@ test("motion settings share one responsive preview across both tabs", async ({ p
 
   const previewCanvas = page.locator(".motion-preview-stage canvas");
   await expect(previewCanvas).toHaveCount(1);
-  await expect(page.getByText("标准待机", { exact: true }).first()).toBeVisible();
+  await expect(page.getByText("可爱待机", { exact: true }).first()).toBeVisible();
   await expect(page).toHaveScreenshot("production-motion-settings-motions-1280x800.png", {
     animations: "disabled",
     mask: [previewCanvas],

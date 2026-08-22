@@ -90,7 +90,7 @@ use scheduler_runtime::start_desktop_scheduler;
 use skill_drop::{PendingSkillDrop, handle_skill_drag_event};
 use std::{
     collections::BTreeMap,
-    fs::{self, File, OpenOptions},
+    fs::{File, OpenOptions},
     io::Write,
     path::{Path, PathBuf},
     sync::{
@@ -124,7 +124,7 @@ use hachimi_protocol::{
     AvatarImportInspection, AvatarRuntimeAsset, BootstrapState, CONTROL_PROTOCOL_VERSION,
     ClientContext, ClientId, ControlMethod, FrontendLogEntry, FrontendLogLevel, GitRefRecord,
     InteractionMotionBindingUpdateRequest, InteractiveRegionsUpdate, LipSyncCapability,
-    LlmSettingsInput, LlmSettingsView, LlmTestResult, Locale, MAX_THEME_PROFILES,
+    LlmSettingsInput, LlmSettingsView, LlmTestResult, Locale,
     McpServerHealthRecord, McpServerRecord, McpServerUpsertRequest, McpServerView,
     MotionAssetBindingsClearRequest, MotionBindingResetRequest, MotionCatalogSnapshot,
     MotionEnabledUpdateRequest, MotionFeatureCacheReadRequest, MotionFeatureCacheWriteRequest,
@@ -132,10 +132,9 @@ use hachimi_protocol::{
     MotionRuntimeAsset, PetContextMenuRequest, PetTurnEvent, PetTurnRequest, PlanAcceptanceRequest,
     ProjectId, ProjectRecord, ResourceEntryRequest, RunId, RunRecord, SETTINGS_SCHEMA_VERSION,
     SessionId, SkillSubscriptionId, SpeechRecognitionRuntimeState, SpeechRecognitionSettingsInput,
-    ThemeProfile, ThemeProfileDocument, ThemeScheme, VoiceCatalogSnapshot,
-    VoiceImportCommitRequest, VoiceModelInspection, VoiceRuntimeState, VoiceSettingsInput,
-    WindowPlacementV1, WorkbenchPlanAcceptanceSnapshot, WorkbenchRoute, WorkbenchSessionSnapshot,
-    WorkbenchTaskSnapshot, WorkbenchTaskStartRequest,
+    VoiceCatalogSnapshot, VoiceImportCommitRequest, VoiceModelInspection, VoiceRuntimeState,
+    VoiceSettingsInput, WindowPlacementV1, WorkbenchPlanAcceptanceSnapshot, WorkbenchRoute,
+    WorkbenchSessionSnapshot, WorkbenchTaskSnapshot, WorkbenchTaskStartRequest,
 };
 use hachimi_sandbox::{
     SandboxBackend, SandboxRuntimeManager, SandboxStatus, WindowsSandboxReadinessProbe,
@@ -175,7 +174,6 @@ const WORKBENCH_SESSION_ACTIVITY_EVENT: &str = "workbench:session-activity-chang
 const DEFAULT_AVATAR_RESOURCE: &str =
     "resources/avatar-default/2639776812528692620/2639776812528692620.vrm";
 const PET_VISIBILITY_EVENT: &str = "pet:visibility";
-const MAX_THEME_FILE_BYTES: u64 = 64 * 1024;
 const AVATAR_IMPORT_TOKEN_TTL: Duration = Duration::from_secs(10 * 60);
 const MOTION_IMPORT_TOKEN_TTL: Duration = Duration::from_secs(10 * 60);
 const VOICE_IMPORT_TOKEN_TTL: Duration = Duration::from_secs(10 * 60);
@@ -481,7 +479,6 @@ fn get_bootstrap_state(
         protocol_version: CONTROL_PROTOCOL_VERSION,
         window_kind: client.window_kind,
         locale: settings.locale,
-        theme: settings.theme,
         appearance: settings.appearance.clone(),
         always_on_top: settings.always_on_top,
         feature_flags: state.control_plane.feature_flags(),
@@ -583,175 +580,6 @@ fn validate_app_settings(settings: &AppSettings) -> Result<(), CommandError> {
                 settings.schema_version
             ),
         ));
-    }
-    settings
-        .appearance
-        .validate()
-        .map_err(|error| CommandError::new("invalid_appearance", error))?;
-    Ok(())
-}
-
-fn save_appearance_settings(
-    app: &AppHandle,
-    state: &DesktopState,
-    settings: AppSettings,
-) -> Result<AppSettings, CommandError> {
-    validate_app_settings(&settings)?;
-    state
-        .settings_store
-        .save(&settings)
-        .map_err(|error| CommandError::operation("settings_save_failed", error))?;
-    *state.settings.write() = settings.clone();
-    let _ = app.emit("settings-changed", &settings);
-    Ok(settings)
-}
-
-#[tauri::command]
-fn import_theme_profile(
-    window: WebviewWindow,
-    app: AppHandle,
-    state: State<'_, DesktopState>,
-    scheme: ThemeScheme,
-) -> Result<Option<AppSettings>, CommandError> {
-    state.authorize(&window, ControlMethod::SettingsWrite)?;
-    let Some(path) = rfd::FileDialog::new()
-        .add_filter("Hachimi theme", &["json"])
-        .pick_file()
-    else {
-        return Ok(None);
-    };
-    let metadata = fs::metadata(&path)
-        .map_err(|error| CommandError::operation("theme_import_failed", error))?;
-    if metadata.len() > MAX_THEME_FILE_BYTES {
-        return Err(CommandError::new(
-            "theme_file_too_large",
-            "theme file must not exceed 64 KiB",
-        ));
-    }
-    let bytes =
-        fs::read(&path).map_err(|error| CommandError::operation("theme_import_failed", error))?;
-    if bytes.len() as u64 > MAX_THEME_FILE_BYTES {
-        return Err(CommandError::new(
-            "theme_file_too_large",
-            "theme file must not exceed 64 KiB",
-        ));
-    }
-    let mut document: ThemeProfileDocument = serde_json::from_slice(&bytes)
-        .map_err(|error| CommandError::operation("invalid_theme_file", error))?;
-    document
-        .validate()
-        .map_err(|error| CommandError::new("invalid_theme_file", error))?;
-    if document.profile.scheme != scheme {
-        return Err(CommandError::new(
-            "theme_scheme_mismatch",
-            "the imported theme has a different color scheme",
-        ));
-    }
-
-    let mut settings = state.settings.read().clone();
-    if settings.appearance.themes.len() >= MAX_THEME_PROFILES {
-        return Err(CommandError::new(
-            "theme_limit_reached",
-            format!("no more than {MAX_THEME_PROFILES} themes can be stored"),
-        ));
-    }
-    document.profile.id = format!("theme-{}", uuid::Uuid::new_v4().simple());
-    document.profile.builtin = false;
-    let selected_id = document.profile.id.clone();
-    settings.appearance.themes.push(document.profile);
-    settings.appearance.set_selected_id(scheme, selected_id);
-    save_appearance_settings(&app, &state, settings).map(Some)
-}
-
-#[tauri::command]
-fn copy_theme_profile(
-    window: WebviewWindow,
-    state: State<'_, DesktopState>,
-    profile_id: String,
-) -> Result<(), CommandError> {
-    state.authorize(&window, ControlMethod::SettingsRead)?;
-    let settings = state.settings.read();
-    let profile = settings
-        .appearance
-        .profile(&profile_id)
-        .cloned()
-        .ok_or_else(|| CommandError::new("theme_not_found", "theme profile was not found"))?;
-    let json = serde_json::to_string_pretty(&ThemeProfileDocument::new(profile))
-        .map_err(|error| CommandError::operation("theme_copy_failed", error))?;
-    arboard::Clipboard::new()
-        .and_then(|mut clipboard| clipboard.set_text(json))
-        .map_err(|error| CommandError::operation("theme_copy_failed", error))
-}
-#[tauri::command]
-fn reset_theme_profile(
-    window: WebviewWindow,
-    app: AppHandle,
-    state: State<'_, DesktopState>,
-    profile_id: String,
-) -> Result<AppSettings, CommandError> {
-    state.authorize(&window, ControlMethod::SettingsWrite)?;
-    let mut settings = state.settings.read().clone();
-    reset_theme_in_settings(&mut settings, &profile_id)?;
-    save_appearance_settings(&app, &state, settings)
-}
-
-fn reset_theme_in_settings(
-    settings: &mut AppSettings,
-    profile_id: &str,
-) -> Result<(), CommandError> {
-    let default = ThemeProfile::builtin_by_id(profile_id).ok_or_else(|| {
-        CommandError::new("theme_not_builtin", "only built-in themes can be reset")
-    })?;
-    let profile = settings
-        .appearance
-        .themes
-        .iter_mut()
-        .find(|profile| profile.id == profile_id && profile.builtin)
-        .ok_or_else(|| CommandError::new("theme_not_found", "built-in theme was not found"))?;
-    *profile = default;
-    Ok(())
-}
-
-#[tauri::command]
-fn delete_theme_profile(
-    window: WebviewWindow,
-    app: AppHandle,
-    state: State<'_, DesktopState>,
-    profile_id: String,
-) -> Result<AppSettings, CommandError> {
-    state.authorize(&window, ControlMethod::SettingsWrite)?;
-    let mut settings = state.settings.read().clone();
-    delete_theme_in_settings(&mut settings, &profile_id)?;
-    save_appearance_settings(&app, &state, settings)
-}
-
-fn delete_theme_in_settings(
-    settings: &mut AppSettings,
-    profile_id: &str,
-) -> Result<(), CommandError> {
-    let profile = settings
-        .appearance
-        .profile(profile_id)
-        .cloned()
-        .ok_or_else(|| CommandError::new("theme_not_found", "theme profile was not found"))?;
-    if profile.builtin {
-        return Err(CommandError::new(
-            "theme_is_builtin",
-            "built-in themes cannot be deleted",
-        ));
-    }
-    settings
-        .appearance
-        .themes
-        .retain(|candidate| candidate.id != profile_id);
-    if settings.appearance.selected_id(profile.scheme) == profile_id {
-        let fallback = match profile.scheme {
-            ThemeScheme::Light => "codex-light",
-            ThemeScheme::Dark => "codex-dark",
-        };
-        settings
-            .appearance
-            .set_selected_id(profile.scheme, fallback.into());
     }
     settings
         .appearance
@@ -1118,10 +946,6 @@ fn main() {
             get_settings,
             update_settings,
             reset_local_data,
-            import_theme_profile,
-            copy_theme_profile,
-            reset_theme_profile,
-            delete_theme_profile,
             set_interactive_regions,
             set_always_on_top,
             start_pet_dragging,

@@ -3,10 +3,9 @@ use super::{
     app_shell::{SingleInstanceActivationTarget, single_instance_activation_target},
     avatar_source_is_unchanged, cancel_pending_avatar_import, cancel_pending_voice_import,
     consume_pending_avatar_import, consume_pending_voice_import, debug_data_root,
-    delete_theme_in_settings, profile_supports_pet_voice, provider_settings_for_runtime,
-    release_agent_feature_flags, release_feature_enabled, release_runtime_feature_set,
-    reset_theme_in_settings, sanitize_log_message, validate_app_settings,
-    voice_source_is_unchanged,
+    profile_supports_pet_voice, provider_settings_for_runtime, release_agent_feature_flags,
+    release_feature_enabled, release_runtime_feature_set, sanitize_log_message,
+    validate_app_settings, voice_source_is_unchanged,
 };
 use std::{
     collections::BTreeMap,
@@ -17,7 +16,7 @@ use std::{
 use hachimi_avatar::InspectedAvatar;
 use hachimi_protocol::{
     AppSettings, AvatarAdaptationProfile, AvatarAssessment, AvatarCompatibility, AvatarFormat,
-    ClientId, LipSyncCapability, ThemeProfile, ThemeScheme,
+    ClientId, LipSyncCapability,
 };
 use hachimi_voice::{InspectedVoiceModel, VoiceAssetPaths};
 
@@ -192,60 +191,9 @@ fn debug_storage_is_kept_under_target_for_binaries_and_tests() {
     );
 }
 #[test]
-fn reset_restores_an_edited_builtin_theme() {
-    let mut settings = AppSettings::default();
-    settings.appearance.themes[1].accent = "#FF00FF".into();
-    reset_theme_in_settings(&mut settings, "codex-dark").expect("reset");
-    assert_eq!(
-        settings
-            .appearance
-            .profile("codex-dark")
-            .expect("dark")
-            .accent,
-        "#7062D5"
-    );
-}
-
-#[test]
-fn reset_supports_every_builtin_theme() {
-    let mut settings = AppSettings::default();
-    settings
-        .appearance
-        .themes
-        .iter_mut()
-        .find(|profile| profile.id == "github-dark")
-        .expect("github dark")
-        .accent = "#FF00FF".into();
-    reset_theme_in_settings(&mut settings, "github-dark").expect("reset");
-    assert_eq!(
-        settings
-            .appearance
-            .profile("github-dark")
-            .expect("github dark")
-            .accent,
-        "#2F81F7"
-    );
-}
-
-#[test]
-fn deleting_selected_custom_theme_falls_back_safely() {
-    let mut settings = AppSettings::default();
-    let mut custom = ThemeProfile::codex_dark();
-    custom.id = "theme-custom".into();
-    custom.name = "Custom".into();
-    custom.builtin = false;
-    custom.scheme = ThemeScheme::Dark;
-    settings.appearance.dark_theme_id = custom.id.clone();
-    settings.appearance.themes.push(custom);
-    delete_theme_in_settings(&mut settings, "theme-custom").expect("delete");
-    assert_eq!(settings.appearance.dark_theme_id, "codex-dark");
-    assert!(settings.appearance.profile("theme-custom").is_none());
-}
-
-#[test]
 fn app_settings_validation_rejects_invalid_appearance() {
     let mut settings = AppSettings::default();
-    settings.appearance.themes[0].background = "white".into();
+    settings.appearance.active_theme_id = "not-a-builtin-theme".into();
     assert_eq!(
         validate_app_settings(&settings).expect_err("invalid").code,
         "invalid_appearance"

@@ -6,7 +6,6 @@ type InstallTauriMocks = (
   withComposerData?: boolean,
   schedulerEnabled?: boolean,
   withSessionData?: boolean,
-  themeMode?: "light" | "dark" | "system",
 ) => Promise<void>;
 
 export function installEnvironmentSummaryVisualTests(installTauriMocks: InstallTauriMocks) {
@@ -133,46 +132,40 @@ export function installEnvironmentSummaryVisualTests(installTauriMocks: InstallT
     { name: "960x700", width: 960, height: 700 },
     { name: "720x640", width: 720, height: 640 },
   ] as const) {
-    for (const theme of ["light", "dark"] as const) {
-      if (viewport.name === "1440x900" && theme === "dark") continue;
-      test(`environment summary remains responsive at ${viewport.name} in ${theme}`, async ({
-        page,
-      }) => {
-        await page.setViewportSize({ width: viewport.width, height: viewport.height });
-        await page.clock.setFixedTime(new Date("2026-07-26T15:00:00.000Z"));
-        await installTauriMocks(page, true, false, true, theme);
-        await page.goto("http://127.0.0.1:1420/workbench.html?route=home");
-        if (viewport.width <= 720) {
-          await page.getByRole("button", { name: "Sidebar" }).click();
-          await expect(page.locator(".project-sidebar")).toBeVisible();
-        }
-        await page.getByTestId("project-select-project-hachimi").click();
-        await page.getByTestId("session-select-session-ui-unification").click();
-        if (viewport.width <= 720) {
-          await page.getByRole("button", { name: "Sidebar" }).click();
-          await expect(page.locator(".project-sidebar")).toBeHidden();
-        }
-        await page.getByTestId("workbench-pin-summary").click();
-        const summary = page.locator(".workbench-pinned-summary .environment-summary");
-        await expect(summary).toBeVisible();
-        await expect(summary).toContainText("Git worktrees");
-        await expect(page.locator("html")).toHaveJSProperty("scrollWidth", viewport.width);
-        await expect(page).toHaveScreenshot(
-          `production-environment-summary-${viewport.name}-${theme}.png`,
-          { animations: "disabled" },
-        );
-
-        for (const row of [
-          page.getByTestId("workbench-git-commit-trigger"),
-          page.getByTestId("workbench-git-compare"),
-          page.getByTestId("workbench-summary-browser-activity"),
-          page.getByTestId("workbench-summary-sources-all"),
-          summary.getByTitle("Git worktrees"),
-        ]) {
-          await expectSummaryRowReachable(row);
-        }
+    test(`environment summary remains responsive at ${viewport.name}`, async ({ page }) => {
+      await page.setViewportSize({ width: viewport.width, height: viewport.height });
+      await page.clock.setFixedTime(new Date("2026-07-26T15:00:00.000Z"));
+      await installTauriMocks(page, true, false, true);
+      await page.goto("http://127.0.0.1:1420/workbench.html?route=home");
+      if (viewport.width <= 720) {
+        await page.getByRole("button", { name: "Sidebar" }).click();
+        await expect(page.locator(".project-sidebar")).toBeVisible();
+      }
+      await page.getByTestId("project-select-project-hachimi").click();
+      await page.getByTestId("session-select-session-ui-unification").click();
+      if (viewport.width <= 720) {
+        await page.getByRole("button", { name: "Sidebar" }).click();
+        await expect(page.locator(".project-sidebar")).toBeHidden();
+      }
+      await page.getByTestId("workbench-pin-summary").click();
+      const summary = page.locator(".workbench-pinned-summary .environment-summary");
+      await expect(summary).toBeVisible();
+      await expect(summary).toContainText("Git worktrees");
+      await expect(page.locator("html")).toHaveJSProperty("scrollWidth", viewport.width);
+      await expect(page).toHaveScreenshot(`production-environment-summary-${viewport.name}.png`, {
+        animations: "disabled",
       });
-    }
+
+      for (const row of [
+        page.getByTestId("workbench-git-commit-trigger"),
+        page.getByTestId("workbench-git-compare"),
+        page.getByTestId("workbench-summary-browser-activity"),
+        page.getByTestId("workbench-summary-sources-all"),
+        summary.getByTitle("Git worktrees"),
+      ]) {
+        await expectSummaryRowReachable(row);
+      }
+    });
   }
 }
 

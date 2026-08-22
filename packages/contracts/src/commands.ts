@@ -210,7 +210,6 @@ import type {
   SkillTreeNode,
   SpeechRecognitionRuntimeState,
   SpeechRecognitionSettingsInput,
-  ThemeScheme,
   TaskInteractiveContinuation,
   TaskRunId,
   TaskRunRecord,
@@ -259,13 +258,6 @@ export const commands = {
   getSettings: () => invoke<AppSettings>("get_settings"),
   updateSettings: (settings: AppSettings) => invoke<AppSettings>("update_settings", { settings }),
   resetLocalData: () => invoke<void>("reset_local_data"),
-  importThemeProfile: (scheme: ThemeScheme) =>
-    invoke<AppSettings | null>("import_theme_profile", { scheme }),
-  copyThemeProfile: (profileId: string) => invoke<void>("copy_theme_profile", { profileId }),
-  resetThemeProfile: (profileId: string) =>
-    invoke<AppSettings>("reset_theme_profile", { profileId }),
-  deleteThemeProfile: (profileId: string) =>
-    invoke<AppSettings>("delete_theme_profile", { profileId }),
   setInteractiveRegions: (update: InteractiveRegionsUpdate) =>
     invoke<void>("set_interactive_regions", { update }),
   setAlwaysOnTop: (enabled: boolean) => invoke<AppSettings>("set_always_on_top", { enabled }),

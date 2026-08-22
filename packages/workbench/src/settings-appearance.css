@@ -1,0 +1,217 @@
+/* Appearance settings page: built-in theme picker cards. */
+
+.theme-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 14px;
+}
+
+.theme-option-card {
+  min-width: 0;
+  display: grid;
+  gap: 12px;
+  padding: 11px 11px 13px;
+  border: 1px solid var(--color-border-muted);
+  border-radius: var(--radius-xl);
+  background: var(--color-bg-elevated);
+  color: var(--color-text-muted);
+  text-align: left;
+}
+
+.theme-option-card:hover {
+  border-color: var(--color-border-strong);
+}
+
+.theme-option-card[data-state="selected"] {
+  border-color: var(--color-bg-accent);
+  box-shadow: 0 0 0 1px var(--color-bg-accent);
+  color: var(--color-text-base);
+}
+
+.theme-option-card strong {
+  padding: 0 3px;
+  font-size: var(--font-size-xs);
+  font-weight: 500;
+}
+
+.theme-option-preview {
+  --thumb-accent: var(--accent);
+  --thumb-background: var(--canvas);
+  --thumb-foreground: var(--text);
+  height: 108px;
+  position: relative;
+  display: block;
+  overflow: hidden;
+  border: 1px solid var(--color-border-muted);
+  border-radius: var(--radius-lg);
+  background: var(--thumb-background);
+}
+
+/* Faux titlebar tinted towards the foreground, underlined by the accent. */
+.theme-option-preview::before {
+  content: "";
+  position: absolute;
+  inset: 0 0 auto;
+  height: 22px;
+  background: color-mix(in srgb, var(--thumb-background) 88%, var(--thumb-foreground));
+  border-bottom: 2px solid var(--thumb-accent);
+}
+
+/* Accent pill standing in for the primary action. */
+.theme-option-preview::after {
+  content: "";
+  position: absolute;
+  left: 14px;
+  bottom: 14px;
+  width: 36px;
+  height: 12px;
+  border-radius: var(--radius-sm);
+  background: var(--thumb-accent);
+}
+
+.theme-option-line {
+  position: absolute;
+  left: 14px;
+  height: 6px;
+  width: 56%;
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--thumb-foreground) 26%, transparent);
+}
+
+.theme-option-line:nth-of-type(1) {
+  top: 40px;
+}
+
+.theme-option-line.short {
+  top: 56px;
+  width: 38%;
+}
+
+.theme-option-scheme {
+  position: absolute;
+  top: 4px;
+  right: 6px;
+  z-index: 1;
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--thumb-foreground) 16%, transparent);
+  color: var(--thumb-foreground);
+  font-size: var(--font-size-xs);
+  line-height: 1.5;
+}
+
+.theme-option-deco {
+  position: absolute;
+  right: 14px;
+  bottom: 12px;
+  width: 30px;
+  height: 26px;
+}
+
+/* px 像素物语：方块硬阴影 */
+.theme-option-px .theme-option-deco {
+  width: 22px;
+  height: 22px;
+  background: var(--thumb-accent);
+  box-shadow: 4px 4px 0 var(--thumb-foreground);
+}
+
+.theme-option-px .theme-option-deco::before {
+  content: "";
+  position: absolute;
+  right: 26px;
+  bottom: 14px;
+  width: 10px;
+  height: 10px;
+  background: var(--thumb-foreground);
+  box-shadow: 3px 3px 0 var(--thumb-accent);
+}
+
+.theme-option-preview.theme-option-px::after {
+  border-radius: 0;
+}
+
+/* crm 奶油手帐：粉圆角 + 胶带 */
+.theme-option-crm .theme-option-deco {
+  width: 34px;
+  height: 26px;
+  border-radius: var(--radius-lg);
+  background: color-mix(in srgb, var(--thumb-accent) 55%, var(--thumb-background));
+}
+
+.theme-option-crm .theme-option-deco::before {
+  content: "";
+  position: absolute;
+  top: -6px;
+  left: 50%;
+  width: 18px;
+  height: 9px;
+  transform: translateX(-50%) rotate(-4deg);
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--thumb-background) 72%, var(--thumb-accent));
+  box-shadow: 0 1px 1px rgb(0 0 0 / 8%);
+}
+
+/* nya 黑猫夜行：猫耳剪影 */
+.theme-option-nya .theme-option-deco {
+  width: 28px;
+  height: 24px;
+  border-radius: 46% 46% 50% 50%;
+  background: var(--thumb-accent);
+}
+
+.theme-option-nya .theme-option-deco::before,
+.theme-option-nya .theme-option-deco::after {
+  content: "";
+  position: absolute;
+  top: -7px;
+  width: 10px;
+  height: 10px;
+  background: var(--thumb-accent);
+  clip-path: polygon(50% 0, 0 100%, 100% 100%);
+}
+
+.theme-option-nya .theme-option-deco::before {
+  left: 2px;
+}
+
+.theme-option-nya .theme-option-deco::after {
+  right: 2px;
+}
+
+/* tora 橘猫咖啡：虎斑条纹带 */
+.theme-option-tora .theme-option-deco {
+  width: 42px;
+  height: 24px;
+  border-radius: var(--radius-md);
+  background: repeating-linear-gradient(
+    -55deg,
+    var(--thumb-accent) 0 7px,
+    color-mix(in srgb, var(--thumb-foreground) 88%, rgb(0 0 0)) 7px 11px
+  );
+}
+
+/* maho 魔法星辰：彩虹渐变带 */
+.theme-option-maho .theme-option-deco {
+  width: 46px;
+  height: 14px;
+  bottom: 18px;
+  border-radius: 999px;
+  background: linear-gradient(
+    90deg,
+    hsl(320 90% 72%),
+    hsl(38 95% 64%),
+    hsl(145 55% 60%),
+    hsl(215 90% 70%),
+    hsl(270 85% 76%)
+  );
+}
+
+.theme-option-maho .theme-option-deco::after {
+  content: "✦";
+  position: absolute;
+  top: -16px;
+  right: 0;
+  color: var(--thumb-accent);
+  font-size: var(--font-size-xs);
+}
